@@ -964,6 +964,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         };
         crate::ledger::write_json(&paths.launch(), &record).expect("a launch record");
         paths

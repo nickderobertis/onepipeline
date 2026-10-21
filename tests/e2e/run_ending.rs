@@ -116,6 +116,7 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         [
             "schema_version",
             "run_id",
+            "public_id",
             "word",
             "liveness",
             "driven",

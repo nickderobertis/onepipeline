@@ -172,6 +172,10 @@ pub(crate) struct Naming {
     pub plan_id: String,
     /// `run`: the run id.
     pub run: String,
+    /// What `plan.name` renders as on a branch of a public repository: the run's public id
+    /// where the launch found the plan's name fails the public-output check, and `None`
+    /// where it may be named there as it is.
+    pub public_name: Option<crate::publicid::PublicId>,
 }
 
 /// What a run names its branches with, or why it cannot name one: the sentence a
@@ -215,14 +219,20 @@ impl Naming {
             plan_name: plan.name.unwrap_or_default(),
             plan_id: launch.project.clone(),
             run: paths.run.clone(),
+            public_name: launch
+                .name_withheld
+                .then(|| crate::publicid::of_record(launch)),
         })
     }
 
-    /// The namespace a node's branch is rendered over.
+    /// The namespace a node's branch is rendered over, `public` answering whether a
+    /// repository is one the linked `onevcs` reports public.
     ///
     /// `task.key` is left out rather than written null where the node's task has
-    /// none, so a template asks for it with `{% if task.key %}`.
-    fn variables(&self, node: &crate::plan::Node) -> Value {
+    /// none, so a template asks for it with `{% if task.key %}`. `plan.name` is the
+    /// run's public id on a public repository's branch where the plan's own name may
+    /// not be named there.
+    fn variables(&self, node: &crate::plan::Node, public: impl FnOnce(&str) -> bool) -> Value {
         let record = node.task_record.as_ref();
         let mut task = json!({
             "id": record.map_or("", |record| record.id.as_str()),
@@ -232,9 +242,13 @@ impl Naming {
         if let Some(key) = record.and_then(|record| record.key.as_deref()) {
             task["key"] = json!(key);
         }
+        let plan_name = match (&self.public_name, node.repo.as_deref()) {
+            (Some(public_name), Some(repo)) if public(repo) => public_name.as_str(),
+            _ => self.plan_name.as_str(),
+        };
         json!({
             "task": task,
-            "plan": {"name": self.plan_name, "id": self.plan_id},
+            "plan": {"name": plan_name, "id": self.plan_id},
             "node": {"id": node.id},
             "run": self.run,
         })
@@ -247,7 +261,21 @@ impl Naming {
     /// A sentence naming the node and the template, carrying the renderer's own
     /// error — the settlement's detail as it stands.
     pub fn render(&self, node: &crate::plan::Node) -> std::result::Result<String, String> {
-        render(self.template.as_str(), &self.variables(node)).map_err(|error| {
+        self.render_with(node, |repo| {
+            use crate::boundary::Oracle;
+            crate::boundary::Onevcs::default()
+                .repository(repo)
+                .clearance
+                == crate::boundary::Clearance::Public
+        })
+    }
+
+    fn render_with(
+        &self,
+        node: &crate::plan::Node,
+        public: impl FnOnce(&str) -> bool,
+    ) -> std::result::Result<String, String> {
+        render(self.template.as_str(), &self.variables(node, public)).map_err(|error| {
             unnamed(
                 node,
                 &format!("{error} (template: {})", self.template.as_str()),
@@ -291,6 +319,7 @@ mod tests {
             plan_name: "demo".to_owned(),
             plan_id: "plans:demo".to_owned(),
             run: "demo-1".to_owned(),
+            public_name: None,
         }
     }
 
@@ -322,6 +351,37 @@ mod tests {
             ..Node::default()
         };
         assert_eq!(naming.render(&bare).as_deref(), Ok("demo/added"));
+    }
+
+    #[test]
+    fn a_withheld_plan_name_renders_as_the_public_id_on_a_public_repositorys_branch_only() {
+        let mut withheld = naming(DEFAULT_TEMPLATE);
+        withheld.public_name = Some(crate::publicid::hashed("secret-plan"));
+        let on = |repo: &str| Node {
+            id: "build".into(),
+            repo: Some(repo.to_owned()),
+            ..Node::default()
+        };
+        let public = |repo: &str| repo == "library";
+        assert_eq!(
+            withheld.render_with(&on("library"), public),
+            Ok(format!(
+                "{}/build",
+                crate::publicid::hashed("secret-plan").as_str()
+            ))
+        );
+        assert_eq!(
+            withheld.render_with(&on("service"), public).as_deref(),
+            Ok("demo/build"),
+            "a private repository's branch was renamed"
+        );
+        // A name the check passes renders as it is, whatever the repository.
+        assert_eq!(
+            naming(DEFAULT_TEMPLATE)
+                .render_with(&on("library"), public)
+                .as_deref(),
+            Ok("demo/build")
+        );
     }
 
     #[test]
