@@ -220,6 +220,11 @@ impl ClaimFile {
         if let Some(unknown) = keys.iter().find(|key| !CLAIM_KEYS.contains(&key.as_str())) {
             return Err(format!("an unknown key `{unknown}`"));
         }
+        // Every key is written, `null` where it does not apply: one missing is no document
+        // this build wrote.
+        if let Some(missing) = CLAIM_KEYS.iter().find(|key| !keys.contains(**key)) {
+            return Err(format!("no `{missing}`"));
+        }
         let file: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
         if !(1..=crate::continuation::MAX_CLAIM_INTERVAL.as_secs()).contains(&file.lease_interval_s)
         {
@@ -359,6 +364,14 @@ mod tests {
         assert!(ClaimFile::parse(&wrong.to_string()).is_err());
         wrong["state"] = serde_json::json!("confirmed");
         assert!(ClaimFile::parse(&wrong.to_string()).is_err());
+        for key in CLAIM_KEYS {
+            let mut short: serde_json::Value = serde_json::from_str(&whole).unwrap();
+            short.as_object_mut().unwrap().remove(key);
+            assert!(
+                ClaimFile::parse(&short.to_string()).is_err(),
+                "without {key}"
+            );
+        }
         let mut odd: serde_json::Value = serde_json::from_str(&whole).unwrap();
         odd["lease_interval"] = serde_json::json!(5);
         assert!(
