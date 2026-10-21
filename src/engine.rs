@@ -3636,15 +3636,16 @@ fn reconcile_edits(
             // Refused as it is claimed rather than in its turn: nothing of it is
             // applied, so no envelope behind it is judged against anything it did.
             Claimed::Undecodable(record) => {
-                if let Err(error) = refuse_undecodable(paths, journal, channel, &record) {
-                    if let Err(unanswered) = record
-                        .carries_id
-                        .then(|| answer_failed(paths, channel, record.id, &error))
-                        .unwrap_or(Ok(()))
-                    {
-                        keep_for_next_pass(deliveries, claimed);
-                        return Err(unanswered);
-                    }
+                let Err(error) = refuse_undecodable(paths, journal, channel, &record) else {
+                    continue;
+                };
+                // A record that names no id has no outcome line to be answered on.
+                if !record.carries_id {
+                    continue;
+                }
+                if let Err(unanswered) = answer_failed(paths, channel, record.id, &error) {
+                    keep_for_next_pass(deliveries, claimed);
+                    return Err(unanswered);
                 }
             }
         }

@@ -9053,8 +9053,9 @@ managers took a slow worker for a lost message and reached for destructive lever
    reading's `schema_version` stays `1`. `schemas/run-reading.schema.json` is regenerated
    from the type, and a test holds the sidecar's type to it.
 
-**What this build does.** `tests/note/main.rs` drives each rule through the binary, with
-each worker's turn held on its own gates (`turn.gates` in the doubled harness):
+**What this build did, until the hand-off amendment below.** `tests/note/main.rs` drove
+each rule through the binary, with each worker's turn held on its own gates (`turn.gates`
+in the doubled harness):
 
 - `a_note_to_each_of_two_receivers_is_recorded_as_each_answers` and
   `each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers` cover fan-out.
@@ -9114,8 +9115,11 @@ in memory until a later driver's recovery.
    `edit-committed` `note-delivered` operation, naming its envelope and index, as before.
    A note its receiver refuses is journalled as its own `edit-rejected`, naming its
    envelope and the note's `index` (a key that record gains, optional, so a record
-   written before it reads unchanged), and is surfaced as any refusal is. `status` shows
-   each. A `withdraw-note` of a queued note is still answered as entry 133 states: it
+   written before it reads unchanged), and is surfaced as any refusal is. A note never
+   offered because an earlier note of its envelope to the same receiver refused is
+   journalled refused the same way, since its envelope's answer said `queued`. `status`
+   shows each. The `turn` entry 133 puts on a delivered note's result is then on that
+   note's `note-delivered` record alone, since the result it would sit on is `queued`. A `withdraw-note` of a queued note is still answered as entry 133 states: it
    answers its envelope again with that note refused, since withdrawing is a later
    command and not the receiver's answer.
 3. **Only a later note to the same receiver keeps order behind an outstanding note.** It
@@ -9159,7 +9163,24 @@ in memory until a later driver's recovery.
   covers rule 4 with a failpoint, the driver still running.
 - `a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next` covers the
   successor's refusal of a queued note.
-- The other journeys there are updated to these rules.
+- `notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_claimed`
+  covers rule 3's order with three envelopes to one receiver, and
+  `a_cancel_refuses_the_note_offered_to_its_node_and_the_one_queued_behind_it` covers a
+  cancel refusing a note still waiting behind another.
+- `status_names_each_receivers_inbox_and_drops_each_as_it_answers` and
+  `status_shows_a_pending_notes_deadline_beside_its_delivering_state` cover rule 5's
+  readings.
+
+The other journeys the two sections above name are updated to these rules, and those named
+for a hold that no longer exists are renamed for what they now prove:
+`nothing_but_a_later_note_to_its_node_waits_behind_a_waiting_note`,
+`a_note_waiting_on_a_receiver_holds_back_no_edit_to_any_node`,
+`a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`,
+`a_cancel_waits_on_no_other_nodes_note_in_an_envelope_that_amended_its_node` and the cancel
+journey above. `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held`
+and `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` are replaced
+by the first journey listed here, which reads the same sidecar and `status` lines and the
+same unreadable sidecars.
 
 `src/engine.rs`'s
 `a_cancel_preempts_the_notes_queued_for_its_node_and_nothing_waits_behind_them`,
@@ -12391,12 +12412,16 @@ stream this build writes is one an earlier reader reads, less the new kind.
 }
 ```
 
-## 135. An envelope carrying a live note went unanswered for as long as its receiver's turn ran — RULED
+## 135. An envelope carrying a live note went unanswered for as long as its receiver's turn ran — OPEN
 
-**Ruling: the manager ruled it on the plan node `op-envelope-outcome`.** The rule is stated
-where it amends what it amends: entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled)
-for the reconciler, the sidecar and `status`, and entry 64 for the receipt's `notes` key.
-This entry records what it raised in the published bundles.
+**Proposal, for the planner who owns the contract: the Channel paragraph's sentence on what
+holds an envelope behind a live note, and the outcome vocabulary it implies, take the rule
+entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled) states.** The manager
+ruled that rule on the plan node `op-envelope-outcome`, and this build implements it;
+`docs/contract.md`'s own wording is unchanged until the planner rules on it. The rule is
+stated where it amends what it amends: entry 108 for the reconciler, the sidecar and
+`status`, and entry 64 for the receipt's `notes` key. This entry records what it raised in
+the published bundles.
 
 `CommandVerdict` is a public exhaustive enum of the crate and of the published channel
 layout, so its new `queued` word is one a reader of the layout before it cannot read: the

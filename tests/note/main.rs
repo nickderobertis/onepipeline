@@ -740,6 +740,34 @@ fn offers_in_spool(world: &World) -> usize {
     found
 }
 
+/// Whether any member's note spool still has a receiver bound to it: the bus's
+/// own probe, which takes the spool's `receiver.lock` and lets go of it at once,
+/// so a receiver binding next is not refused by the look.
+///
+/// `#[cfg(unix)]` because the one journey that reads it is.
+#[cfg(unix)]
+fn a_receiver_is_bound(world: &World) -> bool {
+    fn walk(dir: &Path) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        entries.flatten().any(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return false;
+            }
+            let lock = path.join("receiver.lock");
+            let bound = path.ends_with("notes")
+                && std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&lock)
+                    .is_ok_and(|file| file.try_lock().is_err());
+            bound || walk(&path)
+        })
+    }
+    walk(&world.graph_state())
+}
+
 fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usize> {
     journal.iter().position(|event| {
         event["kind"] == kind && node.is_none_or(|node| event["labels"]["node"] == node)
@@ -3409,6 +3437,14 @@ fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_ado
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or_else(|| panic!("the lock names its holder's pid: {holder}"));
     harness::end_process(driver);
+    // The driver's member goes with it, and until it has let go of its note spool
+    // a note offered there can be taken by a courier that is about to vanish —
+    // carried at once rather than waited on, and the reply gone before anything
+    // below can ask who is writing the run.
+    world.until(
+        "the dead driver's member to let go of its note spool",
+        |world| !a_receiver_is_bound(world),
+    );
 
     // The worker's turn is never released before the reply returns: whatever the
     // reply waited on, it was not that turn ending.
