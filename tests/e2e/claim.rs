@@ -712,11 +712,17 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
     // A sidecar that cannot be read says nothing is known: `status` names no claim, rather
     // than one it made up. The next read, held here, writes it whole again.
     let read = reads.arrived();
+    // llmlint: ignore-block[tests_mirror_real_usage] the driver writes the sidecar whole, through
+    // a rename, so no input of this binary leaves one torn — that is the property the reader
+    // process above holds — and what is driven here is the views' answer to one that cannot be
+    // read anyway (a disk, an older or newer build): the file is torn by hand, and the real
+    // `status` is asked.
     std::fs::write(
         world.run_file(run, "claim.json"),
         r#"{"schema_version":1,"state":"#,
     )
     .expect("the sidecar is torn");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let status = world.run(&["status", run, "--json"]);
     status.exited(0);
     assert!(status.json().get("claim").is_none(), "{}", status.stdout);
