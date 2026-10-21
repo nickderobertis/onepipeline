@@ -12482,6 +12482,13 @@ layout, so its new `queued` word is one a reader of the layout before it cannot 
 planner-channel document's major is raised. The `edit-rejected` record's optional `index`
 is additive, so the events bundle's minor is raised.
 
+**Both public enum additions are breaking, ruled.** `Delivery`, re-exported by `views`,
+is also a public exhaustive enum. The manager accepted `Delivery::Queued` as a second
+breaking change beside `CommandVerdict::Queued` in this same breaking change under
+correlation `c-942acecf8edb6fdef09f0d76f00ac602`. Consumers matching either enum must
+handle its new variant. Every other change remains additive, including the receipt's
+optional `notes` key and the inbox reading.
+
 ```json
 {
   "command_verdict": ["applied", "validated", "delivered", "refused", "queued"],
