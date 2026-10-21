@@ -908,10 +908,25 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
 
 /// A `retitle` reaching a run while its driver is live is staged by that driver
 /// and applied through the host as it is to a run nothing is driving: `c` is
-/// retitled while `a`'s rework waits on its checks.
+/// retitled while `a`'s rework is still publishing, and the rework's checks are
+/// read only once they pass.
+///
+/// The driver is held live by the rework's push rather than by its checks: a
+/// rework republished as a review draft settles `change-review-draft-unchecked`
+/// at its push, on its dispatch's thread, and the driver exits once nothing is
+/// left running. So nothing but a held push keeps the rework unsettled, and the
+/// driver live, for as long as the retitle takes to reach it.
 #[test]
 fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
-    let world = team_world("retitle-driven").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let world = World::new("retitle-driven")
+        .with_env("ONEVCS_BRANCH_PREFIX", crate::stacked_drafts::PREFIX)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let rework_push = crate::harness::held_publication(&world, &world.fakes.join("rework.go"));
+    // The first settlement's pushes go straight through.
+    rework_push.release();
+    world.repository("change-open", &rework_push.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
     world.script("a.work", "a's change\n");
     world.script("c.work", "c's change\n");
     world.script("a-rework-1.work", "a's change, as the review asked\n");
@@ -934,6 +949,7 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
         "lint in_progress - required",
     );
 
+    rework_push.rearm();
     reply(
         &world,
         run,
@@ -944,14 +960,9 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     driving
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let driver = driving.spawn().expect("the adopting driver starts");
-    world.until("the rework to push", |world| {
-        world
-            .events_of(run, "push")
-            .iter()
-            .any(|event| event["labels"]["node"] == "a-rework-1")
-    });
-    // The driver is live: the rework is waiting on its checks, and has not settled.
+    let mut driver = driving.spawn().expect("the adopting driver starts");
+    world.until("the rework's push to be held", |_| rework_push.holding());
+    // The driver is live: the rework is publishing, and has not settled.
     assert!(!world
         .events_of(run, "node-settled")
         .iter()
@@ -967,6 +978,13 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     world.until("the driver to retitle c", |world| {
         !retitled(world, run, "c").is_empty()
     });
+    assert!(
+        driver
+            .try_wait()
+            .expect("the driver can be asked about")
+            .is_none(),
+        "the driver had exited before c was retitled, so it was not the one that did"
+    );
     assert_eq!(
         retitled(&world, run, "c"),
         [
@@ -976,6 +994,31 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     assert_eq!(
         change_from(&world, &c_branch)["title"],
         "fix(c): say what c does"
+    );
+
+    // Let the rework push. It settles on that push while its checks are still
+    // running, and not on them: no verdict on them is read until they pass.
+    rework_push.release();
+    world.until("the rework to settle at its push", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1")
+    });
+    assert!(world
+        .events_of(run, "push")
+        .iter()
+        .any(|event| event["labels"]["node"] == "a-rework-1"));
+    assert_eq!(
+        settled(&world, run, "a-rework-1")["outcome"],
+        "change-review-draft-unchecked"
+    );
+    assert!(
+        !world
+            .events_of(run, "node-checks-read")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1"),
+        "the rework's checks were read while they were still running"
     );
 
     world.script(
