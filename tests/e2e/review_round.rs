@@ -593,8 +593,20 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let mut spans = Vec::new();
     // What the round's commands printed, for naming what made a read it should not make.
     let said = std::cell::RefCell::new(Vec::new());
+    // A command the run ended unsuccessfully names each node it settled short of done, with
+    // the detail that settlement carries: the concise stream says only the outcome's word.
     let ran = |output: crate::harness::Run, what: &str| {
-        passed(&output, what);
+        let short: Vec<Value> = world
+            .events_of(run, "node-settled")
+            .into_iter()
+            .filter(|event| event["payload"]["status"] != "done")
+            .map(|event| event["payload"].clone())
+            .collect();
+        assert_eq!(
+            output.code, 0,
+            "{what}:\n{}\n{}\nsettled short of done: {short:#?}",
+            output.stdout, output.stderr
+        );
         said.borrow_mut().push(output.stderr);
     };
     let round_from = projection_lines(&world, run).len();
