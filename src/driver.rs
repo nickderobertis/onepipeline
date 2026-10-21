@@ -3842,6 +3842,11 @@ fn note_record(
         let Some(recorded) = record.payload.get("operations") else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] an `edit-committed` of this crate's own,
+        // naming this very envelope, whose operations this build cannot read is a journal
+        // edited by hand — no verb, driver or death writes one — so a journey reaching it
+        // would prove the fixture; it is said rather than waited out, as this read said it
+        // before it was keyed on the envelope.
         let operations: Vec<edits::Operation> =
             serde_json::from_value(recorded.clone()).map_err(|why| {
                 Error::Invalid(format!(

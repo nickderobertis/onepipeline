@@ -2311,14 +2311,14 @@ fn a_note_to_each_of_two_receivers_is_recorded_as_each_answers() {
             .iter()
             .any(|prompt| prompt.contains(LINT_NOTE))
     });
-    assert_eq!(
-        awaiting_an_answer(&world, run),
-        1,
-        "build answered, so nothing showed lint recorded while build was held"
-    );
+    // The stream relays lint's answer to its offer on its own clock, after the
+    // note's record may already be written; build's offer is still unanswered.
+    world.until("only build's note to still wait in an inbox", |world| {
+        awaiting_an_answer(world, run) == 1
+    });
     assert!(
         noted_at(&world.journal(run), "build", BUILD_NOTE).is_none(),
-        "build's note was recorded before build answered it"
+        "build answered, so nothing showed lint recorded while build was held"
     );
 
     release_turn_of(&world, run, "build");

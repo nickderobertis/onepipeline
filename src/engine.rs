@@ -3609,9 +3609,9 @@ fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
 ///
 /// An envelope whose processing fails is answered refused, the failure its
 /// reason, where it has no answer yet, and every envelope claimed with it is
-/// still processed on this pass — see [`answer_failed`]. Only a failure to write
-/// that answer ends the pass, and what it had not reached yet is kept for the
-/// next pass of the same driver.
+/// still processed on this pass — see [`refused_for_failure`]. Only a failure to write that
+/// answer ends the pass, and that answer and what the pass had not reached yet
+/// are kept for the next pass of the same driver.
 fn reconcile_edits(
     paths: &RunPaths,
     journal: &mut Journal,
@@ -3623,32 +3623,38 @@ fn reconcile_edits(
 ) -> Result<bool> {
     let mut changed = false;
     crate::review::failpoint("before-claim")?;
-    // Claimed before the recovered envelopes are taken, so a queue that refuses
-    // the claim leaves them for the next pass rather than dropped with the error.
+    // Claimed before what an earlier pass kept is taken, so a queue that refuses
+    // the claim leaves it for the next pass rather than dropped with the error.
     let fresh = channel.claim_commands_answering()?;
-    let mut claimed = deliveries
+    let (mut claimed, mut owed) = deliveries
         .as_deref_mut()
-        .map(|deliveries| std::mem::take(&mut deliveries.behind))
+        .map(|deliveries| {
+            (
+                std::mem::take(&mut deliveries.behind),
+                std::mem::take(&mut deliveries.owed),
+            )
+        })
         .unwrap_or_default();
+    let mut undecodable = Vec::new();
     for record in fresh {
         match record {
             Claimed::Envelope(envelope) => claimed.push_back(envelope),
-            // Refused as it is claimed rather than in its turn: nothing of it is
-            // applied, so no envelope behind it is judged against anything it did.
-            Claimed::Undecodable(record) => {
-                let Err(error) = refuse_undecodable(paths, journal, channel, &record) else {
-                    continue;
-                };
-                // A record that names no id has no outcome line to be answered on.
-                if !record.carries_id {
-                    continue;
-                }
-                if let Err(unanswered) = answer_failed(paths, channel, record.id, &error) {
-                    keep_for_next_pass(deliveries, claimed);
-                    return Err(unanswered);
-                }
+            Claimed::Undecodable(record) => undecodable.push(record),
+        }
+    }
+    // Refused as it is claimed rather than in its turn: nothing of it is applied,
+    // so no envelope behind it is judged against anything it did. A record that
+    // names no id has no outcome line to be answered on.
+    for record in undecodable {
+        if let Err(error) = refuse_undecodable(paths, journal, channel, &record) {
+            if record.carries_id {
+                owed.push_back(refused_for_failure(paths, record.id, &error));
             }
         }
+    }
+    if let Err(unanswered) = pay_owed(channel, &mut owed) {
+        keep_for_next_pass(deliveries, claimed, owed);
+        return Err(unanswered);
     }
     while let Some(envelope) = claimed.pop_front() {
         let id = envelope.id;
@@ -3664,8 +3670,9 @@ fn reconcile_edits(
         ) {
             Ok(moved) => changed |= moved,
             Err(error) => {
-                if let Err(unanswered) = answer_failed(paths, channel, id, &error) {
-                    keep_for_next_pass(deliveries, claimed);
+                owed.push_back(refused_for_failure(paths, id, &error));
+                if let Err(unanswered) = pay_owed(channel, &mut owed) {
+                    keep_for_next_pass(deliveries, claimed, owed);
                     return Err(unanswered);
                 }
                 // What it committed before it failed, if anything, moved the run.
@@ -3676,15 +3683,37 @@ fn reconcile_edits(
     Ok(changed)
 }
 
-/// Keep what a pass claimed and had not reached for the same driver's next pass,
-/// ahead of anything that pass claims.
+/// Keep what a pass claimed and had not reached, and the answers it could not
+/// write, for the same driver's next pass, ahead of anything that pass claims.
 fn keep_for_next_pass(
     deliveries: Option<&mut NoteDeliveries>,
     claimed: std::collections::VecDeque<crate::channel::QueuedCommands>,
+    owed: std::collections::VecDeque<CommandOutcome>,
 ) {
     if let Some(deliveries) = deliveries {
         deliveries.behind = claimed;
+        deliveries.owed = owed;
     }
+}
+
+/// Write each answer `owed` holds, in order, until one cannot be written.
+///
+/// # Errors
+///
+/// The channel's, for the first answer it refuses, which is left at the head
+/// of `owed` with every one after it.
+fn pay_owed(
+    channel: &ChannelState,
+    owed: &mut std::collections::VecDeque<CommandOutcome>,
+) -> Result<()> {
+    while let Some(outcome) = owed.front() {
+        // One answered before it failed keeps that answer.
+        if channel.outcome_of(outcome.id).is_none() {
+            channel.answer_commands(outcome)?;
+        }
+        owed.pop_front();
+    }
+    Ok(())
 }
 
 /// Reconcile one claimed envelope: answered from what the journal holds of it
@@ -3736,34 +3765,27 @@ fn reconcile_claimed(
     )
 }
 
-/// Answer envelope `id`, whose processing failed with `error`, refused with that
-/// failure as its reason — unless it was already answered before it failed, in
-/// which case that answer stands.
+/// The answer envelope `id` is owed where its processing failed with `error`:
+/// refused, with that failure as its reason — written by [`pay_owed`] unless it
+/// was already answered before it failed, in which case that answer stands.
 ///
-/// A claimed envelope is off the queue, so an envelope left unanswered here is
-/// one its submitter is told nothing about until a later driver takes the run
-/// over, which is the silence that reads as a lost message.
-///
-/// # Errors
-///
-/// The channel's, where the answer cannot be written.
-fn answer_failed(paths: &RunPaths, channel: &ChannelState, id: u64, error: &Error) -> Result<()> {
+/// A claimed envelope is off the queue, so an envelope left unanswered is one its
+/// submitter is told nothing about until a later driver takes the run over,
+/// which is the silence that reads as a lost message.
+fn refused_for_failure(paths: &RunPaths, id: u64, error: &Error) -> CommandOutcome {
     eprintln!(
         "onepipeline: run '{}': processing command envelope {id} failed, and it is answered \
          refused: {error}",
         paths.run
     );
-    if channel.outcome_of(id).is_some() {
-        return Ok(());
-    }
-    channel.answer_commands(&CommandOutcome {
+    CommandOutcome {
         id,
         applied: false,
         reason: Some(format!(
             "the run's driver failed while processing this envelope: {error}"
         )),
         results: Vec::new(),
-    })
+    }
 }
 
 /// Take back every command envelope a driver before this one claimed and never
@@ -6125,9 +6147,13 @@ pub(crate) struct NoteDeliveries {
     /// Each envelope with a receiver still to answer, by its id, from the moment
     /// it is handed until its last receiver's answer is recorded.
     outstanding: BTreeMap<u64, Outstanding>,
-    /// What a driver before this one claimed and never answered, in claim
-    /// order, for the next pass to reconcile ahead of anything it claims.
+    /// What a driver before this one claimed and never answered, and what a
+    /// pass of this one claimed and did not reach, in claim order, for the next
+    /// pass to reconcile ahead of anything it claims.
     behind: std::collections::VecDeque<crate::channel::QueuedCommands>,
+    /// The answers a pass of this driver owed and could not write — see
+    /// [`reconcile_edits`] — for the next pass to write first.
+    owed: std::collections::VecDeque<CommandOutcome>,
     /// What the journal holds of each envelope among `behind` a driver before
     /// this one claimed, got as far as its effects, and never answered: answered
     /// from it in its turn rather than judged — see [`Recovered`].
@@ -6296,6 +6322,7 @@ impl NoteDeliveries {
             in_flight: in_flight.clone(),
             outstanding: BTreeMap::new(),
             behind: std::collections::VecDeque::new(),
+            owed: std::collections::VecDeque::new(),
             recovered: BTreeMap::new(),
             sidecar: Some(Sidecar {
                 paths: paths.clone(),
@@ -6305,7 +6332,7 @@ impl NoteDeliveries {
     }
 
     fn idle(&self) -> bool {
-        self.outstanding.is_empty() && self.behind.is_empty()
+        self.outstanding.is_empty() && self.behind.is_empty() && self.owed.is_empty()
     }
 
     /// Take what the journal holds of a recovered envelope, if it holds anything:
@@ -15433,6 +15460,7 @@ mod tests {
             in_flight: in_flight.clone(),
             outstanding: outstanding.into_iter().collect(),
             behind: std::collections::VecDeque::new(),
+            owed: std::collections::VecDeque::new(),
             recovered: BTreeMap::new(),
             sidecar: None,
         }
@@ -15827,6 +15855,107 @@ mod tests {
             answered,
             [first, second],
             "the kept envelopes were not each answered, in the order they were claimed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A pass that cannot write the answers it owes keeps them, and every
+    /// envelope it claimed and had not reached, for the same driver's next pass:
+    /// an undecodable record whose refusal could not be answered, and the two
+    /// envelopes claimed with it. Once the outcome log takes writes again, the
+    /// next pass answers each — the record first, then the envelopes in claim
+    /// order — and keeps nothing.
+    ///
+    /// An outcome log that refuses a write is a store an operator has been in or
+    /// a filesystem that has run out, which no CLI journey can arrange mid-pass;
+    /// so this drives the real queue and the real reconciler with the log's path
+    /// taken by a directory, and then given back.
+    #[test]
+    fn answers_a_pass_could_not_write_are_kept_with_what_it_had_not_reached() {
+        let root = std::env::temp_dir().join(format!("onepipeline-owed-{}", sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "demo");
+        paths.create().expect("the run directory");
+        let launch = bare_launch(&root, "owed-answers");
+        let transport =
+            onemessagebus::LocalTransport::open(paths.channel_dir()).expect("the channel opens");
+        for record in [
+            json!({"id": 0, "commands": [{"op": "cancel", "id": "first"}]}),
+            json!({"id": 1, "commands": [{"op": "drop", "id": "sign-off"}]}),
+            json!({"id": 2, "commands": [{"op": "cancel", "id": "second"}]}),
+        ] {
+            onemessagebus::Transport::append(
+                &transport,
+                &crate::channel::layout::COMMANDS
+                    .parse()
+                    .expect("the command queue's name"),
+                record.to_string().as_bytes(),
+            )
+            .expect("the record is appended");
+        }
+        let mut deliveries = deliveries_holding(&DeliveriesInFlight::default(), []);
+        let mut journal = Journal::open(&paths);
+        let mut state = Projected::open(&paths);
+        let log = paths.channel_dir().join("command-outcomes.jsonl");
+        let _ = std::fs::remove_file(&log);
+        std::fs::create_dir_all(&log).expect("the outcome log's place is taken");
+
+        let refused = reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &ChannelState::new(&paths),
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        );
+        assert!(
+            refused.is_err(),
+            "an answer the log refused was reported written"
+        );
+        let kept: Vec<u64> = deliveries
+            .behind
+            .iter()
+            .map(|envelope| envelope.id)
+            .collect();
+        let owed: Vec<u64> = deliveries.owed.iter().map(|outcome| outcome.id).collect();
+        assert_eq!(
+            (kept, owed),
+            (vec![0, 2], vec![1]),
+            "what the pass could not answer was not kept for the next one"
+        );
+
+        std::fs::remove_dir_all(&log).expect("the outcome log's place is given back");
+        let channel = ChannelState::new(&paths);
+        reconcile_edits(
+            &paths,
+            &mut journal,
+            &mut state,
+            &channel,
+            &launch,
+            &mut BTreeMap::new(),
+            Some(&mut deliveries),
+        )
+        .expect("the outcome log takes writes again");
+        assert!(
+            deliveries.idle(),
+            "something is still kept after the log took writes"
+        );
+        let answered: Vec<(u64, bool)> = channel
+            .outcomes()
+            .iter()
+            .map(|outcome| (outcome.id, outcome.applied))
+            .collect();
+        assert_eq!(
+            answered,
+            [(1, false), (0, false), (2, false)],
+            "the kept answers and envelopes were not each answered once, the owed one first"
+        );
+        assert!(
+            channel.outcome_of(1).is_some_and(|outcome| outcome
+                .reason
+                .is_some_and(|reason| reason.contains("failed while processing"))),
+            "the record whose refusal could not be answered is not answered with that failure"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

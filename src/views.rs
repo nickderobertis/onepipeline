@@ -6586,6 +6586,121 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// `status` names what became of the latest notes answered `queued` that have
+    /// left their inbox — each by its own record, taken or refused — and says how
+    /// many earlier ones it leaves out rather than dropping them silently. Seven
+    /// notes, each in an envelope of its own: the first two are left out, and the
+    /// last five are each named once, with the record that answered it.
+    ///
+    /// Built from a real run directory and channel rather than a driven run: a
+    /// journey reaching six queued notes holds six turns open one after another,
+    /// and what is under test is only how the reading bounds what it prints.
+    #[test]
+    fn status_names_the_latest_queued_notes_results_and_counts_the_rest() {
+        let root = scratch("queued-notes");
+        let note = |text: &str| -> crate::channel::Command {
+            serde_json::from_value(json!({
+                "op": "note", "id": "build", "addressee": "worker", "text": text,
+            }))
+            .expect("a note command")
+        };
+        let texts: Vec<String> = (0..7).map(|at| format!("note number {at}")).collect();
+        let mut events = vec![event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        )];
+        for (id, text) in texts.iter().enumerate() {
+            let command = json!(note(text));
+            events.push(if id == 6 {
+                event(
+                    crate::journal::PipelineKind::EditRejected,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        ("reason", json!("refused: the note was not delivered")),
+                        ("envelope", json!(id)),
+                        ("index", json!(0)),
+                    ],
+                )
+            } else {
+                event(
+                    crate::journal::PipelineKind::EditCommitted,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        (
+                            "operations",
+                            json!([{
+                                "kind": "note-delivered", "node": "build",
+                                "addressee": "worker", "text": text,
+                                "reached": "worker", "turn": "turn-end",
+                                "envelope": id, "index": 0,
+                            }]),
+                        ),
+                    ],
+                )
+            });
+        }
+        let paths = write_run(&root, "demo", dead_pid(), &events);
+        let channel = crate::channel::ChannelState::new(&paths);
+        for text in &texts {
+            let id = channel
+                .submit(crate::channel::Author::planner(), &[note(text)])
+                .expect("queued");
+            channel
+                .answer_commands(&crate::channel::CommandOutcome {
+                    id,
+                    applied: true,
+                    reason: None,
+                    results: vec![crate::channel::CommandResult {
+                        index: 0,
+                        op: "note".into(),
+                        outcome: crate::channel::CommandVerdict::Queued,
+                        reason: None,
+                        refusal: None,
+                        turn: None,
+                    }],
+                })
+                .expect("answered");
+        }
+        let view = RunView::open(&paths).expect("the run reads");
+        let lines = note_lines(&view);
+        assert!(
+            lines.contains("  2 earlier note(s) answered queued are not shown here\n"),
+            "{lines}"
+        );
+        for id in 0..2 {
+            assert!(
+                !lines.contains(&format!("envelope {id}'s note")),
+                "an earlier note was named: {lines}"
+            );
+        }
+        for id in 2..6 {
+            assert!(
+                lines.contains(&format!(
+                    "  note: envelope {id}'s note 0 to build, answered queued — note-delivered \
+                     `worker` (turn: turn-end)\n"
+                )),
+                "{lines}"
+            );
+        }
+        assert!(
+            lines.contains(
+                "  note: envelope 6's note 0 to build, answered queued — refused: the note was \
+                 not delivered\n"
+            ),
+            "{lines}"
+        );
+        assert!(
+            !lines.contains("inbox:"),
+            "a dead driver's inbox was read: {lines}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn a_run_nobody_recorded_is_no_such_run() {
         let root = scratch("missing");
