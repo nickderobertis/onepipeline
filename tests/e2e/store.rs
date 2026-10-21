@@ -2261,15 +2261,37 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
 /// A closeout that falls inside a wait the store asked for asks the store nothing: the run
 /// settles on time, and the terminal projection is not attempted inside the window the
 /// limiter named, which a closeout suspending the retry schedule would otherwise do.
+/// Both nodes are already in flight before the refusal: a new dispatch must first land its
+/// fence, which cannot ask the store anything during that wait.
 #[test]
 fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
     let wait = Duration::from_secs(30);
     let run = "writeback-rate-limit-closeout";
-    let (world, _project) =
-        a_run_whose_destination_can_start_refusing("store-writeback-rate-limit-closeout", run);
-    world.until("every attempt so far to be recorded", |world| {
-        world.run_file(run, "writeback-projections.jsonl").is_file()
-            && !world.store_calls().is_empty()
+    let world = World::new("store-writeback-rate-limit-closeout");
+    world.script("work.wait", "hold");
+    world.script("later.wait", "hold");
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("work", &[]), agent("later", &[])]),
+    );
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("both running states to reach the store", |world| {
+        let tasks = world.store_tasks(&project);
+        ["work", "later"].iter().all(|node| {
+            tasks.iter().any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == *node
+                    && task["item"]["status"]["category"] == "in-progress"
+            })
+        })
+    });
+    world.until("the landing attempt to end its command", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
     });
     let before = streaks_reported(&world, run);
     world.store_refuses_once("update_task", &rate_limited_for(wait.as_secs()));
@@ -2281,6 +2303,7 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
     let calls = world.store_calls().len();
 
     world.release("work.go");
+    world.release("later.go");
     world.until("the run to write its result", |world| {
         world.run_file(run, "result.json").is_file()
     });
@@ -2299,9 +2322,11 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
         "the store was handed a call inside the {wait:?} it asked for: {:?}",
         &world.store_calls()[calls..]
     );
+    let mut ran = dispatched(&world, run);
+    ran.sort();
     assert_eq!(
-        dispatched(&world, run),
-        ["work", "later"],
+        ran,
+        ["later", "work"],
         "the rate limit changed what executed"
     );
 }
