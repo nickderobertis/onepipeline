@@ -173,6 +173,10 @@ fn engine_cancelled_continuation(legacy: bool) {
     // projected by writeback::task_document beside Snapshot::word_of's cancelled board word.
     // Those functions are private to the binary. The legacy input omits the additive key,
     // since a current engine cannot generate that older record.
+    // llmlint: ignore-block[tests_mirror_real_usage] The projection is private and no CLI
+    // path writes this current cancelled board word: stop ends the driver without projecting,
+    // channel cancel parks, and retry replaces the lineage head. The manager approved this
+    // stored-input fixture; park/person-close and retry cleanup use real engine actions.
     let mut metadata = std::collections::BTreeMap::from([(
         key("onepipeline.settlement"),
         json!({"status": "cancelled"}),
@@ -180,6 +184,7 @@ fn engine_cancelled_continuation(legacy: bool) {
     if !legacy {
         metadata.insert(key("onepipeline.projected_status"), json!("cancelled"));
     }
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let update = onetaskgraph_plugin_api::TaskUpdate {
         metadata_set: metadata,
         ..onetaskgraph_plugin_api::TaskUpdate::default()

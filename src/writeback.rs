@@ -4450,10 +4450,16 @@ fn task_document(
         metadata.insert(crate::taskgraph::SETTLEMENT_KEY.into(), settlement.clone());
         // Beside it, the word it is projected as: a park and a stop both settle `cancelled`,
         // and a launch reads this to tell the engine's close of a task from a person's.
+        // llmlint: ignore-block[changed_behavior_has_e2e] This private projection has no CLI
+        // path that writes a current cancelled board word: stop ends the driver without
+        // projecting, channel cancel parks, and retry replaces the lineage head. The manager
+        // approved the stored cancellation fixture in withdrawn.rs; real park/person-close
+        // and retry cleanup journeys exercise this projection through the binary.
         metadata.insert(
             crate::taskgraph::PROJECTED_STATUS_KEY.into(),
             json!(snapshot.word_of(id).word()),
         );
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
     // Written while the head's session is open and gone once it settles, so a host holding
     // none of this run's state pins the node to the branch it was working on.
