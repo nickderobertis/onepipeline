@@ -12343,7 +12343,10 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    store too: after its `dispatch-stopped` records it takes every one that ended, gracefully
    or killed, off the run's fence; one that would not go stays fenced. `adopt` after a host
    shutdown, or after the driver's process died, resumes those nodes onto their recorded
-   branches at once.
+   branches at once. A renamed directory does not release its launch record's run id:
+   minting reserves it, so no successor reads a live displaced driver's claim as its own.
+   The public-id journey's moved dead-pid step therefore waits on nothing and leaves the
+   renamed directory's ownership lock untouched; its live-pid step claims and waits.
 6. **`<run>/claim.json`** is written by the claim thread after every read, whole, through
    a temporary file renamed over it. Like `owner.lock` and `channel/deliveries.json` it is
    driver state, not journal-derived. No journal record is written per claim read. It is

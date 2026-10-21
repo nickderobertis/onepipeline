@@ -530,6 +530,87 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
         "the takeover changed the ownership lock beneath the renamed directory"
     );
 
+    // Windows refuses renaming a directory whose journal a live driver holds open:
+    // that state cannot arise there. The dead-pid moved case above runs everywhere.
+    #[cfg(unix)]
+    {
+        // Hold the real driver's pass and its next claim read so neither writes through
+        // the old path during the move. Only that launch receives these failpoints.
+        let pass = crate::harness::Rendezvous::failpoint();
+        let reads = crate::harness::Rendezvous::failpoint();
+        let live = "zephyrine-moved-live";
+        let project = world.plan(
+            live,
+            &plan_of(
+                live,
+                vec![
+                    agent("live", &[]),
+                    agent("seed", &[]),
+                    agent("ready", &["seed"]),
+                ],
+            ),
+        );
+        world.script("live.wait", "hold");
+        let launched = world
+            .cmd(&["start", &project, "--detach"])
+            .current_dir(&world.project)
+            .env("ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", pass.address())
+            .env("ONEPIPELINE_TEST_CLAIM_BEGIN_NODE", "ready")
+            .env("ONEPIPELINE_TEST_CLAIM_READ_GATE", reads.address())
+            .output()
+            .expect("the live driver starts");
+        assert!(launched.status.success(), "{launched:?}");
+        let held_pass = pass.arrived();
+        let held_read = reads.arrived();
+        let before = stored_claim(&world, &project);
+        let original = world.runs.join(live);
+        let elsewhere = world.runs.join("zephyrine-moved-live-elsewhere");
+        renamed(&original, &elsewhere, "the live run's directory moves");
+        let lock_before = std::fs::read(elsewhere.join("owner.lock")).expect("the live lock");
+        let mut taking = world
+            .cmd(&["start", &project, "--detach", "--take-over"])
+            .current_dir(&world.project)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the live run's takeover starts");
+        world.until("the takeover to claim the moved live run", |world| {
+            stored_claim(world, &project)["claimed_at"] != before["claimed_at"]
+        });
+        let claimed = stored_claim(&world, &project);
+        let waiting = taking.try_wait().expect("the takeover is asked").is_none();
+        let lock_after = std::fs::read(elsewhere.join("owner.lock")).expect("the live lock");
+        // Restore the path before letting either thread write again, and release all
+        // holds before asserting so even an identity regression lets both drivers exit.
+        renamed(&elsewhere, &original, "the live run's directory returns");
+        held_read.release();
+        std::thread::spawn(move || loop {
+            reads.arrived().release();
+        });
+        held_pass.release();
+        world.unscript("live.wait");
+        world.release("live.go");
+        let answered = taking.wait_with_output().expect("the takeover answers");
+        assert_eq!(
+            claimed["run"],
+            json!(hashed(&format!("{live}-2"))),
+            "a successor reused the live driver's recorded identity"
+        );
+        assert!(waiting, "the takeover did not wait for the live driver");
+        assert_eq!(lock_after, lock_before, "the moved driver's lock changed");
+        assert_eq!(answered.status.code(), Some(0), "{answered:?}");
+        assert!(
+            String::from_utf8_lossy(&answered.stderr).contains("--take-over claimed"),
+            "the live driver's takeover did not claim and wait: {answered:?}"
+        );
+        let successor = format!("{live}-2");
+        world.until("the moved live run's successor to settle", |world| {
+            world.run_file(&successor, "result.json").is_file()
+        });
+        assert!(world.events_of(&successor, "driver-superseded").is_empty());
+        assert_eq!(world.events_of(live, "driver-superseded").len(), 1);
+    }
+
     // A stop releases the claim its public id names.
     let stopped = "zephyrine-stopped";
     let project = world.plan(stopped, &plan_of(stopped, vec![agent("stopped", &[])]));

@@ -1013,12 +1013,24 @@ fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
             }
         })
         .collect();
-    if !root.join(&base).exists() {
+    // Moving a directory does not release its recorded run identity: a successor
+    // must never read a live displaced driver's claim as its own.
+    let recorded: std::collections::BTreeSet<String> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            ledger::read_json_opt::<LaunchRecord>(&entry.path().join("launch.json"))
+        })
+        .map(|launch| launch.run_id)
+        .collect();
+    let occupied = |candidate: &str| root.join(candidate).exists() || recorded.contains(candidate);
+    if !occupied(&base) {
         return base;
     }
     (2..)
         .map(|n| format!("{base}-{n}"))
-        .find(|candidate| !root.join(candidate).exists())
+        .find(|candidate| !occupied(candidate))
         .unwrap_or(base)
 }
 
