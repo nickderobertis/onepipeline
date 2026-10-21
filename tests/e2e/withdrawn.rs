@@ -128,7 +128,11 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
         .expect("ship's item");
 
     let refused = world.run(&["start", &project, "--attach"]);
-    assert_ne!(refused.code, 0, "the launch was not refused: {}", refused.stdout);
+    assert_ne!(
+        refused.code, 0,
+        "the launch was not refused: {}",
+        refused.stdout
+    );
     refused.err_has(&format!(
         "'{ship}' depends on '{design}', which is withdrawn — the store reports it cancelled, \
          as 'cancelled'"
@@ -143,4 +147,37 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
         "todo",
         "a refused launch claimed a task"
     );
+}
+
+/// A stop projects the engine's own cancellation. Its stored board word keeps the task
+/// eligible for a fresh launch, whereas a person's cancellation has no such record.
+#[test]
+fn an_engine_cancelled_task_resumes_from_the_store() {
+    let world =
+        World::new("withdrawn-engine-cancelled").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("build.wait", "hold");
+    let project = world.plan(
+        "engine-cancelled",
+        &plan_of("engine-cancelled", vec![agent("build", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to dispatch", |world| {
+        !dispatched(world, "engine-cancelled").is_empty()
+    });
+    world.run(&["stop", "engine-cancelled"]).exited(0);
+    let task = world.store_tasks(&project).remove(0);
+    assert_eq!(task["item"]["status"]["category"], "cancelled", "{task}");
+    assert_eq!(
+        task["item"]["metadata"]["onepipeline.projected_status"], "cancelled",
+        "{task}"
+    );
+    assert_eq!(
+        task["item"]["metadata"]["onepipeline.settlement"]["status"], "cancelled",
+        "{task}"
+    );
+    world.unscript("build.wait");
+    let cold = world.on_host("host-b");
+    cold.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(dispatched(&cold, "engine-cancelled"), ["build"]);
+    assert_eq!(stored_status(&cold, &project, "build")["category"], "done");
 }
