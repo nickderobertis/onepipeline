@@ -195,7 +195,12 @@ pub(crate) fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
 ///
 /// A run found by its public id is the directory its record was read from, and only where
 /// that record names that directory as its run: a record is read as a run's own only there.
+/// A name that is not one run directory under `root` names no run, since the store's claim is
+/// external input and is joined onto `root`.
 pub(crate) fn run_named(root: &std::path::Path, named: &str) -> Option<String> {
+    if !crate::ledger::is_valid_run_id(named) {
+        return None;
+    }
     if root.join(named).is_dir() {
         return Some(named.to_owned());
     }
@@ -241,6 +246,26 @@ mod tests {
         ] {
             assert_eq!(recorded("plan", written), None, "{written}");
         }
+    }
+
+    #[test]
+    fn a_name_that_is_not_one_run_directory_under_the_root_names_no_run() {
+        let world =
+            std::env::temp_dir().join(format!("onepipeline-publicid-{}", std::process::id()));
+        let root = world.join("runs");
+        std::fs::create_dir_all(root.join("mine")).expect("a run directory");
+        std::fs::create_dir_all(world.join("outside")).expect("a directory beside it");
+        assert_eq!(run_named(&root, "mine"), Some("mine".to_owned()));
+        let absolute = world.join("outside");
+        for named in [
+            "../outside",
+            absolute.to_str().expect("a UTF-8 path"),
+            "..",
+            "",
+        ] {
+            assert_eq!(run_named(&root, named), None, "{named}");
+        }
+        let _ = std::fs::remove_dir_all(&world);
     }
 
     #[test]
