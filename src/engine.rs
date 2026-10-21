@@ -2269,7 +2269,12 @@ fn converge(
                     launch,
                     &writeback,
                     &mut in_flight,
-                    &statuses,
+                    CloseoutClaim {
+                        statuses: &statuses,
+                        watch: claims.as_mut(),
+                        publishing: &publishing,
+                        unlanded: &unlanded,
+                    },
                 )? {
                     LastClaim::FoundNothing => break,
                     LastClaim::MovedTheRun => {
@@ -2404,7 +2409,12 @@ fn converge(
                 launch,
                 &writeback,
                 &mut in_flight,
-                &statuses,
+                CloseoutClaim {
+                    statuses: &statuses,
+                    watch: claims.as_mut(),
+                    publishing: &publishing,
+                    unlanded: &unlanded,
+                },
             )? {
                 LastClaim::FoundNothing => break,
                 LastClaim::MovedTheRun => {
@@ -2841,6 +2851,15 @@ enum LastClaim {
     MovedTheRun,
 }
 
+/// The terminal statuses and the claim fence that must reflect their landed settlements
+/// before the run marks its home complete.
+struct CloseoutClaim<'a> {
+    statuses: &'a BTreeMap<String, NodeStatus>,
+    watch: Option<&'a mut crate::continuation::ClaimWatch>,
+    publishing: &'a BTreeSet<String>,
+    unlanded: &'a BTreeSet<String>,
+}
+
 /// Close the run out and take the command queue's **last claim**.
 ///
 /// The holder of the run's ownership lock is the only party that can apply a
@@ -2867,8 +2886,14 @@ fn close_out_and_drain(
     launch: &LaunchRecord,
     writeback: &Option<crate::writeback::Writeback>,
     in_flight: &mut BTreeMap<String, Dispatch>,
-    final_statuses: &BTreeMap<String, NodeStatus>,
+    claim: CloseoutClaim<'_>,
 ) -> Result<LastClaim> {
+    let CloseoutClaim {
+        statuses: final_statuses,
+        watch,
+        publishing,
+        unlanded,
+    } = claim;
     // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
     // terminal projection failing and the surface reaching the planner before the run
     // settles. What it cannot drive is a projection *slow* enough to outlast this bounded
@@ -2881,7 +2906,18 @@ fn close_out_and_drain(
         // A node that never started is released at closeout, so another reader may take up
         // what this run claimed and did not begin. A driver that goes on driving after an
         // edit found here publishes it `queued` again on its next pass.
-        writeback.close_out(paths, launch, state, final_statuses);
+        writeback.close_out(paths, launch, state, final_statuses, || {
+            if let Some(watch) = watch {
+                let mut nodes = publishing.clone();
+                nodes.extend(
+                    unlanded
+                        .iter()
+                        .filter(|node| !writeback.has_landed_settlement(node))
+                        .cloned(),
+                );
+                watch.fence(&nodes);
+            }
+        });
         // A store slower than the closeout's window leaves the claim standing while the
         // closeout is still being attempted; the run releases it itself rather than
         // refusing the next host's launch over a run that is over. A closeout the store

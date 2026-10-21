@@ -1481,15 +1481,17 @@ impl Writeback {
     /// interval, has what it is pending superseded by the closeout as it always had, since
     /// waiting on it is waiting on the store. And inside the one window the landing has, so
     /// nothing here holds the run's settlement longer than it ever could be held.
-    pub fn close_out(
+    pub(crate) fn close_out(
         &self,
         paths: &RunPaths,
         launch: &LaunchRecord,
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
+        before_home: impl FnOnce(),
     ) {
         let deadline = Instant::now() + CLOSEOUT_WAIT;
-        if !self.is_retired() {
+        let retired = self.is_retired();
+        if !retired {
             self.closing_out_until(deadline, |pending| {
                 pending.latest.is_some() && pending.worker == WorkerState::Idle
             });
@@ -1498,6 +1500,11 @@ impl Writeback {
             // exits. This keeps a completed run from racing a person's next store call,
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
+        }
+        // Settlements that landed no longer need the driver's dispatch fence. Clear it
+        // before marking the home complete, so that status remains the final store write.
+        before_home();
+        if !retired {
             // The run's home, marked `done` once the run has reached the success ending and
             // never again once its journal records the call: entry 134. The closure thread
             // makes the call once this projection has landed, inside the closures' window below.

@@ -800,30 +800,49 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
     assert!(records_of(&world, run, "node-settled", "x").is_empty());
     reader.finished();
 
-    // A sidecar that cannot be read says nothing is known: `status` names no claim, rather
-    // than one it made up. The next read, held here, writes it whole again.
+    // An unreadable sidecar says nothing is known. Hold the next read so it cannot
+    // repair the file while a separate status process exercises each refusal.
     let read = reads.arrived();
-    // llmlint: ignore-block[tests_mirror_real_usage] the driver writes the sidecar whole, through
-    // a rename, so no input of this binary leaves one torn — that is the property the reader
-    // process above holds — and what is driven here is the views' answer to one that cannot be
-    // read anyway (a disk, an older or newer build): the file is torn by hand, and the real
-    // `status` is asked.
-    std::fs::write(
-        world.run_file(run, "claim.json"),
-        r#"{"schema_version":1,"state":"#,
-    )
-    .expect("the sidecar is torn");
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    let status = world.run(&["status", run, "--json"]);
-    status.exited(0);
-    assert!(status.json().get("claim").is_none(), "{}", status.stdout);
-    let status = world.run(&["status", run]);
-    status.exited(0);
-    assert!(
-        !status.stdout.contains("claim UNCONFIRMED"),
-        "{}",
-        status.stdout
-    );
+    let valid =
+        serde_json::to_value(claim_file(&world, run).expect("the confirming read")).unwrap();
+    let mut missing = valid.clone();
+    missing.as_object_mut().unwrap().remove("detail");
+    let mut unknown = valid.clone();
+    unknown["typo"] = json!(true);
+    let mut interval = valid.clone();
+    interval["lease_interval_s"] = json!(0);
+    let mut version = valid.clone();
+    version["schema_version"] = json!(2);
+    let mut inconsistent = valid.clone();
+    inconsistent["reason"] = json!("failed");
+    for (case, document) in [
+        ("truncated", r#"{"schema_version":1,"state":"#.to_owned()),
+        ("missing key", missing.to_string()),
+        ("unknown key", unknown.to_string()),
+        ("zero interval", interval.to_string()),
+        ("future version", version.to_string()),
+        ("inconsistent state", inconsistent.to_string()),
+    ] {
+        // llmlint: ignore-block[tests_mirror_real_usage] the driver atomically writes a valid
+        // sidecar, so malformed documents require disk damage or another build. Write those
+        // external inputs directly, then ask the real status process how it reads them.
+        std::fs::write(world.run_file(run, "claim.json"), document).expect("the sidecar");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        let status = world.run(&["status", run, "--json"]);
+        status.exited(0);
+        assert!(
+            status.json().get("claim").is_none(),
+            "{case}: {}",
+            status.stdout
+        );
+        let status = world.run(&["status", run]);
+        status.exited(0);
+        assert!(
+            !status.stdout.contains("claim UNCONFIRMED"),
+            "{case}: {}",
+            status.stdout
+        );
+    }
     read.release();
     world.until("the next read to write the sidecar whole", |world| {
         std::fs::read_to_string(world.run_file(run, "claim.json"))

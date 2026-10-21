@@ -222,7 +222,6 @@ pub(crate) enum ReadRefusal {
 }
 
 impl ReadRefusal {
-    /// The refusal, whichever it was.
     pub(crate) fn into_error(self) -> Error {
         match self {
             Self::Late(error) | Self::RateLimited(error) | Self::Failed(error) => error,

@@ -1396,7 +1396,6 @@ impl Lease {
         });
     }
 
-    /// The next read is due at `at`.
     fn next_read_at(&self, at: Instant) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.next_read = Some(at);
@@ -2027,7 +2026,6 @@ mod tests {
                "claimed_at": "2026-10-11T00:00:00.000Z"})
     }
 
-    /// [`claim`], read as the claim it is.
     fn claimed(run: &str, host: &str) -> DriverClaim {
         serde_json::from_value(claim(run, host)).expect("a claim")
     }
