@@ -1110,7 +1110,7 @@ fn replies_on(world: &World, run: &str) -> usize {
 /// Answer `asked` with `envelope` by its correlation, and hold the answer to
 /// entry 64's receipt with its verdict delivered, the asker's ruling, and a
 /// journal that gained `planner-replied` and never `completion-requested`.
-fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value) -> Value {
+fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value, notes: Option<Value>) -> Value {
     let replied = world.events_of(run, "planner-replied").len();
     let answered = world.run_with_stdin(
         &["reply", run, "--correlation", &asked.correlation],
@@ -1121,10 +1121,16 @@ fn ruled(world: &World, run: &str, asked: Asked, envelope: &Value) -> Value {
     assert!(receipt["reply"].as_u64().is_some(), "{receipt}");
     assert_eq!(receipt["verdict"], json!("delivered"), "{receipt}");
     if envelope.get("commands").is_some() {
+        let expected_keys = if let Some(notes) = notes {
+            assert_eq!(receipt["notes"], notes, "{receipt}");
+            vec!["commands", "notes", "reply", "state", "verdict"]
+        } else {
+            vec!["commands", "reply", "state", "verdict"]
+        };
         assert_eq!(
             keys(&receipt),
-            ["commands", "reply", "state", "verdict"],
-            "the receipt is not entry 64's: {receipt}"
+            expected_keys,
+            "the receipt is not entry 64's amended receipt: {receipt}"
         );
         assert_eq!(receipt["commands"], receipt["state"], "{receipt}");
     } else {
@@ -1214,6 +1220,7 @@ fn a_correlated_ruling_on_a_settled_run_reaches_its_asker_and_leaves_the_run_owe
         &run,
         met,
         &json!({"completion": true, "reason": "the bar is met"}),
+        None,
     );
     blocked(
         &owed,
@@ -1227,6 +1234,7 @@ fn a_correlated_ruling_on_a_settled_run_reaches_its_asker_and_leaves_the_run_owe
         &run,
         unmet,
         &json!({"completion": false, "message": "the bar is not met"}),
+        None,
     );
     blocked(
         &owed,
@@ -1261,6 +1269,7 @@ fn a_correlated_ruling_reaches_its_asker_on_a_settled_run_a_driver_still_holds()
         &run,
         asked,
         &json!({"completion": true, "reason": "the bar is met"}),
+        None,
     );
     assert!(lock.is_file(), "answering took the run's lock over");
     std::fs::remove_file(&lock).expect("the lock");
@@ -1296,6 +1305,7 @@ fn a_correlated_ruling_answers_a_blocking_question_on_a_settled_run() {
         &run,
         asked,
         &json!({"completion": true, "reason": "ship it"}),
+        None,
     );
     assert_eq!(held(), Value::Null, "the pending slot was left holding it");
 }
@@ -1316,6 +1326,7 @@ fn a_correlated_ruling_on_a_live_run_reaches_its_asker_and_never_completes_the_r
         &run,
         asked,
         &json!({"completion": true, "reason": "the bar is met"}),
+        None,
     );
     refused_by_name(&world, &run, &answered);
     assert!(
@@ -1345,6 +1356,7 @@ fn a_correlated_ruling_beside_commands_reaches_its_asker_and_never_completes_the
             "commands": [{"op": "note", "id": "build", "addressee": "worker",
                           "text": "the bar is met", "deliver": "next"}],
         }),
+        Some(json!({"build": "applied"})),
     );
     assert!(
         !world.events_of(&run, "edit-committed").is_empty(),
@@ -1375,6 +1387,7 @@ fn a_correlated_ruling_beside_commands_applied_here_never_completes_the_run() {
             "reason": "the bar is met",
             "commands": [{"op": "finding", "message": "the bar was met at settlement"}],
         }),
+        None,
     );
     assert!(
         !world.events_of(&run, "command-accepted").is_empty(),
@@ -1436,6 +1449,7 @@ fn a_correlated_ruling_the_reply_validator_refuses_leaves_the_question_standing(
         &run,
         asked,
         &json!({"completion": true, "reason": "the bar is met, with evidence"}),
+        None,
     );
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
