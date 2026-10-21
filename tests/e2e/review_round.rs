@@ -286,7 +286,8 @@ fn pass_split(world: &World, run: &str, from: u64, to: u64) -> Value {
 }
 
 /// Run `step`, and record what the round spent while it ran — and, for a pass, its
-/// wall time by step.
+/// wall time by step. Answers the span of [`World::invocations`] the step made, so a
+/// call the round should not have made can be named with the phase it came from.
 fn timed(
     world: &World,
     host: &FileHost,
@@ -294,7 +295,7 @@ fn timed(
     name: &str,
     phases: &mut Vec<Value>,
     step: impl FnOnce(),
-) {
+) -> (String, std::ops::Range<usize>) {
     let from = marks(world, host, run);
     let began = std::time::Instant::now();
     let since = now_millis();
@@ -304,6 +305,111 @@ fn timed(
         spent["pass"] = pass_split(world, run, since, now_millis());
     }
     phases.push(spent);
+    (name.to_owned(), from.invocations..world.invocations().len())
+}
+
+/// What made each `rules/branches/<base>` read the round's phases recorded, as far as the
+/// run's own records say: the read and the `gh` call recorded after it, every base-merge
+/// decision `onevcs` did not settle without the host, and what the round's commands said.
+///
+/// Two `onevcs` questions read that route. Whether the base requires an up-to-date branch
+/// is asked by a base-merge decision — a session open, or a publication's sync, which
+/// always asks it of a base that moved since the branch merged it — and over this host's
+/// rules, which name required checks without saying `strict`, it stops at the rules read.
+/// Which checks a merge requires is asked by a publication watching its draft's checks,
+/// and reads classic protection (`branches/<base>/protection`) next; a republication
+/// falls back to that watch where it says it has no head-branch record.
+fn rule_read_report(
+    world: &World,
+    spans: &[(String, std::ops::Range<usize>)],
+    said: &[String],
+) -> String {
+    let invocations = world.invocations();
+    let route = |call: &Value| -> Option<String> {
+        (call["tool"] == "gh" && call["args"][0] == "api")
+            .then(|| call["args"][1].as_str().map(str::to_owned))
+            .flatten()
+    };
+    let mut report = Vec::new();
+    for (phase, span) in spans {
+        for at in span.clone() {
+            let Some(read) =
+                route(&invocations[at]).filter(|read| read.contains("/rules/branches/"))
+            else {
+                continue;
+            };
+            let next = invocations[at + 1..]
+                .iter()
+                .find(|call| call["tool"] == "gh")
+                .map_or_else(|| "nothing".to_owned(), Value::to_string);
+            report.push(format!(
+                "{phase}: gh api {read}, and the next gh call recorded was {next}"
+            ));
+        }
+    }
+    let mut streams = vec![world.onevcs_home()];
+    let mut decisions = Vec::new();
+    while let Some(dir) = streams.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                streams.push(path);
+                continue;
+            }
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "ndjson")
+            {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                let Ok(event) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let (asked_at, decided) = match event["kind"].as_str() {
+                    Some("base-merge") => ("a publication's sync", &event["payload"]),
+                    Some("session-opened") => ("a session open", &event["payload"]["base_merge"]),
+                    _ => continue,
+                };
+                let because = decided["because"].as_str().unwrap_or_default();
+                if because.is_empty()
+                    || [
+                        "already carries",
+                        "the caller merges the base itself",
+                        "conflicts with the branch",
+                    ]
+                    .iter()
+                    .any(|settled| because.contains(settled))
+                {
+                    continue;
+                }
+                decisions.push(format!(
+                    "{} {asked_at} of {} onto {}: {} — {because} (labels {})",
+                    event["ts"].as_str().unwrap_or_default(),
+                    event["payload"]["branch"],
+                    decided["base"]
+                        .as_str()
+                        .or(event["payload"]["base"].as_str())
+                        .unwrap_or("its base"),
+                    decided["decision"],
+                    event["labels"],
+                ));
+            }
+        }
+    }
+    decisions.sort();
+    let lines: Vec<&str> = said
+        .iter()
+        .flat_map(|output| output.lines())
+        .map(str::trim)
+        .filter(|line| line.starts_with("onepipeline:") || line.starts_with("onevcs:"))
+        .collect();
+    format!(
+        "base branch-rule reads in the round:\n  {}\nbase-merge decisions onevcs did not settle without the host:\n  {}\nwhat the round's commands said:\n  {}",
+        report.join("\n  "),
+        if decisions.is_empty() { "none".to_owned() } else { decisions.join("\n  ") },
+        if lines.is_empty() { "nothing".to_owned() } else { lines.join("\n  ") },
+    )
 }
 
 /// The change request number of a node's draft, off its settlement.
@@ -484,14 +590,21 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .unwrap();
 
     let mut phases = Vec::new();
+    let mut spans = Vec::new();
+    // What the round's commands printed, for naming what made a read it should not make.
+    let said = std::cell::RefCell::new(Vec::new());
+    let ran = |output: crate::harness::Run, what: &str| {
+        passed(&output, what);
+        said.borrow_mut().push(output.stderr);
+    };
     let round_from = projection_lines(&world, run).len();
     let mut reworked = Vec::new();
-    timed(&world, &host, run, "pass-1", &mut phases, || {
-        passed(&world.run(&["review", run]), "the first pass");
-    });
-    timed(&world, &host, run, "decline", &mut phases, || {
-        passed(
-            &world.run_with_stdin(
+    spans.push(timed(&world, &host, run, "pass-1", &mut phases, || {
+        ran(world.run(&["review", run]), "the first pass");
+    }));
+    spans.push(timed(&world, &host, run, "decline", &mut phases, || {
+        ran(
+            world.run_with_stdin(
                 &["reply", run],
                 &json!({"version": 3, "commands": [{"op": "decline", "id": "n1",
                     "comments": [named(&left)], "reason": "Out of scope for this stack."}]})
@@ -499,7 +612,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             ),
             "the decline",
         );
-    });
+    }));
     for (name, node, comments, file) in [
         ("rework-b", "n3", &on_b, "n3"),
         ("rework-h", "n7", &on_h, "n7"),
@@ -510,9 +623,9 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         );
         world.script(&format!("{node}-rework-1.work-file"), file);
         let from = projection_lines(&world, run).len();
-        timed(&world, &host, run, name, &mut phases, || {
-            passed(
-                &world.run_with_stdin(
+        spans.push(timed(&world, &host, run, name, &mut phases, || {
+            ran(
+                world.run_with_stdin(
                     &["reply", run],
                     &json!({"version": 3, "commands": [{"op": "rework", "id": node,
                         "reason": "the review asked for it", "instruction": "Change what the comments name",
@@ -521,8 +634,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
                 ),
                 name,
             );
-            passed(&world.run(&["adopt", run]), name);
-        });
+            ran(world.run(&["adopt", run]), name);
+        }));
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
     // The bottom draft merged by a person mid-round, its branch kept — no call of the run's.
@@ -543,12 +656,12 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         "{}",
         String::from_utf8_lossy(&person.stderr)
     );
-    timed(&world, &host, run, "readjust", &mut phases, || {
-        passed(&world.run(&["readjust", run]), "the readjustment");
-    });
-    timed(&world, &host, run, "pass-2", &mut phases, || {
-        passed(&world.run(&["review", run]), "the second pass");
-    });
+    spans.push(timed(&world, &host, run, "readjust", &mut phases, || {
+        ran(world.run(&["readjust", run]), "the readjustment");
+    }));
+    spans.push(timed(&world, &host, run, "pass-2", &mut phases, || {
+        ran(world.run(&["review", run]), "the second pass");
+    }));
     #[cfg(unix)]
     the_round_started_few_enough_gits(&world);
 
@@ -724,7 +837,8 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .collect();
     assert!(
         rule_reads.is_empty(),
-        "base branch-rule reads: {rule_reads:?}"
+        "{}",
+        rule_read_report(&world, &spans, &said.borrow())
     );
     let replies: usize = record["phases"]
         .as_array()
