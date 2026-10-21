@@ -128,6 +128,12 @@ pub(crate) fn validate(
             "{named} was already answered {}: a turn took it, and a conversation has no undo",
             disposition(&reached)
         ))),
+        // A note answered `queued` as it was handed off has its receiver's
+        // refusal as its own record, which its envelope's answer never says.
+        None if refused_record(&journal, id, index).is_some() => Err(refuse(format!(
+            "{named} was already answered refused: {}",
+            refused_record(&journal, id, index).unwrap_or_default()
+        ))),
         None => match channel
             .outcome_of(id)
             .and_then(|outcome| outcome.results.into_iter().nth(position))
@@ -159,6 +165,33 @@ pub(crate) fn validate(
             }
         },
     }
+}
+
+/// The reason the run's `edit-rejected` record of note `index` of envelope
+/// `sent` gives, if the run journalled one naming that note.
+fn refused_record(journal: &[Envelope], sent: u64, index: u32) -> Option<String> {
+    journal.iter().find_map(|record| {
+        (record.source == crate::event::Source::Pipeline
+            && record.kind.0 == crate::event::PipelineKind::EditRejected.as_str()
+            && record
+                .payload
+                .get("envelope")
+                .and_then(serde_json::Value::as_u64)
+                == Some(sent)
+            && record
+                .payload
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(u64::from(index)))
+        .then(|| {
+            record
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason was recorded")
+                .to_owned()
+        })
+    })
 }
 
 /// The refusal of a `withdraw-note` naming a live note whose delivery has

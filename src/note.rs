@@ -280,8 +280,10 @@ pub enum Delivered {
     /// conversation that took it, or [`Reached::Carried { reason: None }`] for the note no turn
     /// took and the node's next dispatch will.
     To(Reached),
-    /// Accepted and durable, and the run's reconciler had not answered it within
-    /// [`REPLY_TIMEOUT_ENV`](crate::channel::REPLY_TIMEOUT_ENV). It is still
+    /// Accepted and durable, and within
+    /// [`REPLY_TIMEOUT_ENV`](crate::channel::REPLY_TIMEOUT_ENV) either the run's
+    /// reconciler had not answered it, or it answered it `queued` in its
+    /// receiver's inbox and that receiver's turn had not taken it. It is still
     /// queued: this is **not** an instruction to send it again.
     Queued,
 }

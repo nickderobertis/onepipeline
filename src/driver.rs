@@ -3738,13 +3738,13 @@ pub(crate) fn deliver_note_envelope(
     paths: &RunPaths,
     envelope: &Reply,
 ) -> Result<crate::note::Delivered> {
-    let [Command::Note { id, text, .. }] = &envelope.commands[..] else {
+    let [Command::Note { id, .. }] = &envelope.commands[..] else {
         return Err(Error::Refused(
             "a note is delivered one at a time, and this envelope carries something else"
                 .to_string(),
         ));
     };
-    let (id, text) = (id.clone(), text.clone());
+    let id = id.clone();
     match submit_envelope(paths, None, envelope)? {
         // Compiled here, so what it answered is in hand.
         Submitted::AppliedHere { operations } => reached_in(&operations)
@@ -3754,16 +3754,26 @@ pub(crate) fn deliver_note_envelope(
                     "note: node '{id}': the delivery recorded no disposition"
                 ))
             }),
-        // Compiled by the run's own reconciler, which recorded it: the record is
-        // written before the outcome this returned on, so it is there to be read.
-        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)?
-            .map(crate::note::Delivered::To)
-            .ok_or_else(|| {
-                Error::Refused(format!(
-                    "note: node '{id}': the run applied the note and recorded no disposition \
-                     for it"
-                ))
-            }),
+        // Answered by the run's own reconciler as it handed the note to its
+        // receiver's inbox — `queued` — so what became of it is the note's own
+        // record, written once that receiver's turn answers it: waited for here,
+        // for as long as a reply waits for its answer.
+        Submitted::AppliedByRun { reply } => {
+            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            loop {
+                match note_record(paths, reply)? {
+                    Some(Ok(reached)) => break Ok(crate::note::Delivered::To(reached)),
+                    Some(Err(reason)) => {
+                        break Err(Error::Refused(format!("note: node '{id}': {reason}")))
+                    }
+                    // llmlint: ignore[changed_behavior_has_e2e] the reply timeout elapsing is
+                    // read from the calling process's environment, as the `Queued` arm below
+                    // says, and this call is a library call a journey cannot bound from outside.
+                    None if Instant::now() >= deadline => break Ok(crate::note::Delivered::Queued),
+                    None => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }
         // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the reply
         // timeout elapsing, which is read from the *calling process's*
         // environment — and this call is a library call, so a journey driving it
@@ -3788,27 +3798,48 @@ fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     })
 }
 
-/// What the run recorded for the last note of this text delivered to this node,
-/// or nothing where it recorded none.
+/// What the run recorded for the note at the head of envelope `envelope`: the
+/// party or dispatch it reached, or the reason it was refused — or nothing yet,
+/// while it waits in its receiver's inbox.
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] for a committed edit whose recorded operations are not a
 /// shape this build reads. That is the run's own record being unreadable, and it
-/// is **not** the same answer as no disposition: the caller turns the second into
-/// "the run applied the note and recorded no disposition for it", which would
-/// send a manager looking for a delivery that is sitting in the journal all
-/// along. So it is said rather than folded into that.
-fn last_note_delivered(
+/// is **not** the same answer as no record yet: the caller would wait out its
+/// whole timeout for a delivery that is sitting in the journal all along. So it
+/// is said rather than folded into that.
+fn note_record(
     paths: &RunPaths,
-    node: &str,
-    text: &crate::note::NoteText,
-) -> Result<Option<crate::note::Reached>> {
-    for envelope in journal::read(&paths.journal()).into_iter().rev() {
-        if envelope.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+    envelope: u64,
+) -> Result<Option<std::result::Result<crate::note::Reached, String>>> {
+    for record in journal::read(&paths.journal()).into_iter().rev() {
+        if record
+            .payload
+            .get("envelope")
+            .and_then(serde_json::Value::as_u64)
+            != Some(envelope)
+        {
             continue;
         }
-        let Some(recorded) = envelope.payload.get("operations") else {
+        if record.kind.0 == journal::PipelineKind::EditRejected.as_str()
+            && record
+                .payload
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+        {
+            return Ok(Some(Err(record
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the run refused it and recorded no reason")
+                .to_owned())));
+        }
+        if record.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+            continue;
+        }
+        let Some(recorded) = record.payload.get("operations") else {
             continue;
         };
         let operations: Vec<edits::Operation> =
@@ -3816,20 +3847,11 @@ fn last_note_delivered(
                 Error::Invalid(format!(
                     "run '{}': a committed edit at seq {} records operations this build does \
                      not read, so what it did with a note cannot be said: {why}",
-                    paths.run, envelope.seq
+                    paths.run, record.seq
                 ))
             })?;
-        let reached = operations.iter().find_map(|operation| match operation {
-            edits::Operation::NoteDelivered {
-                node: written,
-                text: said,
-                reached,
-                ..
-            } if written == node && said == text => Some(reached.clone()),
-            _ => None,
-        });
-        if reached.is_some() {
-            return Ok(reached);
+        if let Some(reached) = reached_in(&operations) {
+            return Ok(Some(Ok(reached)));
         }
     }
     Ok(None)

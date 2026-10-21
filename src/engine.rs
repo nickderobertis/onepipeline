@@ -6864,9 +6864,23 @@ fn settle_lane(
                 changed = true;
                 Answered::Committed(turn_of(&operations))
             }
-            Ok(Delivery::NotAttempted) => Answered::NotAttempted,
-            // Its withdrawal is its record, and the envelope's answer is written
-            // through it — see [`NoteDeliveries::finish`].
+            // Its envelope was answered with it `queued`, so it is owed a record
+            // of its own like any note handed off: refused, since it was never
+            // offered.
+            Ok(Delivery::NotAttempted) => {
+                let error = never_offered(&outstanding.envelope.commands, index);
+                record_rejection(
+                    paths,
+                    journal,
+                    author.clone(),
+                    command,
+                    &error,
+                    Some((id, index)),
+                )?;
+                Answered::Refused(RecordedRefusal::of(&error))
+            }
+            // Its withdrawal is its record, and its envelope is answered again
+            // through it — see [`crate::withdrawal::answer_each`].
             Ok(Delivery::Withdrawn) => {
                 Answered::Refused(RecordedRefusal::Text(WITHDRAWN_LIVE.to_string()))
             }
@@ -6887,6 +6901,21 @@ fn settle_lane(
         }
     }
     Ok(changed)
+}
+
+/// The refusal a handed note is recorded with when its receiver's thread never
+/// offered it, because an earlier note of the same envelope to that receiver
+/// refused.
+fn never_offered(commands: &[Command], index: usize) -> Error {
+    let node = match commands.get(index) {
+        Some(Command::Note { id, .. }) => id.as_str(),
+        _ => "its node",
+    };
+    Error::Refused(format!(
+        "not offered: an earlier note of this envelope to node '{node}' refused, so this one \
+         was never offered to that node's conversation; resend it on its own if it is still \
+         wanted"
+    ))
 }
 
 /// What one command that did **not** refuse is reported as, when something else

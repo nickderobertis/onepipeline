@@ -4641,15 +4641,15 @@ fn refused_note(
                 |at| usize::try_from(at).ok() == Some(index),
             ))
         .then(|| {
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason was recorded");
+            // A refusal's reason is recorded as its error reads, `refused: …`.
             format!(
                 "refused: {}",
-                one_line(
-                    event
-                        .payload
-                        .get("reason")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("no reason was recorded")
-                )
+                one_line(reason.strip_prefix("refused: ").unwrap_or(reason))
             )
         })
     })
