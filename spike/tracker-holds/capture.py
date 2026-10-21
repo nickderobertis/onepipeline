@@ -28,6 +28,9 @@ import world as W  # noqa: E402
 BIN = W.repo_root() / "target" / "release"
 MOCK = HERE / "mock.py"
 RATE_LIMITED = "Rate limit exceeded"
+#: The mock's synthetic launch clock: 2026-05-04T11:20:00Z, normalise.py's BASE_INSTANT,
+#: so the reset it prints (launch + 1800 s = 11:50:00 UTC) is the same on every capture.
+LAUNCHED_AT = "1777893600"
 
 
 def plan(store: Path, name: str, tasks: list[tuple[str, str]]) -> str:
@@ -130,7 +133,7 @@ def main() -> int:
         cmd = ["status", "public-only", "--no-providers"]
         shot(out, f"public-plan-status-{tag}", w, "onepipeline " + " ".join(cmd),
              run(w, mocked, "", cmd, "stdout"))
-        w.env["SPIKE_LAUNCHED_AT"] = str(time.time())
+        w.env["SPIKE_LAUNCHED_AT"] = LAUNCHED_AT
         cmd = ["start", b, "--detach"]
         shot(out, f"launch-notice-reset-{tag}", w, "onepipeline " + " ".join(cmd) + " 2>&1 >/dev/null",
              run(w, mocked, "changelog", cmd, "stderr"))

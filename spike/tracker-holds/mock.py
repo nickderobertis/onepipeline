@@ -49,9 +49,10 @@ def when(retry_after) -> str:
             f"doubling each time it still does not answer, up to {CAP}s "
             f"(30 poll intervals)"
         )
-    # The stub's reset is the refusal's relative wait from the launch, which is
-    # what the store hands back; the real engine journals it as `retry_at_ms`.
-    launched = float(os.environ.get("SPIKE_LAUNCHED_AT", "0")) or dt.datetime.now().timestamp()
+    # The stub's reset is the refusal's relative wait from a synthetic launch instant
+    # capture.py fixes, so a re-capture prints the same time. The real engine
+    # journals the provider's reset as `retry_at_ms`.
+    launched = float(os.environ["SPIKE_LAUNCHED_AT"])  # a fixed synthetic clock, never now
     at = dt.datetime.fromtimestamp(launched + retry_after, dt.timezone.utc)
     return f"it is read again at {at:%Y-%m-%d %H:%M:%S} UTC, the reset the provider gave"
 
