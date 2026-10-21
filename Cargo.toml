@@ -1135,6 +1135,10 @@ onevcs-testing = "0.19.13"
 # sources only one checkout defines; and it answers a dependency read a private source
 # cannot without failing it. `tests/e2e/store.rs` drives both.
 #
+# **0.9.2 links the faster plan copy**: a plan copy and a project listing on a
+# GitHub Projects board read only the plan, never the whole board, and a copied
+# item takes fewer requests. The test CLI is provisioned at this same release.
+#
 # **0.9.2 is the floor**, for the two changes a plan homed in Linear launches on. A copy to
 # Linear sends each item's content in the form Linear stores it — the rewrite the linear
 # plugin declares in its "Ruling: what Linear does to Markdown on write, declared" — so the

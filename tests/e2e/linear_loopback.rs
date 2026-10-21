@@ -587,6 +587,8 @@ impl Linear {
                     return refusal(&format!("no project {id}"));
                 }
                 world.project_content = stored_form(content);
+                // The content as stored, which the plugin selects in its answer and compares
+                // with what it sent, as Linear answers it.
                 json!({"projectUpdate": {"success": true, "project": {
                     "id": PROJECT, "content": world.project_content,
                 }}})
