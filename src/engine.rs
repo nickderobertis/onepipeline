@@ -2907,6 +2907,17 @@ fn close_out_and_drain(
         // what this run claimed and did not begin. A driver that goes on driving after an
         // edit found here publishes it `queued` again on its next pass.
         writeback.close_out(paths, launch, state, final_statuses, || {
+            // A store slower than the closeout's window leaves the claim standing while the
+            // closeout is still being attempted; the run releases it itself rather than
+            // refusing the next host's launch over a run that is over. A closeout the store
+            // answered — landed, refused or failed — is not asked about again here.
+            if !writeback.is_retired() && writeback.still_landing() {
+                crate::continuation::release_left_standing(
+                    paths,
+                    launch,
+                    &crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+                );
+            }
             if let Some(watch) = watch {
                 let mut nodes = publishing.clone();
                 nodes.extend(
@@ -2918,17 +2929,6 @@ fn close_out_and_drain(
                 watch.fence(&nodes);
             }
         });
-        // A store slower than the closeout's window leaves the claim standing while the
-        // closeout is still being attempted; the run releases it itself rather than
-        // refusing the next host's launch over a run that is over. A closeout the store
-        // answered — landed, refused or failed — is not asked about again here.
-        if !writeback.is_retired() && writeback.still_landing() {
-            crate::continuation::release_left_standing(
-                paths,
-                launch,
-                &crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
-            );
-        }
         // The last thing this loop does, and the reason it is here rather than
         // only at the top: a run whose *terminal* projection failed is exactly
         // the run that settles and is read as the record of what happened, so
