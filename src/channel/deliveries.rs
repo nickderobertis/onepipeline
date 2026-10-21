@@ -116,9 +116,10 @@ pub enum Delivery {
 
 /// A note waiting in its receiver's inbox: [`Delivery`]'s `queued` state and no
 /// other, so a reading of the inbox cannot name a delivery that is not waiting
-/// there. Its wire shape is that state's, `state` included, and
-/// `an_inbox_delivery_is_the_queued_delivery_and_no_other_state` holds the two
-/// to one value and one schema.
+/// there. Its wire shape is that state's, `state` included.
+//
+// `an_inbox_delivery_is_the_queued_delivery_and_no_other_state` holds the two
+// to one value and one schema.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "lowercase")]
 pub enum InboxDelivery {
