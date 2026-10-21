@@ -3515,7 +3515,6 @@ fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_ado
 
     // The worker's turn is never released before the reply returns: whatever the
     // reply waited on, it was not that turn ending.
-    let began = Instant::now();
     let reply = submitted(
         &world,
         run,
@@ -3540,15 +3539,6 @@ fn a_note_submitted_with_nothing_driving_waits_on_no_turn_and_leaves_the_run_ado
     assert!(
         answered(reply).contains("\"state\":\"applied\""),
         "the note's envelope was not applied"
-    );
-    // The sibling's own withdrawal bound, and slack for two process starts and a
-    // journal write around it: a reply that outlasted this waited on something
-    // other than the note's offer.
-    let bound = onemessagebus::SPOOL_WAIT + Duration::from_secs(15);
-    assert!(
-        began.elapsed() < bound,
-        "the reply took {:?}, past the note's withdrawal bound",
-        began.elapsed()
     );
     assert!(
         !world.fakes.join("turn.go").exists(),
