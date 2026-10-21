@@ -944,7 +944,7 @@ pub struct Receipt {
     /// sentence of its own, in the order the binary says them.
     pub advice: Vec<String>,
     /// Each node a `note` of the envelope named, with what the envelope's answer
-    /// says of that note: [`CommandVerdict::Queued`] while it waits in its
+    /// says of that note: [`CommandVerdict::Queued`](crate::channel::CommandVerdict::Queued) while it waits in its
     /// receiver's inbox for that receiver's turn — any one of several notes to
     /// one node waiting is that node's word — and otherwise that note's own
     /// verdict. Empty, and absent from the wire, where the envelope carried no
