@@ -1,12 +1,26 @@
 {
   "type": "object",
   "properties": {
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Effective opaque labels, including the overlay."
+    },
+    "group": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Effective project group; null suppresses grouping."
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
       "minimum": 0,
       "description": "The version of this document.",
-      "const": 1
+      "const": 2
     },
     "run_id": {
       "type": "string",
@@ -72,10 +86,12 @@
       "items": {
         "$ref": "#/$defs/UnansweredEnvelope"
       },
-      "description": "Every command envelope claimed off the run's queue and not answered yet,\nin claim order — omitted when there is none."
+      "description": "Every command envelope claimed off the run's queue and not answered yet,\nin claim order \u2014 omitted when there is none."
     }
   },
   "required": [
+    "labels",
+    "group",
     "schema_version",
     "run_id",
     "public_id",
@@ -140,7 +156,7 @@
           "items": {
             "$ref": "#/$defs/EndedNode"
           },
-          "description": "Every node not `done`, in plan order — the list a failure hook is handed,\nand empty for `complete`."
+          "description": "Every node not `done`, in plan order \u2014 the list a failure hook is handed,\nand empty for `complete`."
         }
       },
       "required": [
@@ -210,7 +226,7 @@
         "status",
         "outcome"
       ],
-      "description": "One node that was not `done` when a run ended — as a failure hook is handed it."
+      "description": "One node that was not `done` when a run ended \u2014 as a failure hook is handed it."
     },
     "Paused": {
       "type": "object",
@@ -238,7 +254,7 @@
       "properties": {
         "envelope": {
           "type": "string",
-          "description": "The channel envelope id — a decimal string in the document."
+          "description": "The channel envelope id \u2014 a decimal string in the document."
         },
         "delivery": {
           "anyOf": [
@@ -249,7 +265,7 @@
               "type": "null"
             }
           ],
-          "description": "Where its live note stands, as the run's live driver last wrote it —\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
+          "description": "Where its live note stands, as the run's live driver last wrote it \u2014\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
         }
       },
       "required": [
@@ -268,14 +284,14 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
+              "description": "When it was offered, in epoch milliseconds \u2014 RFC 3339 on the wire."
             },
             "deadline": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds — RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
+              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds \u2014 RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
             },
             "state": {
               "type": "string",
@@ -298,11 +314,11 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was first held, in epoch milliseconds — RFC 3339 on the wire."
+              "description": "When it was first held, in epoch milliseconds \u2014 RFC 3339 on the wire."
             },
             "behind_envelope": {
               "type": "string",
-              "description": "The channel envelope id of the envelope whose note it waits behind —\na decimal string on the wire."
+              "description": "The channel envelope id of the envelope whose note it waits behind \u2014\na decimal string on the wire."
             },
             "state": {
               "type": "string",
@@ -318,7 +334,7 @@
           "description": "The driver holds the envelope unjudged behind `behind_envelope`'s live\nnote to `node`, so that no later edit to that node overtakes it."
         }
       ],
-      "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states — a channel envelope id in decimal, an instant in RFC\n3339 — so a value read back that is neither is refused where it is read\nrather than shown."
+      "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states \u2014 a channel envelope id in decimal, an instant in RFC\n3339 \u2014 so a value read back that is neither is refused where it is read\nrather than shown."
     }
   }
 }

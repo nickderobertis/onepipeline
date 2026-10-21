@@ -929,6 +929,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: run.to_string(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),

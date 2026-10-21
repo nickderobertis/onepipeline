@@ -1945,3 +1945,34 @@ impl ReadjustReceipt {
         }
     }
 }
+
+/// Validated label keys, values and groups, and the typed overlay document.
+pub use crate::labels::{
+    LabelAuthor, LabelGroup, LabelKey, LabelOverlay, LabelTimestamp, LabelValue, RunGroup,
+};
+
+/// A whole replacement of the run's label overlay; launch metadata is immutable.
+pub struct LabelRequest<'a> {
+    /// Validated labels to overlay.
+    pub labels: &'a std::collections::BTreeMap<LabelKey, LabelValue>,
+    /// Launch keys to remove before overlaying labels.
+    pub unlabel: &'a [LabelKey],
+    /// Preserve, override, or suppress the resolved launch group.
+    pub group: LabelGroup,
+    /// Override another driving session's ownership.
+    pub force: bool,
+    /// The calling launcher.
+    pub launcher: &'a str,
+    /// The calling session.
+    pub session: &'a str,
+}
+
+/// Replace `labels.json` without rewriting the launch or journalling.
+pub fn label(paths: &RunPaths, request: LabelRequest<'_>) -> Result<LabelOverlay> {
+    crate::labels::replace(paths, request)
+}
+
+/// The complete replacement overlay, rendered as one JSON object.
+pub fn render_labelled(overlay: &LabelOverlay) -> String {
+    serde_json::to_string(overlay).expect("an overlay contains only JSON-compatible fields")
+}

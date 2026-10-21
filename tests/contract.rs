@@ -3396,6 +3396,8 @@ fn the_branch_name_template_is_what_the_contract_names() {
 /// wire — so what this answers is the whole inventory a consumer can read.
 fn summary_fields() -> BTreeSet<String> {
     let document = RunSummary {
+        labels: Default::default(),
+        group: None,
         schema_version: SUMMARY_SCHEMA_VERSION,
         run_id: "gated".into(),
         last_write_at: Some(1_786_000_000_000),
@@ -9480,11 +9482,12 @@ fn the_grouped_listing_is_what_the_contract_states() {
 
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
-    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v10.json"))
+    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v11.json"))
         .expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),
+        group: (!project.is_empty()).then(|| project.to_owned()),
         name: name.map(str::to_owned),
         last_write_at: at,
         ..golden.clone()
@@ -9528,7 +9531,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
             ),
             (None, None, Some(250), vec!["orphan"]),
             (Some("plans:a"), Some("A"), Some(100), vec!["only-a"]),
-            (Some("plans:c"), None, None, vec!["undated"]),
+            (Some("plans:c"), Some("c"), None, vec!["undated"]),
         ]
     );
     assert_eq!(
@@ -10392,7 +10395,9 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"liveness\""))
         .expect("the contract's run reading example is JSON");
     let reading = RunReading {
-        schema_version: 1,
+        labels: Default::default(),
+        group: None,
+        schema_version: 2,
         run_id: "demo-1".into(),
         public_id: "demo-1".into(),
         word: "ENDED failed",
@@ -11535,4 +11540,40 @@ fn the_interrupting_note_surface_is_what_entry_133_names() {
             "the run reading's `delivering` does not state `{field}`"
         );
     }
+}
+
+/// The overlay example is the public SDK's document, including absent versus null grouping.
+#[test]
+fn the_label_overlay_is_the_contract_document() {
+    use onepipeline::verbs::{LabelGroup, LabelKey, LabelOverlay, LabelValue, RunGroup};
+    let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"set_by\"")).unwrap();
+    let overlay: LabelOverlay = serde_json::from_value(example.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&overlay).unwrap(), example);
+    assert_eq!(
+        overlay.labels[&LabelKey::try_from("kind".to_owned()).unwrap()].as_str(),
+        "spikes"
+    );
+    assert_eq!(
+        overlay.group,
+        LabelGroup::Set(RunGroup::try_from("authoring:example".to_owned()).unwrap())
+    );
+    let mut absent = example.clone();
+    absent.as_object_mut().unwrap().remove("group");
+    let kept: LabelOverlay = serde_json::from_value(absent.clone()).unwrap();
+    assert_eq!(kept.group, LabelGroup::Keep);
+    assert_eq!(serde_json::to_value(kept).unwrap(), absent);
+    let mut cleared = example.clone();
+    cleared["group"] = Value::Null;
+    let clear: LabelOverlay = serde_json::from_value(cleared.clone()).unwrap();
+    assert_eq!(clear.group, LabelGroup::Clear);
+    assert_eq!(serde_json::to_value(clear).unwrap(), cleared);
+    assert!(LabelKey::try_from("Kind".to_owned()).is_err());
+    assert!(LabelValue::try_from("two\nlines".to_owned()).is_err());
+    assert!(RunGroup::try_from("unqualified".to_owned()).is_err());
+    let mut bad_time = example.clone();
+    bad_time["set_at"] = json!("not-a-time");
+    assert!(serde_json::from_value::<LabelOverlay>(bad_time).is_err());
+    let mut typo = example;
+    typo["lables"] = json!({});
+    assert!(serde_json::from_value::<LabelOverlay>(typo).is_err());
 }

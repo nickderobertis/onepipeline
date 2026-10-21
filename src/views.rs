@@ -238,7 +238,7 @@ pub struct Paused {
 const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
-const RUN_READING_SCHEMA_VERSION: u32 = 1;
+const RUN_READING_SCHEMA_VERSION: u32 = 2;
 
 /// Whether a run is driven or ended, as one document a script reads:
 /// `onepipeline status <RUN> --json`.
@@ -262,8 +262,14 @@ const RUN_READING_SCHEMA_VERSION: u32 = 1;
     ])
 )]
 pub struct RunReading {
+    /// Effective opaque labels, including the overlay.
+    // llmlint: ignore[invalid_states_unrepresentable] the public reading is the contract's string-to-string map, matching RunSummary and LaunchRecord; launch and overlay deserializers validate keys and values through LabelKey/LabelValue before RunView can serve them, and reading accepts no independent label input. Changing this field's Rust type would change that shared view contract.
+    pub labels: BTreeMap<String, String>,
+    /// Effective project group; null suppresses grouping.
+    // llmlint: ignore[invalid_states_unrepresentable] this is the contract's nullable string view field, matching RunSummary and LaunchRecord; explicit groups and origins are validated with RunGroup at launch and deserialization, and overlays carry RunGroup. The reader only projects those checked records; a new public field type would change the shared view contract.
+    pub group: Option<String>,
     /// The version of this document.
-    #[schemars(extend("const" = 1))]
+    #[schemars(extend("const" = 2))]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
@@ -369,7 +375,10 @@ pub fn reading(view: &RunView) -> RunReading {
         Reached::Paused(paused) => (None, Some(paused.clone())),
         Reached::Neither => (None, None),
     };
+
     RunReading {
+        labels: view.launch.labels.clone(),
+        group: view.launch.group.clone(),
         schema_version: RUN_READING_SCHEMA_VERSION,
         run_id: view.paths.run.clone(),
         public_id: crate::publicid::of_record(&view.launch).into_string(),
@@ -1384,7 +1393,8 @@ fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
 pub struct RunView {
     /// Where the run's state lives.
     pub paths: RunPaths,
-    /// Who launched it, and with what.
+    /// Launch attribution with effective labels and group applied for this reading.
+    /// The stored launch record remains immutable.
     pub launch: LaunchRecord,
     /// Its merged event store, in merge order.
     pub events: Vec<Envelope>,
@@ -1401,7 +1411,8 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
-        let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         // Resumed from the run's checkpoint rather than folded from nothing: the
@@ -2291,12 +2302,10 @@ pub struct Projects {
 /// One project's runs, as a grouped listing reads them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectGroup {
-    /// The qualified onetaskgraph project id every run in the group was launched
-    /// with, or `None` for the runs whose summary carries none.
-    // llmlint: ignore[invalid_states_unrepresentable] the id as `RunSummary::project` carries it — a serialized field of a document an older build wrote, for the reason `src/summary.rs`'s file-level suppression states — grouped on by equality and never parsed; the qualified-id type is `taskgraph::QualifiedId`, private, and parsing a recorded id into it would refuse a row this build lists today.
+    /// The effective qualified project group, or `None` for ungrouped runs.
+    // llmlint: ignore[invalid_states_unrepresentable] ProjectGroup.project is the existing public Option<String> field the contract preserves; replacing it with RunGroup would change that public shape beyond the tasked field additions. Its value is projected from RunSummary.group, whose launch and overlay inputs are validated, and grouping only compares those recorded ids.
     pub project: Option<String>,
-    /// The plan's name, off the newest run in the group that recorded one: what
-    /// a header labels the project by, beside its id.
+    /// The newest launch name from the project or its copies, else the native id.
     pub name: Option<String>,
     /// The newest [`RunSummary::last_write_at`] in the group — the recency the
     /// group is ordered by.
@@ -2316,14 +2325,13 @@ pub const GROUP_HEADER: &str = "== ";
 impl Projects {
     /// Group a listing's rows by project.
     ///
-    /// Keyed by [`RunSummary::project`], an empty project being the `None`
-    /// group. Groups take their order from their newest run and their name from
-    /// the newest run that carries one; runs keep the listing's order inside a
-    /// group.
+    /// Keyed by effective [`RunSummary::group`]. Groups take their order from
+    /// newest activity and their name from the newest launch belonging to that
+    /// project or a recorded copy; runs keep the listing's order inside a group.
     pub fn of(listing: &Listing) -> Self {
         let mut groups: Vec<ProjectGroup> = Vec::new();
         for summary in &listing.summaries {
-            let project = (!summary.project.is_empty()).then(|| summary.project.clone());
+            let project = summary.group.clone();
             let group = match groups.iter_mut().find(|group| group.project == project) {
                 Some(group) => group,
                 None => {
@@ -2336,11 +2344,31 @@ impl Projects {
                     groups.last_mut().expect("the group just pushed")
                 }
             };
-            if group.name.is_none() {
-                group.name.clone_from(&summary.name);
-            }
             group.last_write_at = group.last_write_at.max(summary.last_write_at);
             group.runs.push(summary.clone());
+        }
+        for group in &mut groups {
+            group.name = group
+                .runs
+                .iter()
+                .rev()
+                .filter(|run| {
+                    let launch = ledger::read_json::<LaunchRecord>(
+                        &RunPaths::under(&listing.root, &run.run_id).launch(),
+                    );
+                    run.group.is_some()
+                        && (run.group.as_deref() == Some(run.project.as_str())
+                            || launch.is_ok_and(|launch| launch.project_origin == run.group))
+                })
+                .max_by_key(|run| &run.started_at)
+                .and_then(|run| run.name.clone())
+                .or_else(|| {
+                    group.project.as_deref().map(|id| {
+                        id.split_once(':')
+                            .map_or(id, |(_, native)| native)
+                            .to_owned()
+                    })
+                });
         }
         groups.sort_by(|a, b| {
             b.last_write_at
@@ -5704,6 +5732,9 @@ mod tests {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -8252,7 +8283,7 @@ mod tests {
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
         let mut summary: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v10.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v11.json"))
                 .expect("the summary golden reads");
         // Naming a driver this host proves gone: nothing drives the run, so what
         // its graph holds is what decides its word.
