@@ -5354,7 +5354,7 @@ fn release_status(world: &World, reference: &str) -> Result<onevcs::ReleaseStatu
 /// returned, to be asserted on whole.
 fn answered_release_status(world: &World, reference: &str) -> onevcs::ReleaseStatus {
     let mut answered = None;
-    world.until(
+    world.until_store(
         &format!("`onevcs release status {reference}` to answer"),
         |world| match release_status(world, reference) {
             Ok(status) => {
