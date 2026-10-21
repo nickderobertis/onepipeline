@@ -77,12 +77,10 @@ fn reading(world: &World, run: &str) -> Value {
     reading
 }
 
-/// The launch record of `run`, as the file holds it.
 fn record(world: &World, run: &str) -> Value {
     world.run_json(run, "launch.json")
 }
 
-/// Write `run`'s launch record back as `record`.
 fn rewrite(world: &World, run: &str, record: &Value) {
     std::fs::write(
         world.run_file(run, "launch.json"),

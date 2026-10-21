@@ -21,9 +21,6 @@
 //! renders `plan.name` as it under the same condition. A run whose id passes writes exactly
 //! what it wrote before.
 
-use std::collections::BTreeMap;
-use std::sync::Mutex;
-
 use crate::ledger::LaunchRecord;
 
 /// A run's public id, which only this module makes: the run id the check passed, the hashed
@@ -33,12 +30,10 @@ use crate::ledger::LaunchRecord;
 pub(crate) struct PublicId(String);
 
 impl PublicId {
-    /// The id as it is written.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
-    /// The id as it is written, owned.
     pub(crate) fn into_string(self) -> String {
         self.0
     }
@@ -54,6 +49,16 @@ pub(crate) fn hashed(run: &str) -> PublicId {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     PublicId(format!("run-{hex}"))
+}
+
+/// Whether `id` has the hashed form: `run-` and twelve lowercase hex digits.
+fn is_hashed(id: &str) -> bool {
+    id.strip_prefix("run-").is_some_and(|hex| {
+        hex.len() == 12
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 /// Whether `term` may be named on a public destination, as the linked `onevcs` answers over
@@ -131,59 +136,37 @@ fn decide_with(
     Decided { id, plan_name }
 }
 
-/// The public ids this process derived for records that hold none, by run id.
-static DERIVED: Mutex<BTreeMap<String, PublicId>> = Mutex::new(BTreeMap::new());
-
-/// `launch`'s public id: the one its launch recorded, or — for a record written before there
-/// was one — the same derivation over its id. A read must answer, so where the check cannot,
-/// such a record reads the hashed form, which names nothing.
-pub(crate) fn of_record(launch: &LaunchRecord) -> PublicId {
-    if !launch.public_id.is_empty() {
-        return PublicId(launch.public_id.clone());
-    }
-    let run = &launch.run_id;
-    if let Some(known) = DERIVED
-        .lock()
-        .ok()
-        .and_then(|known| known.get(run).cloned())
-    {
-        return known;
-    }
-    let derived = match passes(run) {
-        Ok(true) => PublicId(run.clone()),
-        Ok(false) | Err(_) => hashed(run),
-    };
-    if let Ok(mut known) = DERIVED.lock() {
-        known.insert(run.clone(), derived.clone());
-    }
-    derived
+/// The public id a launch of `run` recorded as `id`, where it is one [`decide`] could have made
+/// for that run: the run id itself, or the hashed form of it. Anything else is not taken at its
+/// word.
+fn recorded(run: &str, id: &str) -> Option<PublicId> {
+    (id == run || (is_hashed(id) && hashed(run).as_str() == id)).then(|| PublicId(id.to_owned()))
 }
 
-/// Whether the plan store's source holding `launch`'s project is declared
-/// `visibility: private`, by the store's own configuration, by launch directory and project.
-static DECLARED_PRIVATE: Mutex<BTreeMap<(std::path::PathBuf, String), bool>> =
-    Mutex::new(BTreeMap::new());
+/// `launch`'s public id: the one its launch recorded, or — for a record holding none, or one
+/// [`decide`] could not have made — the same derivation over its id, asked afresh. A read must
+/// answer, so where the check cannot, such a record reads the hashed form, which names nothing.
+pub(crate) fn of_record(launch: &LaunchRecord) -> PublicId {
+    if let Some(id) = recorded(&launch.run_id, &launch.public_id) {
+        return id;
+    }
+    let run = &launch.run_id;
+    match passes(run) {
+        Ok(true) => PublicId(run.clone()),
+        Ok(false) | Err(_) => hashed(run),
+    }
+}
 
 /// Whether `launch`'s plan store holds its project in a source the store declares
-/// `visibility: private`. A configuration that cannot be read declares nothing private.
+/// `visibility: private`, read from its configuration as it stands. A configuration that
+/// cannot be read declares nothing private.
 fn home_declared_private(launch: &LaunchRecord) -> bool {
-    let Ok(project) = launch.project.parse::<crate::taskgraph::QualifiedId>() else {
-        return false;
-    };
-    let key = (launch.dir.clone(), project.as_str().to_owned());
-    if let Some(known) = DECLARED_PRIVATE
-        .lock()
-        .ok()
-        .and_then(|known| known.get(&key).copied())
-    {
-        return known;
-    }
-    let declared =
-        crate::taskgraph::Store::at(&launch.dir).source_declared_private(project.source());
-    if let Ok(mut known) = DECLARED_PRIVATE.lock() {
-        known.insert(key, declared);
-    }
-    declared
+    launch
+        .project
+        .parse::<crate::taskgraph::QualifiedId>()
+        .is_ok_and(|project| {
+            crate::taskgraph::Store::at(&launch.dir).source_declared_private(project.source())
+        })
 }
 
 /// What `launch`'s run is named by on its own plan store: its public id where the store does
@@ -209,6 +192,9 @@ pub(crate) fn name_on_store(launch: &LaunchRecord, name: &str) -> String {
 
 /// The run under `root` a store names `named` — the run of that id, or else the one whose
 /// launch recorded `named` as its public id — or `None` where this host holds neither.
+///
+/// A run found by its public id is the directory its record was read from, and only where
+/// that record names that directory as its run: a record is read as a run's own only there.
 pub(crate) fn run_named(root: &std::path::Path, named: &str) -> Option<String> {
     if root.join(named).is_dir() {
         return Some(named.to_owned());
@@ -216,11 +202,15 @@ pub(crate) fn run_named(root: &std::path::Path, named: &str) -> Option<String> {
     std::fs::read_dir(root)
         .ok()?
         .filter_map(std::result::Result::ok)
-        .filter_map(|entry| {
-            crate::ledger::read_json::<LaunchRecord>(&entry.path().join("launch.json")).ok()
+        .find_map(|entry| {
+            let dir = entry.file_name().into_string().ok()?;
+            let launch =
+                crate::ledger::read_json::<LaunchRecord>(&entry.path().join("launch.json")).ok()?;
+            (launch.run_id == dir
+                && recorded(&launch.run_id, &launch.public_id)
+                    .is_some_and(|id| id.as_str() == named))
+            .then_some(dir)
         })
-        .find(|launch| launch.public_id == named)
-        .map(|launch| launch.run_id)
 }
 
 #[cfg(test)]
@@ -233,6 +223,24 @@ mod tests {
         let id = hashed("abc");
         assert_eq!(id.as_str(), "run-ba7816bf8f01");
         assert_eq!(id.as_str().len(), "run-".len() + 12);
+    }
+
+    #[test]
+    fn a_recorded_id_is_taken_only_where_the_launch_could_have_decided_it() {
+        assert_eq!(recorded("plan", "plan"), Some(PublicId("plan".to_owned())));
+        assert_eq!(
+            recorded("plan", hashed("plan").as_str()),
+            Some(hashed("plan"))
+        );
+        // Another run's hash, a hash-shaped word, and anything else are not this run's.
+        for written in [
+            hashed("other").as_str(),
+            "run-0123456789ab",
+            "../elsewhere",
+            "",
+        ] {
+            assert_eq!(recorded("plan", written), None, "{written}");
+        }
     }
 
     #[test]
