@@ -250,6 +250,7 @@ enum Unconfirming {
     Failed,
     RateLimited,
     Late(Arc<AtomicBool>),
+    TimedOut(Arc<AtomicBool>),
 }
 
 impl Unconfirming {
@@ -257,7 +258,7 @@ impl Unconfirming {
         match self {
             Self::Failed => "failed",
             Self::RateLimited => "rate-limited",
-            Self::Late(_) => "late",
+            Self::Late(_) | Self::TimedOut(_) => "late",
         }
     }
 
@@ -265,7 +266,7 @@ impl Unconfirming {
         match self {
             Self::Failed => "the claim read failed",
             Self::RateLimited => "the claim read was declined for the store's rate limit",
-            Self::Late(_) => "the claim read was late",
+            Self::Late(_) | Self::TimedOut(_) => "the claim read was late",
         }
     }
 
@@ -273,14 +274,14 @@ impl Unconfirming {
         match self {
             Self::Failed => world.store_refuses("get_project", &board_down()),
             Self::RateLimited => world.store_refuses("get_project", &rate_limited()),
-            Self::Late(holding) => holding.store(true, Ordering::SeqCst),
+            Self::Late(holding) | Self::TimedOut(holding) => holding.store(true, Ordering::SeqCst),
         }
     }
 
     fn end(&self, world: &World) {
         match self {
             Self::Failed | Self::RateLimited => world.store_stops_refusing("get_project"),
-            Self::Late(holding) => holding.store(false, Ordering::SeqCst),
+            Self::Late(holding) | Self::TimedOut(holding) => holding.store(false, Ordering::SeqCst),
         }
     }
 }
@@ -322,6 +323,15 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
             // llmlint: ignore-end[tests_mirror_real_usage]
             world
         }
+        Unconfirming::TimedOut(holding) => {
+            let request = base.rendezvous(&format!("{}.get_project", crate::harness::SCRIPTED_KEY));
+            let_through(
+                request,
+                Arc::clone(holding),
+                READ_DEADLINE + Duration::from_secs(1),
+            );
+            base
+        }
         _ => base,
     };
     world.script("z.work", "z's change\n");
@@ -349,6 +359,21 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
     let reader = ClaimReader::start(&world, run);
 
     unconfirming.begin(&world);
+    if matches!(unconfirming, Unconfirming::TimedOut(_)) {
+        // Distinguish the store call's own timeout result from the lease watchdog's
+        // observation that the read is still outstanding.
+        world.until("the store's timeout result to reach claim.json", |world| {
+            claim_file(world, run).is_some_and(|file| {
+                file.reading.detail.as_deref().is_some_and(|detail| {
+                    detail.contains("project show of")
+                        && detail.contains(&format!(
+                            "did not answer within {} seconds",
+                            READ_DEADLINE.as_secs()
+                        ))
+                })
+            })
+        });
+    }
     let unconfirmed = until_claim(&world, run, "unconfirmed");
     assert_eq!(
         unconfirmed.reading.reason.map(|reason| reason.as_str()),
@@ -547,6 +572,16 @@ fn a_claim_whose_reads_answer_late_keeps_its_dispatch_and_starts_nothing() {
         "claim-late",
         "cl",
         Unconfirming::Late(Arc::new(AtomicBool::new(false))),
+    );
+}
+
+/// A real store request times out, is classified late, and recovers when the store answers.
+#[test]
+fn a_claim_whose_store_requests_time_out_keeps_its_work_and_recovers() {
+    an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
+        "claim-timeout",
+        "ct",
+        Unconfirming::TimedOut(Arc::new(AtomicBool::new(false))),
     );
 }
 

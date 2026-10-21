@@ -551,6 +551,9 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
             ),
         );
         world.script("live.wait", "hold");
+        // llmlint: ignore-block[tests_mirror_real_usage] no CLI input can hold both
+        // writers while a live run directory moves. These failpoints only order that
+        // move; the real CLI, store claim, ownership lock and handover are asserted below.
         let launched = world
             .cmd(&["start", &project, "--detach"])
             .current_dir(&world.project)
@@ -559,6 +562,7 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
             .env("ONEPIPELINE_TEST_CLAIM_READ_GATE", reads.address())
             .output()
             .expect("the live driver starts");
+        // llmlint: ignore-end[tests_mirror_real_usage]
         assert!(launched.status.success(), "{launched:?}");
         let held_pass = pass.arrived();
         let held_read = reads.arrived();
