@@ -7850,6 +7850,11 @@ const RULINGS: &[(&str, &str)] = &[
         "117.",
         "An **armed** `checks-unsettled` is recovered the same way",
     ),
+    // op-link-linear-store: every run has a public id, which `status --json` carries.
+    (
+        "136.",
+        "`public_id` is what the run is named by wherever the destination is not private",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10389,6 +10394,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let reading = RunReading {
         schema_version: 1,
         run_id: "demo-1".into(),
+        public_id: "demo-1".into(),
         word: "ENDED failed",
         liveness: "DRIVER DEAD",
         driven: false,

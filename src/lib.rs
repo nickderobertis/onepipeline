@@ -105,6 +105,7 @@ mod ordering;
 mod plancheck;
 mod pool;
 mod projection;
+mod publicid;
 mod readjust;
 mod refusal;
 mod release;

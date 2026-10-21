@@ -688,10 +688,6 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CreateCarried { .. } => decided("create-carried"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: its copy only creates lineages that have no item yet, so none has a counterpart to be misrouted from, and an item that exists is changed by a targeted update; `writeback::tests` holds the word.
         EngineError::Misrouted { .. } => decided("misrouted"),
-        // llmlint: ignore[changed_behavior_has_e2e] this exhaustive compatibility arm requires a backend to report an undeclared content rewrite; the offline local-md destination reports no stored_content, so it cannot raise this error. `every_engine_failure_is_named_as_the_store_names_it` checks the kind and refusal class against the linked store's public Failure conversion.
-        EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
-        // llmlint: ignore[changed_behavior_has_e2e] unreachable from settlement writes: this store refusal needs a routed plan copy choosing between private homes, while write-back copies into the run's already chosen destination. `every_engine_failure_is_named_as_the_store_names_it` checks the kind and refusal class against the linked store's public Failure conversion.
-        EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
         EngineError::AssetNotReferenced { .. } => decided("asset-not-referenced"),
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
@@ -701,6 +697,13 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
         EngineError::DependencyCycle { .. } => decided("dependency-cycle"),
+        // A destination that stored a write's content other than its declared rewrite
+        // explains: the item was written, so asking again writes the same text and is refused
+        // the same way. `writeback::tests` holds the word.
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the linked store raises it only where it creates or renders an item from a template (`onetaskgraph-core` 0.9.2's `engine/rendered.rs` is its one caller), and a write-back only copies and updates; a loopback Linear storing a write-back's `issueCreate` other than the ruling explains was driven and the copy raised nothing, so no journey can reach it.
+        EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only a routed copy of a whole plan chooses a home, and a write-back copies into the one project the run was launched from; `writeback::tests` holds the word.
+        EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
         // The public boundary's refusals, in the store's own words for each: every one of
         // them is decided before the write's first mutation, so none is worth asking again.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
@@ -1187,7 +1190,7 @@ impl Writeback {
             return;
         }
         let driver = DriverWrite::Release {
-            run: paths.run.clone(),
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
         };
         if let Some(snapshot) = snapshot_of(paths, launch, state, statuses, Claim::Released, driver)
@@ -1343,7 +1346,10 @@ fn snapshot_of(
                     metadata.insert("onepipeline.goal".into(), json!(goal));
                 }
                 if let Some(name) = &plan.name {
-                    metadata.insert("onepipeline.name".into(), json!(name));
+                    metadata.insert(
+                        "onepipeline.name".into(),
+                        json!(crate::publicid::name_on_store(launch, name)),
+                    );
                 }
                 // As launched: each end names its lineage's root, which is the id the
                 // store's own item for that lineage carries whatever retried it.
@@ -1780,7 +1786,7 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
     let driver = DriverWrite::Release {
-        run: paths.run.clone(),
+        run: crate::publicid::on_store(launch),
         host: launch.host.clone(),
     };
     let Some(snapshot) = snapshot_of(paths, launch, &state, &statuses, Claim::Released, driver)
@@ -6116,6 +6122,19 @@ mod tests {
             EngineError::QueryNotTasks,
             EngineError::CommentsNotDocuments,
             EngineError::ChangedWhileCopied { item: id() },
+            EngineError::StoredContentDiverged {
+                item: id(),
+                line: 1,
+                sent: Some("- a".to_owned()),
+                stored: Some("* a".to_owned()),
+            },
+            EngineError::SplitPrivateHome {
+                project: id(),
+                destinations: vec![(
+                    onetaskgraph_plugin_api::SourceName::new("private").expect("a source name"),
+                    vec![id()],
+                )],
+            },
             EngineError::NotWritable {
                 name: "plans".into(),
                 kind: "in-memory".into(),
@@ -6344,19 +6363,6 @@ mod tests {
             EngineError::PrivateMemberOfPublicProject {
                 item: "plans:a".into(),
                 project: "plans:p".into(),
-            },
-            EngineError::StoredContentDiverged {
-                item: id(),
-                line: 1,
-                sent: Some("sent".into()),
-                stored: Some("stored".into()),
-            },
-            EngineError::SplitPrivateHome {
-                project: id(),
-                destinations: vec![(
-                    onetaskgraph_plugin_api::SourceName::new("plans").expect("valid source name"),
-                    vec![id()],
-                )],
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {

@@ -12,6 +12,10 @@
       "type": "string",
       "description": "The run."
     },
+    "public_id": {
+      "type": "string",
+      "description": "What the run is named by wherever the destination is not private: the run id itself\nwhere the linked `onevcs`'s public-output check passes it as metadata bound for a\npublic destination, over every private identity registered on the host, and\notherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the\nrun id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run\nwhose record holds none reads the same derivation over its id."
+    },
     "word": {
       "type": "string",
       "description": "The word `status` and `runs` print for the run.",
@@ -85,6 +89,7 @@
   "required": [
     "schema_version",
     "run_id",
+    "public_id",
     "word",
     "liveness",
     "driven",

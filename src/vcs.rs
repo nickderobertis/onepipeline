@@ -3524,6 +3524,7 @@ mod tests {
             plan_name: "demo".into(),
             plan_id: "plans:demo".into(),
             run: "demo-1".into(),
+            public_name: None,
         };
         let cut = Node {
             id: "service".into(),

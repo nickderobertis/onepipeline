@@ -771,7 +771,7 @@ impl ClaimWatch {
         let reader = Reader {
             store: Store::at(&launch.dir),
             project: project.clone(),
-            run: paths.run.clone(),
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             displaced: taken_over(paths),
@@ -789,7 +789,9 @@ impl ClaimWatch {
         Some(Self {
             store: Store::at(&launch.dir),
             project,
-            run: paths.run.clone(),
+            // As the store names this run: its public id, where the store does not declare
+            // the project's source private.
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             every,
@@ -1803,11 +1805,13 @@ pub(crate) fn release_left_standing(
         return;
     };
     let host = crate::sys::hostname();
+    // llmlint: ignore[changed_behavior_has_e2e] reached only where a closeout projection outlasts its bounded window without failing, which `engine.rs`'s one caller of this function records no journey can drive (the real store suspended mid-command); the name read here is `publicid::on_store`, the one every release uses, and `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives that name through the closeout's and the stop's releases.
+    let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
         matches!(
             claim_of(project.as_str(), metadata),
-            Ok(Some(claim)) if claim.names(&paths.run, &host)
+            Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
     let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
@@ -1862,12 +1866,13 @@ pub(crate) fn release_stopped(
     if stopped.is_empty() || crate::writeback::store_asked_to_wait(&paths.dir) {
         return;
     }
+    let run = crate::publicid::on_store(launch);
     let host = crate::sys::hostname();
     let store = Store::at(&launch.dir);
     let released = store
         .project_metadata_within(&project, CLAIM_READ_DEADLINE)
         .and_then(|metadata| {
-            let Some(fenced) = fence_on(&paths.run, &host, &project, &metadata) else {
+            let Some(fenced) = fence_on(&run, &host, &project, &metadata) else {
                 return Ok(());
             };
             // llmlint: ignore[changed_behavior_has_e2e] what stays is a dispatch the teardown could not end — a process a kill did not reach, which no journey can arrange — or a settlement the store had not taken at that instant; the release of what stopped is asserted by `claim::a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch`.
@@ -1880,7 +1885,7 @@ pub(crate) fn release_stopped(
                 Value::Null
             } else {
                 serde_json::to_value(Publishing {
-                    run: paths.run.clone(),
+                    run: run.clone(),
                     host: host.clone(),
                     nodes: left.into_iter().collect(),
                     at: crate::sys::now_rfc3339(),
