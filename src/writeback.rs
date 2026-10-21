@@ -688,6 +688,10 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CreateCarried { .. } => decided("create-carried"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: its copy only creates lineages that have no item yet, so none has a counterpart to be misrouted from, and an item that exists is changed by a targeted update; `writeback::tests` holds the word.
         EngineError::Misrouted { .. } => decided("misrouted"),
+        // llmlint: ignore[changed_behavior_has_e2e] this exhaustive compatibility arm requires a backend to report an undeclared content rewrite; the offline local-md destination reports no stored_content, so it cannot raise this error. `every_engine_failure_is_named_as_the_store_names_it` checks the kind and refusal class against the linked store's public Failure conversion.
+        EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from settlement writes: this store refusal needs a routed plan copy choosing between private homes, while write-back copies into the run's already chosen destination. `every_engine_failure_is_named_as_the_store_names_it` checks the kind and refusal class against the linked store's public Failure conversion.
+        EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
         EngineError::AssetNotReferenced { .. } => decided("asset-not-referenced"),
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
@@ -6335,6 +6339,19 @@ mod tests {
             EngineError::PrivateMemberOfPublicProject {
                 item: "plans:a".into(),
                 project: "plans:p".into(),
+            },
+            EngineError::StoredContentDiverged {
+                item: id(),
+                line: 1,
+                sent: Some("sent".into()),
+                stored: Some("stored".into()),
+            },
+            EngineError::SplitPrivateHome {
+                project: id(),
+                destinations: vec![(
+                    onetaskgraph_plugin_api::SourceName::new("plans").expect("valid source name"),
+                    vec![id()],
+                )],
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {

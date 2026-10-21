@@ -38,7 +38,7 @@
     }
   },
   "after": {
-    "engine": "this tree, linking onetaskgraph 0.3.2: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node; the write-back worker keeps one store for its lifetime and ends each attempt's command on it; and, since docs/contract-divergences.md entry 119, the project's driver claim: written by each driver's first projection and released at the stop and at closeout once a read of the project finds it still this run's, and, since entry 128, read once at the adoption and then once per claim interval (five minutes by default, which this plan never reaches), each read on a store of its own — the three reads the passes that dispatched made before are gone, and, since entry 134, the run's home marked done once the run has settled, one set_project_status on a store of its own after the write-back's last command — counted apart as home",
+    "engine": "this tree, linking onetaskgraph 0.9.2: every change to an existing item is one Engine::update_task naming only the fields that differ from the landed baseline; a member copy is made only to create the add-ed node; the write-back worker keeps one store for its lifetime and ends each attempt's command on it; and, since docs/contract-divergences.md entry 119, the project's driver claim: written by each driver's first projection and released at the stop and at closeout once a read of the project finds it still this run's, and, since entry 128, read once at the adoption and then once per claim interval (five minutes by default, which this plan never reaches), each read on a store of its own — the three reads the passes that dispatched made before are gone, and, since entry 134, the run's home marked done once the run has settled, one set_project_status on a store of its own after the write-back's last command — counted apart as home. The 0.9.2 copy adds one stored_form and three stored_status calls. The scripted-source meter charges these four protocol calls like every answered method, so its requests and graphql_points each rise by four; these are not four production GitHub requests. GitHubProjectsSource (onetaskgraph-github-projects/src/lib.rs:12303) inherits the identity defaults at onetaskgraph-plugin-api/src/source.rs:531 (stored_form) and :547 (stored_status), which return the supplied content and status locally, without a GitHub request or a cache read.",
     "figures": {
       "launch_read": {
         "calls": {
@@ -61,13 +61,15 @@
           "project_dependencies": 1,
           "query_tasks": 1,
           "set_project_metadata": 4,
+          "stored_form": 1,
+          "stored_status": 3,
           "update_task": 33,
           "write_task": 1
         },
-        "calls_total": 134,
+        "calls_total": 138,
         "spent": {
-          "requests": 41,
-          "graphql_points": 41
+          "requests": 45,
+          "graphql_points": 45
         },
         "attempts": 21,
         "failed_attempts": 4,
