@@ -976,10 +976,11 @@ fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>)
     else {
         return Ok(false);
     };
-    let paths = RunPaths::under(root, &claim.run);
-    if !paths.dir.is_dir() {
+    // A store not declared private names the run by its public id.
+    let Some(run) = crate::publicid::run_named(root, &claim.run) else {
         return Ok(false);
-    }
+    };
+    let paths = RunPaths::under(root, &run);
     Ok(match engine::take_if_undriven(&paths)? {
         Some(lock) => {
             lock.release();
@@ -1504,6 +1505,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
+    // Its public id, decided where the id is minted and before anything records the run: a
+    // check that cannot answer gives the hashed form, which names nothing.
+    let public = crate::publicid::decide(&run, plan.name.as_deref());
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has
@@ -1513,8 +1517,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         && found.may_stand_over_a_driver()
         && !gone_from_this_host(&root, claim.as_ref())?
     {
+        // Named on the store as every write-back of the run names it there.
         let mine = crate::payload::DriverClaim {
-            run: run.clone(),
+            run: if store.source_declared_private(project.source()) {
+                run.clone()
+            } else {
+                public.id.as_str().to_owned()
+            },
             host: sys::hostname(),
             session: crate::vcs::usable(&sys::launching_session()),
             pid: sys::pid(),
@@ -1692,6 +1701,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
+        public_id: public.id.into_string(),
+        name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -4865,6 +4876,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 

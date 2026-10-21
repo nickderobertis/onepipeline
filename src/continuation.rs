@@ -752,7 +752,9 @@ impl ClaimWatch {
         Some(Self {
             store: Store::at(&launch.dir),
             project,
-            run: paths.run.clone(),
+            // As the store names this run: its public id, where the store does not declare
+            // the project's source private.
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             displaced: taken_over(paths),
@@ -1436,11 +1438,13 @@ pub(crate) fn release_left_standing(
         return;
     };
     let host = crate::sys::hostname();
+    // llmlint: ignore[changed_behavior_has_e2e] reached only where a closeout projection outlasts its bounded window without failing, which `engine.rs`'s one caller of this function records no journey can drive (the real store suspended mid-command); the name read here is `publicid::on_store`, the one every release uses, and `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives that name through the closeout's and the stop's releases.
+    let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
         matches!(
             claim_of(project.as_str(), metadata),
-            Ok(Some(claim)) if claim.names(&paths.run, &host)
+            Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
     let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)

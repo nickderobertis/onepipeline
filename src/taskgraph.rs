@@ -248,6 +248,20 @@ impl Store {
         }
     }
 
+    /// Whether this store's configuration declares `source` `visibility: private` — the
+    /// declaration the store's own boundary reads. A configuration that cannot be read, and
+    /// a source it does not configure, declare nothing private.
+    pub(crate) fn source_declared_private(&self, source: &str) -> bool {
+        let Ok(name) = onetaskgraph_plugin_api::SourceName::new(source) else {
+            return false;
+        };
+        self.validate(&Layer::default()).is_ok_and(|config| {
+            config.sources().get(&name).is_some_and(|configured| {
+                configured.visibility() == onetaskgraph_core::config::SourceVisibility::Private
+            })
+        })
+    }
+
     /// Load this store's configuration, `flags` layered last, and build the engine it
     /// describes — afresh, every time.
     ///

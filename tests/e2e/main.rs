@@ -205,6 +205,7 @@ mod multi_source;
 // plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is
 // the narrowest edge they can honestly sit behind; same grounds as `mod multi_source` above.
 mod budget_result;
+mod linear_launch;
 mod linear_loopback;
 mod linear_writeback;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
@@ -228,6 +229,11 @@ mod publish_preserve;
 // head of `tests/e2e/publication_boundary.rs` and is not restated here; it belongs to this
 // binary for the reason `mod publish_preserve` above does.
 mod publication_boundary;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/public_id.rs` and is not restated here; it belongs to this binary for
+// the reason `mod publication_boundary` above does.
+mod public_id;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod real_vcs;
 mod recorded_channel;

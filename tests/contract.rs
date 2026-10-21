@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("135.")["bundle_versions"]["events"],
+        divergence_block("136.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("135.")["bundle_versions"]["planner_channel"],
+        divergence_block("136.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -7850,6 +7850,11 @@ const RULINGS: &[(&str, &str)] = &[
         "117.",
         "An **armed** `checks-unsettled` is recovered the same way",
     ),
+    // op-link-linear-store: every run has a public id, which `status --json` carries.
+    (
+        "135.",
+        "`public_id` is what the run is named by wherever the destination is not private",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10389,6 +10394,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let reading = RunReading {
         schema_version: 1,
         run_id: "demo-1".into(),
+        public_id: "demo-1".into(),
         word: "ENDED failed",
         liveness: "DRIVER DEAD",
         driven: false,
@@ -11532,14 +11538,14 @@ fn the_interrupting_note_surface_is_what_entry_133_names() {
     }
 }
 
-/// Entry 135 names every word of `CommandVerdict`, the `queued` word among them, and
+/// Entry 136 names every word of `CommandVerdict`, the `queued` word among them, and
 /// the published layout document and the run reading carry what that entry's ruling
 /// adds: `queued` in the channel's outcome vocabulary, and a `queued` delivery beside
 /// `RunReading`'s `inbox`.
 #[test]
-fn the_command_verdict_words_are_what_entry_135_names() {
+fn the_command_verdict_words_are_what_entry_136_names() {
     use onepipeline::channel::CommandVerdict;
-    let block = divergence_block("135.");
+    let block = divergence_block("136.");
     let stated: Vec<String> =
         serde_json::from_value(block["command_verdict"].clone()).expect("a list of words");
     let every = [
@@ -11572,7 +11578,7 @@ fn the_command_verdict_words_are_what_entry_135_names() {
         .collect();
     assert_eq!(
         words, stated,
-        "entry 135 does not name CommandVerdict's words"
+        "entry 136 does not name CommandVerdict's words"
     );
     for word in &stated {
         let read: CommandVerdict =

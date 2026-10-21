@@ -1134,9 +1134,21 @@ onevcs-testing = "0.19.13"
 # unconfigured rather than failing every load, so a host's user layer may route to
 # sources only one checkout defines; and it answers a dependency read a private source
 # cannot without failing it. `tests/e2e/store.rs` drives both.
+#
 # **0.9.2 links the faster plan copy**: a plan copy and a project listing on a
 # GitHub Projects board read only the plan, never the whole board, and a copied
 # item takes fewer requests. The test CLI is provisioned at this same release.
+#
+# **0.9.2 is the floor**, for the two changes a plan homed in Linear launches on. A copy to
+# Linear sends each item's content in the form Linear stores it — the rewrite the linear
+# plugin declares in its "Ruling: what Linear does to Markdown on write, declared" — so the
+# `body_digest` its `onetaskgraph.template` provenance records is of what a read hands back,
+# and `--require-rendered true` accepts a Linear-copied task (`tests/e2e/linear_launch.rs`).
+# A write whose stored content no declared rule explains is
+# `EngineError::StoredContentDiverged`. And a routed plan copy homes the plan where its
+# repository-naming tasks route, refusing a split private home as
+# `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
+# store's own word.
 onetaskgraph-core = "=0.9.2"
 onetaskgraph-plugin-api = "=0.9.2"
 onetaskgraph-local-md = "=0.9.2"
@@ -1375,6 +1387,10 @@ toml = "1"
 # `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
 # checker's own library; the pin is in `[workspace.dependencies]`.
 onebudgetspec-core = { workspace = true }
+# `tests/e2e/public_id.rs` validates what `status --json` prints against
+# `schemas/run-reading.schema.json` itself; the release the lock already resolves for a
+# sibling, with no remote reference resolution.
+jsonschema = { version = "0.56", default-features = false }
 
 [[test]]
 name = "e2e"

@@ -1078,6 +1078,20 @@ pub struct LaunchRecord {
     /// every record written before it reads unchanged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flow: String,
+    /// The run's public id: what it is named by wherever the destination is not private —
+    /// the run id itself where the linked `onevcs`'s public-output check passes it, and
+    /// otherwise `run-` and twelve hex digits of its SHA-256.
+    ///
+    /// **Decided once, at the launch**, where the id is minted, and replayed by every driver
+    /// that adopts the run. Empty on a record written before this field existed, which reads
+    /// the same derivation over its id. Omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public_id: String,
+    /// Whether the plan's own name failed the same check at the launch, so a destination
+    /// that is not private carries the [public id](Self::public_id) in its place. `false` is
+    /// what a record written before this field existed reads as. Omitted when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub name_withheld: bool,
 }
 
 impl LaunchRecord {
@@ -3681,6 +3695,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
@@ -4624,6 +4640,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4669,6 +4687,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");
