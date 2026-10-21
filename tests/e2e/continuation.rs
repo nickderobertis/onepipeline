@@ -3189,6 +3189,11 @@ fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
     world.script("cleared.wait", "hold");
     let cleared = launch_detached(&world, "cleared", vec![agent("cleared", &[])]);
     until_claimed_by(&world, &cleared, "cleared");
+    // And the fence its dispatch wrote: `local-md` sets a project key by rewriting the
+    // project, so a write of the claim racing that one could be undone by it.
+    world.until("the dispatch's fence to land", |world| {
+        stored_publishing(world, &cleared)["nodes"] == json!(["cleared"])
+    });
     set_claim(&cleared, Value::Null);
     world.release("cleared.go");
     world.until("the run to settle", |world| {
@@ -3202,6 +3207,11 @@ fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
     world.script("mangled.wait", "hold");
     let mangled = launch_detached(&world, "mangled", vec![agent("mangled", &[])]);
     until_claimed_by(&world, &mangled, "mangled");
+    // And the fence its dispatch wrote: `local-md` sets a project key by rewriting the
+    // project, so a write of the claim racing that one could be undone by it.
+    world.until("the dispatch's fence to land", |world| {
+        stored_publishing(world, &mangled)["nodes"] == json!(["mangled"])
+    });
     let stranger = json!({"run": "mangled", "host": "", "session": null, "pid": 7,
                           "claimed_at": "2026-10-11T00:00:00.000Z"});
     set_claim(&mangled, stranger.clone());
