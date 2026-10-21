@@ -739,18 +739,22 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     verdict == PublicationVerdict::Publish
 }
 
-/// End every dispatch this driver has in flight that is not publishing, because a read of
+/// End every dispatch this driver has in flight that is still working, because a read of
 /// its claim found another run's: the only thing that ends a dispatch for the claim's sake.
 /// Each is asked to stop, killed after the cancel grace, and settles `cancelled` with its
-/// branch kept, for the run that took over to continue.
+/// branch kept, for the run that took over to continue. A publication under way finishes,
+/// and one whose work is done and that waits to start is withheld instead.
 fn end_superseded(
     paths: &RunPaths,
     in_flight: &BTreeMap<String, Dispatch>,
     publishing: &BTreeSet<String>,
+    waiting: &[PublicationDue],
 ) {
     let ended: Vec<&String> = in_flight
         .iter()
-        .filter(|(node, _)| !publishing.contains(*node))
+        .filter(|(node, _)| {
+            !publishing.contains(*node) && !waiting.iter().any(|due| &due.node == *node)
+        })
         .map(|(node, dispatch)| {
             dispatch.cancel.cancel();
             node
@@ -1911,7 +1915,7 @@ fn converge(
                 .as_ref()
                 .and_then(crate::continuation::ClaimWatch::superseded)
             {
-                end_superseded(paths, &in_flight, &publishing);
+                end_superseded(paths, &in_flight, &publishing, &publications);
                 let fenced =
                     !publishing.is_empty() || !unlanded.is_empty() || !dispatching.is_empty();
                 let owed = supersede(
@@ -1958,13 +1962,21 @@ fn converge(
         // a stale lease does — and the lease is asked again once the fence has landed.
         // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
         unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
-        let fenced = claims.as_mut().is_none_or(|watch| {
-            let mut nodes = publishing.clone();
-            nodes.extend(unlanded.iter().cloned());
-            nodes.extend(dispatching.iter().cloned());
-            nodes.extend(starting.iter().map(|due| due.node.clone()));
-            watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
-        });
+        // A run with nothing in flight, starting or publishing, and nothing left that can
+        // move, is closing out: what its fence lets go of then is written once, as it lets go
+        // of the run, rather than on every pass a slow store would hold.
+        let closing = in_flight.is_empty() && starting.is_empty() && publishing.is_empty() && {
+            let statuses = statuses_of(&mut derived, state);
+            graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses)
+        };
+        let fenced = closing
+            || claims.as_mut().is_none_or(|watch| {
+                let mut nodes = publishing.clone();
+                nodes.extend(unlanded.iter().cloned());
+                nodes.extend(dispatching.iter().cloned());
+                nodes.extend(starting.iter().map(|due| due.node.clone()));
+                watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
+            });
         for due in starting {
             if fenced {
                 publishing.insert(due.node.clone());
@@ -2203,15 +2215,16 @@ fn converge(
             unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
             if unlanded.is_empty() {
                 // What it settled is on the board: the run that took over continues it, so it
-                // writes nothing more there, names no publication of its, and lets that run go.
-                *owed = false;
+                // writes nothing more there, names no work of its, and lets that run go — once
+                // the acknowledgement or the cleared fence has landed, either of which that run
+                // starts on. Neither landing, it tries both again when the fence's retry is due.
                 if let Some(writeback) = &writeback {
                     writeback.retire(by);
                 }
-                if let Some(watch) = claims.as_mut() {
-                    watch.fence(&publishing);
-                    watch.acknowledge(by);
-                }
+                *owed = !claims.as_mut().is_none_or(|watch| {
+                    let acknowledged = watch.acknowledge(by);
+                    watch.fence(&publishing) || acknowledged
+                });
             } else if !*waited {
                 // A settlement the board has not taken would be dispatched again by a run that
                 // started without it, so the fence stands and nothing is acknowledged until it
@@ -2784,15 +2797,14 @@ fn converge(
     }
 
     // The close-out projected every settlement this run made, or spent its window trying:
-    // the fence lets go of each that has landed since the last pass, and goes on naming one
-    // that has not — a run that took the project over without it would dispatch it again.
-    if !unlanded.is_empty() {
-        unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
-        if let Some(watch) = claims.as_mut() {
-            let mut nodes = publishing.clone();
-            nodes.extend(unlanded.iter().cloned());
-            watch.fence(&nodes);
-        }
+    // the fence lets go of each that has landed, and goes on naming one that has not — a run
+    // that took the project over without it would dispatch it again. Written once, here,
+    // and only where it differs from what the store holds.
+    unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
+    if let Some(watch) = claims.as_mut() {
+        let mut nodes = publishing.clone();
+        nodes.extend(unlanded.iter().cloned());
+        watch.fence(&nodes);
     }
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.

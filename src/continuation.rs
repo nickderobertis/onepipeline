@@ -897,6 +897,7 @@ impl ClaimWatch {
                         self.run,
                         self.project.as_str()
                     );
+                    self.fence_refused = Some(Instant::now());
                     return false;
                 }
             }
@@ -943,11 +944,11 @@ impl ClaimWatch {
         }
     }
 
-    /// Record on the claim that superseded this driver that it has stopped: written once,
-    /// best effort, over the claim exactly as it was read, with the acknowledgement beside
-    /// it. What could not be written is said on standard error, and the adopter then waits
-    /// for this driver's fence to clear instead.
-    pub(crate) fn acknowledge(&self, by: &DriverClaim) {
+    /// Record on the claim that superseded this driver that it has stopped, over the claim
+    /// exactly as it was read, with the acknowledgement beside it, and answer whether it
+    /// landed. What could not be written is said on standard error, and the adopter then
+    /// waits for this driver's fence to clear instead.
+    pub(crate) fn acknowledge(&self, by: &DriverClaim) -> bool {
         let written = serde_json::to_value(by).map(|mut claim| {
             claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
                 run: self.run.clone(),
@@ -977,18 +978,24 @@ impl ClaimWatch {
             Err(why) => Err(why.to_string()),
         };
         match outcome {
-            Ok(()) => eprintln!(
-                "onepipeline: run '{}' acknowledged run '{}' on host '{}' as the driver of {}",
-                self.run,
-                by.run,
-                by.host,
-                self.project.as_str()
-            ),
-            Err(why) => eprintln!(
-                "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; that \
-                 run starts once this one's fence has cleared",
-                self.run, by.run, by.host
-            ),
+            Ok(()) => {
+                eprintln!(
+                    "onepipeline: run '{}' acknowledged run '{}' on host '{}' as the driver of {}",
+                    self.run,
+                    by.run,
+                    by.host,
+                    self.project.as_str()
+                );
+                true
+            }
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; \
+                     that run starts once this one's fence has cleared",
+                    self.run, by.run, by.host
+                );
+                false
+            }
         }
     }
 }

@@ -12318,13 +12318,19 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    lapse and its watchdog's cancellation are retired.
 3. **Only a read showing another driver's claim ends this driver's dispatches**: each one
    not publishing is asked to stop, killed after the cancel grace, and settled `cancelled`
-   with its branch kept. The driver then supersedes as entry 128 and entry 129 say.
+   with its branch kept. A node whose work is done and whose publication waits to start
+   has nothing left running; its publication is withheld instead. The driver then
+   supersedes as entry 128 and entry 129 say, with one change. It lets go once its
+   acknowledgement or its cleared fence has landed, either of which its adopter starts
+   on. Where neither lands, it tries both again when the fence's five-second retry is due.
 4. **The fence names dispatches as well as publications.** Before any dispatch starts,
    the driver writes the project's `onepipeline.publishing`, entry 128's fence (whose
    publication half #1014 tightened), naming that node beside its publications under way.
    The dispatch starts only once the write has landed and the claim still admits it.
    A node leaves the fence only once a projection carrying its settlement has landed, as
-   entry 129 says of a publication. The fence keeps its shape, `{"run", "host", "nodes",
+   entry 129 says of a publication. A run closing out, with nothing in flight and nothing
+   left that can move, writes what its fence lets go of once, as it lets go of the run,
+   rather than on every pass a slow store would hold. The fence keeps its shape, `{"run", "host", "nodes",
    "at"}`, so a build that reads `nodes` as publications only waits on them all the same.
    An adopting driver therefore dispatches no node the displaced driver may still be running
    until the store shows it settled or released. Entry 128's wait is kept only as a floor,
@@ -12391,5 +12397,16 @@ and `a_run_adopted_after_its_drivers_pid_died_waits_on_nothing_and_resumes_on_th
 Entry 128's `a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses` and
 `a_dispatch_outliving_its_lease_is_ended_while_the_reconcile_loop_is_held` asserted the
 retired lapse and are replaced by the first four, and
-`a_superseded_driver_starts_nothing_once_it_has_read_the_takeover` now asserts that the
-dispatch in flight is ended.
+`tests/e2e/continuation.rs`'s journeys move with the rules above.
+`a_superseded_driver_starts_nothing_once_it_has_read_the_takeover`,
+`a_superseded_driver_notices_within_one_interval_and_publishes_nothing`,
+`a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement` and
+`a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over` assert the
+dispatch in flight ended and dispatched again by the adopter, in turn.
+`a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has` withholds a
+publication asked for while the claim was unconfirmed.
+`a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing` resumes already
+superseded, its claim thread having read the takeover during the hold.
+`a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` refuses the
+fence a dispatch needs. The two closeout-release journeys make the store slow only once the
+dispatch is under way.
