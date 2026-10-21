@@ -811,7 +811,11 @@ fn the_busy_review_round_takes_the_whole_group() {
         .expect("the default profile has overrides");
     let required = overrides
         .iter()
-        .find(|entry| entry["filter"].as_str().is_some_and(|filter| filter.contains(name)))
+        .find(|entry| {
+            entry["filter"]
+                .as_str()
+                .is_some_and(|filter| filter.contains(name))
+        })
         .expect("an override names the busy round");
     assert_eq!(
         required["filter"].as_str(),
