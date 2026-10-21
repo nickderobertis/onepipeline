@@ -22,7 +22,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, held_publication, lifecycle, plan_of, project_id, World};
+use crate::harness::{agent, held_publication, lifecycle, plan_of, project_id, renamed, World};
 use crate::publication_boundary::declare_visibility;
 
 /// Plan A's name: the private repository's own.
@@ -504,11 +504,13 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
     held_and_claimed(&world, &project, moved, "moved");
     let shutdown = world.run(&["shutdown", moved, "--grace", "1"]);
     assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
-    std::fs::rename(
-        world.runs.join(moved),
-        world.runs.join("zephyrine-moved-elsewhere"),
-    )
-    .expect("the run's directory moves");
+    // Windows refuses to move a directory while any handle beneath it is open, and the
+    // shut-down driver and its dispatch let go of theirs only as they finish exiting.
+    renamed(
+        &world.runs.join(moved),
+        &world.runs.join("zephyrine-moved-elsewhere"),
+        "the run's directory moves",
+    );
     world.unscript("moved.wait");
     let taken = world.run_from(
         &world.project,
