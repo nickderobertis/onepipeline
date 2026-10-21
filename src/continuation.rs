@@ -1207,10 +1207,6 @@ struct LeaseInner {
 
 #[derive(Default)]
 struct LeaseState {
-    /// When the newest read that found the project this driver's began.
-    confirmed: Option<Instant>,
-    /// The same instant, in epoch milliseconds.
-    confirmed_at: Option<u64>,
     standing: Standing,
     /// When the next read is due — the one the watchdog marks late if it has not answered
     /// a read's deadline after.
@@ -1219,19 +1215,44 @@ struct LeaseState {
     closed: bool,
 }
 
+/// The newest read that found the project this driver's: when it began, on this process's
+/// clock and in epoch milliseconds.
+#[derive(Clone, Copy)]
+struct Confirmation {
+    at: Instant,
+    at_ms: u64,
+}
+
 /// Where the claim stands: the driver's own state, which builds the contracted reading.
+/// Every standing after the first read carries the newest confirmation it has, which a
+/// confirmed one cannot be without.
 #[derive(Default)]
 enum Standing {
     /// Nothing has been read: an adoption before its first read answers.
     #[default]
     Unread,
-    Confirmed,
-    Unconfirmed(Episode),
+    Confirmed(Confirmation),
+    Unconfirmed {
+        episode: Episode,
+        last: Option<Confirmation>,
+    },
     Superseded {
         by: DriverClaim,
         /// Whether the reconcile loop has been handed it.
         taken: bool,
+        last: Option<Confirmation>,
     },
+}
+
+impl Standing {
+    /// The newest confirmation this driver has had.
+    fn last(&self) -> Option<Confirmation> {
+        match self {
+            Self::Unread => None,
+            Self::Confirmed(last) => Some(*last),
+            Self::Unconfirmed { last, .. } | Self::Superseded { last, .. } => *last,
+        }
+    }
 }
 
 /// One uninterrupted stretch of the claim unconfirmed.
@@ -1321,12 +1342,15 @@ impl Lease {
             if matches!(state.standing, Standing::Superseded { .. }) {
                 return false;
             }
-            if state.confirmed.is_none_or(|was| was < began) {
-                state.confirmed = Some(began);
-                state.confirmed_at = Some(began_at);
-            }
-            let was = std::mem::replace(&mut state.standing, Standing::Confirmed);
-            !matches!(was, Standing::Confirmed)
+            let newest = match state.standing.last() {
+                Some(was) if was.at >= began => was,
+                _ => Confirmation {
+                    at: began,
+                    at_ms: began_at,
+                },
+            };
+            let was = std::mem::replace(&mut state.standing, Standing::Confirmed(newest));
+            !matches!(was, Standing::Confirmed(_))
         });
     }
 
@@ -1335,19 +1359,23 @@ impl Lease {
     fn unconfirm(&self, reason: crate::claimstate::UnconfirmedReason, detail: String) {
         self.change(|state| match &mut state.standing {
             Standing::Superseded { .. } => false,
-            Standing::Unconfirmed(episode) => {
+            Standing::Unconfirmed { episode, .. } => {
                 episode.reason = reason;
                 episode.detail = detail;
                 false
             }
-            Standing::Unread | Standing::Confirmed => {
-                state.standing = Standing::Unconfirmed(Episode {
-                    since: Instant::now(),
-                    since_at: crate::sys::now_millis(),
-                    reason,
-                    detail,
-                    surfaced: false,
-                });
+            Standing::Unread | Standing::Confirmed(_) => {
+                let last = state.standing.last();
+                state.standing = Standing::Unconfirmed {
+                    episode: Episode {
+                        since: Instant::now(),
+                        since_at: crate::sys::now_millis(),
+                        reason,
+                        detail,
+                        surfaced: false,
+                    },
+                    last,
+                };
                 true
             }
         });
@@ -1356,7 +1384,12 @@ impl Lease {
     /// A read found `by`'s claim.
     fn supersede(&self, by: DriverClaim) {
         self.change(|state| {
-            state.standing = Standing::Superseded { by, taken: false };
+            let last = state.standing.last();
+            state.standing = Standing::Superseded {
+                by,
+                taken: false,
+                last,
+            };
             true
         });
     }
@@ -1397,7 +1430,7 @@ impl Lease {
     fn take_superseded(&self) -> Option<DriverClaim> {
         let mut state = self.inner.state.lock().ok()?;
         match &mut state.standing {
-            Standing::Superseded { by, taken } if !*taken => {
+            Standing::Superseded { by, taken, .. } if !*taken => {
                 *taken = true;
                 Some(by.clone())
             }
@@ -1417,10 +1450,9 @@ impl Lease {
     /// interval and the answer a read is given.
     fn may_start(&self) -> bool {
         self.inner.state.lock().is_ok_and(|state| {
-            matches!(state.standing, Standing::Confirmed)
-                && state.confirmed.is_some_and(|at| {
-                    at.elapsed() < STARTS_WITHIN_INTERVALS * self.inner.interval + self.inner.answer
-                })
+            matches!(state.standing, Standing::Confirmed(last)
+                if last.at.elapsed()
+                    < STARTS_WITHIN_INTERVALS * self.inner.interval + self.inner.answer)
         })
     }
 
@@ -1429,7 +1461,7 @@ impl Lease {
         self.inner
             .state
             .lock()
-            .is_ok_and(|state| state.confirmed.is_some())
+            .is_ok_and(|state| state.standing.last().is_some())
     }
 
     /// Whether the newest confirming read is two intervals and a read's deadline old — or
@@ -1437,8 +1469,9 @@ impl Lease {
     pub(crate) fn lapsed(&self) -> bool {
         self.inner.state.lock().is_ok_and(|state| {
             state
-                .confirmed
-                .is_none_or(|at| at.elapsed() >= self.inner.holds_for)
+                .standing
+                .last()
+                .is_none_or(|last| last.at.elapsed() >= self.inner.holds_for)
         })
     }
 
@@ -1446,10 +1479,10 @@ impl Lease {
     /// window and none has been raised for it: each episode raises one.
     pub(crate) fn surface_due(&self) -> Option<Unconfirmed> {
         let mut state = self.inner.state.lock().ok()?;
-        let confirmed_at = state.confirmed_at;
-        let Standing::Unconfirmed(episode) = &mut state.standing else {
+        let Standing::Unconfirmed { episode, last } = &mut state.standing else {
             return None;
         };
+        let confirmed_at = last.map(|last| last.at_ms);
         if episode.surfaced || episode.since.elapsed() < self.inner.interval {
             return None;
         }
@@ -1470,7 +1503,7 @@ impl Lease {
             .lock()
             .ok()
             .and_then(|state| match &state.standing {
-                Standing::Unconfirmed(episode) if !episode.surfaced => {
+                Standing::Unconfirmed { episode, .. } if !episode.surfaced => {
                     Some(self.inner.interval.saturating_sub(episode.since.elapsed()))
                 }
                 _ => None,
@@ -1492,15 +1525,15 @@ fn reading_of(state: &LeaseState) -> Option<crate::claimstate::ClaimReading> {
     use crate::claimstate::ClaimReading;
     match &state.standing {
         Standing::Unread => None,
-        Standing::Confirmed => state.confirmed_at.map(ClaimReading::confirmed),
-        Standing::Unconfirmed(episode) => Some(ClaimReading::unconfirmed(
-            state.confirmed_at,
+        Standing::Confirmed(last) => Some(ClaimReading::confirmed(last.at_ms)),
+        Standing::Unconfirmed { episode, last } => Some(ClaimReading::unconfirmed(
+            last.map(|last| last.at_ms),
             episode.since_at,
             episode.reason,
             episode.detail.clone(),
         )),
-        Standing::Superseded { by, .. } => Some(ClaimReading::superseded(
-            state.confirmed_at,
+        Standing::Superseded { by, last, .. } => Some(ClaimReading::superseded(
+            last.map(|last| last.at_ms),
             format!(
                 "run '{}' on host '{}' claimed this project at {}",
                 by.run, by.host, by.claimed_at
@@ -1525,7 +1558,7 @@ fn watch(lease: &std::sync::Weak<LeaseInner>) {
             return;
         }
         let wait = match (&state.standing, state.next_read) {
-            (Standing::Unread | Standing::Confirmed, Some(due)) => {
+            (Standing::Unread | Standing::Confirmed(_), Some(due)) => {
                 let late_at = due + inner.answer;
                 let now = Instant::now();
                 if now >= late_at {

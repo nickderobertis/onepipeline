@@ -210,6 +210,27 @@ fn let_through(gate: Rendezvous, holding: Arc<AtomicBool>, hold: Duration) {
     });
 }
 
+/// A short `watch` of `run` — waiting for it to settle, timing out after three seconds with a
+/// heartbeat each — and the heartbeat and ending lines it wrote.
+fn watch_lines(world: &World, run: &str) -> Vec<String> {
+    let watched = world.run(&[
+        "watch",
+        run,
+        "--until",
+        "settled",
+        "--timeout",
+        "3",
+        "--tick-interval",
+        "1",
+    ]);
+    watched
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("-- watch"))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The age a watch line's claim segment states — `30 s`, `12 min` — or nothing.
 fn age_of(line: &str) -> String {
     line.split_once("CLAIM UNCONFIRMED ")
@@ -417,30 +438,15 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
         "{}",
         status.stdout
     );
-    let watched = world.run(&[
-        "watch",
-        run,
-        "--until",
-        "settled",
-        "--timeout",
-        "3",
-        "--tick-interval",
-        "1",
-    ]);
-    let lines: Vec<&str> = watched
-        .stderr
-        .lines()
-        .filter(|line| line.starts_with("-- watch"))
-        .collect();
+    let watched = watch_lines(&world, run);
+    let lines: Vec<&str> = watched.iter().map(String::as_str).collect();
     assert!(
         lines.iter().any(|line| line.starts_with("-- watching")),
-        "{}",
-        watched.stderr
+        "{watched:?}"
     );
     assert!(
         lines.iter().any(|line| !line.starts_with("-- watching")),
-        "{}",
-        watched.stderr
+        "{watched:?}"
     );
     for line in &lines {
         // The state and its age, and nothing more: the next field follows at once.
@@ -449,14 +455,52 @@ fn an_unconfirmed_claim_keeps_its_work_and_starts_nothing(
                 && line.contains(&format!("  CLAIM UNCONFIRMED {}  ", age_of(line))),
             "a watch line without the claim's state and age alone: {line:?}"
         );
-        // Under a short run id the heartbeat and the ending line both keep within the
-        // columns the screenshots render at, segment and all.
+        // The segment adds at most 26 columns; under a short run id the heartbeat and the
+        // ending line both keep within the columns the screenshots render at, segment and all.
+        assert!(
+            format!("  CLAIM UNCONFIRMED {}", age_of(line))
+                .chars()
+                .count()
+                <= 26,
+            "{line:?}"
+        );
         assert!(line.chars().count() <= 118, "{line:?}");
     }
 
     // The store answers again: the next read confirms the claim, and the driver carries on.
     unconfirming.end(&world);
     let again = until_claim(&world, run, "confirmed");
+    // Each line is otherwise the one the same watch prints for a confirmed claim: the heartbeat
+    // and the ending line, read with the segment taken out and the cursor, which moves on,
+    // set aside.
+    let confirmed = watch_lines(&world, run);
+    for kind in ["-- watching ", "-- watch "] {
+        let pick = |of: &[String], strip: bool| -> Option<String> {
+            of.iter()
+                .find(|line| {
+                    line.starts_with(kind)
+                        && (kind == "-- watching " || !line.starts_with("-- watching"))
+                })
+                .map(|line| {
+                    let line = if strip {
+                        line.replace(&format!("  CLAIM UNCONFIRMED {}", age_of(line)), "")
+                    } else {
+                        line.clone()
+                    };
+                    line.split("  cursor ")
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+        };
+        let (was, now) = (pick(&watched, true), pick(&confirmed, false));
+        assert!(was.is_some(), "no {kind:?} line: {watched:?}");
+        assert_eq!(was, now, "{watched:?}\n{confirmed:?}");
+        assert!(
+            !now.unwrap_or_default().contains("CLAIM"),
+            "a confirmed claim's line said something of it: {confirmed:?}"
+        );
+    }
     assert!(again.reading.last_confirmed_at > file.reading.last_confirmed_at);
     assert_eq!(claim_read(&world, run)["state"], "confirmed");
     world.until("y to be dispatched", |world| {

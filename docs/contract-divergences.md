@@ -12355,8 +12355,12 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    `#[non_exhaustive]`, breaks a Rust struct literal of it, as `unanswered` did. The manager
    ruled to take it, since this release already carries a breaking change. Human `status`
    says the claim is unconfirmed, the reason and its detail, and how long since the last
-   confirming read, against the lease. Every watch heartbeat and ending line carries the
-   state and its age only, `CLAIM UNCONFIRMED 12 min`, so the line stays within 118 columns.
+   confirming read, against the lease. Every watch heartbeat and ending line reporting an
+   unconfirmed claim carries the state and its age only, `CLAIM UNCONFIRMED 12 min`. That
+   segment adds at most 26 columns, and the line is otherwise byte-identical to the one the
+   same watch prints for a confirmed claim, by the manager's ruling. The line's other fields,
+   the run id it carries twice and the unread phrase, are what bound its width; under a
+   2-character run id both lines fit the 118 columns the screenshots render at.
    A non-blocking planner surface of kind `claim-unconfirmed` is raised once each time an
    uninterrupted unconfirmed episode outlasts the lease window, naming the reason and the
    time since the last confirming read.
