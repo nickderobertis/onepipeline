@@ -12318,8 +12318,12 @@ plan's title. The node's task first stated a refusal there; the planner who owns
 ruled it out once this build showed it refused every launch on a host holding one private
 repository whose committed declaration cannot be read — including plans naming no private
 repository, which `publication_boundary` and `lifecycle` journeys run on such a host — and the
-hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`:
-the field is additive, and the schema closes no object.
+hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`,
+which the planner who owns the contract ruled when this build proposed `2`. The run-reading
+contract is frozen for this run, the field is additive, and the schema closes no object, so a
+reader of version 1 keeps reading it, and a bump would break every reader pinned to `1` for no
+gain. A consumer that needs `public_id` checks that the field is present rather than branching on
+the version.
 
 **Where it is written.** On a plan store whose project's source is not declared
 `visibility: private` — the store's own declaration — `onepipeline.driver.run` and
