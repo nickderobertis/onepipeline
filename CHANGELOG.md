@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.81.0](https://github.com/nickderobertis/onepipeline/compare/v0.80.2...v0.81.0) - 2026-10-21
+
+### Performance
+
+- *(deps)* [**breaking**] link the plan store that copies without walking the board ([#1070](https://github.com/nickderobertis/onepipeline/pull/1070))
+
 ## [0.80.2](https://github.com/nickderobertis/onepipeline/compare/v0.80.1...v0.80.2) - 2026-10-20
 
 ### Added
