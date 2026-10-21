@@ -38,7 +38,6 @@ pub(crate) fn withdraw(world: &World, project: &str, node: &str) -> String {
     whole
 }
 
-/// The status the store holds the task carrying node `node` at.
 pub(crate) fn stored_status(world: &World, project: &str, node: &str) -> Value {
     world
         .store_tasks(project)
@@ -48,7 +47,6 @@ pub(crate) fn stored_status(world: &World, project: &str, node: &str) -> Value {
         .unwrap_or_else(|| panic!("the board holds no item for {node}"))
 }
 
-/// The nodes `run` dispatched, in order.
 fn dispatched(world: &World, run: &str) -> Vec<String> {
     world
         .events_of(run, "node-dispatched")
@@ -153,6 +151,16 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
 /// eligible for a fresh launch, whereas a person's cancellation has no such record.
 #[test]
 fn an_engine_cancelled_task_resumes_from_the_store() {
+    engine_cancelled_continuation(false);
+}
+
+/// Older projections carry the settlement but no projected board word. They remain resumable.
+#[test]
+fn a_legacy_engine_cancelled_task_resumes_without_a_recorded_board_word() {
+    engine_cancelled_continuation(true);
+}
+
+fn engine_cancelled_continuation(legacy: bool) {
     let world =
         World::new("withdrawn-engine-cancelled").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     world.script("build.wait", "hold");
@@ -175,9 +183,169 @@ fn an_engine_cancelled_task_resumes_from_the_store() {
         task["item"]["metadata"]["onepipeline.settlement"]["status"], "cancelled",
         "{task}"
     );
+    if legacy {
+        let id = crate::harness::global(task["id"].as_str().expect("a task id"));
+        let update = onetaskgraph_plugin_api::TaskUpdate {
+            metadata_remove: std::collections::BTreeSet::from([
+                onetaskgraph_plugin_api::MetadataKey::new("onepipeline.projected_status")
+                    .expect("a metadata key"),
+            ]),
+            ..onetaskgraph_plugin_api::TaskUpdate::default()
+        };
+        world
+            .store_call(|engine| async move { engine.update_task(&id, &update).await })
+            .expect("remove the board word to reproduce an older projection");
+    }
     world.unscript("build.wait");
     let cold = world.on_host("host-b");
     cold.run(&["start", &project, "--attach"]).settled();
     assert_eq!(dispatched(&cold, "engine-cancelled"), ["build"]);
     assert_eq!(stored_status(&cold, &project, "build")["category"], "done");
+}
+
+/// A person's cancellation after a successful settlement removes that task on continuation.
+#[test]
+fn a_persons_close_after_a_done_settlement_withdraws_the_task() {
+    let world = World::new("withdrawn-done");
+    let project = world.plan(
+        "withdrawn-done",
+        &plan_of(
+            "withdrawn-done",
+            vec![agent("build", &[]), agent("keep", &[])],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).settled();
+    withdraw(&world, &project, "build");
+    let cold = world.on_host("host-b");
+    cold.run(&["start", &project, "--attach"]).settled();
+    let result = cold.run_json("withdrawn-done", "result.json");
+    assert_eq!(
+        result["nodes"].as_array().expect("nodes").len(),
+        1,
+        "{result}"
+    );
+    assert_eq!(result["nodes"][0]["id"], "keep", "{result}");
+    assert_eq!(
+        stored_status(&cold, &project, "build")["category"],
+        "cancelled"
+    );
+    assert!(dispatched(&cold, "withdrawn-done").is_empty());
+}
+
+/// Metadata is external input: malformed words refuse before the run claims or dispatches.
+#[test]
+fn a_cancelled_task_with_malformed_projected_status_refuses_launch() {
+    for value in [json!(17), json!("canceled"), Value::Null] {
+        let world = World::new("withdrawn-malformed");
+        let project = world.plan(
+            "withdrawn-malformed",
+            &plan_of("withdrawn-malformed", vec![agent("build", &[])]),
+        );
+        let task = withdraw(&world, &project, "build");
+        let id = crate::harness::global(&task);
+        let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.projected_status")
+            .expect("a metadata key");
+        world
+            .store_call(|engine| async move { engine.set_task_metadata(&id, &key, &value).await })
+            .expect("write external metadata");
+        let refused = world.run(&["start", &project, "--attach"]);
+        assert_ne!(refused.code, 0, "{}", refused.stdout);
+        refused.err_has(&task);
+        refused.err_has("`onepipeline.projected_status` is not a projected status");
+        assert!(dispatched(&world, "withdrawn-malformed").is_empty());
+        assert_eq!(
+            stored_status(&world, &project, "build")["category"],
+            "cancelled"
+        );
+    }
+}
+
+/// A withdrawn board item need not have executable metadata: it claims no ID or edges.
+#[test]
+fn a_withdrawn_task_without_a_node_id_or_valid_edges_is_left_out() {
+    let world = World::new("withdrawn-unplanned");
+    let project = world.plan(
+        "withdrawn-unplanned",
+        &plan_of(
+            "withdrawn-unplanned",
+            vec![agent("build", &[]), agent("spike", &[])],
+        ),
+    );
+    let task = withdraw(&world, &project, "spike");
+    let id = crate::harness::global(&task);
+    let key = |name| onetaskgraph_plugin_api::MetadataKey::new(name).expect("a metadata key");
+    let update = onetaskgraph_plugin_api::TaskUpdate {
+        metadata_remove: std::collections::BTreeSet::from([key("onepipeline.id")]),
+        metadata_set: std::collections::BTreeMap::from([(
+            key("onepipeline.deps"),
+            json!(["missing"]),
+        )]),
+        ..onetaskgraph_plugin_api::TaskUpdate::default()
+    };
+    world
+        .store_call(|engine| async move { engine.update_task(&id, &update).await })
+        .expect("leave withdrawn work without executable metadata");
+    world.run(&["start", &project, "--attach"]).settled();
+    assert_eq!(dispatched(&world, "withdrawn-unplanned"), ["build"]);
+    let result = world.run_json("withdrawn-unplanned", "result.json");
+    assert_eq!(
+        result["nodes"].as_array().expect("nodes").len(),
+        1,
+        "{result}"
+    );
+    let stored = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|item| item["id"] == task)
+        .expect("the withdrawn task remains on the board");
+    assert_eq!(stored["item"]["status"]["category"], "cancelled");
+}
+
+/// A retry clears the old settlement's projected word before its replacement settles.
+#[test]
+fn a_retry_removes_the_previous_settlements_recorded_board_word() {
+    let world = World::new("withdrawn-retry");
+    world.script("build.fail", "1");
+    let run = "withdrawn-retry";
+    let project = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.run(&["start", &project, "--attach"]).settled();
+    let task = world.store_tasks(&project).remove(0);
+    assert_eq!(
+        task["item"]["metadata"]["onepipeline.projected_status"],
+        "failed"
+    );
+    world.script("replacement.wait", "hold");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{
+                "op": "retry", "id": "build", "node": {
+                    "id": "replacement", "persona": "engineer",
+                    "task": "## What\nRetry it.\n\n## Acceptance criteria\n- It is done."
+                }
+            }]})
+            .to_string(),
+        )
+        .exited(0);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until_store(
+        "the replacement to reach the board without the old settlement",
+        |world| {
+            let task = world.store_tasks(&project).remove(0);
+            let metadata = &task["item"]["metadata"];
+            metadata["onepipeline.node"] == "replacement"
+                && metadata.get("onepipeline.settlement").is_none()
+        },
+    );
+    let task = world.store_tasks(&project).remove(0);
+    assert!(
+        task["item"]["metadata"]
+            .get("onepipeline.projected_status")
+            .is_none(),
+        "{task}"
+    );
+    world.release("replacement.go");
+    world.until_store("the replacement to settle", |world| {
+        world.store_tasks(&project)[0]["item"]["metadata"]["onepipeline.projected_status"] == "done"
+    });
 }

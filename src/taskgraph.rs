@@ -1305,16 +1305,8 @@ type Withdrawn = BTreeMap<String, String>;
 
 /// Split a project's tasks into the ones that become nodes and the ones a person withdrew.
 ///
-/// Withdrawn is a task the store reports [`StatusCategory::Cancelled`] that the engine did
-/// not cancel itself. The engine closed it only where its stored settlement is `cancelled` and
-/// the word it projected beside that settlement, [`PROJECTED_STATUS_KEY`], is `cancelled` too —
-/// a stopped dispatch's, which a continuing launch resumes. Every other cancelled task was
-/// closed by a person: one carrying no settlement, one whose settlement the engine never
-/// projects as cancelled, and one it parked, whose projected word is `parked` — the person's
-/// close after the park wins. The one residual is a settlement written before the projected
-/// word was: `cancelled` with no word beside it is kept, as every launch before it kept it.
-/// A withdrawn task claims no node id and is never read for its edges, so nothing projects it
-/// again.
+/// Partition before claiming IDs or reading edges: excluded items must never enter the
+/// write-back baseline. Entry 136 of `docs/contract-divergences.md` defines membership.
 fn partition(
     tasks: Vec<Qualified<Task>>,
 ) -> std::result::Result<(Vec<Qualified<Task>>, Withdrawn), Load> {
@@ -1328,18 +1320,19 @@ fn partition(
         let whole = task.id.to_string();
         let metadata: Map<String, Value> = task.item.metadata.clone().into_iter().collect();
         let projected = match metadata.get(PROJECTED_STATUS_KEY) {
-            None | Some(Value::Null) => None,
-            Some(Value::String(word)) => Some(word.as_str()),
-            Some(other) => {
-                return Err(refused(
-                    &whole,
-                    format!("`{PROJECTED_STATUS_KEY}` is {other}, not the word a status is"),
-                )
-                .into())
-            }
+            None => None,
+            Some(value) => Some(
+                serde_json::from_value::<crate::writeback::ProjectedStatus>(value.clone())
+                    .map_err(|why| {
+                        refused(
+                            &whole,
+                            format!("`{PROJECTED_STATUS_KEY}` is not a projected status: {why}"),
+                        )
+                    })?,
+            ),
         };
         let closed_by_the_engine = projected
-            .is_none_or(|word| word == crate::writeback::ProjectedStatus::Cancelled.word())
+            .is_none_or(|word| word == crate::writeback::ProjectedStatus::Cancelled)
             && crate::continuation::cancelled_by_the_engine(&whole, &metadata)?;
         if closed_by_the_engine {
             kept.push(task);
