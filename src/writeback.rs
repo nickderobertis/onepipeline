@@ -1996,6 +1996,14 @@ fn worker(
             baseline,
             Scope::Driven,
         );
+        // Keep the store's wait before publishing the attempt or waking the driver. Its
+        // first-attempt waiter may immediately try to fence a dispatch, and that fence
+        // must already see the wait the projection's failure asked for.
+        if let Err(failed) = &attempted.result {
+            if let Some(wait) = failed.wait {
+                AskedWait::record(&run_dir, wait);
+            }
+        }
         append_record(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
@@ -2075,9 +2083,6 @@ fn worker(
                 // snapshot published meanwhile, and not at closeout. One that said nothing is
                 // asked again on the schedule.
                 let asked = failed.wait;
-                if let Some(wait) = asked {
-                    AskedWait::record(&run_dir, wait);
-                }
                 if first {
                     // The one line on the driver's stderr that ever says a projection is in
                     // trouble, so it says what an operator's next question is: whether to

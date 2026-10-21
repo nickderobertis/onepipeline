@@ -960,6 +960,7 @@ fn a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_la
 }
 
 /// This host's name, as the binary reads it when nothing names it.
+#[cfg(unix)]
 fn this_host() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -1305,7 +1306,6 @@ fn a_watch_over_an_hours_long_unconfirmed_claim_keeps_the_segment_within_its_col
         .reading
         .last_confirmed_at
         .expect("a confirming read");
-    let written = std::fs::read_to_string(world.run_file(run, "claim.json")).expect("claim.json");
     let confirmed = watch_lines(&world, run);
     let minute = 60_000;
     let hour = 60 * minute;
@@ -1388,7 +1388,6 @@ fn a_watch_over_an_hours_long_unconfirmed_claim_keeps_the_segment_within_its_col
             assert_eq!(pick(&lines, true), pick(&confirmed, false), "{lines:?}");
         }
     }
-    std::fs::write(world.run_file(run, "claim.json"), &written).expect("the sidecar");
     in_flight.release();
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
