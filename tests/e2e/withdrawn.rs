@@ -117,6 +117,7 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
             vec![agent("design", &[]), agent("ship", &["design"])],
         ),
     );
+    let before = stored_status(&world, &project, "ship");
     let design = withdraw(&world, &project, "design");
     let ship = world
         .store_tasks(&project)
@@ -141,8 +142,8 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
     );
     assert!(dispatched(&world, "withdrawn-dep").is_empty());
     assert_eq!(
-        stored_status(&world, &project, "ship")["category"],
-        "todo",
+        stored_status(&world, &project, "ship"),
+        before,
         "a refused launch claimed a task"
     );
 }
@@ -173,6 +174,12 @@ fn engine_cancelled_continuation(legacy: bool) {
         !dispatched(world, "engine-cancelled").is_empty()
     });
     world.run(&["stop", "engine-cancelled"]).exited(0);
+    world.until_store("the stop's cancellation to reach the board", |world| {
+        let task = world.store_tasks(&project).remove(0);
+        task["item"]["status"]["category"] == "cancelled"
+            && task["item"]["metadata"]["onepipeline.projected_status"] == "cancelled"
+            && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "cancelled"
+    });
     let task = world.store_tasks(&project).remove(0);
     assert_eq!(task["item"]["status"]["category"], "cancelled", "{task}");
     assert_eq!(
