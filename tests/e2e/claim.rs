@@ -239,7 +239,7 @@ fn age_of(line: &str) -> String {
             let count = words.next()?.parse::<u64>().ok()?;
             let unit = words
                 .next()
-                .filter(|unit| ["s", "min", "h"].contains(unit))?;
+                .filter(|unit| ["s", "min", "h", "d"].contains(unit))?;
             Some(format!("{count} {unit}"))
         })
         .unwrap_or_default()
@@ -1219,5 +1219,143 @@ fn a_run_adopted_after_its_drivers_pid_died_waits_on_nothing_and_resumes_on_the_
             .expect("the driver's pid");
         crate::harness::end_process(pid);
         assert!(world.events_of(run, "host-shutdown").is_empty());
+    });
+}
+
+/// Epoch milliseconds as the RFC 3339 instant the binary stamps.
+fn rfc3339(millis: u64) -> String {
+    let (secs, ms) = (millis / 1_000, millis % 1_000);
+    let days = i64::try_from(secs / 86_400).expect("a day count");
+    let of_day = secs % 86_400;
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{ms:03}Z",
+        of_day / 3_600,
+        of_day % 3_600 / 60,
+        of_day % 60
+    )
+}
+
+/// A watch of a live driver whose claim has been unconfirmed for two hours and longer still
+/// prints the segment as the state and its age alone, adding at most 26 columns to each
+/// heartbeat and ending line, which are otherwise the lines it prints for a confirmed claim.
+///
+/// Nobody waits two hours in a journey: the driver reads its claim once a minute here, so
+/// between reads the journey writes the sidecar it would have written that far into an
+/// episode, and the real `watch` reads it back.
+#[test]
+fn a_watch_over_an_hours_long_unconfirmed_claim_keeps_the_segment_within_its_columns() {
+    let run = "ch";
+    let world = World::new("claim-hours")
+        .through_scripted_source()
+        .with_env(CLAIM_INTERVAL_ENV, "60");
+    let x = world.rendezvous("x");
+    let project = world.plan(run, &plan_of(run, vec![agent("x", &[])]));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let in_flight = x.arrived();
+    let launched = until_claim(&world, run, "confirmed");
+    assert_eq!(launched.lease_interval_s, 60);
+    let confirmed_at = launched
+        .reading
+        .last_confirmed_at
+        .expect("a confirming read");
+    let written = std::fs::read_to_string(world.run_file(run, "claim.json")).expect("claim.json");
+    let confirmed = watch_lines(&world, run);
+    let minute = 60_000;
+    let hour = 60 * minute;
+    for age in [
+        2 * hour,
+        2 * hour + 59 * minute,
+        25 * hour,
+        100 * hour,
+        400 * 24 * hour,
+    ] {
+        let last = confirmed_at - age;
+        // llmlint: ignore-block[tests_mirror_real_usage] an episode hours or days long is
+        // what the driver writes only that far into one, which no journey can wait out; the
+        // sidecar it would hold then is written between its reads — once a minute here — in
+        // its declared shape, and read back by the real `watch`.
+        let sidecar = json!({
+            "schema_version": 1,
+            "state": "unconfirmed",
+            "last_confirmed_at": rfc3339(last),
+            "unconfirmed_since": rfc3339(last + 60_000),
+            "reason": "failed",
+            "detail": "the board is down",
+            "lease_interval_s": 60,
+        })
+        .to_string();
+        ClaimFile::parse(&sidecar).expect("the sidecar is the declared shape");
+        std::fs::write(world.run_file(run, "claim.json"), &sidecar).expect("the sidecar");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        let lines = watch_lines(&world, run);
+        assert_eq!(
+            std::fs::read_to_string(world.run_file(run, "claim.json")).expect("claim.json"),
+            sidecar,
+            "the driver rewrote its claim while the watch read it"
+        );
+        let status = world.run(&["status", run]);
+        status.exited(0);
+        let hours = age / hour;
+        assert!(
+            status.stdout.contains(&format!("for {hours} h ")),
+            "status no longer says the age in full: {}",
+            status.stdout
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("-- watching "))
+                && lines.iter().any(|line| !line.starts_with("-- watching ")),
+            "{lines:?}"
+        );
+        for line in &lines {
+            let age_said = age_of(line);
+            let segment = format!("  CLAIM UNCONFIRMED {age_said}");
+            assert!(
+                !age_said.is_empty() && line.contains(&format!("{segment}  ")),
+                "{age}ms: {line:?}"
+            );
+            assert!(
+                segment.chars().count() <= 26,
+                "{age}ms: the segment is {} columns: {line:?}",
+                segment.chars().count()
+            );
+        }
+        for kind in ["-- watching ", "-- watch "] {
+            let pick = |of: &[String], strip: bool| -> Option<String> {
+                of.iter()
+                    .find(|line| {
+                        line.starts_with(kind)
+                            && (kind == "-- watching " || !line.starts_with("-- watching"))
+                    })
+                    .map(|line| {
+                        let line = if strip {
+                            line.replace(&format!("  CLAIM UNCONFIRMED {}", age_of(line)), "")
+                        } else {
+                            line.clone()
+                        };
+                        line.split("  cursor ")
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned()
+                    })
+            };
+            assert_eq!(pick(&lines, true), pick(&confirmed, false), "{lines:?}");
+        }
+    }
+    std::fs::write(world.run_file(run, "claim.json"), &written).expect("the sidecar");
+    in_flight.release();
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
     });
 }

@@ -12356,8 +12356,11 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    ruled to take it, since this release already carries a breaking change. Human `status`
    says the claim is unconfirmed, the reason and its detail, and how long since the last
    confirming read, against the lease. Every watch heartbeat and ending line reporting an
-   unconfirmed claim carries the state and its age only, `CLAIM UNCONFIRMED 12 min`. That
-   segment adds at most 26 columns, and the line is otherwise byte-identical to the one the
+   unconfirmed claim carries the state and its age only, `CLAIM UNCONFIRMED 12 min`. The
+   age is one whole unit of at most six characters: seconds under two minutes, minutes
+   under a hundred, hours under a hundred, then days, up to `9999 d`. `status` and the
+   surface say it in full (`2 h 5 min`). So the segment adds at most 26 columns however
+   long the episode, and the line is otherwise byte-identical to the one the
    same watch prints for a confirmed claim, by the manager's ruling. The line's other fields,
    the run id it carries twice and the unread phrase, are what bound its width; under a
    2-character run id both lines fit the 118 columns the screenshots render at.
@@ -12394,6 +12397,7 @@ declared type in a tight loop throughout:
 `a_claim_whose_reads_answer_late_keeps_its_dispatch_and_starts_nothing`, the last through a
 new failpoint inside the read, `ONEPIPELINE_TEST_CLAIM_READ_LATE_GATE`;
 `each_uninterrupted_unconfirmed_episode_raises_one_surface`;
+`a_watch_over_an_hours_long_unconfirmed_claim_keeps_the_segment_within_its_columns`;
 `a_landed_claim_found_gone_is_unconfirmed_until_a_read_finds_it_again`;
 `a_read_finding_another_drivers_claim_ends_the_dispatch_in_flight_and_supersedes`;
 `a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_lands`;

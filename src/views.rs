@@ -351,9 +351,17 @@ fn claim_lines(view: &RunView) -> String {
 /// claim is unconfirmed — the state and its age only, so the line stays narrow —
 /// or nothing.
 pub(crate) fn claim_phrase(view: &RunView) -> String {
-    unconfirmed_claim(view).map_or_else(String::new, |(_, age)| {
-        format!("  CLAIM UNCONFIRMED {}", crate::claimstate::span(age))
-    })
+    unconfirmed_claim(view).map_or_else(String::new, |(_, age)| claim_segment(age))
+}
+
+/// The watch segment for a claim unconfirmed for `seconds`: the state and its age in one
+/// whole unit, at most 26 columns however long the episode, so the line it is on grows by
+/// no more than that. `status` says the age in full.
+fn claim_segment(seconds: u64) -> String {
+    format!(
+        "  CLAIM UNCONFIRMED {}",
+        crate::claimstate::watch_age(seconds)
+    )
 }
 
 /// One command envelope claimed off a run's queue with no outcome yet, as
@@ -5562,6 +5570,52 @@ mod tests {
     use crate::filter::Filters;
     use crate::plan::{Node, Plan, PLAN_SCHEMA_VERSION};
     use serde_json::json;
+
+    /// The watch's claim segment is the state and its age alone, and adds at most 26
+    /// columns to its line however long the episode — two hours, days, years — while the
+    /// age it states still reads as one.
+    #[test]
+    fn the_watch_claim_segment_stays_within_its_columns_however_long_the_episode() {
+        /// The most columns the claim segment adds to a watch line.
+        const CLAIM_SEGMENT_COLUMNS: usize = 26;
+        let minute = 60;
+        let hour = 60 * minute;
+        let day = 24 * hour;
+        for seconds in [
+            0,
+            59,
+            119,
+            120,
+            99 * minute + 59,
+            100 * minute,
+            2 * hour,
+            2 * hour + 59 * minute,
+            25 * hour,
+            99 * hour,
+            100 * hour,
+            30 * day,
+            3_650 * day,
+            u64::MAX,
+        ] {
+            let segment = claim_segment(seconds);
+            assert!(
+                segment.chars().count() <= CLAIM_SEGMENT_COLUMNS,
+                "{seconds}s: {segment:?} is {} columns",
+                segment.chars().count()
+            );
+            let age = segment
+                .strip_prefix("  CLAIM UNCONFIRMED ")
+                .unwrap_or_else(|| panic!("{segment:?}"));
+            let (count, unit) = age.split_once(' ').unwrap_or_else(|| panic!("{age:?}"));
+            assert!(count.parse::<u64>().is_ok(), "{age:?}");
+            assert!(["s", "min", "h", "d"].contains(&unit), "{age:?}");
+        }
+        assert_eq!(claim_segment(42), "  CLAIM UNCONFIRMED 42 s");
+        assert_eq!(claim_segment(12 * minute), "  CLAIM UNCONFIRMED 12 min");
+        assert_eq!(claim_segment(2 * hour), "  CLAIM UNCONFIRMED 2 h");
+        assert_eq!(claim_segment(3 * day), "  CLAIM UNCONFIRMED 72 h");
+        assert_eq!(claim_segment(5 * day), "  CLAIM UNCONFIRMED 5 d");
+    }
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {

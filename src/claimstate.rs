@@ -290,6 +290,19 @@ pub(crate) fn span(seconds: u64) -> String {
     }
 }
 
+/// How long `seconds` is, compactly, for a watch line: one whole unit, at most six
+/// characters — seconds under two minutes, minutes under a hundred, hours under a hundred,
+/// and days past that, up to 9999 (some 27 years, where it stops). [`span`] says it in full
+/// for `status` and the planner surface; a watch line only has room for its order.
+pub(crate) fn watch_age(seconds: u64) -> String {
+    match seconds {
+        0..120 => format!("{seconds} s"),
+        120..6_000 => format!("{} min", seconds / 60),
+        6_000..360_000 => format!("{} h", seconds / 3_600),
+        _ => format!("{} d", (seconds / 86_400).min(9_999)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,8 +468,28 @@ mod tests {
         assert_eq!(block["surface_kind"], crate::engine::CLAIM_UNCONFIRMED);
         assert_eq!(
             block["watch_segment"],
-            format!("CLAIM UNCONFIRMED {}", span(720))
+            format!("CLAIM UNCONFIRMED {}", watch_age(720))
         );
+    }
+
+    #[test]
+    fn a_watch_age_is_one_whole_unit_of_at_most_six_characters() {
+        for (seconds, said) in [
+            (0, "0 s"),
+            (119, "119 s"),
+            (120, "2 min"),
+            (5_999, "99 min"),
+            (6_000, "1 h"),
+            (7_200, "2 h"),
+            (10_740, "2 h"),
+            (359_999, "99 h"),
+            (360_000, "4 d"),
+            (86_400 * 400, "400 d"),
+            (u64::MAX, "9999 d"),
+        ] {
+            assert_eq!(watch_age(seconds), said, "{seconds}");
+            assert!(said.len() <= 6, "{said}");
+        }
     }
 
     #[test]
