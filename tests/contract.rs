@@ -7863,7 +7863,6 @@ const RULINGS: &[(&str, &str)] = &[
         "135.",
         "`public_id` is what the run is named by wherever the destination is not private",
     ),
-    // op-withdrawn-tasks: the manager approved projection-only withdrawal provenance.
     ("136.", "onepipeline.projected_status"),
 ];
 
