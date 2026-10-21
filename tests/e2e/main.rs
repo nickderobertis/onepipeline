@@ -331,6 +331,7 @@ mod wake_budget;
 // sits; that project is edged on conversational cost, which this module has none of.
 mod watch;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod withdrawn;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four of its journeys
 // wait past the write-back's sixty-second floor by construction, for the reason at the
 // head of `tests/e2e/writeback_budget.rs`; this declaration is the other site the rule
