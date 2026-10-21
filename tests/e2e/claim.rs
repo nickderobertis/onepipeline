@@ -641,41 +641,168 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
     reader.finished();
 }
 
-/// A read that finds another driver's claim ends this driver's dispatch in flight — asked
-/// to stop, settled `cancelled` with its branch kept — and supersedes it.
+/// A read that finds another driver's claim — a host's `start --take-over` — ends this
+/// driver's dispatch in flight: asked to stop, settled `cancelled` with its branch kept. It
+/// supersedes, acknowledges, and the adopter dispatches the node again.
 #[test]
 fn a_read_finding_another_drivers_claim_ends_the_dispatch_in_flight_and_supersedes() {
-    let world = claim_world("claim-superseded");
-    world.script("x.wait", "hold");
+    let base = claim_world("claim-superseded");
+    let successor = base.on_host("host-b");
+    let world = base;
+    let x = world.rendezvous("x");
     let run = "claim-superseded";
     let project = world.plan(run, &plan_of(run, vec![agent("x", &[])]));
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
-    world.until("x to be dispatched", |world| {
-        !records_of(world, run, "node-dispatched", "x").is_empty()
-    });
+    let mine = x.arrived();
     until_claim(&world, run, "confirmed");
-    let key =
-        onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned()).expect("a key");
-    let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
-    let theirs = json!({"run": "theirs", "host": "host-b", "session": null, "pid": 7,
-                        "claimed_at": "2026-10-21T00:00:00.000Z"});
-    world
-        .store_call(|engine| async move { engine.set_project_metadata(&id, &key, &theirs).await })
-        .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+    let taking = take_over(&successor, &project);
+    world.until("the takeover's claim to land", |world| {
+        stored_claim(world, &project)["host"] == "host-b"
+    });
     world.until("the driver to end", |world| {
         world.run_file(run, "result.json").is_file()
     });
+    drop(mine);
     assert_eq!(settled(&world, run, "x")["status"], "cancelled");
     let superseded = world.events_of(run, "driver-superseded");
     assert_eq!(superseded.len(), 1, "{superseded:?}");
-    assert_eq!(superseded[0]["payload"]["by"]["run"], "theirs");
+    assert_eq!(superseded[0]["payload"]["by"]["host"], "host-b");
     assert_eq!(
         claim_file(&world, run).map(|file| file.reading.state),
         Some(onepipeline::views::ClaimState::Superseded)
     );
     world.until_run_file_holds(run, "driver.log", "ends its dispatches in progress — 'x'");
+    let said = taken_over(taking);
+    assert!(said.contains("acknowledged the takeover"), "{said}");
+    x.arrived().release();
+    successor.until("the adopter to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(settled(&successor, run, "x")["status"], "done");
+}
+
+/// `host` taking `project` over, in the background.
+fn take_over(host: &World, project: &str) -> std::process::Child {
+    let mut command = host.cmd(&["start", project, "--detach", "--take-over"]);
+    command
+        .current_dir(&host.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.spawn().expect("the takeover starts")
+}
+
+/// A background takeover's answer: it launched, and what it said on its way.
+fn taken_over(taking: std::process::Child) -> String {
+    let answered = taking.wait_with_output().expect("the takeover answers");
+    let said = String::from_utf8_lossy(&answered.stderr).into_owned();
+    assert_eq!(
+        answered.status.code(),
+        Some(0),
+        "the takeover failed:\n{said}"
+    );
+    said
+}
+
+/// A superseded driver whose acknowledgement and fence clear the board both refuses stays,
+/// owing them, and tries both again on the fence's retry — it neither ends nor leaves its
+/// adopter on a fence nothing will clear — and lets go once one lands, which the adopter
+/// starts on.
+#[test]
+fn a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_lands() {
+    let base = claim_world("claim-handover-refused");
+    let successor = base.on_host("host-b");
+    let world = base;
+    let x = world.rendezvous("x");
+    let run = "claim-handover-refused";
+    let project = world.plan(run, &plan_of(run, vec![agent("x", &[])]));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let mine = x.arrived();
+    until_claim(&world, run, "confirmed");
+    let taking = take_over(&successor, &project);
+    world.until("the takeover's claim to land", |world| {
+        stored_claim(world, &project)["host"] == "host-b"
+    });
+    world.store_refuses("set_project_metadata", &board_down());
+    world.until("the displaced driver to retry its handover", |world| {
+        std::fs::read_to_string(world.run_file(run, "driver.log")).is_ok_and(|log| {
+            log.matches("could not acknowledge run").count() >= 2
+                && log.contains("could not write its dispatches and publications under way")
+        })
+    });
+    drop(mine);
+    assert_eq!(settled(&world, run, "x")["status"], "cancelled");
+    assert!(
+        !world.run_file(run, "result.json").is_file(),
+        "the displaced driver let go owing its adopter both writes"
+    );
+    world.store_stops_refusing("set_project_metadata");
+    let said = taken_over(taking);
+    assert!(said.contains("acknowledged the takeover"), "{said}");
+    world.until("the displaced driver to let go", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    x.arrived().release();
+    successor.until("the adopter to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(settled(&successor, run, "x")["status"], "done");
+}
+
+/// This host's name, as the binary reads it when nothing names it.
+fn this_host() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|name| name.trim().to_owned())
+                .filter(|name| !name.is_empty())
+        })
+        .unwrap_or_else(|| "localhost".to_owned())
+}
+
+/// A takeover on the driver's own host, from a runs root that does not hold its run, once the
+/// claim's pid has died there, waits on nothing — no claim written first, no wait said — and
+/// dispatches the node that was in flight onto the branch its record names.
+///
+/// The same takeover over a pid still live is the wait every other takeover journey drives
+/// across hosts: a live driver under another runs root of this host would mint the same run
+/// id here and read this takeover's claim as its own, so it is not arranged on one host.
+#[cfg(unix)]
+#[test]
+fn a_takeover_on_the_drivers_host_once_its_pid_has_died_waits_on_nothing() {
+    let run = "claim-host-dead";
+    let world = claim_world(run);
+    world.script("x.work", "x's change\n");
+    let elsewhere = world.on_host(&this_host());
+    let x = world.rendezvous("x");
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("x", &[])]));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let mine = x.arrived();
+    let branch = recorded_branch(&world, &project, "x");
+    assert_eq!(stored_claim(&world, &project)["host"], this_host());
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the driver's pid");
+    crate::harness::end_process(pid);
+    let said = taken_over(take_over(&elsewhere, &project));
+    drop(mine);
+    assert!(!said.contains("--take-over claimed"), "{said}");
+    assert!(!said.contains("has not acknowledged"), "{said}");
+    x.arrived().release();
+    elsewhere.until("the takeover to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(sessions_opened_after(&elsewhere, run, 0), vec![branch]);
+    assert!(records_of(&elsewhere, run, "node-held", "x").is_empty());
 }
 
 /// The node ids `run` dispatched, each with when.
@@ -840,7 +967,10 @@ fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() 
 /// A run adopted after the driver it had was put down — `put_down` — waits on nothing: the
 /// adopting driver journals no hold on the one it replaces, and dispatches the node that
 /// was in flight onto the branch its record names.
-fn an_adoption_after_its_driver_is_gone_waits_on_nothing(name: &str, put_down: fn(&World, &str)) {
+fn an_adoption_after_its_driver_is_gone_waits_on_nothing(
+    name: &str,
+    put_down: fn(&World, &str, &str),
+) {
     let world = claim_world(name);
     world.script("x.work", "x's change\n");
     let x = world.rendezvous("x");
@@ -851,7 +981,7 @@ fn an_adoption_after_its_driver_is_gone_waits_on_nothing(name: &str, put_down: f
         .exited(0);
     let first = x.arrived();
     let branch = recorded_branch(&world, &project, "x");
-    put_down(&world, run);
+    put_down(&world, run, &project);
     drop(first);
     let before = world.journal(run).len();
     let adopted = world.run(&["adopt", run, "--detach"]);
@@ -884,18 +1014,33 @@ fn an_adoption_after_its_driver_is_gone_waits_on_nothing(name: &str, put_down: f
 /// A host shutdown put the driver down; `adopt` picks the run up.
 #[test]
 fn a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch() {
-    an_adoption_after_its_driver_is_gone_waits_on_nothing("claim-shutdown", |world, run| {
-        let shutdown = world.run(&["shutdown", run, "--grace", "1"]);
-        assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
-        assert!(!world.events_of(run, "host-shutdown").is_empty());
-    });
+    an_adoption_after_its_driver_is_gone_waits_on_nothing(
+        "claim-shutdown",
+        |world, run, project| {
+            let shutdown = world.run(&["shutdown", run, "--grace", "1"]);
+            assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+            assert!(!world.events_of(run, "host-shutdown").is_empty());
+            // The dispatch it stopped is recorded stopped on the store: the fence names it no more.
+            let fence = world.store_project(project)["items"][0]["item"]["metadata"]
+                .get("onepipeline.publishing")
+                .cloned()
+                .unwrap_or(Value::Null);
+            assert!(
+                fence.is_null()
+                    || !fence["nodes"]
+                        .as_array()
+                        .is_some_and(|nodes| nodes.contains(&json!("x"))),
+                "the shutdown left x on the fence: {fence}"
+            );
+        },
+    );
 }
 
 /// The driver's process died on this host; `adopt` picks the run up.
 #[cfg(unix)]
 #[test]
 fn a_run_adopted_after_its_drivers_pid_died_waits_on_nothing_and_resumes_on_the_recorded_branch() {
-    an_adoption_after_its_driver_is_gone_waits_on_nothing("claim-pid-died", |world, run| {
+    an_adoption_after_its_driver_is_gone_waits_on_nothing("claim-pid-died", |world, run, _| {
         let pid = world.run_json(run, "launch.json")["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())

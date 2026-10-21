@@ -1851,7 +1851,7 @@ fn restate_publishing(world: &World, project: &str, value: Value) {
 /// once nor an interval later — and a pass something else wakes inside that window, here a
 /// surface queued on the run's channel, writes nothing.
 #[test]
-fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
+fn a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
     let world = takeover_world("fence-refused", 60).through_scripted_source();
     world.script("y.work", "y's change\n");
     let x = world.rendezvous("x");

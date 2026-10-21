@@ -27,6 +27,17 @@ pub(crate) const CLAIM_FILE: &str = "claim.json";
 /// The version of the sidecar document.
 pub(crate) const CLAIM_SCHEMA_VERSION: u32 = 1;
 
+/// The keys the sidecar carries, and the only ones.
+const CLAIM_KEYS: [&str; 7] = [
+    "schema_version",
+    "state",
+    "last_confirmed_at",
+    "unconfirmed_since",
+    "reason",
+    "detail",
+    "lease_interval_s",
+];
+
 /// Where the driver's claim on its project stands, as its newest read left it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -156,9 +167,12 @@ impl ClaimReading {
             ClaimState::Confirmed => {
                 self.unconfirmed_since.is_none()
                     && self.reason.is_none()
+                    && self.detail.is_none()
                     && self.last_confirmed_at.is_some()
             }
-            ClaimState::Superseded => self.unconfirmed_since.is_none() && self.reason.is_none(),
+            ClaimState::Superseded => {
+                self.unconfirmed_since.is_none() && self.reason.is_none() && self.detail.is_some()
+            }
         }
     }
 
@@ -195,7 +209,26 @@ impl ClaimFile {
     ///
     /// What was wrong with it, in words.
     pub fn parse(text: &str) -> Result<Self, String> {
+        // The document's keys exactly: a flattened reading cannot refuse unknown fields
+        // itself, so a misspelled or unexpected one is refused here rather than dropped.
+        let keys: std::collections::BTreeSet<String> =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text)
+                .map_err(|error| error.to_string())?
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect();
+        if let Some(unknown) = keys.iter().find(|key| !CLAIM_KEYS.contains(&key.as_str())) {
+            return Err(format!("an unknown key `{unknown}`"));
+        }
         let file: Self = serde_json::from_str(text).map_err(|error| error.to_string())?;
+        if !(1..=crate::continuation::MAX_CLAIM_INTERVAL.as_secs()).contains(&file.lease_interval_s)
+        {
+            return Err(format!(
+                "a lease interval of {}s, outside 1 to {}",
+                file.lease_interval_s,
+                crate::continuation::MAX_CLAIM_INTERVAL.as_secs()
+            ));
+        }
         if file.schema_version != CLAIM_SCHEMA_VERSION {
             return Err(format!(
                 "schema_version {} is not {CLAIM_SCHEMA_VERSION}",
@@ -326,12 +359,91 @@ mod tests {
         assert!(ClaimFile::parse(&wrong.to_string()).is_err());
         wrong["state"] = serde_json::json!("confirmed");
         assert!(ClaimFile::parse(&wrong.to_string()).is_err());
+        let mut odd: serde_json::Value = serde_json::from_str(&whole).unwrap();
+        odd["lease_interval"] = serde_json::json!(5);
+        assert!(
+            ClaimFile::parse(&odd.to_string()).is_err(),
+            "an unknown key"
+        );
+        for interval in [0, 86_401] {
+            let mut lease: serde_json::Value = serde_json::from_str(&whole).unwrap();
+            lease["lease_interval_s"] = serde_json::json!(interval);
+            assert!(ClaimFile::parse(&lease.to_string()).is_err(), "{interval}");
+        }
+        let at = 1_760_000_000_000;
+        let mut chatty = serde_json::to_value(file(ClaimReading::confirmed(at))).unwrap();
+        chatty["detail"] = serde_json::json!("why");
+        assert!(ClaimFile::parse(&chatty.to_string()).is_err());
+        let mut silent =
+            serde_json::to_value(file(ClaimReading::superseded(Some(at), "b".into()))).unwrap();
+        silent["detail"] = serde_json::Value::Null;
+        assert!(ClaimFile::parse(&silent.to_string()).is_err());
         let mut later: serde_json::Value = serde_json::from_str(&whole).unwrap();
         later["schema_version"] = serde_json::json!(2);
         assert!(ClaimFile::parse(&later.to_string()).is_err());
         later["schema_version"] = serde_json::json!(1);
         later["state"] = serde_json::json!("lapsed");
         assert!(ClaimFile::parse(&later.to_string()).is_err());
+    }
+
+    /// Entry 135 of `docs/contract-divergences.md` states the sidecar, its words and the
+    /// surface kind in one json block: each is held to the type and the constant it names.
+    #[test]
+    fn entry_135s_block_is_what_this_build_writes_and_reads() {
+        let record = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
+        )
+        .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("135."))
+            .expect("the record carries entry 135");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 135 carries a json block");
+        assert_eq!(block["claim_file"], CLAIM_FILE);
+        let example = ClaimFile::parse(&block["claim"].to_string()).expect("the example reads");
+        assert_eq!(serde_json::to_value(&example).unwrap(), block["claim"]);
+        let words = |of: Vec<serde_json::Value>| serde_json::Value::Array(of);
+        assert_eq!(
+            block["states"],
+            words(
+                [
+                    ClaimState::Confirmed,
+                    ClaimState::Unconfirmed,
+                    ClaimState::Superseded
+                ]
+                .map(|state| serde_json::to_value(state).unwrap())
+                .to_vec()
+            )
+        );
+        assert_eq!(
+            block["reasons"],
+            words(
+                [
+                    UnconfirmedReason::Late,
+                    UnconfirmedReason::Failed,
+                    UnconfirmedReason::RateLimited
+                ]
+                .map(|reason| serde_json::json!(reason.as_str()))
+                .to_vec()
+            )
+        );
+        for reason in [
+            UnconfirmedReason::Late,
+            UnconfirmedReason::Failed,
+            UnconfirmedReason::RateLimited,
+        ] {
+            assert_eq!(serde_json::to_value(reason).unwrap(), reason.as_str());
+        }
+        assert_eq!(block["surface_kind"], crate::engine::CLAIM_UNCONFIRMED);
+        assert_eq!(
+            block["watch_segment"],
+            format!("CLAIM UNCONFIRMED {}", span(720))
+        );
     }
 
     #[test]

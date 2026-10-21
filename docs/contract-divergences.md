@@ -12407,6 +12407,7 @@ dispatch in flight ended and dispatched again by the adopter, in turn.
 publication asked for while the claim was unconfirmed.
 `a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing` resumes already
 superseded, its claim thread having read the takeover during the hold.
-`a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands` refuses the
-fence a dispatch needs. The two closeout-release journeys make the store slow only once the
+Entry 128's `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands`
+refuses the fence a dispatch needs, as
+`a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands`. The two closeout-release journeys make the store slow only once the
 dispatch is under way.

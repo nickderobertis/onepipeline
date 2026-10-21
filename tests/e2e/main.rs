@@ -49,7 +49,12 @@ mod branch_template;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod bus_config;
 mod cancellation;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the claim thread lives in
+// `continuation`, gates the starts `engine` makes, is fenced through `taskgraph`, released by
+// `shutdown`, judged gone by `driver` and read back by `views` and `watch`, so the crate is the
+// narrowest edge these journeys can honestly sit behind; same grounds as `mod continuation`.
 mod claim;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] nine journeys, about
 // 25s together, whose waits are the measurement under test — a scripted turn and a
 // `pre-push` hook of known lengths, against which the view's segments are checked. What

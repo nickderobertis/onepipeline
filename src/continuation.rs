@@ -1837,6 +1837,7 @@ pub(crate) fn release_stopped(
             let Some(fenced) = fence_on(&paths.run, &host, &project, &metadata) else {
                 return Ok(());
             };
+            // llmlint: ignore[changed_behavior_has_e2e] what stays is a dispatch the teardown could not end — a process a kill did not reach, which no journey can arrange — or a settlement the store had not taken at that instant; the release of what stopped is asserted by `claim::a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch`.
             let left: std::collections::BTreeSet<String> =
                 fenced.difference(stopped).cloned().collect();
             if left == fenced {
@@ -2080,7 +2081,8 @@ mod tests {
     #[test]
     fn a_read_not_answered_by_its_deadline_is_late_and_each_episode_surfaces_once() {
         use crate::claimstate::{ClaimFile, ClaimState, UnconfirmedReason};
-        let interval = Duration::from_millis(300);
+        // A whole second: the sidecar states its lease in whole seconds, and refuses none.
+        let interval = Duration::from_secs(1);
         let dir = std::env::temp_dir().join(format!(
             "onepipeline-lease-{}-{:?}",
             std::process::id(),
@@ -2101,7 +2103,7 @@ mod tests {
         );
         lease.next_read_at(began + interval);
         let until = |what: &str, done: &dyn Fn() -> bool| {
-            let deadline = Instant::now() + 50 * interval;
+            let deadline = Instant::now() + 20 * interval;
             while !done() {
                 assert!(Instant::now() < deadline, "{what}");
                 std::thread::sleep(Duration::from_millis(10));
