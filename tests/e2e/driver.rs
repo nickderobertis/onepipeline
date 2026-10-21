@@ -6286,34 +6286,41 @@ fn an_edit_that_arrives_while_the_driver_is_leaving_is_applied_before_it_lets_go
 /// A run held in the one window where its driver owns it and claims nothing.
 ///
 /// The run's only node has settled and the driver is inside its write-back
-/// close-out — a bounded wait it owes the store before it settles the run — held
-/// open by a capture path the store cannot write. It holds the ownership lock
-/// throughout, so an edit typed here is accepted onto the durable queue, and it
-/// claims nothing from that queue while it waits.
+/// close-out, after its terminal projection failed and before its final command
+/// claim. The closeout failpoint holds that exact boundary: a settled-node record
+/// alone does not prove the driver has stopped claiming commands.
 ///
-/// Returns the run and the pid of the driver holding it.
+/// Returns the world, run, driver pid and the held final claim.
 #[cfg(unix)]
-fn a_driver_that_owns_a_run_and_claims_nothing(world: &World, name: &str) -> (String, u32) {
+fn a_driver_that_owns_a_run_and_claims_nothing(
+    world: World,
+    name: &str,
+) -> (World, String, u32, crate::harness::Arrival) {
+    let closeout = crate::harness::Rendezvous::failpoint();
+    // llmlint: ignore-block[tests_mirror_real_usage] the fixture needs the driver to own
+    // the run without claiming its queue. A settled-node record precedes that boundary;
+    // this existing failpoint holds the real final claim while replies use the real CLI.
+    let world = world.with_env("ONEPIPELINE_TEST_CLOSEOUT_GATE", &closeout.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.script("work.wait", "hold");
-    let (run, driver) = start_detached_announcing(world, name, vec![agent("work", &[])]);
+    let (run, driver) = start_detached_announcing(&world, name, vec![agent("work", &[])]);
     world.until("the run to dispatch something", |world| {
         !world.events_of(&run, "node-dispatched").is_empty()
     });
 
-    // llmlint: ignore-block[tests_mirror_real_usage] a write-back shadow store that cannot
-    // be written is a state a host produces on its own — a full disk, a permission change —
-    // and `store.rs`'s `an_unwritable_shadow_store_is_reported_retried_and_recovered` states
-    // the same fixture the same way. It is here because the driver has to hold the run
-    // without claiming its queue for long enough for a planner to type a reply into that
-    // window, and how long a store takes to refuse is not an input the CLI exposes.
-    unwritable_shadow_store(world, &run);
+    // llmlint: ignore-block[tests_mirror_real_usage] an unwritable shadow store is a
+    // real host failure, such as a full disk or a permission change, which no CLI verb
+    // creates. Keep the failed terminal projection in these recovery journeys while
+    // the closeout gate holds the final command claim independently of store timing.
+    unwritable_shadow_store(&world, &run);
     // llmlint: ignore-end[tests_mirror_real_usage]
 
     world.release("work.go");
     world.until("the only node to settle", |world| {
         !world.events_of(&run, "node-settled").is_empty()
     });
-    (run, driver)
+    let leaving = closeout.arrived();
+    (world, run, driver, leaving)
 }
 
 /// Make the run's write-back shadow store unwritable once its first projection has opened
@@ -6478,8 +6485,10 @@ fn an_edit_that_cannot_be_gated_is_refused_and_nothing_reaches_the_queue() {
 #[test]
 fn a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed() {
     let world = World::new("driver-gate-refused-exit");
-    let (run, driver) = a_driver_that_owns_a_run_and_claims_nothing(&world, "gate-exit");
+    let (world, run, driver, leaving) =
+        a_driver_that_owns_a_run_and_claims_nothing(world, "gate-exit");
     a_gate_this_host_cannot_take(&world, &run);
+    leaving.release();
 
     world.until("the driver to end", |_| !still_listed(driver));
     assert!(
@@ -6517,13 +6526,15 @@ fn a_driver_that_cannot_be_gated_on_its_way_out_leaves_the_run_claimed() {
 #[test]
 fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accepted_it() {
     let world = World::new("driver-queue-recovery");
-    let (run, driver) = a_driver_that_owns_a_run_and_claims_nothing(&world, "queue-recovery");
+    let (world, run, driver, leaving) =
+        a_driver_that_owns_a_run_and_claims_nothing(world, "queue-recovery");
     let replying = queued_behind_the_driver(&world, &run, &adding_a_node(), 0);
 
     // The driver dies holding the run, the way a host ends a process it has run
     // out of memory for: the lock it never released still names it, and the
     // envelope on the queue is one it never claimed.
     end_process(driver);
+    leaving.release();
 
     let answered = replying.wait_with_output().expect("the reply answers");
     let said = String::from_utf8_lossy(&answered.stdout);
@@ -6573,12 +6584,13 @@ fn an_edit_the_dead_drivers_queue_still_holds_is_applied_by_the_reply_that_accep
 #[test]
 fn a_queued_edit_the_run_refuses_is_refused_to_the_reply_that_took_the_run_over() {
     let world = World::new("driver-queue-recovery-refusal");
-    let (run, driver) =
-        a_driver_that_owns_a_run_and_claims_nothing(&world, "queue-recovery-refused");
+    let (world, run, driver, leaving) =
+        a_driver_that_owns_a_run_and_claims_nothing(world, "queue-recovery-refused");
     let first = queued_behind_the_driver(&world, &run, &adding_a_node(), 0);
     let second = queued_behind_the_driver(&world, &run, &adding_a_node(), 1);
 
     end_process(driver);
+    leaving.release();
 
     let applied = first.wait_with_output().expect("the first reply answers");
     let refused = second.wait_with_output().expect("the second reply answers");
