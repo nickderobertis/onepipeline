@@ -6334,6 +6334,19 @@ fn run_labels_survive_real_start_and_adopt() {
 fn run_labels_copy_origin_resolves_group_and_name() {
     use onepipeline::views::{Listing, Projects};
     let world = World::new("origin-labels");
+    let authoring = world.store_apart("authoring");
+    let newer = world.store_apart("newer");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        )
+        .with_env("ONETASKGRAPH_SOURCES__NEWER__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__NEWER__CONFIG__ROOT",
+            newer.to_str().unwrap(),
+        );
     world.write_graphs();
     let copy = world.plan("copied", &plan_of("copied", vec![agent("build", &[])]));
     let file = world.store().join("projects/copied-board.md");
@@ -6354,38 +6367,25 @@ fn run_labels_copy_origin_resolves_group_and_name() {
             .err_has("onetaskgraph.origin");
         assert!(!world.run_file("copied", "launch.json").exists());
     }
-    std::fs::write(
-        &file,
-        text.replacen(
-            "metadata:",
-            "metadata:\n  onetaskgraph.origin: authoring:example",
-            1,
-        ),
-    )
-    .unwrap();
+    std::fs::write(&file, &text).unwrap();
+    world.plan_in(&authoring, "example", &plan_of("copied", vec![]));
+    world.copy_project_metadata("authoring:example-board", crate::harness::STORE_SOURCE);
     world
         .run_on_agentgraph(&["start", &copy, "--attach"])
         .exited(0);
     let launch = world.run_json("copied", "launch.json");
-    assert_eq!(launch["project_origin"], "authoring:example");
-    let newest = world.plan(
+    assert_eq!(launch["project_origin"], "authoring:example-board");
+    let newest = world.plan_in(
+        &newer,
         "newest-copy",
         &plan_of("newest-copy", vec![agent("build", &[])]),
     );
-    let newest_file = world.store().join("projects/newest-copy-board.md");
-    let text = std::fs::read_to_string(&newest_file).unwrap();
-    std::fs::write(
-        &newest_file,
-        text.replacen(
-            "metadata:",
-            "metadata:\n  onetaskgraph.origin: authoring:example",
-            1,
-        ),
-    )
-    .unwrap();
-    world
-        .run_on_agentgraph(&["start", &newest, "--attach"])
-        .exited(0);
+    world.plan_in(&authoring, "example", &plan_of("newest-copy", vec![]));
+    world.copy_project_metadata("authoring:example-board", "newer");
+    let newest = newest.replacen(crate::harness::STORE_SOURCE, "newer", 1);
+    let mut command = world.agentgraph_cmd(&["start", &newest, "--attach"]);
+    command.env("ONETASKGRAPH_DEFAULT_SOURCES", "newer");
+    world.run_on(command, "start the newer copy").exited(0);
     // New activity on the earlier run must not rename a project after its newest launch.
     world
         .run_on_agentgraph(&["adopt", "copied", "--attach"])
@@ -6400,14 +6400,14 @@ fn run_labels_copy_origin_resolves_group_and_name() {
             &planning,
             "--attach",
             "--group",
-            "authoring:example",
+            "authoring:example-board",
         ])
         .exited(0);
     let projects = Projects::of(&Listing::of(&world.runs));
     assert_eq!(projects.groups.len(), 1);
     assert_eq!(
         projects.groups[0].project.as_deref(),
-        Some("authoring:example")
+        Some("authoring:example-board")
     );
     assert_eq!(projects.groups[0].name.as_deref(), Some("newest-copy"));
     assert_eq!(projects.groups[0].runs.len(), 3);
@@ -6415,13 +6415,13 @@ fn run_labels_copy_origin_resolves_group_and_name() {
     status.exited(0);
     assert_eq!(
         serde_json::from_str::<Value>(&status.stdout).unwrap()["group"],
-        "authoring:example"
+        "authoring:example-board"
     );
     world
         .run_on_agentgraph(&["start", &copy, "--attach", "--group", "authoring:override"])
         .exited(0);
     let override_launch = world.run_json("copied-2", "launch.json");
-    assert_eq!(override_launch["project_origin"], "authoring:example");
+    assert_eq!(override_launch["project_origin"], "authoring:example-board");
     assert_eq!(override_launch["group"], "authoring:override");
     assert_eq!(
         world.run(&["status", "copied-2", "--json"]).json()["group"],
@@ -6794,6 +6794,7 @@ fn run_labels_recorded_host_runs_and_force_authorization() {
     for key in ["pid", "host", "started"] {
         recorded[key] = claim[key].clone();
     }
+    // llmlint: ignore[tests_mirror_real_usage] this persists only the captured fixture's pid/host/start transplant above so its foreign ownership can be replayed against a real held driver on this host. The original host process and recorded graph are never run or touched; the preceding real-start journey separately proves ownership refusal and force authorization without rewriting a claim.
     std::fs::write(
         world.run_file(driven, "launch.json"),
         serde_json::to_vec(&recorded).unwrap(),

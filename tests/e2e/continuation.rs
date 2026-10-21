@@ -1369,31 +1369,34 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let x = world.rendezvous("x");
     let run = "idle";
     let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
-    let origin = |value: &str| {
-        // Edit the actual local source document: the store's metadata setter reserves
-        // onetaskgraph.origin to its copy machinery and refuses arbitrary writes to it.
-        let file = world
-            .store()
-            .join("projects")
-            .join(format!("{}.md", project.split_once(':').unwrap().1));
-        let text = std::fs::read_to_string(&file).unwrap();
-        let (front, body) = text
-            .strip_prefix("---\n")
-            .unwrap()
-            .split_once("\n---")
-            .unwrap();
-        let mut document: Value = serde_saphyr::from_str(front).unwrap();
-        document["metadata"]["onetaskgraph.origin"] = json!(value);
+    let authoring = world.store_apart("authoring");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        );
+    let origin = |name: &str| {
+        let mut plan = world.store_project(&project)["items"][0]["item"].clone();
+        // Use the launched plan's current metadata so copying the replacement origin
+        // preserves its active claim and the driver's projection.
+        let file = authoring.join("projects").join(format!("{name}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        plan["title"] = json!("idle");
         std::fs::write(
             &file,
             format!(
-                "---\n{}---{body}",
-                serde_saphyr::to_string(&document).unwrap()
+                "---\n{}---\n",
+                serde_saphyr::to_string(&json!({
+                    "title": plan["title"], "metadata": plan["metadata"]
+                }))
+                .unwrap()
             ),
         )
         .unwrap();
+        world.copy_project_metadata(&format!("authoring:{name}"), crate::harness::STORE_SOURCE);
     };
-    origin("authoring:before");
+    origin("before");
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
@@ -1422,7 +1425,7 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let claim = until_claimed_on(&world, &project, "host-b");
     let landed = std::time::Instant::now();
     // The successor has read the old origin and written its claim, but cannot yet launch.
-    origin("authoring:after");
+    origin("after");
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run before the driver it displaced had let go"
