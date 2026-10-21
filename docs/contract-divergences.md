@@ -12390,10 +12390,14 @@ declared type in a tight loop throughout:
 `a_claim_whose_reads_answer_late_keeps_its_dispatch_and_starts_nothing`, the last through a
 new failpoint inside the read, `ONEPIPELINE_TEST_CLAIM_READ_LATE_GATE`;
 `each_uninterrupted_unconfirmed_episode_raises_one_surface`;
+`a_landed_claim_found_gone_is_unconfirmed_until_a_read_finds_it_again`;
 `a_read_finding_another_drivers_claim_ends_the_dispatch_in_flight_and_supersedes`;
-`an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs`; and
+`a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_lands`;
+`an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs`;
+`a_takeover_on_the_drivers_host_once_its_pid_has_died_waits_on_nothing`; and
 `a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch`
 and `a_run_adopted_after_its_drivers_pid_died_waits_on_nothing_and_resumes_on_the_recorded_branch`.
+`src/claimstate.rs`'s unit tests hold the block above to the types and the surface kind.
 Entry 128's `a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses` and
 `a_dispatch_outliving_its_lease_is_ended_while_the_reconcile_loop_is_held` asserted the
 retired lapse and are replaced by the first four, and

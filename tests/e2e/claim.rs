@@ -545,6 +545,90 @@ fn each_uninterrupted_unconfirmed_episode_raises_one_surface() {
     assert_eq!(unconfirmed_surfaces(&world, run).len(), 2);
     assert_eq!(settled(&world, run, "x")["status"], "done");
     reader.finished();
+    // The driver has gone: what its sidecar last said is no claim of a live driver.
+    world.until("the driver to exit", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    assert!(
+        claim_file(&world, run).is_some(),
+        "the sidecar was taken away"
+    );
+    let status = world.run(&["status", run, "--json"]);
+    status.exited(0);
+    assert!(status.json().get("claim").is_none(), "{}", status.stdout);
+}
+
+/// A claim this driver's own had landed as, which a read then finds gone — somebody cleared
+/// it — confirms nothing: the claim is unconfirmed, `failed`, the dispatch in flight runs on,
+/// the node made ready starts nothing; and once the claim is back, a read confirms it and the
+/// node starts.
+#[test]
+fn a_landed_claim_found_gone_is_unconfirmed_until_a_read_finds_it_again() {
+    let world = claim_world("claim-gone");
+    let x = world.rendezvous("x");
+    let w = world.rendezvous("w");
+    let run = "claim-gone";
+    let mut plan = plan_of(
+        run,
+        vec![agent("x", &[]), agent("w", &[]), agent("y", &["w"])],
+    );
+    plan["concurrency"] = json!(3);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let in_flight = x.arrived();
+    let readying = w.arrived();
+    world.until("the claim to land", |world| {
+        stored_claim(world, &project)["run"] == run
+    });
+    let landed = stored_claim(&world, &project);
+    until_claim(&world, run, "confirmed");
+    let reader = ClaimReader::start(&world, run);
+    // llmlint: ignore-block[tests_mirror_real_usage] a claim cleared by somebody else is a
+    // write outside this binary — a person at the store's own tools — so the journey makes it
+    // through the store's own engine, as `continuation.rs`'s cleared-claim journeys do.
+    let set_claim = |value: Value| {
+        let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
+            .expect("a key");
+        let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+        world
+            .store_call(
+                |engine| async move { engine.set_project_metadata(&id, &key, &value).await },
+            )
+            .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+    };
+    set_claim(Value::Null);
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let gone = until_claim(&world, run, "unconfirmed");
+    assert_eq!(
+        gone.reading.reason,
+        Some(onepipeline::views::UnconfirmedReason::Failed)
+    );
+    assert!(
+        gone.reading
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("found no claim on")),
+        "{gone:?}"
+    );
+    readying.release();
+    assert_eq!(settled(&world, run, "w")["status"], "done");
+    std::thread::sleep(Duration::from_secs(2 * INTERVAL));
+    assert!(records_of(&world, run, "node-dispatched", "y").is_empty());
+    assert!(records_of(&world, run, "node-settled", "x").is_empty());
+
+    set_claim(landed);
+    until_claim(&world, run, "confirmed");
+    world.until("y to be dispatched", |world| {
+        !records_of(world, run, "node-dispatched", "y").is_empty()
+    });
+    in_flight.release();
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(settled(&world, run, "x")["status"], "done");
+    reader.finished();
 }
 
 /// A reconcile pass held — at the start of another node — for several lease windows with a
@@ -623,6 +707,33 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
         "a confirming read wrote to the journal"
     );
     assert!(records_of(&world, run, "node-settled", "x").is_empty());
+    reader.finished();
+
+    // A sidecar that cannot be read says nothing is known: `status` names no claim, rather
+    // than one it made up. The next read, held here, writes it whole again.
+    let read = reads.arrived();
+    std::fs::write(
+        world.run_file(run, "claim.json"),
+        r#"{"schema_version":1,"state":"#,
+    )
+    .expect("the sidecar is torn");
+    let status = world.run(&["status", run, "--json"]);
+    status.exited(0);
+    assert!(status.json().get("claim").is_none(), "{}", status.stdout);
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains("claim UNCONFIRMED"),
+        "{}",
+        status.stdout
+    );
+    read.release();
+    world.until("the next read to write the sidecar whole", |world| {
+        std::fs::read_to_string(world.run_file(run, "claim.json"))
+            .ok()
+            .and_then(|text| ClaimFile::parse(&text).ok())
+            .is_some()
+    });
 
     loop_held.release();
     std::thread::spawn(move || loop {
@@ -638,7 +749,6 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
     assert_eq!(settled(&world, run, "x")["status"], "done");
     assert_eq!(settled(&world, run, "y")["status"], "done");
     assert!(unconfirmed_surfaces(&world, run).is_empty());
-    reader.finished();
 }
 
 /// A read that finds another driver's claim — a host's `start --take-over` — ends this
