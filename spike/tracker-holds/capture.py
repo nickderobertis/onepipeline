@@ -14,6 +14,7 @@ rate limited.
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -31,6 +32,8 @@ RATE_LIMITED = "Rate limit exceeded"
 #: The mock's synthetic launch clock: 2026-05-04T11:20:00Z, normalise.py's BASE_INSTANT,
 #: so the reset it prints (launch + 1800 s = 11:50:00 UTC) is the same on every capture.
 LAUNCHED_AT = "1777893600"
+#: The source-wait envelope's queue clock, in milliseconds at that same instant.
+QUEUED_AT = "1777893600000"
 
 
 def plan(store: Path, name: str, tasks: list[tuple[str, str]]) -> str:
@@ -87,6 +90,10 @@ def run(w: W.World, mocked: bool, edged: str, args: list[str], stream: str) -> s
 
 
 def shot(out: Path, name: str, w: W.World, shown: str, text: str) -> None:
+    # Only the volatile envelope field changes, on both sides of pair 3. Keep
+    # the base's wording and JSON formatting exactly as the binary printed them.
+    if name.startswith("source-wait-backoff-"):
+        text = re.sub(r'("queued_at"\s*:\s*)\d+', lambda m: m[1] + QUEUED_AT, text)
     paths = {
         str(w.root / "onevcs-home"): "/home/you/.onevcs",
         str(w.runs): "/home/you/onepipeline/runs",
