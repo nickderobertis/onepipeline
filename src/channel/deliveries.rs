@@ -134,7 +134,7 @@ mod instant {
 }
 
 /// An instant that may be absent, as [`instant`] writes one that is present.
-mod optional_instant {
+pub(crate) mod optional_instant {
     use serde::{Deserialize, Deserializer, Serializer};
 
     // serde hands a `skip_serializing_if` field to its serializer only when it

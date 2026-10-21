@@ -45,7 +45,7 @@ use onetaskgraph_core::{
 };
 use onetaskgraph_plugin_api::{
     Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
-    SourceName, Task,
+    SourceError, SourceName, Task,
 };
 use serde_json::{Map, Value};
 
@@ -209,6 +209,27 @@ pub struct Store {
     environment: Environment,
 }
 
+/// Why a bounded read of the store confirmed nothing, as
+/// [`Store::project_metadata_read`] tells the cases apart.
+#[derive(Debug)]
+pub(crate) enum ReadRefusal {
+    /// It did not answer within the time it was given.
+    Late(Error),
+    /// The store refused it for its rate limit.
+    RateLimited(Error),
+    /// It failed some other way.
+    Failed(Error),
+}
+
+impl ReadRefusal {
+    /// The refusal, whichever it was.
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::Late(error) | Self::RateLimited(error) | Self::Failed(error) => error,
+        }
+    }
+}
+
 impl Store {
     /// The store this process's working directory configures, which is where a plan
     /// is read from.
@@ -345,6 +366,23 @@ impl Store {
         id: &QualifiedId,
         within: std::time::Duration,
     ) -> Result<BTreeMap<String, Value>> {
+        self.project_metadata_read(id, within)
+            .map_err(ReadRefusal::into_error)
+    }
+
+    /// [`project_metadata_within`](Self::project_metadata_within), answering why a read
+    /// confirmed nothing as well as what it said: it did not answer in time, the store
+    /// refused it for its rate limit, or it failed some other way. What a driver's claim
+    /// thread tells apart.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_metadata_within`](Self::project_metadata_within), classed.
+    pub(crate) fn project_metadata_read(
+        &self,
+        id: &QualifiedId,
+        within: std::time::Duration,
+    ) -> std::result::Result<BTreeMap<String, Value>, ReadRefusal> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -353,21 +391,41 @@ impl Store {
                     "the configuration discovered from {} cannot be read: {error}",
                     self.dir.display()
                 ),
-            })?;
-        let reader = Reader::over(built)?;
+            })
+            .map_err(ReadRefusal::Failed)?;
+        let reader = Reader::over(built).map_err(ReadRefusal::Failed)?;
         let global = id.global();
         let read = reader
             .call(async { tokio::time::timeout(within, reader.engine.project(&global)).await })
-            .map_err(|_| Error::Sibling {
-                tool: STORE,
-                message: format!(
-                    "project show of '{}' did not answer within {} seconds",
-                    id.as_str(),
-                    within.as_secs()
-                ),
+            .map_err(|_| {
+                ReadRefusal::Late(Error::Sibling {
+                    tool: STORE,
+                    message: format!(
+                        "project show of '{}' did not answer within {} seconds",
+                        id.as_str(),
+                        within.as_secs()
+                    ),
+                })
             })?
-            .map_err(|error| failed("project show", id.as_str(), &error))?;
-        let found = one(&global, "project show", read)?;
+            .map_err(|error| {
+                let refused = failed("project show", id.as_str(), &error);
+                if crate::writeback::rate_limited(&error) {
+                    ReadRefusal::RateLimited(refused)
+                } else {
+                    ReadRefusal::Failed(refused)
+                }
+            })?;
+        let limited = read
+            .errors
+            .iter()
+            .any(|failure| matches!(failure.error, SourceError::RateLimited { .. }));
+        let found = one(&global, "project show", read).map_err(|error| {
+            if limited {
+                ReadRefusal::RateLimited(error)
+            } else {
+                ReadRefusal::Failed(error)
+            }
+        })?;
         Ok(found.item.metadata.into_iter().collect())
     }
 

@@ -69,6 +69,17 @@
         "$ref": "#/$defs/UnansweredEnvelope"
       },
       "description": "Every command envelope claimed off the run's queue and not answered yet,\nin claim order — omitted when there is none."
+    },
+    "claim": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClaimReading"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Where the live driver's claim on its project stands, as its newest read of\nit left it — omitted where nothing is known: no driver is live, or the\ndriver wrote no `claim.json`."
     }
   },
   "required": [
@@ -314,6 +325,95 @@
         }
       ],
       "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states — a channel envelope id in decimal, an instant in RFC\n3339 — so a value read back that is neither is refused where it is read\nrather than shown."
+    },
+    "ClaimReading": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/ClaimState",
+          "description": "Where the claim stands."
+        },
+        "last_confirmed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the newest read that confirmed the claim began — `null` where none has."
+        },
+        "unconfirmed_since": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the claim became unconfirmed — `null` unless it is."
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnconfirmedReason"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Why it is unconfirmed — `null` unless it is."
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The newest read's own words: why it confirmed nothing, or the claim that\nsuperseded this driver — `null` where the claim is confirmed."
+        }
+      },
+      "required": [
+        "state",
+        "last_confirmed_at",
+        "unconfirmed_since",
+        "reason",
+        "detail"
+      ],
+      "description": "The driver's claim, as `status --json` reads it and as `claim.json` carries it.\n\nInstants are carried as epoch milliseconds and written as RFC 3339, as the document\nstates, so one read back that is not an instant is refused where it is read."
+    },
+    "ClaimState": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "confirmed",
+          "description": "A read within the lease window found the project this driver's."
+        },
+        {
+          "type": "string",
+          "const": "unconfirmed",
+          "description": "No read has confirmed the claim within the lease window: the driver's dispatches in\nflight keep running, and it starts no new dispatch and opens no new publication\nuntil a read confirms the claim again."
+        },
+        {
+          "type": "string",
+          "const": "superseded",
+          "description": "A read found another driver's claim: this driver ends its dispatches and lets go."
+        }
+      ],
+      "description": "Where the driver's claim on its project stands, as its newest read left it."
+    },
+    "UnconfirmedReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "late",
+          "description": "The read due did not answer within its deadline."
+        },
+        {
+          "type": "string",
+          "const": "failed",
+          "description": "The read was refused, or answered with something that confirms nothing."
+        },
+        {
+          "type": "string",
+          "const": "rate-limited",
+          "description": "The read was declined for the store's rate limit: refused for it, or not asked\ninside a wait the store asked for."
+        }
+      ],
+      "description": "Why no read has confirmed the claim."
     }
   }
 }

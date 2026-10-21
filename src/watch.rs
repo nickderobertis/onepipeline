@@ -1531,9 +1531,10 @@ impl Lines {
                 let unread = view.unread();
                 (
                     format!(
-                        "-- watching {}  {}  {}",
+                        "-- watching {}  {}{}  {}",
                         view.paths.run,
                         views::liveness_word(view),
+                        views::claim_phrase(view),
                         unread_phrase(&unread)
                     ),
                     rendered(&Record::Heartbeat {
@@ -1550,9 +1551,10 @@ impl Lines {
                     .map_or_else(String::new, |summary| format!("\n{}", summary.lines()));
                 (
                     format!(
-                        "-- watch {} {}  {}  cursor {}{summary}",
+                        "-- watch {} {}{}  {}  cursor {}{summary}",
                         view.paths.run,
                         outcome.ending.phrase(),
+                        views::claim_phrase(view),
                         unread_phrase(&unread),
                         outcome.cursor
                     ),

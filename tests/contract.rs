@@ -10402,6 +10402,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
         }),
         paused: None,
         unanswered: Vec::new(),
+        claim: None,
     };
     assert_eq!(
         example,

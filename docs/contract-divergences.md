@@ -12288,3 +12288,108 @@ stream this build writes is one an earlier reader reads, less the new kind.
   "bundle_versions": {"events": "1.9.0"}
 }
 ```
+
+## 135. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
+
+**Amendment of #965's ruling (entry 128), by the manager's ruling for this build: an
+unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128
+read the claim on the reconcile loop, so a long pass delayed the read, and its lease's
+watchdog ended every dispatch once no read had confirmed the claim for two intervals and the
+read deadline. A read that failed, or one skipped inside a wait the store asked for, renewed
+nothing, so a slow or rate-limited board was treated as another driver. A three-day run had
+all four of its live dispatches cancelled that way while the board's claim named that very
+driver throughout. The adopter's wait relied on that lapse having killed the displaced
+driver's work. Entry 128's wording, and the contract's, are unchanged until this is ruled on.
+
+1. **The claim is read off the reconcile loop**, on a thread of the claim watch's own,
+   once per claim interval as entry 128 says: due once the previous read began an interval
+   ago, never sooner. A read skipped inside a store's wait is due once that wait has passed
+   or an interval on, whichever is sooner. No pass, however long, delays a read.
+2. **A driver none of whose reads has confirmed its claim within the lease window is
+   unconfirmed.** That covers a read that is `late` (not answered within its 20-second
+   deadline, said by the lease's watchdog while it is still outstanding), one that `failed`,
+   and one declined for the store's rate limit (`rate-limited`: refused for it, or not asked
+   inside a wait the store asked for). A read that finds no claim where the driver's own had
+   landed confirms nothing either, and reads as `failed`. An unconfirmed driver keeps every
+   dispatch it has in flight, and never interrupts, kills or settles one for that reason. It
+   starts no new dispatch and opens no new publication. The first read that confirms the
+   claim makes it confirmed again, and it carries on. A start asks that the claim be
+   confirmed, by a read that began less than one interval and the read deadline ago. The
+   lapse and its watchdog's cancellation are retired.
+3. **Only a read showing another driver's claim ends this driver's dispatches**: each one
+   not publishing is asked to stop, killed after the cancel grace, and settled `cancelled`
+   with its branch kept. The driver then supersedes as entry 128 and entry 129 say.
+4. **The fence names dispatches as well as publications.** Before any dispatch starts,
+   the driver writes the project's `onepipeline.publishing`, entry 128's fence (whose
+   publication half #1014 tightened), naming that node beside its publications under way.
+   The dispatch starts only once the write has landed and the claim still admits it.
+   A node leaves the fence only once a projection carrying its settlement has landed, as
+   entry 129 says of a publication. The fence keeps its shape, `{"run", "host", "nodes",
+   "at"}`, so a build that reads `nodes` as publications only waits on them all the same.
+   An adopting driver therefore dispatches no node the displaced driver may still be running
+   until the store shows it settled or released. Entry 128's wait is kept only as a floor,
+   bounding when a displaced driver of either build can start anything more. The adopter no
+   longer treats it as proof that driver stopped: past it, the fence must name none of the
+   displaced driver's nodes, or the displaced driver must acknowledge.
+5. **A displaced driver that is provably gone makes nobody wait.** On the same host that is
+   its run's ownership lock found free, as before, or, for a run this runs root does not
+   hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
+   store too: after its `dispatch-stopped` records it takes every one that ended, gracefully
+   or killed, off the run's fence; one that would not go stays fenced. `adopt` after a host
+   shutdown, or after the driver's process died, resumes those nodes onto their recorded
+   branches at once.
+6. **`<run>/claim.json`** is written by the claim thread after every read, whole, through
+   a temporary file renamed over it. Like `owner.lock` and `channel/deliveries.json` it is
+   driver state, not journal-derived. No journal record is written per claim read. It is
+   declared once, as `views::ClaimFile`, whose `ClaimReading` is also the run reading's
+   `claim`. Its absence means nothing is known, which is how a run of an older engine reads.
+7. **The state is visible.** `status --json` gains, additively, `claim`, a `ClaimReading`
+   omitted where nothing is known or no driver is live, and `schemas/run-reading.schema.json`
+   is regenerated from the type. Adding the field to `RunReading`, which is not
+   `#[non_exhaustive]`, breaks a Rust struct literal of it, as `unanswered` did. The manager
+   ruled to take it, since this release already carries a breaking change. Human `status`
+   says the claim is unconfirmed, the reason and its detail, and how long since the last
+   confirming read, against the lease. Every watch heartbeat and ending line carries the
+   state and its age only, `CLAIM UNCONFIRMED 12 min`, so the line stays within 118 columns.
+   A non-blocking planner surface of kind `claim-unconfirmed` is raised once each time an
+   uninterrupted unconfirmed episode outlasts the lease window, naming the reason and the
+   time since the last confirming read.
+
+```json
+{
+  "claim_file": "claim.json",
+  "claim": {
+    "schema_version": 1,
+    "state": "unconfirmed",
+    "last_confirmed_at": "2026-10-21T09:40:58.551Z",
+    "unconfirmed_since": "2026-10-21T09:46:18.902Z",
+    "reason": "rate-limited",
+    "detail": "`project show` of 'plans:drafts' failed: rate limited",
+    "lease_interval_s": 300
+  },
+  "states": ["confirmed", "unconfirmed", "superseded"],
+  "reasons": ["late", "failed", "rate-limited"],
+  "surface_kind": "claim-unconfirmed",
+  "watch_segment": "CLAIM UNCONFIRMED 12 min"
+}
+```
+
+**What this build does.** `tests/e2e/claim.rs` drives it through the compiled binary over
+the scripted `local-md` store, with the interval shortened through
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, and a separate process reading `claim.json` through its
+declared type in a tight loop throughout:
+`a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing`;
+`a_claim_whose_reads_fail_keeps_its_dispatch_and_starts_nothing_until_a_read_confirms_it`,
+`a_claim_whose_reads_are_rate_limited_keeps_its_dispatch_and_starts_nothing` and
+`a_claim_whose_reads_answer_late_keeps_its_dispatch_and_starts_nothing`, the last through a
+new failpoint inside the read, `ONEPIPELINE_TEST_CLAIM_READ_LATE_GATE`;
+`each_uninterrupted_unconfirmed_episode_raises_one_surface`;
+`a_read_finding_another_drivers_claim_ends_the_dispatch_in_flight_and_supersedes`;
+`an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs`; and
+`a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch`
+and `a_run_adopted_after_its_drivers_pid_died_waits_on_nothing_and_resumes_on_the_recorded_branch`.
+Entry 128's `a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses` and
+`a_dispatch_outliving_its_lease_is_ended_while_the_reconcile_loop_is_held` asserted the
+retired lapse and are replaced by the first four, and
+`a_superseded_driver_starts_nothing_once_it_has_read_the_takeover` now asserts that the
+dispatch in flight is ended.

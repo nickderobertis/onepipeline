@@ -664,6 +664,19 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
         unrecorded(&paths.run, "a dispatch-stopped", written);
     }
 
+    // The dispatches that stopped are recorded stopped on the project's store too, so a run
+    // taking the project over waits on none of them; one that would not go stays fenced.
+    crate::continuation::release_stopped(
+        paths,
+        &view.launch,
+        &dispatches
+            .iter()
+            .filter(|stopped| stopped.ended != DispatchEnding::StillRunning)
+            .map(|stopped| stopped.node.clone())
+            .collect(),
+        &crate::boundary::of_run(&crate::boundary::plan_now(&view.state)).scope,
+    );
+
     // Unconditionally, whatever the teardown established: a branch is not less
     // worth keeping because a process would not go.
     let branches = preserve_every_branch(view, now.as_ref());

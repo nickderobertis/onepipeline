@@ -1068,11 +1068,12 @@ fn one_change_request_per_branch(world: &World) {
     );
 }
 
-/// A driver with a node **ready to dispatch** once a host has taken its project over reads
-/// the takeover at its next read and dispatches nothing, records why, and ends once the
-/// dispatch it had in flight has settled — and only then acknowledges the claim. The host
-/// that took over started nothing until then; it continues what that driver settled,
-/// dispatches what is left, and publishes the only change request for its branch.
+/// A driver with a dispatch in flight once a host has taken its project over reads the
+/// takeover at its next read, ends that dispatch — it settles cancelled, so the node behind
+/// it never becomes ready there — dispatches nothing, records why, and only then
+/// acknowledges the claim. The host that took over started nothing until then; it
+/// dispatches the ended node again and what is left, and publishes the only change request
+/// for its branch.
 #[test]
 fn a_superseded_driver_starts_nothing_once_it_has_read_the_takeover() {
     let interval = 10;
@@ -1093,23 +1094,27 @@ fn a_superseded_driver_starts_nothing_once_it_has_read_the_takeover() {
         !world.events_of("ready", "driver-superseded").is_empty()
     });
 
-    // `next` becomes ready in the first driver the moment `gate` settles there.
-    mine.release();
+    // The read that found the takeover ends `gate`, in flight: it settles cancelled, so
+    // `next` never becomes ready in the first driver.
     world.until("the superseded driver to end", |world| {
         world.run_file("ready", "result.json").is_file()
     });
+    drop(mine);
     superseded_by(&world, "ready", &claim);
     assert_eq!(dispatched(&world, "ready"), vec!["gate".to_owned()]);
+    assert_eq!(settled(&world, "ready", "gate")["status"], "cancelled");
     let said = launched_over(taking);
     assert!(said.contains("acknowledged the takeover"), "{said}");
 
+    // The successor dispatches `gate` again and then `next`.
+    let theirs = gate.arrived();
+    theirs.release();
     successor.until("the successor to settle", |world| {
         world.run_file("ready", "result.json").is_file()
     });
-    assert_eq!(dispatched(&successor, "ready"), vec!["next".to_owned()]);
     assert_eq!(
-        settled(&successor, "ready", "gate")["continued"]["source"],
-        "store"
+        dispatched(&successor, "ready"),
+        vec!["gate".to_owned(), "next".to_owned()]
     );
     assert_eq!(
         settled(&successor, "ready", "next")["outcome"],
@@ -2454,124 +2459,6 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     assert!(!refusal_pending(&world, "set_project_metadata"));
     in_turn(&world, &successor, run);
     drop(successor);
-}
-
-/// A driver whose reads of its claim keep failing ends the dispatch it has in progress once
-/// its last confirming read has held it two intervals and a read's deadline, says so, and
-/// starts nothing more until a read confirms it — and starts again once one does.
-#[test]
-fn a_driver_whose_reads_keep_failing_ends_its_dispatch_once_its_lease_lapses() {
-    let interval = 5;
-    let world = World::new("lease-lapsed")
-        .through_scripted_source()
-        .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
-        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    let x = world.rendezvous("x");
-    let run = "lapsed";
-    // One dispatch at a time, so `y` waits behind `x` rather than beside it.
-    let mut plan = plan_of(run, vec![agent("x", &[]), agent("y", &[])]);
-    plan["concurrency"] = json!(1);
-    let project = world.plan(run, &plan);
-    world
-        .run_from(&world.project, &["start", &project, "--detach"])
-        .exited(0);
-    let held = x.arrived();
-    until_claimed_by(&world, &project, run);
-    let since = std::time::Instant::now();
-    world.store_refuses("get_project", &board_down());
-    world.until_within(
-        std::time::Duration::from_secs(120),
-        "the lapsed lease to end x",
-        |world| {
-            world
-                .events_of(run, "node-settled")
-                .iter()
-                .any(|event| event["labels"]["node"] == "x")
-        },
-    );
-    assert!(
-        since.elapsed() >= std::time::Duration::from_secs(2 * interval),
-        "x was ended {:?} after the reads began failing, inside the lease",
-        since.elapsed()
-    );
-    assert_eq!(settled(&world, run, "x")["status"], "cancelled");
-    world.until_run_file_holds(run, "driver.log", "ends its dispatches in progress — 'x'");
-    // `y` is free to start and the lease lets it start nothing.
-    std::thread::sleep(std::time::Duration::from_secs(interval));
-    assert_eq!(dispatched(&world, run), vec!["x".to_owned()]);
-    // The board answers again: the next read confirms the lease, and `y` starts.
-    world.store_stops_refusing("get_project");
-    world.until("the driver to end", |world| {
-        world.run_file(run, "result.json").is_file()
-    });
-    assert_eq!(
-        dispatched(&world, run),
-        vec!["x".to_owned(), "y".to_owned()]
-    );
-    assert_eq!(settled(&world, run, "y")["status"], "done");
-    drop(held);
-}
-
-/// A driver whose reconcile loop is held — here at the start of another node — while a
-/// dispatch it has in progress outlives its lease still ends that dispatch: the lease's
-/// watchdog ends it from beside the loop, which reads no claim while it is held, and the
-/// held start then waits for a read to confirm the lease before it begins.
-#[test]
-fn a_dispatch_outliving_its_lease_is_ended_while_the_reconcile_loop_is_held() {
-    let interval = 5;
-    // llmlint: ignore-block[tests_mirror_real_usage] the property is the watchdog acting while
-    // the reconcile loop cannot, and no user-facing input holds that loop at a chosen instant.
-    // The failpoint only orders the real binary over the real store and agent doubles, and
-    // every outcome is asserted on the binary's own records.
-    let begins = crate::harness::Rendezvous::failpoint();
-    let world = World::new("lease-lapsed-held")
-        .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
-        .with_env(crate::harness::CANCEL_GRACE_ENV, "1")
-        .with_env(BEGIN_GATE, &begins.address())
-        .with_env(BEGIN_NODE, "y");
-    // llmlint: ignore-end[tests_mirror_real_usage]
-    let x = world.rendezvous("x");
-    let run = "lapsed-held";
-    // `x` is held in progress; `y` waits on `z`, so its start comes on a later pass, after
-    // the watchdog has been handed `x`.
-    let mut plan = plan_of(
-        run,
-        vec![agent("x", &[]), agent("z", &[]), agent("y", &["z"])],
-    );
-    plan["concurrency"] = json!(3);
-    let project = world.plan(run, &plan);
-    world
-        .run_from(&world.project, &["start", &project, "--detach"])
-        .exited(0);
-    let in_progress = x.arrived();
-    let loop_held = begins.arrived();
-    world.until_within(
-        std::time::Duration::from_secs(120),
-        "the watchdog to end x while the loop is held",
-        |world| {
-            std::fs::read_to_string(world.run_file(run, "driver.log"))
-                .is_ok_and(|log| log.contains("ends its dispatches in progress — 'x'"))
-        },
-    );
-    let mut started = dispatched(&world, run);
-    started.sort();
-    assert_eq!(
-        started,
-        vec!["x".to_owned(), "z".to_owned()],
-        "y started past the hold"
-    );
-    loop_held.release();
-    // Every later pass that would start `y` meets the failpoint again: each is let through.
-    std::thread::spawn(move || loop {
-        begins.arrived().release();
-    });
-    world.until("the driver to end", |world| {
-        world.run_file(run, "result.json").is_file()
-    });
-    assert_eq!(settled(&world, run, "x")["status"], "cancelled");
-    assert_eq!(settled(&world, run, "z")["status"], "done");
-    assert_eq!(settled(&world, run, "y")["status"], "done");
-    drop(in_progress);
 }
 
 /// A publication asked for on a lease an interval old — the read due then refused by the

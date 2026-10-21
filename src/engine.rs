@@ -592,6 +592,9 @@ pub(crate) enum Message {
     Raise(Box<Surface>),
     /// A rework's publication left its change request's title unverified.
     TitleUnverified(Box<UnverifiedTitle>),
+    /// The claim thread's newest read changed what the driver may do: its claim confirmed
+    /// again, unconfirmed, or superseded.
+    ClaimRead,
 }
 
 /// A rework's title nothing verified, on its way to the record and the planner:
@@ -736,13 +739,72 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
     verdict == PublicationVerdict::Publish
 }
 
+/// End every dispatch this driver has in flight that is not publishing, because a read of
+/// its claim found another run's: the only thing that ends a dispatch for the claim's sake.
+/// Each is asked to stop, killed after the cancel grace, and settles `cancelled` with its
+/// branch kept, for the run that took over to continue.
+fn end_superseded(
+    paths: &RunPaths,
+    in_flight: &BTreeMap<String, Dispatch>,
+    publishing: &BTreeSet<String>,
+) {
+    let ended: Vec<&String> = in_flight
+        .iter()
+        .filter(|(node, _)| !publishing.contains(*node))
+        .map(|(node, dispatch)| {
+            dispatch.cancel.cancel();
+            node
+        })
+        .collect();
+    if !ended.is_empty() {
+        eprintln!(
+            "onepipeline: run '{}': a read of the project's claim found another run's, so it \
+             ends its dispatches in progress — {}",
+            paths.run,
+            ended
+                .iter()
+                .map(|node| format!("'{node}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
+/// The non-blocking surface a claim no read has confirmed for as long as the lease window
+/// raises, once per episode: why, and how long since the last read that confirmed it.
+fn claim_unconfirmed_surface(unconfirmed: &crate::continuation::Unconfirmed) -> Surface {
+    Surface {
+        id: 0,
+        kind: CLAIM_UNCONFIRMED.into(),
+        message: format!(
+            "claim-unconfirmed: no read has confirmed this driver's claim on its project for {} \
+             (lease {}): {}: {}. Its dispatches in flight keep running; it starts no new \
+             dispatch and opens no new publication until a read confirms the claim, and \
+             carries on once one does.",
+            crate::claimstate::span(unconfirmed.for_seconds),
+            crate::claimstate::span(unconfirmed.lease_seconds),
+            unconfirmed.reason.phrase(),
+            unconfirmed.detail
+        ),
+        source: crate::channel::source::RECONCILER.into(),
+        blocking: false,
+        queued_at: sys::now_millis(),
+        abandoned: false,
+        asker: None,
+        workstream: None,
+        correlation: None,
+    }
+}
+
+/// The kind of the non-blocking surface a driver whose claim stays unconfirmed raises.
+pub(crate) const CLAIM_UNCONFIRMED: &str = "claim-unconfirmed";
+
 /// Record that another run's claim superseded this driver: the record first, then a
 /// non-blocking surface saying what it means, and the board left to that run once what
 /// this driver settles is on it.
 ///
-/// Nothing more is started. A dispatch in progress settles unpublished — or is ended by the
-/// lease's watchdog, once the last read that found the project this driver's has held it as
-/// long as a read may — and a publication already under way finishes.
+/// Nothing more is started. A dispatch in progress has been ended by [`end_superseded`],
+/// and settles `cancelled` and unpublished; a publication already under way finishes.
 ///
 /// Answers whether this driver owes the run that took over an acknowledgement: it does
 /// where it ever held a lease, so that run may be waiting on it — an adoption whose first
@@ -770,9 +832,9 @@ fn supersede(
     }
     let message = format!(
         "driver-superseded: run '{}' on host '{}' claimed this project at {}, so this driver \
-         dispatches and publishes nothing more; a dispatch in flight settles unpublished with \
-         its branch kept, for that run to continue, and once nothing is in progress this \
-         driver acknowledges that run's claim",
+         dispatches and publishes nothing more; a dispatch in flight is ended and settles \
+         cancelled and unpublished with its branch kept, for that run to continue, and once \
+         nothing is in progress this driver acknowledges that run's claim",
         by.run, by.host, by.claimed_at
     );
     journal.emit(
@@ -1530,21 +1592,13 @@ fn converge(
     // The landings whose closed issues the store is owed, read off this run's own journal and
     // sessions: entry 132 of `docs/contract-divergences.md`.
     let mut closures = crate::closures::Watch::new();
-    // Who the project's store says drives it, read once per claim interval whatever the
-    // driver is doing — an adoption's first pass included — and never more often. Each
-    // start of a dispatch or a publication asks the lease that read gave, not the store.
-    let mut claims = crate::continuation::ClaimWatch::of_run(
-        paths,
-        launch,
-        crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
-    );
     let claimed_at = sys::now_rfc3339();
     // The claim that took the project over from this driver, once one has: from then on it
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
     let mut superseded_by: Option<Superseded> = None;
     let mut publications: Vec<PublicationDue> = Vec::new();
     // The nodes whose publication this driver cleared and which have not settled: a
-    // publication under way is finished, so neither a takeover nor a lapsed lease ends it.
+    // publication under way is finished, so a takeover does not end it.
     let mut publishing: BTreeSet<String> = BTreeSet::new();
     // The nodes whose publication has settled and whose settlement the store does not hold
     // yet: each stays named on the fence until a projection carrying it has landed, so a run
@@ -1556,6 +1610,23 @@ fn converge(
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // Who the project's store says drives it, read once per claim interval on the watch's
+    // own thread, whatever the driver is doing — an adoption's first read included — and
+    // never more often; no pass, however long, delays a read. Each start of a dispatch or a
+    // publication asks the lease those reads keep, not the store, and the thread wakes this
+    // loop when what it found changes what the loop may do.
+    let claim_wake = tx.clone();
+    let mut claims = crate::continuation::ClaimWatch::of_run(
+        paths,
+        launch,
+        crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
+        Box::new(move || {
+            let _ = claim_wake.send(Message::ClaimRead);
+        }),
+    );
+    // The nodes this driver has dispatched and not settled, which its fence names so that a
+    // run taking the project over starts none of them while they may still be running.
+    let mut dispatching: BTreeSet<String> = BTreeSet::new();
     // Where a note waits for its conversation, so this loop does not: see
     // [`NoteDeliveries`]. What it holds outstanding is shared with every
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
@@ -1833,15 +1904,16 @@ fn converge(
         // once per driver — a launch's and an adoption's alike — and bounded by the store's
         // command deadline, so a store that fails or stalls reports it and delays nothing more.
         // Every later projection stays on the worker's own thread.
-        // The claim, once an interval has passed since the last read began — an adoption's
-        // first pass included, before it claims anything itself.
+        // What the claim thread's newest read found: another run's claim supersedes this
+        // driver, which ends every dispatch it has in flight that is not publishing.
         if superseded_by.is_none() {
             if let Some(by) = claims
-                .as_mut()
-                .filter(|watch| watch.read_due())
-                .and_then(crate::continuation::ClaimWatch::check)
+                .as_ref()
+                .and_then(crate::continuation::ClaimWatch::superseded)
             {
-                let fenced = !publishing.is_empty() || !unlanded.is_empty();
+                end_superseded(paths, &in_flight, &publishing);
+                let fenced =
+                    !publishing.is_empty() || !unlanded.is_empty() || !dispatching.is_empty();
                 let owed = supersede(
                     paths,
                     journal,
@@ -1856,6 +1928,15 @@ fn converge(
                     waited: false,
                 });
             }
+        }
+        // A claim no read has confirmed for as long as the lease window is said to the
+        // planner, once for each uninterrupted episode.
+        if let Some(unconfirmed) = claims
+            .as_ref()
+            .filter(|_| superseded_by.is_none())
+            .and_then(|watch| watch.lease().surface_due())
+        {
+            raise(paths, journal, claim_unconfirmed_surface(&unconfirmed))?;
         }
         // A publication waits on the pass rather than reading the claim itself: it starts
         // on the lease the newest read gave, and one asked for when that read is an interval
@@ -1880,6 +1961,7 @@ fn converge(
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
             nodes.extend(unlanded.iter().cloned());
+            nodes.extend(dispatching.iter().cloned());
             nodes.extend(starting.iter().map(|due| due.node.clone()));
             watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
         });
@@ -1971,10 +2053,23 @@ fn converge(
         let started_here = if superseded_by.is_some() {
             false
         } else {
+            // A dispatch starts only once the fence naming it has landed, and the lease is
+            // asked again after that write.
             let mut admit = |node: &str| {
-                claims
-                    .as_ref()
-                    .is_none_or(|watch| watch.may_start(Some(node)))
+                claims.as_mut().is_none_or(|watch| {
+                    if !watch.may_start(Some(node)) {
+                        return false;
+                    }
+                    let mut nodes = publishing.clone();
+                    nodes.extend(unlanded.iter().cloned());
+                    nodes.extend(dispatching.iter().cloned());
+                    nodes.insert(node.to_owned());
+                    if !(watch.fence(&nodes) && watch.may_start(None)) {
+                        return false;
+                    }
+                    dispatching.insert(node.to_owned());
+                    true
+                })
             };
             // A placement at dispatch, and a restack, read their stack parents' standings
             // first: once a pass, and once for each node however long it is held.
@@ -2044,17 +2139,8 @@ fn converge(
             )?;
             started || restacked || readjusted
         };
-        // What the lease's watchdog ends at a lapse: every dispatch in progress that is not
-        // publishing.
-        if let Some(watch) = &claims {
-            watch.lease().hold(
-                in_flight
-                    .iter()
-                    .filter(|(node, _)| !publishing.contains(*node))
-                    .map(|(node, dispatch)| (node.clone(), dispatch.cancel.clone()))
-                    .collect(),
-            );
-        }
+        // A node admitted whose dispatch did not start is no dispatch under way.
+        dispatching.retain(|node| in_flight.contains_key(node));
         if started_here {
             derived = None;
             unpublished = true;
@@ -2229,11 +2315,11 @@ fn converge(
             sources.next_read(),
             // The pace at which an idle driver next asks the schedule.
             maintenance.next_due(),
-            // And when it next reads who claims its project.
+            // And when a claim no read has confirmed is owed its planner surface.
             claims
                 .as_ref()
                 .filter(|_| superseded_by.is_none())
-                .map_or(Duration::MAX, crate::continuation::ClaimWatch::until_read),
+                .map_or(Duration::MAX, |watch| watch.lease().until_surface()),
             // And when it next writes the publications under way the store last refused.
             claims.as_ref().map_or(
                 Duration::MAX,
@@ -2597,12 +2683,15 @@ fn converge(
                 }
                 // Answered by the next pass's claim check, which this arrival is what wakes.
                 Message::PublicationDue(due) => publications.push(*due),
+                // What the claim thread found is read by the pass this arrival wakes.
+                Message::ClaimRead => {}
                 Message::ReworkDue(due) => reworks_due.push(*due),
                 Message::Raise(surface) => raise(paths, journal, *surface)?,
                 Message::Settled(settled) => {
                     let settlement = &settled.settlement;
                     in_flight.remove(&settlement.node);
-                    if publishing.remove(&settlement.node) {
+                    let fenced = dispatching.remove(&settlement.node);
+                    if publishing.remove(&settlement.node) || fenced {
                         unlanded.insert(settlement.node.clone());
                     }
                     // A restack says what it did ahead of the node's ordinary

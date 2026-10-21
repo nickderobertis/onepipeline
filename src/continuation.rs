@@ -136,6 +136,10 @@ const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
 /// driver's lease began and hold it there.
 const READ_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_READ_GATE";
 
+/// The test failpoint met inside each read of the claim the store is asked, after the read
+/// began: a journey holds it past the read's deadline to make every read answer late.
+const READ_LATE_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_READ_LATE_GATE";
+
 /// The test failpoint met before each read a takeover makes once its wait has passed, so a
 /// journey can hold that read until the displaced driver has got where it needs it.
 const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
@@ -687,12 +691,13 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
     Ok(continued)
 }
 
-/// What a driver knows about its project's claim, and when it last asked.
+/// What a driver knows about its project's claim, and the thread that asks.
 ///
-/// One store read per [claim interval](claim_interval), whatever the driver is doing: a
-/// read is due once the last one began an interval ago, and never sooner. The read that
-/// finds the project still this driver's renews its [`Lease`], which is what every start of
-/// a dispatch or a publication asks — never the store.
+/// One store read per [claim interval](claim_interval), on a thread of the watch's own — not
+/// the reconcile loop, so no pass, however long, delays one: a read is due once the last one
+/// began an interval ago, and never sooner. What each read finds is kept by the [`Lease`],
+/// which every start of a dispatch or a publication asks — never the store — and written to
+/// the run's `claim.json` for the views.
 pub(crate) struct ClaimWatch {
     store: Store,
     project: QualifiedId,
@@ -705,65 +710,92 @@ pub(crate) struct ClaimWatch {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The run's own directory, where the store's request to be left alone is kept.
     run_dir: std::path::PathBuf,
-    /// The claim this run's launch knowingly took over: still on the store until this
-    /// driver's first projection replaces it, and no sign that anybody else drives.
-    displaced: Option<DriverClaim>,
-    /// The claim this driver writes, once it has made one.
-    mine: Option<DriverClaim>,
-    /// When the next read is due: an interval after the last one began, or — where the
-    /// store asked to be left alone — once that wait has passed. `None` is due now.
-    next_read: Option<Instant>,
     every: Duration,
     lease: Lease,
-    /// The nodes the project's [`PUBLISHING_KEY`] names as this driver's publications under
-    /// way, as far as this driver knows: `None` where it cannot say — an adoption before its
-    /// first read, or after a write the store refused.
-    fenced: Option<std::collections::BTreeSet<String>>,
+    /// What the loop and the claim thread both know: the claim this driver writes, and the
+    /// fence the newest read or write left.
+    seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     /// When the store last refused that write, so the loop wakes to write it again.
     fence_refused: Option<Instant>,
-    /// A read found another run's claim: the fence this driver clears may since be that
-    /// run's, so it reads before it clears.
-    superseded: bool,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
 }
 
+/// What the reconcile loop and the claim thread share beside the lease.
+#[derive(Default)]
+struct Seen {
+    /// The claim this driver writes, once it has made one.
+    mine: Option<DriverClaim>,
+    /// The nodes the project's [`PUBLISHING_KEY`] names as this driver's dispatches and
+    /// publications under way, as far as this driver knows: `None` where it cannot say — an
+    /// adoption before its first read, or after a write the store refused.
+    fenced: Option<std::collections::BTreeSet<String>>,
+}
+
 impl ClaimWatch {
-    /// The watch over the project `launch` names, or `None` for a run naming none.
+    /// The watch over the project `launch` names, or `None` for a run naming none, with its
+    /// claim thread started; `wake` is how that thread wakes the reconcile loop when what it
+    /// found changes what the loop may do.
     ///
     /// A launch's driver starts on the read that let it launch — its own, or the one its
     /// takeover made once the driver it displaced had let go — so its lease and its interval
-    /// both start now. An adoption's starts on nothing: its first pass reads.
+    /// both start now. An adoption's starts on nothing: its thread reads at once.
     pub(crate) fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
         term_scope: Vec<String>,
+        wake: Box<dyn Fn() + Send>,
     ) -> Option<Self> {
-        let project = launch.project.parse().ok()?;
+        let project: QualifiedId = launch.project.parse().ok()?;
         let every = claim_interval();
-        let lease = Lease::new(every, CLAIM_READ_DEADLINE);
+        let lease = Lease::new(
+            every,
+            CLAIM_READ_DEADLINE,
+            Some(paths.dir.clone()),
+            Some(wake),
+        );
         let launched = launch.adoptions == 0;
-        let next_read = launched.then(|| {
-            let now = Instant::now();
-            lease.confirm(now);
-            now + every
-        });
+        let now = Instant::now();
+        if launched {
+            lease.confirm(now, crate::sys::now_millis());
+            lease.next_read_at(now + every);
+        } else {
+            lease.next_read_at(now);
+        }
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen {
+            mine: None,
+            // A launch minted its run, so nothing on the store names its work yet.
+            fenced: launched.then(std::collections::BTreeSet::new),
+        }));
+        let reader = Reader {
+            store: Store::at(&launch.dir),
+            project: project.clone(),
+            run: paths.run.clone(),
+            host: crate::sys::hostname(),
+            run_dir: paths.dir.clone(),
+            displaced: taken_over(paths),
+            every,
+            seen: std::sync::Arc::clone(&seen),
+            lease: lease.clone(),
+        };
+        // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing this process one
+        // thread is resource exhaustion no journey can arrange; the lease then is never
+        // confirmed again, so the driver starts nothing and keeps what it has in flight.
+        let _ = std::thread::Builder::new()
+            .name("claim-read".to_owned())
+            .spawn(move || reader.run());
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(Self {
             store: Store::at(&launch.dir),
             project,
             run: paths.run.clone(),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
-            displaced: taken_over(paths),
-            mine: None,
-            next_read,
             every,
             lease,
-            // A launch minted its run, so nothing on the store names its publications yet.
-            fenced: launched.then(std::collections::BTreeSet::new),
+            seen,
             fence_refused: None,
-            superseded: false,
             term_scope,
         })
     }
@@ -780,108 +812,21 @@ impl ClaimWatch {
             claimed_at: claimed_at.to_owned(),
             lease: Some(terms_of(self.every)),
         };
-        self.mine = Some(mine.clone());
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.mine = Some(mine.clone());
+        }
         mine
     }
 
-    /// Whether the claim is due to be read.
-    pub(crate) fn read_due(&self) -> bool {
-        self.until_read() == Duration::ZERO
-    }
-
-    /// How long until the next read is due: now where this driver has never read.
-    pub(crate) fn until_read(&self) -> Duration {
-        self.next_read.map_or(Duration::ZERO, |at| {
-            at.saturating_duration_since(Instant::now())
-        })
-    }
-
-    /// Whether the claim this driver wrote has landed on the store: a claim it then reads
-    /// gone was released or cleared by somebody else, which says nothing about whether this
-    /// driver still drives — the run that took the project over may have finished it.
-    fn landed_mine(&self) -> bool {
-        self.mine.as_ref().is_some_and(|mine| {
-            crate::writeback::landed_claim(&self.run_dir) == serde_json::to_value(mine).ok()
-        })
-    }
-
-    /// Read the claim, and answer the claim that supersedes this driver, if one does. A
-    /// read finding the project still this driver's — its own claim, the one it took over,
-    /// or none where its own has never landed — renews its lease from the moment the read
-    /// began. One finding none where its own had landed renews nothing.
-    ///
-    /// A read the store fails is said on standard error and answers nothing: a claim is
-    /// best effort, and a store that cannot be read has not said anybody else drives. Nor
-    /// does it renew anything, so a driver whose reads keep failing runs out of lease.
-    pub(crate) fn check(&mut self) -> Option<DriverClaim> {
-        // A failpoint, so a journey knows when a lease began and can hold a driver there.
-        let _ = crate::ordering::meet(READ_GATE_ENV);
-        let began = Instant::now();
-        self.next_read = Some(began + self.every);
-        // A store that asked to be left alone is asked nothing inside the wait: every further
-        // call extends a limiter nothing reports. The write-back is waiting it out too, and
-        // the next check after it has passed reads the claim.
-        // llmlint: ignore-block[changed_behavior_has_e2e] driven end to end by `tests/e2e/store.rs`'s
-        // `a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` and
-        // `a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing`, which hold that an adopted
-        // driver inside a wait the store asked for makes no store call at all — the adoption's own
-        // claim read was the one call each caught before this skip existed — and that the driver
-        // reaches the store again once the wait has passed.
-        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
-            // Asked nothing, so not a read: the next one is due once the wait has passed.
-            self.next_read = Some(began + left.min(self.every));
-            return None;
-        }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        crate::loopstats::claim_read();
-        let read = self
-            .store
-            .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
-            .and_then(|metadata| {
-                self.fenced = self.fence_on(&metadata);
-                claim_of(self.project.as_str(), &metadata)
-            });
-        match read {
-            Ok(Some(claim)) if self.supersedes(&claim) => {
-                self.superseded = true;
-                Some(claim)
-            }
-            Ok(None) if self.landed_mine() => {
-                eprintln!(
-                    "onepipeline: run '{}' found no claim on {} where its own had landed; it \
-                     starts nothing on that read",
-                    self.run,
-                    self.project.as_str()
-                );
-                None
-            }
-            Ok(_) => {
-                self.lease.confirm(began);
-                None
-            }
-            Err(why) => {
-                eprintln!(
-                    "onepipeline: run '{}' could not read the claim on {}: {why}; it starts \
-                     nothing more on a lease older than {}s, and reads it again in {}s",
-                    self.run,
-                    self.project.as_str(),
-                    self.every.as_secs(),
-                    self.every.as_secs()
-                );
-                None
-            }
-        }
-    }
-
-    /// Whether `claim` names a run other than this one and other than the one this launch
-    /// took the project over from.
-    fn supersedes(&self, claim: &DriverClaim) -> bool {
-        !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
+    /// The claim a read found superseding this driver, handed over once.
+    pub(crate) fn superseded(&self) -> Option<DriverClaim> {
+        self.lease.take_superseded()
     }
 
     /// Whether this driver may start a dispatch of `node` — or, for `None`, a publication —
-    /// now: only on a read that found the project its own and began less than an interval
-    /// ago. Asked at the moment of the start, after anything that could have held it.
+    /// now: only while its claim is confirmed, by a read that began less than an interval
+    /// and a read's deadline ago. Asked at the moment of the start, after anything that
+    /// could have held it.
     pub(crate) fn may_start(&self, node: Option<&str>) -> bool {
         if let Some(node) = node {
             if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
@@ -891,43 +836,38 @@ impl ClaimWatch {
         self.lease.may_start()
     }
 
-    /// The lease this driver's dispatches are ended by once it runs out.
+    /// The lease the claim thread's reads keep.
     pub(crate) fn lease(&self) -> &Lease {
         &self.lease
     }
 
-    /// How long until a write of this driver's publications the store refused is due again.
+    /// How long until a write of this driver's fence the store refused is due again.
     pub(crate) fn until_fence_retry(&self) -> Duration {
         self.fence_refused.map_or(Duration::MAX, |at| {
             (at + FENCE_RETRY).saturating_duration_since(Instant::now())
         })
     }
 
-    /// The nodes `metadata`'s [`PUBLISHING_KEY`] names as this driver's: none where it is
-    /// absent or another run's, and `None` where it is not a driver's publications at all.
-    fn fence_on(
-        &self,
-        metadata: &BTreeMap<String, Value>,
-    ) -> Option<std::collections::BTreeSet<String>> {
-        match publishing_of(self.project.as_str(), metadata) {
-            Ok(Some(publishing)) if publishing.run == self.run && publishing.host == self.host => {
-                Some(publishing.nodes.into_iter().collect())
-            }
-            Ok(_) => Some(std::collections::BTreeSet::new()),
-            Err(_) => None,
+    fn fenced(&self) -> Option<std::collections::BTreeSet<String>> {
+        self.seen.lock().ok().and_then(|seen| seen.fenced.clone())
+    }
+
+    fn set_fenced(&self, fenced: Option<std::collections::BTreeSet<String>>) {
+        if let Ok(mut seen) = self.seen.lock() {
+            seen.fenced = fenced;
         }
     }
 
-    /// Make the project's [`PUBLISHING_KEY`] name `nodes` as this driver's publications under
-    /// way — `null` for none — and answer whether it does: a publication starts only once the
-    /// fence naming it has landed, so a run taking the project over that finds no fence of
-    /// this driver's knows none is under way.
+    /// Make the project's [`PUBLISHING_KEY`] name `nodes` as this driver's dispatches and
+    /// publications under way — `null` for none — and answer whether it does: a dispatch or
+    /// a publication starts only once the fence naming it has landed, so a run taking the
+    /// project over that finds no fence of this driver's knows none is under way.
     ///
     /// Written only where it differs from what the store is known to hold, bounded by
     /// [`CLAIM_READ_DEADLINE`], and not inside a wait the store asked for. A superseded
     /// driver reads before it clears, and clears only a fence of its own.
     pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
-        if self.fenced.as_ref() == Some(nodes) {
+        if self.fenced().as_ref() == Some(nodes) {
             return true;
         }
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
@@ -938,14 +878,15 @@ impl ClaimWatch {
         if self.fence_refused.is_some() && !self.until_fence_retry().is_zero() {
             return false;
         }
-        if nodes.is_empty() && self.superseded {
+        if nodes.is_empty() && self.lease.is_superseded() {
             match self
                 .store
                 .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
             {
                 Ok(metadata) => {
-                    self.fenced = self.fence_on(&metadata);
-                    if self.fenced.as_ref() == Some(nodes) {
+                    let fenced = fence_on(&self.run, &self.host, &self.project, &metadata);
+                    self.set_fenced(fenced.clone());
+                    if fenced.as_ref() == Some(nodes) {
                         return true;
                     }
                 }
@@ -983,19 +924,19 @@ impl ClaimWatch {
         });
         match landed {
             Ok(()) => {
-                self.fenced = Some(nodes.clone());
+                self.set_fenced(Some(nodes.clone()));
                 self.fence_refused = None;
                 true
             }
             Err(why) => {
                 eprintln!(
-                    "onepipeline: run '{}' could not write its publications under way on {}: \
-                     {why}; it starts no publication until a write lands",
+                    "onepipeline: run '{}' could not write its dispatches and publications \
+                     under way on {}: {why}; it starts none until a write lands",
                     self.run,
                     self.project.as_str()
                 );
                 // What the store holds now is not known: the write may yet land.
-                self.fenced = None;
+                self.set_fenced(None);
                 self.fence_refused = Some(Instant::now());
                 false
             }
@@ -1005,7 +946,7 @@ impl ClaimWatch {
     /// Record on the claim that superseded this driver that it has stopped: written once,
     /// best effort, over the claim exactly as it was read, with the acknowledgement beside
     /// it. What could not be written is said on standard error, and the adopter then waits
-    /// out [`takeover_wait`] instead.
+    /// for this driver's fence to clear instead.
     pub(crate) fn acknowledge(&self, by: &DriverClaim) {
         let written = serde_json::to_value(by).map(|mut claim| {
             claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
@@ -1017,8 +958,8 @@ impl ClaimWatch {
         });
         let outcome = match written {
             // llmlint: ignore-block[changed_behavior_has_e2e] the store's own wait is the
-            // write-back's to keep, as `check` keeps it; the adopter's journeys drive the wait
-            // it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`).
+            // write-back's to keep, as the claim thread keeps it; the adopter's journeys drive the
+            // wait it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`).
             _ if crate::writeback::store_asked_to_wait(&self.run_dir) => {
                 Err("the store asked to be left alone".to_owned())
             }
@@ -1045,23 +986,197 @@ impl ClaimWatch {
             ),
             Err(why) => eprintln!(
                 "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; that \
-                 run starts once this one's lease has run out",
+                 run starts once this one's fence has cleared",
                 self.run, by.run, by.host
             ),
         }
     }
 }
 
-/// How long a driver's last read of its claim lets it act.
+impl Drop for ClaimWatch {
+    fn drop(&mut self) {
+        self.lease.close();
+    }
+}
+
+/// The nodes `metadata`'s [`PUBLISHING_KEY`] names as the work of `run` on `host`: none where
+/// it is absent or another run's, and `None` where it is not a driver's fence at all.
+fn fence_on(
+    run: &str,
+    host: &str,
+    project: &QualifiedId,
+    metadata: &BTreeMap<String, Value>,
+) -> Option<std::collections::BTreeSet<String>> {
+    match publishing_of(project.as_str(), metadata) {
+        Ok(Some(publishing)) if publishing.run == run && publishing.host == host => {
+            Some(publishing.nodes.into_iter().collect())
+        }
+        Ok(_) => Some(std::collections::BTreeSet::new()),
+        Err(_) => None,
+    }
+}
+
+/// The claim thread: everything one read needs, owned by the thread that makes it.
+struct Reader {
+    store: Store,
+    project: QualifiedId,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the run and host `ClaimWatch`
+    // carries, as it says.
+    run: String,
+    host: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    run_dir: std::path::PathBuf,
+    /// The claim this run's launch knowingly took over: still on the store until this
+    /// driver's first projection replaces it, and no sign that anybody else drives.
+    displaced: Option<DriverClaim>,
+    every: Duration,
+    seen: std::sync::Arc<std::sync::Mutex<Seen>>,
+    lease: Lease,
+}
+
+/// What one read of the claim found.
+enum Found {
+    /// The project is still this driver's.
+    Confirmed,
+    /// Another run's claim.
+    Superseded(DriverClaim),
+    /// Nothing confirming, and why.
+    Unconfirmed(crate::claimstate::UnconfirmedReason, String),
+}
+
+impl Reader {
+    /// Read once per interval until the watch closes or a read finds this driver superseded.
+    fn run(self) {
+        while self.lease.until_due() {
+            // A failpoint, so a journey knows when a lease began and can hold a driver there.
+            let _ = crate::ordering::meet(READ_GATE_ENV);
+            let began = Instant::now();
+            let began_at = crate::sys::now_millis();
+            let (found, next) = self.read(began);
+            match found {
+                Found::Confirmed => self.lease.confirm(began, began_at),
+                Found::Superseded(by) => {
+                    self.lease.supersede(by);
+                    return;
+                }
+                Found::Unconfirmed(reason, detail) => self.lease.unconfirm(reason, detail),
+            }
+            self.lease.next_read_at(next);
+        }
+    }
+
+    /// Read the claim, and answer what it found and when the next read is due.
+    ///
+    /// A read finding the project still this driver's — its own claim, the one it took over,
+    /// or none where its own has never landed — confirms it from the moment the read began,
+    /// unless it answered past its deadline. One finding none where its own had landed
+    /// confirms nothing; nor does one the store fails, refuses for its rate limit, or is not
+    /// asked inside a wait the store asked for. Each is said on standard error.
+    fn read(&self, began: Instant) -> (Found, Instant) {
+        use crate::claimstate::UnconfirmedReason;
+        // A store that asked to be left alone is asked nothing inside the wait: every further
+        // call extends a limiter nothing reports. The write-back is waiting it out too, and
+        // the next read after it has passed asks the store.
+        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
+            return (
+                Found::Unconfirmed(
+                    UnconfirmedReason::RateLimited,
+                    format!(
+                        "the store asked to be left alone for {}s more, so the claim was not read",
+                        left.as_secs()
+                    ),
+                ),
+                began + left.min(self.every),
+            );
+        }
+        let next = began + self.every;
+        crate::loopstats::claim_read();
+        // A failpoint inside the read, so a journey can make one answer past its deadline.
+        let _ = crate::ordering::meet(READ_LATE_GATE_ENV);
+        let read = self
+            .store
+            .project_metadata_read(&self.project, CLAIM_READ_DEADLINE)
+            .and_then(|metadata| {
+                let fenced = fence_on(&self.run, &self.host, &self.project, &metadata);
+                if let Ok(mut seen) = self.seen.lock() {
+                    seen.fenced = fenced;
+                }
+                claim_of(self.project.as_str(), &metadata)
+                    .map_err(crate::taskgraph::ReadRefusal::Failed)
+            });
+        let unconfirmed = |reason: UnconfirmedReason, detail: String| {
+            eprintln!(
+                "onepipeline: run '{}' could not confirm its claim on {}: {detail}; its \
+                 dispatches in flight keep running, it starts nothing more until a read \
+                 confirms the claim, and it reads it again in {}s",
+                self.run,
+                self.project.as_str(),
+                self.every.as_secs()
+            );
+            Found::Unconfirmed(reason, detail)
+        };
+        let found = match read {
+            Ok(Some(claim)) if self.supersedes(&claim) => Found::Superseded(claim),
+            Ok(None) if self.landed_mine() => unconfirmed(
+                UnconfirmedReason::Failed,
+                format!(
+                    "found no claim on {} where its own had landed",
+                    self.project.as_str()
+                ),
+            ),
+            Ok(_) if began.elapsed() > CLAIM_READ_DEADLINE => unconfirmed(
+                UnconfirmedReason::Late,
+                format!(
+                    "the read answered after {}s, past its {}-second deadline",
+                    began.elapsed().as_secs(),
+                    CLAIM_READ_DEADLINE.as_secs()
+                ),
+            ),
+            Ok(_) => Found::Confirmed,
+            Err(crate::taskgraph::ReadRefusal::Late(why)) => {
+                unconfirmed(UnconfirmedReason::Late, why.to_string())
+            }
+            Err(crate::taskgraph::ReadRefusal::RateLimited(why)) => {
+                unconfirmed(UnconfirmedReason::RateLimited, why.to_string())
+            }
+            Err(crate::taskgraph::ReadRefusal::Failed(why)) => {
+                unconfirmed(UnconfirmedReason::Failed, why.to_string())
+            }
+        };
+        (found, next)
+    }
+
+    /// Whether `claim` names a run other than this one and other than the one this launch
+    /// took the project over from.
+    fn supersedes(&self, claim: &DriverClaim) -> bool {
+        !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
+    }
+
+    /// Whether the claim this driver wrote has landed on the store: a claim it then reads
+    /// gone was released or cleared by somebody else, which says nothing about whether this
+    /// driver still drives — the run that took the project over may have finished it.
+    fn landed_mine(&self) -> bool {
+        let mine = self.seen.lock().ok().and_then(|seen| seen.mine.clone());
+        mine.is_some_and(|mine| {
+            crate::writeback::landed_claim(&self.run_dir) == serde_json::to_value(mine).ok()
+        })
+    }
+}
+
+/// Where a driver's claim stands, by the reads its claim thread made, and what that lets it
+/// do.
 ///
-/// A read that found the project the driver's own, from the moment it **began**, lets the
-/// driver start a dispatch or a publication for one claim interval, and keep a dispatch
-/// going for two and the [`CLAIM_READ_DEADLINE`] the read due then is given to answer — so
-/// one read the board fails is not, alone, a lapse. Past that, a watchdog thread of the
-/// lease's own — not the reconcile loop, which a slow call or a held step could be inside —
-/// cancels every dispatch the driver has in progress that is not publishing: a driver that
-/// cannot say the project is still its own goes on with nothing an adopter could be
-/// starting beside.
+/// A read that found the project the driver's own **confirms** it from the moment the read
+/// began. While it is confirmed — by a read that began less than one interval and a read's
+/// deadline ago — the driver may start a dispatch or a publication. A read that is late,
+/// fails, or is declined for the store's rate limit makes it **unconfirmed**: the driver
+/// keeps every dispatch it has in flight, never interrupting one for that, starts nothing,
+/// and carries on at the first read that confirms it again. A watchdog thread of the
+/// lease's own marks a read that has not answered within its deadline late, since the read
+/// itself cannot say so until it does. Only a read finding another driver's claim
+/// **supersedes** it, which is the reconcile loop's to act on.
+///
+/// Every change is written to the run's `claim.json`, after every read.
 #[derive(Clone)]
 pub(crate) struct Lease {
     inner: std::sync::Arc<LeaseInner>,
@@ -1069,9 +1184,16 @@ pub(crate) struct Lease {
 
 struct LeaseInner {
     interval: Duration,
-    /// How long a confirming read lets a dispatch go on: [`LAPSES_AFTER_INTERVALS`] intervals
-    /// and the answer the read due then is given.
+    /// How long a read is given to answer.
+    answer: Duration,
+    /// How long a confirming read stood for under the lease a build before this one kept,
+    /// whose dispatches ended then: the age past which a superseded driver no longer
+    /// projects onto a board its adopter may already be writing to.
     holds_for: Duration,
+    /// Where `claim.json` is written: the run's directory.
+    run_dir: Option<std::path::PathBuf>,
+    /// How the reconcile loop is woken when what the lease lets it do changes.
+    wake: Option<std::sync::Mutex<Box<dyn Fn() + Send>>>,
     state: std::sync::Mutex<LeaseState>,
     changed: std::sync::Condvar,
 }
@@ -1080,31 +1202,75 @@ struct LeaseInner {
 struct LeaseState {
     /// When the newest read that found the project this driver's began.
     confirmed: Option<Instant>,
-    /// The cancellation of each dispatch in progress that is not publishing, by node.
-    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every map of `RunState` keys by, copied from the loop's own `in_flight` map whose ids the graph validated.
-    held: Vec<(String, crate::executor::CancellationToken)>,
-    /// Whether the lapse has been said, so it is said once per lapse.
-    said: bool,
-    /// The driver has let go of the lease, so the watchdog ends.
+    /// The same instant, in epoch milliseconds.
+    confirmed_at: Option<u64>,
+    standing: Standing,
+    /// When the next read is due — the one the watchdog marks late if it has not answered
+    /// a read's deadline after.
+    next_read: Option<Instant>,
+    /// The driver has let go of the lease, so its threads end.
     closed: bool,
 }
 
+/// Where the claim stands: the driver's own state, which builds the contracted reading.
+#[derive(Default)]
+enum Standing {
+    /// Nothing has been read: an adoption before its first read answers.
+    #[default]
+    Unread,
+    Confirmed,
+    Unconfirmed(Episode),
+    Superseded {
+        by: DriverClaim,
+        /// Whether the reconcile loop has been handed it.
+        taken: bool,
+    },
+}
+
+/// One uninterrupted stretch of the claim unconfirmed.
+struct Episode {
+    since: Instant,
+    since_at: u64,
+    reason: crate::claimstate::UnconfirmedReason,
+    detail: String,
+    /// Whether its planner surface has been raised: once per episode.
+    surfaced: bool,
+}
+
+/// The planner surface an unconfirmed claim is owed, once its episode outlasts the lease.
+pub(crate) struct Unconfirmed {
+    pub(crate) reason: crate::claimstate::UnconfirmedReason,
+    pub(crate) detail: String,
+    /// Whole seconds since the last confirming read — or, where none ever confirmed it,
+    /// since the episode began.
+    pub(crate) for_seconds: u64,
+    pub(crate) lease_seconds: u64,
+}
+
 impl Lease {
-    /// A lease starting a dispatch for one `interval` after a read and keeping one going
-    /// for [`LAPSES_AFTER_INTERVALS`] of them and `answer` more.
-    fn new(interval: Duration, answer: Duration) -> Self {
+    /// A lease starting a dispatch on a read for one `interval` and the `answer` a read is
+    /// given, writing its standing into `run_dir` and waking the loop through `wake`.
+    fn new(
+        interval: Duration,
+        answer: Duration,
+        run_dir: Option<std::path::PathBuf>,
+        wake: Option<Box<dyn Fn() + Send>>,
+    ) -> Self {
         let lease = Self {
             inner: std::sync::Arc::new(LeaseInner {
                 interval,
+                answer,
                 holds_for: LAPSES_AFTER_INTERVALS * interval + answer,
+                run_dir,
+                wake: wake.map(std::sync::Mutex::new),
                 state: std::sync::Mutex::new(LeaseState::default()),
                 changed: std::sync::Condvar::new(),
             }),
         };
         let watched = std::sync::Arc::downgrade(&lease.inner);
         // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing this process one
-        // thread is resource exhaustion no journey can arrange; the lease then has no watchdog,
-        // and every start still asks it.
+        // thread is resource exhaustion no journey can arrange; a read that never answers is
+        // then said late only once it does.
         let _ = std::thread::Builder::new()
             .name("claim-lease".to_owned())
             .spawn(move || watch(&watched));
@@ -1112,22 +1278,142 @@ impl Lease {
         lease
     }
 
-    fn confirm(&self, began: Instant) {
-        if let Ok(mut state) = self.inner.state.lock() {
+    /// Change the state, write the standing it leaves, and wake the loop where `wakes` says
+    /// the change is one the loop acts on.
+    fn change(&self, apply: impl FnOnce(&mut LeaseState) -> bool) {
+        let Ok(mut state) = self.inner.state.lock() else {
+            return;
+        };
+        if state.closed {
+            return;
+        }
+        let wakes = apply(&mut state);
+        if let (Some(run_dir), Some(reading)) = (&self.inner.run_dir, reading_of(&state)) {
+            crate::claimstate::ClaimFile {
+                schema_version: crate::claimstate::CLAIM_SCHEMA_VERSION,
+                reading,
+                lease_interval_s: self.inner.interval.as_secs(),
+            }
+            .write(run_dir);
+        }
+        self.inner.changed.notify_all();
+        drop(state);
+        if wakes {
+            if let Some(wake) = &self.inner.wake {
+                if let Ok(wake) = wake.lock() {
+                    wake();
+                }
+            }
+        }
+    }
+
+    /// A read that began at `began` — `began_at` in epoch milliseconds — found the project
+    /// this driver's: an older read than the newest changes nothing.
+    fn confirm(&self, began: Instant, began_at: u64) {
+        self.change(|state| {
+            if matches!(state.standing, Standing::Superseded { .. }) {
+                return false;
+            }
             if state.confirmed.is_none_or(|was| was < began) {
                 state.confirmed = Some(began);
-                state.said = false;
+                state.confirmed_at = Some(began_at);
             }
+            let was = std::mem::replace(&mut state.standing, Standing::Confirmed);
+            !matches!(was, Standing::Confirmed)
+        });
+    }
+
+    /// A read confirmed nothing, for `reason`: an episode begins, or the one under way goes
+    /// on with the newest read's words.
+    fn unconfirm(&self, reason: crate::claimstate::UnconfirmedReason, detail: String) {
+        self.change(|state| match &mut state.standing {
+            Standing::Superseded { .. } => false,
+            Standing::Unconfirmed(episode) => {
+                episode.reason = reason;
+                episode.detail = detail;
+                false
+            }
+            Standing::Unread | Standing::Confirmed => {
+                state.standing = Standing::Unconfirmed(Episode {
+                    since: Instant::now(),
+                    since_at: crate::sys::now_millis(),
+                    reason,
+                    detail,
+                    surfaced: false,
+                });
+                true
+            }
+        });
+    }
+
+    /// A read found `by`'s claim.
+    fn supersede(&self, by: DriverClaim) {
+        self.change(|state| {
+            state.standing = Standing::Superseded { by, taken: false };
+            true
+        });
+    }
+
+    /// The next read is due at `at`.
+    fn next_read_at(&self, at: Instant) {
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.next_read = Some(at);
             self.inner.changed.notify_all();
         }
     }
 
-    /// Whether a start may go ahead on the newest confirming read.
+    /// Wait for the next read to be due: `false` where the lease has been let go of, or a
+    /// read has found the driver superseded, so no read is due again.
+    fn until_due(&self) -> bool {
+        let Ok(mut state) = self.inner.state.lock() else {
+            return false;
+        };
+        loop {
+            if state.closed || matches!(state.standing, Standing::Superseded { .. }) {
+                return false;
+            }
+            let now = Instant::now();
+            let wait = state
+                .next_read
+                .map_or(Duration::ZERO, |at| at - now.min(at));
+            if wait.is_zero() {
+                return true;
+            }
+            state = match self.inner.changed.wait_timeout(state, wait) {
+                Ok((state, _)) => state,
+                Err(_) => return false,
+            };
+        }
+    }
+
+    /// The claim that superseded this driver, handed to the loop once.
+    fn take_superseded(&self) -> Option<DriverClaim> {
+        let mut state = self.inner.state.lock().ok()?;
+        match &mut state.standing {
+            Standing::Superseded { by, taken } if !*taken => {
+                *taken = true;
+                Some(by.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a read has found another run's claim.
+    fn is_superseded(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .is_ok_and(|state| matches!(state.standing, Standing::Superseded { .. }))
+    }
+
+    /// Whether a start may go ahead: the claim is confirmed, by a read younger than an
+    /// interval and the answer a read is given.
     fn may_start(&self) -> bool {
         self.inner.state.lock().is_ok_and(|state| {
-            state
-                .confirmed
-                .is_some_and(|at| at.elapsed() < STARTS_WITHIN_INTERVALS * self.inner.interval)
+            matches!(state.standing, Standing::Confirmed)
+                && state.confirmed.is_some_and(|at| {
+                    at.elapsed() < STARTS_WITHIN_INTERVALS * self.inner.interval + self.inner.answer
+                })
         })
     }
 
@@ -1139,8 +1425,8 @@ impl Lease {
             .is_ok_and(|state| state.confirmed.is_some())
     }
 
-    /// Whether the driver has been without a confirming read for as long as one holds a
-    /// dispatch, so its dispatches have been ended — or never had one.
+    /// Whether the newest confirming read is two intervals and a read's deadline old — or
+    /// there never was one: a run that took the project over may be writing to its board.
     pub(crate) fn lapsed(&self) -> bool {
         self.inner.state.lock().is_ok_and(|state| {
             state
@@ -1149,16 +1435,43 @@ impl Lease {
         })
     }
 
-    /// Hand the watchdog the dispatches in progress it ends at a lapse: every one not
-    /// publishing. A lease that has lapsed already ends them at once.
-    pub(crate) fn hold(&self, held: Vec<(String, crate::executor::CancellationToken)>) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.held = held;
-            self.inner.changed.notify_all();
+    /// The planner surface the episode under way is owed, once it has outlasted the lease
+    /// window and none has been raised for it: each episode raises one.
+    pub(crate) fn surface_due(&self) -> Option<Unconfirmed> {
+        let mut state = self.inner.state.lock().ok()?;
+        let confirmed_at = state.confirmed_at;
+        let Standing::Unconfirmed(episode) = &mut state.standing else {
+            return None;
+        };
+        if episode.surfaced || episode.since.elapsed() < self.inner.interval {
+            return None;
         }
+        episode.surfaced = true;
+        let now = crate::sys::now_millis();
+        Some(Unconfirmed {
+            reason: episode.reason,
+            detail: episode.detail.clone(),
+            for_seconds: now.saturating_sub(confirmed_at.unwrap_or(episode.since_at)) / 1_000,
+            lease_seconds: self.inner.interval.as_secs(),
+        })
     }
 
-    /// End the watchdog: the driver is going.
+    /// How long until the episode under way is owed its surface: never where none is.
+    pub(crate) fn until_surface(&self) -> Duration {
+        self.inner
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| match &state.standing {
+                Standing::Unconfirmed(episode) if !episode.surfaced => {
+                    Some(self.inner.interval.saturating_sub(episode.since.elapsed()))
+                }
+                _ => None,
+            })
+            .unwrap_or(Duration::MAX)
+    }
+
+    /// Let go of the lease: the driver is going, so its threads end.
     pub(crate) fn close(&self) {
         if let Ok(mut state) = self.inner.state.lock() {
             state.closed = true;
@@ -1167,17 +1480,36 @@ impl Lease {
     }
 }
 
-impl Drop for ClaimWatch {
-    fn drop(&mut self) {
-        self.lease.close();
+/// The contracted reading of `state`: nothing where nothing has been read.
+fn reading_of(state: &LeaseState) -> Option<crate::claimstate::ClaimReading> {
+    use crate::claimstate::ClaimReading;
+    match &state.standing {
+        Standing::Unread => None,
+        Standing::Confirmed => state.confirmed_at.map(ClaimReading::confirmed),
+        Standing::Unconfirmed(episode) => Some(ClaimReading::unconfirmed(
+            state.confirmed_at,
+            episode.since_at,
+            episode.reason,
+            episode.detail.clone(),
+        )),
+        Standing::Superseded { by, .. } => Some(ClaimReading::superseded(
+            state.confirmed_at,
+            format!(
+                "run '{}' on host '{}' claimed this project at {}",
+                by.run, by.host, by.claimed_at
+            ),
+        )),
     }
 }
 
-/// The lease's watchdog: asleep until the lease's newest read has held a dispatch as long as
-/// one may, and then cancelling every dispatch the driver handed it, until a newer read
-/// renews the lease.
+/// The lease's watchdog: asleep until the read due has had its deadline to answer, and then
+/// marking the claim unconfirmed as late where nothing has answered since — so a read the
+/// store holds, or one that never began, is said while it is still outstanding.
 fn watch(lease: &std::sync::Weak<LeaseInner>) {
     let Some(inner) = lease.upgrade() else { return };
+    let watched = Lease {
+        inner: std::sync::Arc::clone(&inner),
+    };
     let Ok(mut state) = inner.state.lock() else {
         return;
     };
@@ -1185,37 +1517,32 @@ fn watch(lease: &std::sync::Weak<LeaseInner>) {
         if state.closed {
             return;
         }
-        let wait = match state.confirmed {
-            Some(at) => {
-                let lapses = at + inner.holds_for;
+        let wait = match (&state.standing, state.next_read) {
+            (Standing::Unread | Standing::Confirmed, Some(due)) => {
+                let late_at = due + inner.answer;
                 let now = Instant::now();
-                if now >= lapses {
-                    if !state.held.is_empty() {
-                        for (_, cancel) in &state.held {
-                            cancel.cancel();
-                        }
-                        if !state.said {
-                            state.said = true;
-                            eprintln!(
-                                "onepipeline: no read of the project's claim has found it this \
-                                 driver's for {}s, so it ends its dispatches in progress — {} — \
-                                 and starts nothing until a read does",
-                                inner.holds_for.as_secs(),
-                                state
-                                    .held
-                                    .iter()
-                                    .map(|(node, _)| format!("'{node}'"))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                        }
-                    }
-                    None
-                } else {
-                    Some(lapses - now)
+                if now >= late_at {
+                    let due_at = crate::sys::now_millis()
+                        .saturating_sub(u64::try_from((now - due).as_millis()).unwrap_or(0));
+                    drop(state);
+                    watched.unconfirm(
+                        crate::claimstate::UnconfirmedReason::Late,
+                        format!(
+                            "the claim read due at {} has not answered within its {}-second \
+                             deadline",
+                            crate::sys::rfc3339_from_millis(due_at),
+                            inner.answer.as_secs()
+                        ),
+                    );
+                    state = match inner.state.lock() {
+                        Ok(state) => state,
+                        Err(_) => return,
+                    };
+                    continue;
                 }
+                Some(late_at - now)
             }
-            None => None,
+            _ => None,
         };
         state = match wait {
             Some(wait) => match inner.changed.wait_timeout(state, wait) {
@@ -1474,6 +1801,73 @@ pub(crate) fn release_left_standing(
     }
 }
 
+/// Take the dispatches a host shutdown stopped off this run's fence on its project: they are
+/// no longer running, so a run taking the project over waits on none of them — the store
+/// records them stopped, and the adopter resumes each onto its recorded branch at once.
+///
+/// Read first, and written only where the fence still names this run on this host; nodes
+/// it names that were not `stopped` — a settlement not yet on the store, a dispatch that
+/// would not go — stay. Each call bounded by [`CLAIM_READ_DEADLINE`], not made inside a wait
+/// the store asked for, and best effort: what could not be done is said on standard error,
+/// and an adopter then waits for the fence as it would for a driver that died.
+pub(crate) fn release_stopped(
+    paths: &crate::ledger::RunPaths,
+    launch: &crate::ledger::LaunchRecord,
+    stopped: &std::collections::BTreeSet<String>,
+    term_scope: &[String],
+) {
+    let Ok(project) = launch.project.parse::<QualifiedId>() else {
+        return;
+    };
+    if stopped.is_empty() || crate::writeback::store_asked_to_wait(&paths.dir) {
+        return;
+    }
+    let host = crate::sys::hostname();
+    let store = Store::at(&launch.dir);
+    let released = store
+        .project_metadata_within(&project, CLAIM_READ_DEADLINE)
+        .and_then(|metadata| {
+            let Some(fenced) = fence_on(&paths.run, &host, &project, &metadata) else {
+                return Ok(());
+            };
+            let left: std::collections::BTreeSet<String> =
+                fenced.difference(stopped).cloned().collect();
+            if left == fenced {
+                return Ok(());
+            }
+            let value = if left.is_empty() {
+                Value::Null
+            } else {
+                serde_json::to_value(Publishing {
+                    run: paths.run.clone(),
+                    host: host.clone(),
+                    nodes: left.into_iter().collect(),
+                    at: crate::sys::now_rfc3339(),
+                })
+                .map_err(|why| Error::Invalid(why.to_string()))?
+            };
+            store.set_project_metadata_within(
+                &project,
+                PUBLISHING_KEY,
+                &value,
+                CLAIM_READ_DEADLINE,
+                term_scope,
+            )
+        });
+    // llmlint: ignore-block[changed_behavior_has_e2e] a store that refuses this one write while
+    // the shutdown runs is the board failing at that instant; the adopter then waits on the
+    // fence as it does for a driver that died, which the takeover journeys drive.
+    if let Err(why) = released {
+        eprintln!(
+            "onepipeline: run '{}' could not take its stopped dispatches off its fence on {}: \
+             {why}; a run taking the project over waits on them",
+            paths.run,
+            project.as_str()
+        );
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
 /// The claim this run's `start --take-over` passed, off its own `driver-taken-over`.
 fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
     crate::journal::read(&paths.journal())
@@ -1587,6 +1981,11 @@ mod tests {
                "claimed_at": "2026-10-11T00:00:00.000Z"})
     }
 
+    /// [`claim`], read as the claim it is.
+    fn claimed(run: &str, host: &str) -> DriverClaim {
+        serde_json::from_value(claim(run, host)).expect("a claim")
+    }
+
     #[test]
     fn the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day() {
         assert_eq!(CLAIM_INTERVAL, Duration::from_secs(300));
@@ -1610,60 +2009,140 @@ mod tests {
         }
     }
 
-    /// A lease lets a start go ahead for one interval from the read that confirmed it, and
-    /// lapses at two; a newer confirmation renews it and an older one changes nothing.
+    /// A lease lets a start go ahead for one interval from the read that confirmed it, while
+    /// that read's claim stands confirmed, and reads as lapsed at two; a newer confirmation
+    /// renews it and an older one changes nothing.
     #[test]
     fn a_lease_starts_for_one_interval_and_lapses_at_two() {
         let interval = Duration::from_millis(400);
-        let lease = Lease::new(interval, Duration::ZERO);
+        let lease = Lease::new(interval, Duration::ZERO, None, None);
         assert!(
             !lease.may_start(),
             "a lease nothing confirmed started something"
         );
-        assert!(lease.lapsed());
+        assert!(lease.lapsed() && !lease.ever_held());
         let now = Instant::now();
-        lease.confirm(now);
-        assert!(lease.may_start() && !lease.lapsed());
-        lease.confirm(now - 3 * interval);
+        lease.confirm(now, 0);
+        assert!(lease.may_start() && !lease.lapsed() && lease.ever_held());
+        lease.confirm(now - 3 * interval, 0);
         assert!(lease.may_start(), "an older read moved the lease back");
-        lease.confirm(now - interval);
+        lease.confirm(now - interval, 0);
         assert!(lease.may_start(), "an older read moved the lease back");
-        let lapsing = Lease::new(interval, Duration::ZERO);
-        lapsing.confirm(Instant::now() - interval);
+        let lapsing = Lease::new(interval, Duration::ZERO, None, None);
+        lapsing.confirm(Instant::now() - interval, 0);
         assert!(!lapsing.may_start() && !lapsing.lapsed());
-        lapsing.confirm(Instant::now() - 2 * interval);
+        lapsing.confirm(Instant::now() - 2 * interval, 0);
         assert!(!lapsing.may_start());
-        let stale = Lease::new(interval, Duration::ZERO);
-        stale.confirm(Instant::now() - 2 * interval);
+        let stale = Lease::new(interval, Duration::ZERO, None, None);
+        stale.confirm(Instant::now() - 2 * interval, 0);
         assert!(stale.lapsed());
         for watched in [lease, lapsing, stale] {
             watched.close();
         }
     }
 
-    /// The watchdog ends every dispatch it holds once the lease is two intervals old, and
-    /// not before.
+    /// An unconfirmed claim starts nothing, however young its last confirming read, and the
+    /// first read that confirms it again lets starts go ahead; a superseded one starts
+    /// nothing and no read confirms it again.
     #[test]
-    fn a_lapsed_lease_cancels_what_it_holds() {
-        let interval = Duration::from_millis(300);
-        let lease = Lease::new(interval, Duration::ZERO);
-        let held = crate::executor::CancellationToken::new();
-        lease.confirm(Instant::now());
-        lease.hold(vec![("work".to_owned(), held.clone())]);
-        std::thread::sleep(interval);
-        assert!(
-            !held.is_cancelled(),
-            "a dispatch was ended inside its lease"
+    fn an_unconfirmed_claim_starts_nothing_until_a_read_confirms_it() {
+        use crate::claimstate::UnconfirmedReason;
+        let lease = Lease::new(Duration::from_secs(60), Duration::ZERO, None, None);
+        lease.confirm(Instant::now(), 0);
+        lease.unconfirm(UnconfirmedReason::Failed, "the board is down".into());
+        assert!(!lease.may_start(), "an unconfirmed claim started something");
+        assert!(!lease.lapsed(), "an unconfirmed claim read as lapsed");
+        lease.confirm(Instant::now(), 0);
+        assert!(lease.may_start());
+        lease.supersede(claimed("b", "h"));
+        assert!(!lease.may_start() && lease.is_superseded());
+        lease.confirm(Instant::now(), 0);
+        assert!(!lease.may_start(), "a read confirmed a superseded claim");
+        assert_eq!(
+            lease.take_superseded().map(|by| by.run),
+            Some("b".to_owned())
         );
-        let deadline = Instant::now() + 20 * interval;
-        while !held.is_cancelled() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert_eq!(lease.take_superseded(), None, "handed over twice");
+        lease.close();
+    }
+
+    /// The watchdog says a read that has not answered within its deadline late while it is
+    /// still outstanding, and that one episode raises its surface once — only once it has
+    /// outlasted the lease window, however long it lasts — and a confirming read ends it, so
+    /// the next episode raises its own.
+    #[test]
+    fn a_read_not_answered_by_its_deadline_is_late_and_each_episode_surfaces_once() {
+        use crate::claimstate::{ClaimFile, ClaimState, UnconfirmedReason};
+        let interval = Duration::from_millis(300);
+        let dir = std::env::temp_dir().join(format!(
+            "onepipeline-lease-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lease = Lease::new(
+            interval,
+            Duration::from_millis(100),
+            Some(dir.clone()),
+            None,
+        );
+        let began = Instant::now();
+        lease.confirm(began, 1_760_000_000_000);
+        assert_eq!(
+            ClaimFile::read(&dir).map(|file| file.reading.state),
+            Some(ClaimState::Confirmed)
+        );
+        lease.next_read_at(began + interval);
+        let until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + 50 * interval;
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        until("the watchdog to say the read late", &|| {
+            ClaimFile::read(&dir).is_some_and(|file| file.reading.state == ClaimState::Unconfirmed)
+        });
+        let late = ClaimFile::read(&dir).unwrap();
+        assert_eq!(late.reading.reason, Some(UnconfirmedReason::Late));
+        assert_eq!(late.reading.last_confirmed_at, Some(1_760_000_000_000));
         assert!(
-            held.is_cancelled(),
-            "a lapsed lease left its dispatch running"
+            late.reading
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("has not answered")),
+            "{late:?}"
+        );
+        assert!(began.elapsed() >= interval, "said late inside the lease");
+        assert!(lease.surface_due().is_none(), "surfaced inside the lease");
+        until("the episode to outlast the lease", &|| {
+            lease.until_surface().is_zero()
+        });
+        let surfaced = lease.surface_due().expect("the episode's surface");
+        assert_eq!(surfaced.reason, UnconfirmedReason::Late);
+        lease.unconfirm(UnconfirmedReason::Failed, "the board is down".into());
+        std::thread::sleep(2 * interval);
+        assert!(lease.surface_due().is_none(), "one episode surfaced twice");
+        assert_eq!(lease.until_surface(), Duration::MAX);
+        let again = Instant::now();
+        lease.confirm(again, 1_760_000_100_000);
+        lease.next_read_at(again + 10 * interval);
+        assert_eq!(
+            ClaimFile::read(&dir).map(|file| file.reading),
+            Some(crate::claimstate::ClaimReading::confirmed(
+                1_760_000_100_000
+            ))
+        );
+        lease.unconfirm(UnconfirmedReason::RateLimited, "limited".into());
+        until("the second episode to outlast the lease", &|| {
+            lease.until_surface().is_zero()
+        });
+        assert_eq!(
+            lease.surface_due().map(|due| due.reason),
+            Some(UnconfirmedReason::RateLimited)
         );
         lease.close();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A claim's lease reads only as this build writes one — a positive interval no longer
@@ -1800,7 +2279,7 @@ mod tests {
     #[test]
     fn the_takeover_wait_outlasts_the_lease_and_the_cancel_grace() {
         let interval = Duration::from_secs(7);
-        let lease = Lease::new(interval, CLAIM_READ_DEADLINE);
+        let lease = Lease::new(interval, CLAIM_READ_DEADLINE, None, None);
         assert_eq!(lease.inner.holds_for, 2 * interval + CLAIM_READ_DEADLINE);
         // Sized by the displaced driver's own terms, whatever this host was given.
         let theirs = terms(interval.as_secs(), 45);

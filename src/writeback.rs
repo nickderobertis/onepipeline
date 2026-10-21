@@ -745,6 +745,11 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
     }
 }
 
+/// Whether `error` is the store refusing a call for its rate limit.
+pub(crate) fn rate_limited(error: &EngineError) -> bool {
+    matches!(cause_of(error).1, Some(SourceError::RateLimited { .. }))
+}
+
 /// A source error's kind, as its own wire tag spells it.
 ///
 /// Exhaustive, for the reason [`cause_of`] is; `writeback::tests` holds each word to the tag

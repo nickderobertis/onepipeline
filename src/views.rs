@@ -296,6 +296,64 @@ pub struct RunReading {
     /// in claim order — omitted when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<UnansweredEnvelope>,
+    /// Where the live driver's claim on its project stands, as its newest read of
+    /// it left it — omitted where nothing is known: no driver is live, or the
+    /// driver wrote no `claim.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<ClaimReading>,
+}
+
+/// Where a live driver's claim on its project stands — the one type the run's
+/// `claim.json` and this reading both carry.
+pub use crate::claimstate::{ClaimFile, ClaimReading, ClaimState, UnconfirmedReason};
+
+/// The live driver's `claim.json`: `None` where no driver is live — a driver that
+/// has gone reads no claim — or it wrote none that can be read.
+fn live_claim(view: &RunView, liveness: DriverLiveness) -> Option<ClaimFile> {
+    if liveness.is_undriven() {
+        return None;
+    }
+    ClaimFile::read(&view.paths.dir)
+}
+
+/// The live driver's claim where it is unconfirmed, and how long, in whole seconds,
+/// since the last read that confirmed it.
+fn unconfirmed_claim(view: &RunView) -> Option<(ClaimFile, u64)> {
+    let claim = live_claim(view, view.liveness())?;
+    if claim.reading.state != ClaimState::Unconfirmed {
+        return None;
+    }
+    let age = claim.reading.unconfirmed_for(sys::now_millis())?;
+    Some((claim, age))
+}
+
+/// What `status` says of a live driver whose claim is unconfirmed: why, in the
+/// read's own words, and how long since a read confirmed it, against the lease.
+fn claim_lines(view: &RunView) -> String {
+    let Some((claim, age)) = unconfirmed_claim(view) else {
+        return String::new();
+    };
+    let reason = claim
+        .reading
+        .reason
+        .map_or("no read confirmed it", UnconfirmedReason::phrase);
+    format!(
+        "  claim UNCONFIRMED: no read has confirmed this driver's claim for {} (lease {}) — \
+         {reason}: {}\n    its dispatches in flight keep running; it starts no new dispatch \
+         and opens no new publication until a read confirms the claim\n",
+        crate::claimstate::span(age),
+        crate::claimstate::span(claim.lease_interval_s),
+        claim.reading.detail.as_deref().unwrap_or_default(),
+    )
+}
+
+/// The segment a watch's heartbeat and ending lines carry for a live driver whose
+/// claim is unconfirmed — the state and its age only, so the line stays narrow —
+/// or nothing.
+pub(crate) fn claim_phrase(view: &RunView) -> String {
+    unconfirmed_claim(view).map_or_else(String::new, |(_, age)| {
+        format!("  CLAIM UNCONFIRMED {}", crate::claimstate::span(age))
+    })
 }
 
 /// One command envelope claimed off a run's queue with no outcome yet, as
@@ -370,6 +428,7 @@ pub fn reading(view: &RunView) -> RunReading {
         ending,
         paused,
         unanswered: unanswered_of(view, liveness),
+        claim: live_claim(view, liveness).map(|claim| claim.reading),
     }
 }
 
@@ -2705,6 +2764,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&claim_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
         // them would otherwise find drafts with no dispatch behind them.
