@@ -493,7 +493,11 @@ impl Linear {
                     return refusal(&format!("no project {id}"));
                 }
                 world.project_content = content.to_owned();
-                json!({"projectUpdate": {"success": true, "project": {"id": PROJECT}}})
+                // The content as stored, which the plugin selects in its answer and compares
+                // with what it sent, as Linear answers it.
+                json!({"projectUpdate": {"success": true, "project": {
+                    "id": PROJECT, "content": world.project_content,
+                }}})
             }
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
