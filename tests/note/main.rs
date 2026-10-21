@@ -7506,15 +7506,22 @@ fn a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch
     world.until("build to settle cancelled", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
+    // Requeue only after the cancelled run's driver is gone: a live driver can
+    // claim it and start another held turn, so waiting for its exit afterward
+    // would wait on the very dispatch this journey just started.
+    world.until(
+        "the cancelled run's driver to exit and release its lock",
+        |world| {
+            !world.events_of(run, "driver-exited").is_empty()
+                && !world.run_file(run, "owner.lock").exists()
+        },
+    );
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
             &envelope(json!({"op": "requeue", "id": "build"})),
         )
         .exited(0);
-    world.until("the driver to exit", |world| {
-        !world.events_of(run, "driver-exited").is_empty()
-    });
     world
         .run_on(
             world.agentgraph_cmd(&["adopt", run, "--detach"]),
