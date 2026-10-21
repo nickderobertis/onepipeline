@@ -5322,6 +5322,11 @@ fn settle_broken(world: &World, run: &str, landing: &str, extra: Value) -> crate
 /// nobody has released yet is an answer too, and it is the one read here before a
 /// release is recorded.
 fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseStatus> {
+    release_status(world, reference).ok()
+}
+
+/// The same read, saying what `onevcs` printed where it printed no answer.
+fn release_status(world: &World, reference: &str) -> Result<onevcs::ReleaseStatus, String> {
     let output = std::process::Command::new(crate::harness::onevcs_binary())
         .args(["release", "status", reference, "--json"])
         .env("ONEVCS_HOME", world.onevcs_home())
@@ -5329,7 +5334,40 @@ fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseSt
         .stdin(std::process::Stdio::null())
         .output()
         .expect("the onevcs binary runs");
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice(&output.stdout).map_err(|_| {
+        format!(
+            "exit {:?}, stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })
+}
+
+/// What `onevcs release status` answers about `reference` while a driver is asking it
+/// about the same landing, waiting past a read that printed no answer.
+///
+/// The run's release watch asks on its own schedule, and every ask appends to the event
+/// streams this read resolves the landing from. Each append holds its stream under an
+/// exclusive lock, which Windows enforces against readers too: a read that meets one
+/// finds that stream unreadable and can be refused, with nothing on stdout. That is not
+/// an answer to assert on, so it is waited past and said; whatever the command answers is
+/// returned, to be asserted on whole.
+fn answered_release_status(world: &World, reference: &str) -> onevcs::ReleaseStatus {
+    let mut answered = None;
+    world.until(
+        &format!("`onevcs release status {reference}` to answer"),
+        |world| match release_status(world, reference) {
+            Ok(status) => {
+                answered = Some(status);
+                true
+            }
+            Err(refused) => {
+                eprintln!("`onevcs release status {reference}` printed no answer: {refused}");
+                false
+            }
+        },
+    );
+    answered.expect("the wait ends on an answer")
 }
 
 /// Run one pasted `onevcs …` line through `sh`, the way a person pasting it does,
@@ -5520,18 +5558,6 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
                 restated.stderr
             );
         }
-        // The baseline is the sibling's record and not this crate's inference: it
-        // is what `onevcs` itself now answers about the change request.
-        match release_status_of(&world, &url) {
-            Some(onevcs::ReleaseStatus::NotReleased { at_landing, .. }) => assert_eq!(
-                at_landing,
-                onevcs::Baseline::At {
-                    version: "0.2.0".to_owned()
-                },
-                "the baseline captured at the reconciled landing is not what the probe answered"
-            ),
-            other => panic!("the reconciled landing does not answer against a baseline: {other:?}"),
-        }
         // And the wait it raised is one a probe answer can lift: the node holds
         // `not-released`, and the release after the baseline starts it, with
         // nobody having recorded anything.
@@ -5540,6 +5566,19 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
             |world| answered(world, &run, "consumer") == Some("not-released".to_owned()),
         );
         assert!(!dispatched(&world, &run, "consumer"));
+        // The baseline is the sibling's record and not this crate's inference: it
+        // is what `onevcs` itself answers about the change request, asked once the
+        // run has been seen holding against it, beside the driver still asking.
+        match answered_release_status(&world, &url) {
+            onevcs::ReleaseStatus::NotReleased { at_landing, .. } => assert_eq!(
+                at_landing,
+                onevcs::Baseline::At {
+                    version: "0.2.0".to_owned()
+                },
+                "the baseline captured at the reconciled landing is not what the probe answered"
+            ),
+            other => panic!("the reconciled landing does not answer against a baseline: {other:?}"),
+        }
         releases_at(&answer, "0.3.0");
         world.until(
             "the release past the baseline to start the held node",
