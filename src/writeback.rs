@@ -700,6 +700,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // A destination that stored a write's content other than its declared rewrite
         // explains: the item was written, so asking again writes the same text and is refused
         // the same way. `writeback::tests` holds the word.
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the linked store raises it only where it creates or renders an item from a template (`onetaskgraph-core` 0.9.2's `engine/rendered.rs` is its one caller), and a write-back only copies and updates; a loopback Linear storing a write-back's `issueCreate` other than the ruling explains was driven and the copy raised nothing, so no journey can reach it.
         EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only a routed copy of a whole plan chooses a home, and a write-back copies into the one project the run was launched from; `writeback::tests` holds the word.
         EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
