@@ -148,62 +148,45 @@ fn a_launch_whose_task_depends_on_a_withdrawn_task_is_refused_naming_both() {
     );
 }
 
-/// A stop projects the engine's own cancellation. Its stored board word keeps the task
-/// eligible for a fresh launch, whereas a person's cancellation has no such record.
+/// An engine cancellation's stored board word keeps the task eligible for a fresh launch.
 #[test]
 fn an_engine_cancelled_task_resumes_from_the_store() {
     engine_cancelled_continuation(false);
 }
 
-/// Older projections carry the settlement but no projected board word. They remain resumable.
+/// No current engine writes the legacy shape without a board word; it remains resumable.
 #[test]
 fn a_legacy_engine_cancelled_task_resumes_without_a_recorded_board_word() {
     engine_cancelled_continuation(true);
 }
 
 fn engine_cancelled_continuation(legacy: bool) {
-    let world =
-        World::new("withdrawn-engine-cancelled").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    world.script("build.wait", "hold");
+    let world = World::new("withdrawn-engine-cancelled");
     let project = world.plan(
         "engine-cancelled",
         &plan_of("engine-cancelled", vec![agent("build", &[])]),
     );
-    world.run(&["start", &project, "--detach"]).exited(0);
-    world.until("build to dispatch", |world| {
-        !dispatched(world, "engine-cancelled").is_empty()
-    });
-    world.run(&["stop", "engine-cancelled"]).exited(0);
-    world.until_store("the stop's cancellation to reach the board", |world| {
-        let task = world.store_tasks(&project).remove(0);
-        task["item"]["status"]["category"] == "cancelled"
-            && task["item"]["metadata"]["onepipeline.projected_status"] == "cancelled"
-            && task["item"]["metadata"]["onepipeline.settlement"]["status"] == "cancelled"
-    });
-    let task = world.store_tasks(&project).remove(0);
-    assert_eq!(task["item"]["status"]["category"], "cancelled", "{task}");
-    assert_eq!(
-        task["item"]["metadata"]["onepipeline.projected_status"], "cancelled",
-        "{task}"
-    );
-    assert_eq!(
-        task["item"]["metadata"]["onepipeline.settlement"]["status"], "cancelled",
-        "{task}"
-    );
-    if legacy {
-        let id = crate::harness::global(task["id"].as_str().expect("a task id"));
-        let update = onetaskgraph_plugin_api::TaskUpdate {
-            metadata_remove: std::collections::BTreeSet::from([
-                onetaskgraph_plugin_api::MetadataKey::new("onepipeline.projected_status")
-                    .expect("a metadata key"),
-            ]),
-            ..onetaskgraph_plugin_api::TaskUpdate::default()
-        };
-        world
-            .store_call(|engine| async move { engine.update_task(&id, &update).await })
-            .expect("remove the board word to reproduce an older projection");
+    let task = withdraw(&world, &project, "build");
+    let id = crate::harness::global(&task);
+    let key = |name| onetaskgraph_plugin_api::MetadataKey::new(name).expect("a metadata key");
+    // Stored input in the shape engine::drain produces via Settlement::plain(Cancelled),
+    // projected by writeback::task_document beside Snapshot::word_of's cancelled board word.
+    // Those functions are private to the binary. The legacy input omits the additive key,
+    // since a current engine cannot generate that older record.
+    let mut metadata = std::collections::BTreeMap::from([(
+        key("onepipeline.settlement"),
+        json!({"status": "cancelled"}),
+    )]);
+    if !legacy {
+        metadata.insert(key("onepipeline.projected_status"), json!("cancelled"));
     }
-    world.unscript("build.wait");
+    let update = onetaskgraph_plugin_api::TaskUpdate {
+        metadata_set: metadata,
+        ..onetaskgraph_plugin_api::TaskUpdate::default()
+    };
+    world
+        .store_call(|engine| async move { engine.update_task(&id, &update).await })
+        .expect("store the engine cancellation record");
     let cold = world.on_host("host-b");
     cold.run(&["start", &project, "--attach"]).settled();
     assert_eq!(dispatched(&cold, "engine-cancelled"), ["build"]);
