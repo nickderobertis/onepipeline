@@ -3403,6 +3403,73 @@ fn a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it
     });
 }
 
+/// The same refusal through this crate's own API: `note::deliver` submits the
+/// note to the run's live driver, which answers its envelope `queued` as it hands
+/// the note off, and the call then waits on that note's own record — so a
+/// receiver refusing the note after its envelope was answered is the call's
+/// refusal, in the receiver's own words, rather than a success.
+///
+/// `build` has settled `done` while `after` is held mid-turn, as in
+/// [`a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`],
+/// so the note is offered on a delivery thread and refused by the conversation.
+#[test]
+fn the_note_seam_answers_a_queued_note_its_receiver_refuses_with_that_refusal() {
+    let world = World::new("note-api-queued-refused");
+    let run = "apiqueuedrefused";
+    world.script("turn.hold-each", "");
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("after", &["build"])],
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until(
+        "the dependent's turn to open while build is settled",
+        |world| {
+            world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == "after")
+        },
+    );
+
+    let paths = RunPaths::under(&world.runs, run);
+    let refused = deliver(&paths, "build", &Note::to(Addressee::Worker, NOTE))
+        .expect_err("a note its receiver refused is not delivered");
+    let said = refused.to_string();
+    assert!(
+        said.starts_with("refused: note: node 'build': ") && said.contains("was not delivered"),
+        "the call does not answer with the receiver's refusal: {said}"
+    );
+    assert_eq!(
+        said.matches("note: node 'build':").count(),
+        1,
+        "the call names the node more than once: {said}"
+    );
+    let id = queued_id_of(&world, run, NOTE);
+    let outcome = outcome_of(&world, run, id).expect("the envelope was answered");
+    assert_eq!(
+        (&outcome["applied"], &outcome["results"][0]["outcome"]),
+        (&json!(true), &json!("queued")),
+        "the envelope was not answered as its note was queued: {outcome}"
+    );
+    assert_eq!(
+        outcomes_for(&world, run, id),
+        1,
+        "the envelope was answered again once its note was refused"
+    );
+    let record = note_recorded(&world, run, id, 0);
+    assert_eq!(record["kind"], json!("edit-rejected"), "{record}");
+
+    std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
 /// A note submitted while **nothing** drives the run waits on no turn.
 ///
 /// With no driver, `reply` is the run's writer itself and delivers inline, holding

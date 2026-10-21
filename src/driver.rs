@@ -3774,9 +3774,7 @@ pub(crate) fn deliver_note_envelope(
             loop {
                 match note_record(paths, reply)? {
                     Some(Ok(reached)) => break Ok(crate::note::Delivered::To(reached)),
-                    Some(Err(reason)) => {
-                        break Err(Error::Refused(format!("note: node '{id}': {reason}")))
-                    }
+                    Some(Err(reason)) => break Err(note_refused(&id, &reason)),
                     // llmlint: ignore[changed_behavior_has_e2e] the reply timeout elapsing is
                     // read from the calling process's environment, as the `Queued` arm below
                     // says, and this call is a library call a journey cannot bound from outside.
@@ -3798,6 +3796,21 @@ pub(crate) fn deliver_note_envelope(
         Submitted::Answered { .. } => Err(Error::Refused(
             "a note carries a command, and this envelope was answered as a verdict".to_string(),
         )),
+    }
+}
+
+/// The refusal a note's own `edit-rejected` record states, as the call's error.
+///
+/// That record's reason is the refusal the run wrote, already worded in full —
+/// `refused: note: node '…': …` — so it is returned as it stands rather than
+/// prefixed a second time; only a reason that does not name the node is given
+/// the node's name.
+fn note_refused(id: &str, reason: &str) -> Error {
+    let reason = reason.strip_prefix("refused: ").unwrap_or(reason);
+    if reason.starts_with(&format!("note: node '{id}': ")) {
+        Error::Refused(reason.to_owned())
+    } else {
+        Error::Refused(format!("note: node '{id}': {reason}"))
     }
 }
 
