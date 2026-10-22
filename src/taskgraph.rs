@@ -152,6 +152,10 @@ const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
 /// from — so a project stating it is told which end to edit rather than having
 /// its value silently lose to the task's own.
 const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
+    (
+        "assets_from",
+        "a live edit only; this is not a plan node field",
+    ),
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
     ("delivers", "the task's own `delivers`"),
