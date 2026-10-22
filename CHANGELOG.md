@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.82.1](https://github.com/nickderobertis/onepipeline/compare/v0.82.0...v0.82.1) - 2026-10-21
+
+### Fixed
+
+- *(tests)* keep onepipeline's rework retitle journey reliable on a slower runner ([#1098](https://github.com/nickderobertis/onepipeline/pull/1098))
+
 ## [0.82.0](https://github.com/nickderobertis/onepipeline/compare/v0.81.0...v0.82.0) - 2026-10-21
 
 ### Added

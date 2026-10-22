@@ -384,7 +384,7 @@ impl Message for QueuedCommands {
     const SCHEMA: SchemaId = QUEUED_COMMANDS_SCHEMA;
 }
 
-/// The four things that can become of one command of an envelope.
+/// The five things that can become of one command of an envelope.
 ///
 /// One field rather than a boolean and a sentence, because "not applied" was two
 /// facts wearing one word: a command that was wrong and a command that was fine.
@@ -417,13 +417,21 @@ pub enum CommandVerdict {
     Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,
+    /// A live `note` handed to its receiver's inbox, waiting for that
+    /// receiver's turn to take it.
+    ///
+    /// The envelope is answered as its notes are handed off rather than once
+    /// each receiver's turn ends, which can be hours later. What the receiver's
+    /// turn later makes of the note — taken, carried or refused — is that note's
+    /// own record in the run's journal, and never rewrites this answer.
+    Queued,
 }
 
 /// What became of **one** command of an envelope.
 ///
 /// Every command is evaluated, whatever the ones before it said, so each entry is
 /// that command's **own** answer. The envelope is still atomic — a refusal
-/// anywhere in it applies none of it — and the four words of [`CommandVerdict`]
+/// anywhere in it applies none of it — and the words of [`CommandVerdict`]
 /// are what tells apart the facts a single boolean could not: which commands
 /// were wrong, which were fine and went down with them, and which of those had
 /// already been read by a conversation that cannot unread it. A manager reading
