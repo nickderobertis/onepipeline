@@ -412,24 +412,24 @@ mod tests {
         assert!(ClaimFile::parse(&later.to_string()).is_err());
     }
 
-    /// Entry 138 of `docs/contract-divergences.md` states the sidecar, its words and the
+    /// Entry 139 of `docs/contract-divergences.md` states the sidecar, its words and the
     /// surface kind in one json block: each is held to the type and the constant it names.
     #[test]
-    fn entry_138s_block_is_what_this_build_writes_and_reads() {
+    fn entry_139s_block_is_what_this_build_writes_and_reads() {
         let record = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
         )
         .expect("the divergence record ships");
         let entry = record
             .split("\n## ")
-            .find(|entry| entry.starts_with("138."))
-            .expect("the record carries entry 138");
+            .find(|entry| entry.starts_with("139."))
+            .expect("the record carries entry 139");
         let block: serde_json::Value = entry
             .split("```json")
             .nth(1)
             .and_then(|rest| rest.split("```").next())
             .and_then(|block| serde_json::from_str(block).ok())
-            .expect("entry 138 carries a json block");
+            .expect("entry 139 carries a json block");
         assert_eq!(block["claim_file"], CLAIM_FILE);
         let example = ClaimFile::parse(&block["claim"].to_string()).expect("the example reads");
         assert_eq!(serde_json::to_value(&example).unwrap(), block["claim"]);

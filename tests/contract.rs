@@ -1822,6 +1822,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/other".into(),
             ],
         }),
+        assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
@@ -11698,5 +11699,32 @@ fn the_command_verdict_words_are_what_entry_136_names() {
                 .iter()
                 .any(|variant| variant["properties"]["state"]["const"] == "queued")),
         "the run reading does not state a `queued` delivery"
+    );
+}
+
+#[test]
+fn retained_run_views_publish_the_contracts_refresh_outcomes() {
+    use onepipeline::views::{Refreshed, RunView};
+    let _: fn(&mut RunView) -> onepipeline::Result<Refreshed> = RunView::refresh;
+    let outcomes = [
+        Refreshed::Unchanged,
+        Refreshed::Appended { first: 7 },
+        Refreshed::Reread,
+    ];
+    let offsets: Vec<_> = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Refreshed::Unchanged => None,
+            Refreshed::Appended { first } => Some(first),
+            Refreshed::Reread => None,
+        })
+        .collect();
+    assert_eq!(offsets, [None, Some(7), None]);
+    assert_contract_names(
+        "retained view refresh",
+        &[
+            "`views::RunView::refresh(&mut self) -> crate::Result<views::Refreshed>`",
+            "`views::Refreshed { Unchanged, Appended { first: usize }, Reread }`",
+        ],
     );
 }

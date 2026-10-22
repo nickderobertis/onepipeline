@@ -1,7 +1,7 @@
 //! A driver whose claim on its project no read could confirm keeps every dispatch it has in
 //! flight, starts nothing, says so everywhere a view looks, and carries on at the first read
 //! that confirms it — while a read that finds another driver's claim still ends its work, and
-//! an adopter starts on evidence rather than on a timer. Entry 138 of
+//! an adopter starts on evidence rather than on a timer. Entry 139 of
 //! `docs/contract-divergences.md`.
 //!
 //! Each journey drives the compiled binary over a real `local-md` store — the scripted one

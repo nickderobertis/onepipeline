@@ -177,7 +177,7 @@ const PUBLISHING: &str = "onepipeline.publishing";
 ///
 /// The fence is the driver's best-effort projection of what it has under way, written off
 /// the reconcile loop on a store of its own whenever that changes (`docs/contract-divergences.md`
-/// entry 138). Its requests are the run's like any other, and the figures count them: this is
+/// entry 139). Its requests are the run's like any other, and the figures count them: this is
 /// only how a journey knows they have finished. A fence connection is one whose every call is
 /// its handshake or a write of [`PUBLISHING`].
 struct Fence {
@@ -305,7 +305,7 @@ fn under_way(journal: &[Value]) -> BTreeSet<String> {
 /// The run, paced so the claim fence never has two snapshots to coalesce.
 ///
 /// The fence worker coalesces the snapshots a driver makes while one of its writes is in
-/// flight into the newest (`docs/contract-divergences.md` entry 138), so how many writes a
+/// flight into the newest (`docs/contract-divergences.md` entry 139), so how many writes a
 /// run takes would depend on how fast the store answers. Two things make a snapshot here: an
 /// admission, which queues the fence with its node before it dispatches, and a write-back
 /// attempt landing a settlement, after which the driver's next pass lets the node go. The
@@ -854,7 +854,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
     // releases the run's driver claim: one read of the project, which finds the claim still
     // this run's, and one write of it (`docs/contract-divergences.md` entry 119); and clears
     // the claim fence: one read, which finds the fence the paused fence worker last wrote
-    // still naming this run, and one write of it (entry 138). Before the claim existed this
+    // still naming this run, and one write of it (entry 139). Before the claim existed this
     // was the attempt left with nothing to carry.
     let closeout = recorded.last().expect("the closeout was recorded");
     assert_eq!(closeout["items"], json!([]), "{closeout}");
@@ -889,7 +889,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         // read only by that attempt, for its copy, and by the two that release the run's
         // driver claim — the stop's and the closeout's — each reading it once and writing the
         // claim beside it, and reading it again to clear the claim fence where it still names
-        // this run (entry 138); and every other write is a targeted update whose fields the
+        // this run (entry 139); and every other write is a targeted update whose fields the
         // store says it wrote.
         let calls = &record["calls"];
         if calls.get("project-copy").is_some() {

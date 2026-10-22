@@ -1137,6 +1137,8 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    #[cfg(test)]
+    crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
     // edit, no claim — and not a write that keeps the run looking busy either,
     // so a run reads exactly as it would without it. Only `status` reads it, off

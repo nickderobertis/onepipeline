@@ -802,6 +802,10 @@ resolver = "2"
 # preemption withdraw a live note through it, and `tests/note`'s live-withdrawal
 # journeys hold it. It requires nothing this lock did not already resolve.
 #
+# `oneagentgraph` 0.7.1 ends a member's blocked command provider when the graph
+# stops. The attached observer stop journey in
+# `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -822,7 +826,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.7.0"
+oneagentgraph = "0.7.1"
 onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -1063,7 +1067,12 @@ onejudge = "0.20.0"
 # **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
 # `oneagentgraph` 0.6.0 and `onejudge` 0.20.0 admit this core, so the lock
 # resolves the core once.
-oneharness-core = "0.28.5"
+# 0.28.8 removes the dispatch's environment stamp from the pool sweeper
+# (oneharness #1520), so a member's final reap leaves it alive to stop the
+# server after its last lease and linger. The retirement journey in
+# `tests/e2e/dispatch.rs` holds this through the public in-process executor.
+# All linked consumers admit this 0.28.x core, so it resolves once.
+oneharness-core = "0.28.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -1139,7 +1148,7 @@ onevcs-testing = "0.19.13"
 # GitHub Projects board read only the plan, never the whole board, and a copied
 # item takes fewer requests. The test CLI is provisioned at this same release.
 #
-# **0.9.2 is the floor**, for the two changes a plan homed in Linear launches on. A copy to
+# **0.9.2 supplies the two changes a plan homed in Linear launches on.** A copy to
 # Linear sends each item's content in the form Linear stores it — the rewrite the linear
 # plugin declares in its "Ruling: what Linear does to Markdown on write, declared" — so the
 # `body_digest` its `onetaskgraph.template` provenance records is of what a read hands back,
@@ -1149,9 +1158,11 @@ onevcs-testing = "0.19.13"
 # repository-naming tasks route, refusing a split private home as
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
-onetaskgraph-core = "=0.9.2"
-onetaskgraph-plugin-api = "=0.9.2"
-onetaskgraph-local-md = "=0.9.2"
+# **0.10.0 is the floor** for the public held-task-image read that creating write-backs
+# use to carry authoring images through the shadow store.
+onetaskgraph-core = "=0.10.0"
+onetaskgraph-plugin-api = "=0.10.0"
+onetaskgraph-local-md = "=0.10.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1168,7 +1179,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.84.0"
+version = "0.84.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1313,6 +1324,8 @@ schemars = { version = "1", features = ["preserve_order"] }
 # llmlint: ignore[new_command_or_client_gets_its_own_project] plugins of the linked store library, not a command or client of this repository; required in this package so the bill of materials declares them.
 onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
 onetaskgraph-plugin-api = { workspace = true }
+# The shadow store writes assets through its public source API.
+onetaskgraph-local-md = { workspace = true }
 # The store's plugin traits are async, so each call into it runs on a runtime this crate
 # builds for that one logical command — a plan read, a write-back attempt — and drops
 # with it: a current-thread runtime, because what the store needs is several sources

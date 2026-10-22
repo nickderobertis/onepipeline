@@ -650,6 +650,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // comments, set no expected version, and read immutable local shadow tasks.
         // `every_engine_failure_is_named_as_the_store_names_it` verifies their mapping.
         EngineError::ExpectOneTask => decided("expect-one-task"),
+        EngineError::VersionMoved { .. } => decided("version-moved"),
         EngineError::NotCached { .. } => decided("not-cached"),
         EngineError::CommentlessDestination { .. } => decided("no-comments"),
         EngineError::QueryNotTasks => decided("query-not-tasks"),
@@ -683,6 +684,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::StaleOrigin { .. } => decided("stale-origin"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
         EngineError::StaleLink { .. } => decided("stale-link"),
+        // llmlint: ignore[changed_behavior_has_e2e] only members-only copies raise this refusal; this worker uses whole-project copies. The exhaustive store-word test below checks the classification for the linked release.
+        EngineError::NoProjectCounterpart { .. } => decided("no-project-counterpart"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never sets `create`; `writeback::tests` holds the word.
@@ -695,7 +698,6 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
         EngineError::AssetNotHeld { .. } => decided("asset-not-held"),
-        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the store raises it only for an asset its source hands over, and `write_shadow` writes a creation's Markdown alone, so a reference is refused `asset-not-held` first (`store::a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held`); `writeback::tests` holds the word.
         EngineError::AssetsUnsupported { .. } => decided("assets-unsupported"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `project graph` raises these, and a write-back reads and copies but never draws a graph; `writeback::tests` holds each word.
         EngineError::GraphGroupNotText { .. } => decided("graph-group"),
@@ -3350,6 +3352,7 @@ fn create(
     // retried: `store::an_unwritable_shadow_store_is_reported_retried_and_recovered`.
     write_shadow(snapshot, created, ends, &destination_project)
         .map_err(|why| carrying.failed(why.into()))?;
+    write_shadow_assets(attempt, snapshot, created).map_err(|failed| carrying.failed(failed))?;
     let members = CopyItems::new(
         created
             .iter()
@@ -4360,9 +4363,115 @@ fn write_shadow(
     // lists beside its members.
     for entry in std::fs::read_dir(&tasks).map_err(|e| e.to_string())? {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if !written.contains(&path) {
+        if path.is_file() && !written.contains(&path) {
             std::fs::remove_file(&path).map_err(|e| e.to_string())?;
         }
+    }
+    Ok(())
+}
+
+/// Carry held images through the source APIs, before the creating copy reads the shadow.
+fn write_shadow_assets(
+    attempt: &Attempt,
+    snapshot: &Snapshot,
+    created: &BTreeSet<String>,
+) -> Result<(), Failed> {
+    use onetaskgraph_plugin_api::{AssetPayload, AssetWrite, ItemWrite, TaskSource};
+
+    let config = serde_json::from_value(json!({"root": snapshot.dir}))
+        .map_err(|why| Failed::from(format!("shadow configuration: {why}")))?;
+    let shadow = onetaskgraph_local_md::LocalMdSource::new(config)
+        .map_err(|why| Failed::from(why.to_string()))?
+        .named(SourceName::new(SHADOW_SOURCE).expect("the shadow source name"));
+    let lineages = snapshot.lineages();
+    for root in created {
+        let chain = lineages
+            .chain(root)
+            .ok_or_else(|| Failed::from("missing lineage".to_owned()))?;
+        let mut sources = Vec::new();
+        if let Some(record) = snapshot.nodes[root].task_record.as_ref() {
+            let source = record
+                .source
+                .as_ref()
+                .map_or(snapshot.project.source(), |s| s.as_str());
+            sources.push(
+                format!("{source}:{}", record.id)
+                    .parse::<GlobalId>()
+                    .map_err(|why| Failed::from(format!("root task: {why}")))?,
+            );
+        }
+        let head = chain.last().expect("a lineage has a head");
+        // A stated author supplies the replacement's bytes; the stored root is its fallback.
+        let mut assets = BTreeMap::new();
+        for id in sources
+            .iter()
+            .chain(snapshot.nodes[head].assets_from.iter())
+        {
+            let held = attempt
+                .runtime
+                .block_on(async {
+                    tokio::time::timeout(Deadline::Floor.within(), attempt.engine.task_assets(id))
+                        .await
+                })
+                .map_err(|_| {
+                    attempt.cancelled.set(true);
+                    Failed::from(format!("reading assets_from {id} timed out"))
+                })?
+                .map_err(|why| {
+                    Failed::classed(why.to_string(), Classified::of_engine(&why.error))
+                })?;
+            for asset in held {
+                assets.insert(
+                    asset.name.clone(),
+                    AssetPayload::of(asset.name, asset.bytes),
+                );
+            }
+        }
+        let target = member_id(snapshot, root).native;
+        attempt
+            .runtime
+            .block_on(async {
+                let item = shadow
+                    .get_task(&target)
+                    .await?
+                    .ok_or_else(|| SourceError::Refused {
+                        message: format!("shadow task {target} is missing"),
+                    })?;
+                let mut depends_on = Vec::new();
+                let mut cursor = None;
+                loop {
+                    let page = shadow
+                        .task_dependencies(
+                            &target,
+                            onetaskgraph_plugin_api::Direction::DependsOn,
+                            &onetaskgraph_plugin_api::PageRequest {
+                                cursor,
+                                limit: onetaskgraph_local_md::MAX_PAGE_SIZE,
+                            },
+                        )
+                        .await?;
+                    depends_on.extend(page.items);
+                    match page.next {
+                        Some(next) => cursor = Some(next),
+                        None => break,
+                    }
+                }
+                shadow
+                    .write_task_with_assets(
+                        &ItemWrite {
+                            target: Some(target),
+                            item,
+                            depends_on,
+                        },
+                        None,
+                        &AssetWrite {
+                            assets: assets.into_values().collect(),
+                            recorded_assets: None,
+                        },
+                    )
+                    .await
+            })
+            .map_err(|why| Failed::from(why.to_string()))?;
     }
     Ok(())
 }
@@ -4492,6 +4601,7 @@ fn task_document(
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     wire.remove("id");
+    wire.remove("assets_from");
     // What the node was read out of rather than anything it says: the destination task's
     // own id, key and title are that task's, and a relaunch of a project this run projected
     // onto refuses `onepipeline.task_record` as a key no plan may state.
@@ -6245,6 +6355,11 @@ mod tests {
                 name: "plans".into(),
                 kind: "in-memory".into(),
             },
+            EngineError::VersionMoved {
+                id: "plans:doc".into(),
+                expected: "old".into(),
+                found: "new".into(),
+            },
             EngineError::NoSuchProject {
                 id: "plans:a".into(),
             },
@@ -6280,6 +6395,12 @@ mod tests {
             EngineError::StaleLink {
                 item: "a".into(),
                 link: "b".into(),
+            },
+            EngineError::NoProjectCounterpart {
+                project: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("board")
+                    .expect("a source name"),
+                missing: onetaskgraph_plugin_api::SourceName::new("board").expect("a source name"),
             },
             EngineError::NotAMember {
                 id: id(),
@@ -7412,6 +7533,171 @@ mod tests {
             (&edited["title"], &edited["content"], &edited["labels"]),
             "the edit changed more of the project than one metadata key"
         );
+    }
+
+    /// Creation from an extant stored root has no ordinary start/reply path: known_id
+    /// targets that root in place. Exercise the dormant branch over real source writes,
+    /// the public held-image read, shadow materialization, and a creating store copy.
+    #[test]
+    fn a_created_stored_root_carries_images_through_the_real_store_seam() {
+        use onetaskgraph_plugin_api::{AssetName, AssetPayload, AssetWrite, ItemWrite, TaskSource};
+        for combine in [false, true] {
+            let mut fixture = Fixture::new("stored-root-images");
+            let author = fixture.dir.join("author");
+            let board = fixture.dir.join("board");
+            std::fs::create_dir_all(author.join("tasks/source")).unwrap();
+            std::fs::create_dir_all(board.join("projects")).unwrap();
+            super::document(
+                &author.join("tasks/source/root.md"),
+                &json!({"title": "Author", "project": "source"}),
+                "![flow](./diagram.png)\n![root](./root.png)",
+            )
+            .unwrap();
+            super::document(
+                &author.join("tasks/source/replacement.md"),
+                &json!({"title": "Replacement", "project": "source"}),
+                "![flow](./diagram.png)\n![extra](./extra.png)",
+            )
+            .unwrap();
+            super::document(
+                &board.join("projects/board.md"),
+                &json!({"title": fixture.destination.title}),
+                "",
+            )
+            .unwrap();
+            std::fs::write(fixture.dir.join("onetaskgraph.yaml"), format!(
+            "sources:\n  authors:\n    plugin: local-md\n    config:\n      root: {}\n  plans:\n    plugin: local-md\n    config:\n      root: {}\n", author.display(), board.display()
+        )).unwrap();
+            let source = onetaskgraph_local_md::LocalMdSource::new(
+                serde_json::from_value(json!({"root": author})).unwrap(),
+            )
+            .unwrap();
+            let runtime = crate::taskgraph::runtime().unwrap();
+            runtime.block_on(async {
+                for (native, payloads) in [
+                    (
+                        "source/root",
+                        vec![
+                            ("diagram.png", b"root image bytes".to_vec()),
+                            ("root.png", b"root only".to_vec()),
+                        ],
+                    ),
+                    (
+                        "source/replacement",
+                        vec![
+                            ("diagram.png", b"replacement image bytes".to_vec()),
+                            ("extra.png", b"author only".to_vec()),
+                        ],
+                    ),
+                ] {
+                    let target = native.into();
+                    let item = source.get_task(&target).await.unwrap().unwrap();
+                    source
+                        .write_task_with_assets(
+                            &ItemWrite {
+                                target: Some(target),
+                                item,
+                                depends_on: vec![],
+                            },
+                            None,
+                            &AssetWrite {
+                                assets: payloads
+                                    .into_iter()
+                                    .map(|(name, bytes)| {
+                                        AssetPayload::of(AssetName::new(name).unwrap(), bytes)
+                                    })
+                                    .collect(),
+                                recorded_assets: None,
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+            let node = fixture.snapshot.nodes.get_mut("design").unwrap();
+            node.task = Some(
+                if combine {
+                    "![flow](./diagram.png)\n![root](./root.png)\n![extra](./extra.png)"
+                } else {
+                    "![flow](./diagram.png)\n![root](./root.png)"
+                }
+                .into(),
+            );
+            node.assets_from = combine.then(|| "authors:source/replacement".parse().unwrap());
+            node.task_record = Some(crate::plan::TaskRecord {
+                id: "source/root".into(),
+                source: Some(onetaskgraph_plugin_api::SourceName::new("authors").unwrap()),
+                ..Default::default()
+            });
+            let created = std::collections::BTreeSet::from(["design".to_owned()]);
+            write_shadow(
+                &fixture.snapshot,
+                &created,
+                &fixture.ends,
+                &fixture.destination,
+            )
+            .unwrap();
+            let attempt = super::Attempt::open(
+                &crate::taskgraph::Store::isolated(fixture.dir.to_path_buf()),
+                &fixture.snapshot,
+            )
+            .unwrap_or_else(|e| panic!("{}", e.reason));
+            super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+                .unwrap_or_else(|e| panic!("{}", e.reason));
+            let shadow = super::member_id(&fixture.snapshot, "design");
+            let report = attempt
+                .runtime
+                .block_on(
+                    attempt.engine.copy(&onetaskgraph_core::CopyRequest {
+                        items: onetaskgraph_core::CopyItems::new(vec![super::shadow_id(
+                            &super::project_file(&fixture.snapshot.project),
+                        )])
+                        .unwrap(),
+                        scope: onetaskgraph_core::CopyScope::Members(
+                            onetaskgraph_core::CopyItems::new(vec![shadow.clone()]).unwrap(),
+                        ),
+                        destination: onetaskgraph_plugin_api::SourceName::new("plans").unwrap(),
+                        match_by: None,
+                        recreate: false,
+                        create: false,
+                        dry_run: false,
+                        comments: false,
+                        no_link: false,
+                        expect: None,
+                        statuses: vec![],
+                    }),
+                )
+                .unwrap();
+            let end = report
+                .items
+                .iter()
+                .find(|item| item.source == shadow)
+                .and_then(|item| item.action.destination())
+                .expect("the task was created");
+            let assets = attempt
+                .runtime
+                .block_on(attempt.engine.task_assets(end))
+                .unwrap();
+            let assets: BTreeMap<_, _> = assets
+                .into_iter()
+                .map(|asset| (asset.name.to_string(), asset.bytes))
+                .collect();
+            let mut expected = BTreeMap::from([
+                (
+                    "diagram.png".to_owned(),
+                    if combine {
+                        b"replacement image bytes".to_vec()
+                    } else {
+                        b"root image bytes".to_vec()
+                    },
+                ),
+                ("root.png".to_owned(), b"root only".to_vec()),
+            ]);
+            if combine {
+                expected.insert("extra.png".to_owned(), b"author only".to_vec());
+            }
+            assert_eq!(assets, expected);
+        }
     }
 
     /// The same engine reads the stable local shadow again after each command ends.

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "epoch": "writer-epoch",
+  "stamp": {
+    "len": 4096,
+    "modified": { "secs_since_epoch": 1700000000, "nanos_since_epoch": 100 },
+    "identity": [1, 42, 1700000000, 123]
+  }
+}

@@ -3083,7 +3083,7 @@ impl World {
     ///
     /// The driver writes the nodes it has under way to the project's
     /// `onepipeline.publishing` on a store of its own, off the reconcile loop, whenever that
-    /// set changes (`docs/contract-divergences.md` entry 138): a connection whose every call
+    /// set changes (`docs/contract-divergences.md` entry 139): a connection whose every call
     /// is its handshake or that write. It belongs to no write-back attempt and ends no
     /// command, so a journey waiting for the write-back's last command to have ended reads
     /// it here, where a fence write landing after that command cannot stand last.

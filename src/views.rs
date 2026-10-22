@@ -1496,7 +1496,19 @@ fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
     });
 }
 
-/// Everything a view needs about one run, read once.
+/// Everything a view needs about one run, read once or kept current with
+/// [`refresh`](Self::refresh).
+///
+/// Refresh returns [`Refreshed::Unchanged`] without parsing or folding a journal
+/// record when the journal and externally resolved view data are unchanged.
+/// [`Refreshed::Appended`] preserves the previous events exactly as a prefix;
+/// only appended records are read, parsed and folded, in merge order.
+/// [`Refreshed::Reread`] reads the whole store when its prefix changed, it shrank,
+/// appended records sort before held records under the checkpoint coverage rule,
+/// or labels, cross-DAG resolution or landing information changed incompatibly
+/// with suffix processing. After every outcome, `events`, `state` and `launch`
+/// equal a fresh [`open`](Self::open), including its label overlay and external
+/// resolution. Existing callers of `open` retain the same behavior.
 #[derive(Debug)]
 pub struct RunView {
     /// Where the run's state lives.
@@ -1508,6 +1520,50 @@ pub struct RunView {
     pub events: Vec<Envelope>,
     /// What the journal says about it.
     pub state: RunState,
+    refresh: RefreshCursor,
+}
+
+/// What changed when a long-lived [`RunView`] refreshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Nothing changed; no journal record was parsed or folded.
+    Unchanged,
+    /// Only the suffix starting at `first` was read, parsed and folded.
+    Appended {
+        /// The previous event count; earlier events are unchanged.
+        first: usize,
+    },
+    /// The whole store was read again, as by [`RunView::open`].
+    Reread,
+}
+
+#[derive(Debug)]
+struct RefreshCursor {
+    dir: PathBuf,
+    stamp: Option<crate::appendstamp::Stamp>,
+    receipt: Option<crate::appendstamp::Receipt>,
+    coverage: crate::checkpoint::Coverage,
+    result: Option<serde_json::Value>,
+    upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
+}
+
+fn upstream_stamps(
+    paths: &RunPaths,
+    state: &RunState,
+) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
+    let root = paths
+        .dir
+        .parent()
+        .map_or_else(ledger::runs_root, Path::to_path_buf);
+    crate::crossdag::edges(&state.graph)
+        .keys()
+        .filter_map(|edge| {
+            let reference = crate::crossdag::parse(edge)?;
+            let journal = RunPaths::under(&root, &reference.run).journal();
+            let stamp = crate::appendstamp::Stamp::read(&journal);
+            Some((edge.clone(), stamp))
+        })
+        .collect()
 }
 
 impl RunView {
@@ -1519,6 +1575,7 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
+        let stamp = crate::appendstamp::Stamp::read(&paths.journal());
         let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
         (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
         let mut events = crate::journal::read(&paths.journal());
@@ -1540,12 +1597,136 @@ impl RunView {
                 .map_or_else(ledger::runs_root, Path::to_path_buf),
             &state.graph,
         );
+        let receipt = stamp.as_ref().and_then(|stamp| {
+            (Some(stamp) == crate::appendstamp::Stamp::read(&paths.journal()).as_ref())
+                .then(|| crate::appendstamp::Receipt::read(&paths.journal(), stamp))
+                .flatten()
+        });
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in &events {
+            coverage.absorb(Some(event), 0);
+        }
+        coverage.bytes = stamp.as_ref().map_or(0, |stamp| stamp.len);
+        let refresh = RefreshCursor {
+            dir: paths.dir.clone(),
+            stamp,
+            receipt,
+            coverage,
+            result: ledger::read_json_opt(&paths.result()),
+            upstreams: crate::crossdag::resolution_stamps(
+                &paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+                &state.cross_dag,
+            ),
+        };
         Ok(Self {
             paths: paths.clone(),
             launch,
             events,
             state,
+            refresh,
         })
+    }
+
+    /// Bring this view up to date, preserving its event prefix on an append.
+    ///
+    /// See [`RunView`] and [`Refreshed`] for the outcomes and equality guarantee.
+    /// An unsuccessful refresh leaves the previous view intact.
+    pub fn refresh(&mut self) -> crate::Result<Refreshed> {
+        let journal = self.paths.journal();
+        let stamp = crate::appendstamp::Stamp::read(&journal);
+        let mut launch: LaunchRecord = ledger::read_json(&self.paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
+        let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
+        let upstreams = upstream_stamps(&self.paths, &self.state);
+        if self.refresh.upstreams.as_ref() != Some(&upstreams) {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &self.state.graph,
+            );
+            return self.reread();
+        }
+        let external_changed = serde_json::to_value(&launch)
+            .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            != serde_json::to_value(&self.launch)
+                .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            || result != self.refresh.result;
+        if self.paths.dir != self.refresh.dir || external_changed {
+            return self.reread();
+        }
+        if stamp == self.refresh.stamp {
+            return Ok(Refreshed::Unchanged);
+        }
+        let receipt = stamp
+            .as_ref()
+            .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
+        let continuous = receipt
+            .as_ref()
+            .zip(self.refresh.receipt.as_ref())
+            .is_some_and(|(now, previous)| now.continues(previous));
+        if !continuous
+            || stamp
+                .as_ref()
+                .is_none_or(|stamp| stamp.len <= self.refresh.coverage.bytes)
+        {
+            return self.reread();
+        }
+        #[cfg(test)]
+        refresh_tests::before_appended_read();
+        let (mut grown, offset) = crate::journal::appended_range(
+            &journal,
+            self.refresh.coverage.bytes,
+            stamp
+                .as_ref()
+                .map_or(0, |stamp| stamp.len - self.refresh.coverage.bytes),
+        );
+        if stamp.as_ref().is_none_or(|stamp| offset != stamp.len)
+            || crate::appendstamp::Stamp::read(&journal) != stamp
+            || !grown
+                .iter()
+                .all(|event| self.refresh.coverage.is_in_front_of(event))
+        {
+            return self.reread();
+        }
+        crate::journal::merge_order(&mut grown);
+        let first = self.events.len();
+        let mut state = self.state.clone();
+        for event in &grown {
+            crate::projection::fold_one(&mut state, event);
+        }
+        if upstream_stamps(&self.paths, &state) != upstreams {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+            );
+            return self.reread();
+        }
+        landings_the_run_re_read(&mut state, &self.paths);
+        self.state = state;
+        for event in &grown {
+            self.refresh.coverage.absorb(Some(event), 0);
+        }
+        self.events.extend(grown);
+        self.refresh.coverage.bytes = offset;
+        self.refresh.stamp = stamp;
+        self.refresh.receipt = receipt;
+        Ok(Refreshed::Appended { first })
+    }
+
+    fn reread(&mut self) -> crate::Result<Refreshed> {
+        *self = Self::open(&self.paths)?;
+        Ok(Refreshed::Reread)
     }
 
     /// How the run is being driven.
@@ -6027,7 +6208,7 @@ mod tests {
         );
     }
 
-    fn plan() -> Plan {
+    pub(super) fn plan() -> Plan {
         Plan {
             schema_version: PLAN_SCHEMA_VERSION,
             goal: Some(crate::plan::Goal {
@@ -6045,7 +6226,7 @@ mod tests {
         }
     }
 
-    fn launch(pid: u32) -> LaunchRecord {
+    pub(super) fn launch(pid: u32) -> LaunchRecord {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
@@ -8748,3 +8929,7 @@ mod tests {
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }
+
+#[cfg(test)]
+#[path = "views_refresh_tests.rs"]
+mod refresh_tests;

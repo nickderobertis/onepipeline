@@ -2770,16 +2770,601 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A complete one-pixel PNG, including non-UTF-8 bytes, to prove binary transport.
+const DIAGRAM_PNG: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\x00\x00\x00\x0b\x49\x44\x41\x54\x78\xda\x63\xfc\xff\x1f\x00\x03\x03\x02\x00\xef\xa3\x91\x99\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+
+/// Put an image on an authoring task in a second real local-md store through its write API.
+fn image_author(world: World) -> (World, String) {
+    let root = world.store_apart("images");
+    world.plan_in(
+        &root,
+        "author",
+        &plan_of("author", vec![agent("author", &[])]),
+    );
+    hold_diagram(&root, "author-board/000-author");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__IMAGES__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__ROOT",
+            &root.to_string_lossy(),
+        );
+    (world, "images:author-board/000-author".into())
+}
+
+fn hold_diagram(root: &std::path::Path, native: &str) {
+    hold_images(root, native, &[("diagram.png", DIAGRAM_PNG)]);
+}
+
+fn hold_images(root: &std::path::Path, native: &str, images: &[(&str, &[u8])]) {
+    use onetaskgraph_plugin_api::{AssetPayload, AssetWrite, ItemWrite, TaskSource};
+    let config = serde_json::from_value(json!({"root": root})).unwrap();
+    let source = onetaskgraph_local_md::LocalMdSource::new(config).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let target = native.into();
+            let mut item = source.get_task(&target).await.unwrap().unwrap();
+            item.content = Some(format!(
+                "{}\n\n{}",
+                item.content.unwrap_or_default(),
+                images
+                    .iter()
+                    .map(|(name, _)| format!("![flow](./{name})"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+            let edges = source
+                .task_dependencies(
+                    &target,
+                    onetaskgraph_plugin_api::Direction::DependsOn,
+                    &onetaskgraph_plugin_api::PageRequest {
+                        cursor: None,
+                        limit: 200,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                edges.next.is_none(),
+                "the fixture fits in one dependency page"
+            );
+            source
+                .write_task_with_assets(
+                    &ItemWrite {
+                        target: Some(target),
+                        item,
+                        depends_on: edges.items,
+                    },
+                    None,
+                    &AssetWrite {
+                        assets: images
+                            .iter()
+                            .map(|(name, bytes)| {
+                                AssetPayload::of(
+                                    onetaskgraph_plugin_api::AssetName::new(*name).unwrap(),
+                                    bytes.to_vec(),
+                                )
+                            })
+                            .collect(),
+                        recorded_assets: None,
+                    },
+                )
+                .await
+                .unwrap();
+        });
+}
+
+fn assert_diagram(world: &World, project: &str, node: &str) {
+    let tasks = world.store_tasks(project);
+    let task = tasks
+        .iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap();
+    let id: onetaskgraph_core::GlobalId = task["id"].as_str().unwrap().parse().unwrap();
+    let held = world.store_call(|engine| async move { engine.task_assets(&id).await.unwrap() });
+    assert!(task["item"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("![flow](./diagram.png)"));
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].name.as_str(), "diagram.png");
+    assert_eq!(held[0].bytes, DIAGRAM_PNG);
+    assert!(!task["item"]["metadata"]
+        .as_object()
+        .unwrap()
+        .contains_key("onepipeline.assets_from"));
+}
+
+/// Live adds and retry replacements carry author images through the channel and shadow copy.
+#[test]
+fn live_added_and_retried_tasks_carry_their_authoring_images() {
+    for retry in [false, true] {
+        let run = if retry { "assets-retry" } else { "assets-add" };
+        let (world, author) = image_author(World::new(run));
+        world.script("work.wait", "hold");
+        let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        let mut drawn = agent("drawn", &["work"]);
+        drawn["task"] = json!(format!(
+            "{}\n\n![flow](./diagram.png)",
+            drawn["task"].as_str().unwrap()
+        ));
+        drawn["assets_from"] = json!(author);
+        let mut commands = vec![];
+        if retry {
+            commands.push(json!({"op": "add", "node": agent("first", &["work"])}));
+            commands.push(json!({"op": "settle", "id": "first", "outcome": "failed", "evidence": "The planner superseded this draft before dispatch."}));
+            commands.push(json!({"op": "retry", "id": "first", "node": drawn}));
+        } else {
+            commands.push(json!({"op": "add", "node": drawn}));
+        }
+        // An old-style add in the same envelope still creates normally.
+        commands.push(json!({"op": "add", "node": agent("plain", &["work"])}));
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 3, "commands": commands}).to_string(),
+            )
+            .exited(0);
+        let root = if retry { "first" } else { "drawn" };
+        world.until_store("both added tasks to reach the board", |world| {
+            let tasks = world.store_tasks(&project);
+            [root, "plain"].iter().all(|id| {
+                tasks
+                    .iter()
+                    .any(|t| t["item"]["metadata"]["onepipeline.id"] == *id)
+            })
+        });
+        assert_diagram(&world, &project, root);
+        let plain = world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "plain")
+            .unwrap();
+        assert_eq!(plain["item"]["content"], agent("plain", &["work"])["task"]);
+        let plain_id = plain["id"].as_str().unwrap().parse().unwrap();
+        assert!(world
+            .store_call(|engine| async move { engine.task_assets(&plain_id).await.unwrap() })
+            .is_empty());
+        world.release("work.go");
+        world.until("the run to finish", |world| {
+            world.run_file(run, "result.json").is_file()
+        });
+        assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    }
+}
+
+/// A retry keeps the stored root's image on the lineage's one existing board item.
+#[test]
+fn a_stored_roots_retry_keeps_its_images_without_assets_from() {
+    let run = "assets-stored-retry";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let mut root = agent("drawn", &["work"]);
+    root["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), root]));
+    hold_diagram(&world.store(), &format!("{}/001-drawn", project_id(run)));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let before = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    let mut replacement = agent("replacement", &["work"]);
+    replacement["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)",
+        replacement["task"].as_str().unwrap()
+    ));
+    world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [{"op": "settle", "id": "drawn", "outcome": "failed", "evidence": "The planner superseded the parked draft."}, {"op": "retry", "id": "drawn", "node": replacement}]}).to_string()).exited(0);
+    world.until_store("the retry to reach the root item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|t| t["item"]["metadata"]["onepipeline.node"] == "replacement")
+    });
+    assert_diagram(&world, &project, "drawn");
+    let after = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    assert_eq!(before, after);
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// The documented existing-item limit: a stated author neither replaces a held image
+/// nor adds one. That retry still updates the same board item and its task text.
+#[test]
+fn a_retry_with_assets_from_keeps_an_existing_items_images_without_adding_any() {
+    let run = "assets-existing-retry";
+    let (world, author) = image_author(World::new(run));
+    let mut other_diagram = DIAGRAM_PNG.to_vec();
+    other_diagram.push(0);
+    hold_images(
+        &world.store_apart("images"),
+        "author-board/000-author",
+        &[
+            ("diagram.png", &other_diagram),
+            ("author-only.png", DIAGRAM_PNG),
+        ],
+    );
+    world.script("work.wait", "hold");
+    let mut root = agent("drawn", &["work"]);
+    root["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), root]));
+    hold_diagram(&world.store(), &format!("{}/001-drawn", project_id(run)));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let before = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    let author_id = author.parse().unwrap();
+    let held_by_author =
+        world.store_call(|engine| async move { engine.task_assets(&author_id).await.unwrap() });
+    assert_eq!(held_by_author.len(), 2);
+    assert_ne!(
+        held_by_author
+            .iter()
+            .find(|asset| asset.name.as_str() == "diagram.png")
+            .unwrap()
+            .bytes,
+        DIAGRAM_PNG
+    );
+    let mut replacement = agent("replacement", &["work"]);
+    replacement["assets_from"] = json!(author);
+    replacement["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)\n![author](./author-only.png)",
+        replacement["task"].as_str().unwrap()
+    ));
+    world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [
+        {"op": "settle", "id": "drawn", "outcome": "failed", "evidence": "The planner replaced the parked draft."},
+        {"op": "retry", "id": "drawn", "node": replacement},
+    ]}).to_string()).exited(0);
+    world.until_store("the retry to update the existing item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.node"] == "replacement")
+    });
+    assert_diagram(&world, &project, "drawn");
+    let after = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap();
+    assert_eq!(after["id"], before);
+    assert!(after["item"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("![author](./author-only.png)"));
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+#[test]
+fn an_unreadable_assets_from_is_refused_before_any_edit_is_journalled() {
+    let run = "assets-unreadable";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let mut drawn = agent("drawn", &["work"]);
+    drawn["assets_from"] = json!("plans:absent/task");
+    let refused = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 3, "commands": [{"op": "add", "node": drawn}]}).to_string(),
+    );
+    refused.exited(REFUSED);
+    assert!(
+        refused.stderr.contains("plans:absent/task")
+            && refused
+                .stderr
+                .contains("no task with the id plans:absent/task"),
+        "{}",
+        refused.stderr
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    for record in world.journal(run) {
+        let wire = record.to_string();
+        assert!(
+            !wire.contains("plans:absent/task") && !wire.contains("\"drawn\""),
+            "the refused edit entered the journal: {record}"
+        );
+    }
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+#[test]
+fn a_requeue_cannot_introduce_assets_from() {
+    let run = "assets-requeue-refused";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let mut held = agent("held", &["work"]);
+    held["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), held]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let refused = world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [{"op": "requeue", "id": "held", "amend": {"assets_from": "plans:author/task"}}]}).to_string());
+    refused.exited(REFUSED);
+    assert!(
+        refused.stderr.contains("cannot amend `assets_from`"),
+        "{}",
+        refused.stderr
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    world.run(&["stop", run]).exited(0);
+}
+
+#[test]
+fn assets_from_in_plan_metadata_is_refused_as_not_a_node_field() {
+    let world = World::new("assets-plan-refused");
+    let mut task = agent("work", &[]);
+    task["assets_from"] = json!("plans:author/task");
+    let project = world.plan(
+        "assets-plan-refused",
+        &plan_of("assets-plan-refused", vec![task]),
+    );
+    let refused = world.run(&["plan", "check", &project]);
+    refused.exited(1);
+    assert!(
+        refused.stdout.contains("assets_from") && refused.stdout.contains("not a node field"),
+        "{}",
+        refused.stdout
+    );
+}
+
+#[test]
+fn an_assetless_destination_refuses_image_creation_and_reports_the_store_kind() {
+    let run = "assets-unsupported";
+    let (world, author) = image_author(World::new(run));
+    world.script("store.assets-unsupported", "");
+    let world = world.through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let mut node = agent("drawn", &["work"]);
+    node["assets_from"] = json!(author);
+    node["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)",
+        node["task"].as_str().unwrap()
+    ));
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [{"op": "add", "node": node}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the unsupported assets refusal", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let said = the_line_reported(&world, run);
+    assert!(
+        said.contains("class: refused, kind: assets-unsupported"),
+        "{said}"
+    );
+    assert!(!world
+        .store_tasks(&project)
+        .iter()
+        .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn"));
+    world.until("the planner to be told", |world| {
+        !surfaces_raised(world, run).is_empty()
+    });
+    assert!(surfaces_raised(&world, run)
+        .iter()
+        .any(|surface| surface.contains("class: refused, kind: assets-unsupported")));
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// Hold the real creating write-back at its destination project read, after edit
+/// compilation and before it reads the authoring task's assets.
+fn a_creation_paused_before_reading_its_author(
+    world: &World,
+    run: &str,
+    author: &str,
+    image: bool,
+) -> (crate::harness::Arrival, std::process::Child) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let project_read = world.store_holds("get_project");
+    let mut node = agent("drawn", &["work"]);
+    node["assets_from"] = json!(author);
+    if image {
+        node["task"] = json!(format!(
+            "{}\n\n![flow](./diagram.png)",
+            node["task"].as_str().unwrap()
+        ));
+    }
+    let mut reply = world
+        .cmd(&["reply", run])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    reply
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"version": 3, "commands": [{"op": "add", "node": node}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let held = project_read.arrived();
+    world.store_stops_holding("get_project");
+    assert_eq!(world.events_of(run, "edit-committed").len(), 1);
+    (held, reply)
+}
+
+#[test]
+fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() {
+    let run = "assets-author-repair";
+    let (world, author) = image_author(World::new(run));
+    let world = world.through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the initial projection", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (held, reply) = a_creation_paused_before_reading_its_author(&world, run, &author, true);
+    let path = world
+        .store_apart("images")
+        .join("tasks/author-board/000-author.md");
+    let saved = world.root.join("paused-author.md");
+    std::fs::rename(&path, &saved).unwrap();
+    held.release();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until("the missing author refusal", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let said = the_line_reported(&world, run);
+    assert!(
+        said.contains(&author) && said.contains("class: refused, kind: no-such-item"),
+        "{said}"
+    );
+    assert!(!world
+        .store_tasks(&project)
+        .iter()
+        .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn"));
+    std::fs::rename(saved, path).unwrap();
+    noted(&world, run, "drawn", "the authoring task is readable again");
+    world.until_store("the repaired author image to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+    });
+    assert_diagram(&world, &project, "drawn");
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey must outlast the public sixty-second store-read floor to prove cancellation and rebuilding of a real subprocess source. It exercises this crate's write-back worker, so its existing e2e project is the narrowest applicable edge.
+#[test]
+fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
+    let run = "assets-read-timeout";
+    let world = World::new(run);
+    let images = world.store_apart("images");
+    world.plan_in(
+        &images,
+        "author",
+        &plan_of("author", vec![agent("author", &[])]),
+    );
+    let fakes = world.fakes.display().to_string();
+    let world = world
+        .through_scripted_source()
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env("ONETASKGRAPH_SOURCES__IMAGES__PLUGIN", "subprocess")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__COMMAND",
+            &double("scripted-source").display().to_string(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__DEADLINE_MS",
+            "180000",
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__ROOT",
+            &images.display().to_string(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__SCRIPT",
+            &fakes,
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__KEY",
+            "images",
+        );
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the initial projection", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (held, reply) = a_creation_paused_before_reading_its_author(
+        &world,
+        run,
+        "images:author-board/000-author",
+        false,
+    );
+    let reading = world.rendezvous("images.get_task.first");
+    let began = Instant::now();
+    held.release();
+    let source = reading.arrived();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until_run_file_holds(
+        run,
+        "driver.log",
+        "reading assets_from images:author-board/000-author timed out",
+    );
+    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    assert!(began.elapsed() >= floor);
+    assert!(
+        began.elapsed() < floor + floor / 2,
+        "the cancelled store waited for end_command too"
+    );
+    world.unscript("images.get_task.first.rendezvous");
+    // Keep the original process held: only a rebuilt store can now make progress.
+    world.until_store("a fresh store to create the task", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+    });
+    source.release();
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// A node added live whose task references an image asset — `![…](./diagram.png)`, the
 /// store's convention for one a record holds — is refused by the real store when the
-/// write-back's copy creates it: the shadow store a creation is copied out of holds the task's
-/// Markdown and no asset, so the copy refuses it as `asset-not-held` rather than carrying a
-/// reference to nothing onto the board. The refusal is reported with the store's own class
+/// write-back's copy creates it: its author holds diagram.png, but not missing.png, so
+/// the copy refuses it as `asset-not-held`. The refusal is reported with the store's own class
 /// and kind, nothing is created on the board, and the run settles as it would have.
 #[test]
 fn a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held() {
     let run = "writeback-asset-not-held";
-    let world = World::new("store-writeback-asset-not-held");
+    let (world, author) = image_author(World::new("store-writeback-asset-not-held"));
     world.script("work.wait", "hold");
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -2795,6 +3380,11 @@ fn a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_no
         "## What\nShip the flow below.\n\n![the flow](./diagram.png)\n\n\
          ## Why\nSo the run can settle.\n\n## Acceptance criteria\n- drawn is done."
     );
+    drawn["assets_from"] = json!(author);
+    drawn["task"] = json!(drawn["task"]
+        .as_str()
+        .unwrap()
+        .replace("diagram.png", "missing.png"));
     world
         .run_with_stdin(
             &["reply", run],

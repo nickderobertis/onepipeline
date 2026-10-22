@@ -298,7 +298,7 @@ impl Coverage {
     /// The one comparison the module note's proof rests on, asked in both
     /// directions of the same fact: extending a coverage over a record, and
     /// deciding that a coverage is still corroborated by a store that has grown.
-    fn is_in_front_of(&self, event: &Envelope) -> bool {
+    pub(crate) fn is_in_front_of(&self, event: &Envelope) -> bool {
         let placed = placed(event);
         self.at.as_ref().is_none_or(|at| *at <= placed)
             && self
@@ -393,7 +393,7 @@ impl Coverage {
     /// would place it decides nothing either, and holding the later records
     /// against a line with no timestamp of its own would stop a coverage that has
     /// lost no accuracy at all.
-    fn absorb(&mut self, event: Option<&Envelope>, bytes: u64) {
+    pub(crate) fn absorb(&mut self, event: Option<&Envelope>, bytes: u64) {
         self.bytes += bytes;
         self.records += 1;
         let Some(event) = event else {

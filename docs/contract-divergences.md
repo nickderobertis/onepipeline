@@ -3774,6 +3774,20 @@ stating one; and the profile's v3 document already admits it, because its `Comma
 leaves an op's own fields open. Describing it in that document is a follow-up
 recorded for `onemessagebus-agent`.
 
+**`assets_from` follows that same version ruling.** For issue #805 the manager
+confirmed that optional `node.assets_from` on `add` and a `retry` replacement rides
+envelope version 3, citing the #296 precedent above (manager reply
+`c-ef6e619f5f1b5ab68480081476614d78`). Versions 2 and 3 remain unchanged. The field
+is omitted when absent, so old envelopes round-trip unchanged; the v3 golden
+covers a stated qualified task id. Describing the field in the
+`onemessagebus-agent` v3 profile document is a recorded follow-up.
+
+The manager also confirmed that `PLAN_SCHEMA_VERSION` stays at 3 for the persisted
+node (`c-bc54e989161708d7313d27f279d480e0`): optional `adoption` and `consumes`
+already followed that rule in section 40. An older snapshot without `assets_from`
+reads and serializes byte-identically; a snapshot carrying it round-trips at the
+same version. Store-backed plan metadata still cannot state it.
+
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
 wait had been done by dropping and re-adding it and its dependent, purely because
@@ -12520,7 +12534,45 @@ launches the real binary over a local-md project and checks exclusion, stored st
 dependency refusal. `tests/e2e/continuation.rs` parks through the engine's real projection,
 then proves both continuation of the parked task and exclusion after a person's close.
 
-## 138. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
+## 138. Creating write-back copies lost a task's held images — OPEN
+
+**Proposal — implement the manager-approved image-carrying seam below; its addition
+to the verbatim contract remains with that contract's planner.**
+
+**Ruling:** The manager's decision for issue #805 adds one optional public `Node` field,
+`assets_from`, a qualified onetaskgraph task id (`<source>:<native-id>`). It is
+absent by default. An edit may state it on `add` and a `retry` replacement. A node
+loaded from a plan never states it: `onepipeline.assets_from` metadata is refused
+at load as not a node field, as `task_record` is. `requeue` cannot amend it.
+
+The edit compiler reads the named task's held images through onetaskgraph 0.10.0's
+public `Engine::task_assets` read (the otg-task-images release). An unreadable
+`assets_from` refuses the edit before it is journalled, naming the qualified id
+and the store's reason. Before a creating copy, write-back reads the held images
+through that public API and writes them beside the created document through the
+shadow local-md store's public write path. It never reads a source plugin's
+storage layout. A stored root supplies its own assets from the source its
+`task_record` names, with no field. The current head's stated authoring task supplies
+images too, taking precedence over the stored root under the same reference name.
+A reference neither those tasks nor the root holds still refuses
+`asset-not-held`. Nodes carrying no field retain their existing behavior.
+
+`assets_from` takes effect when write-back creates the lineage's item. A retry
+onto an existing item keeps what that item holds and adds nothing: the store's
+public update path has no asset input. The manager confirmed that limit
+(`c-33c7ad95cc704ad5948ee874f15a78ff`) and directed a follow-up for that missing
+update-path input, leaving the update/copy work to its separate owner.
+
+A stored root normally already has its board item: a retry updates that one item
+in place and retains its held images. There is no ordinary start/reply path that
+creates a lineage from an extant stored root. The manager ruled that the real
+start/retry journey proves that retention, and a test across the real local-md
+read/write/copy seam covers the otherwise unreachable creation branch. Live
+`add`, a retry replacement with `assets_from`, an image-free add without it, and
+the unreadable-source, missing-image and plan-metadata refusals are exercised
+through the compiled binary and its real channel in `tests/e2e/store.rs`.
+
+## 139. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
 
 **Proposal, approved by the manager for this build: amendment of #965's ruling (entry 128).
 An unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128

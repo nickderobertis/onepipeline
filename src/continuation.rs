@@ -22,7 +22,7 @@
 //! A running driver reads the claim on its own schedule. Unconfirmed claims pause new
 //! dispatches and publications while keeping work in flight alive. A read naming another
 //! driver supersedes it. Same-host takeovers require local evidence or acknowledgement;
-//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 138 amends
+//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 139 amends
 //! entry 128 with these rules.
 
 use std::collections::BTreeMap;
@@ -1792,7 +1792,7 @@ pub(crate) enum HandedOver {
 /// evidence that the displaced driver has let go. For another host, the existing
 /// best-effort fallback still accepts an empty store fence after [`takeover_wait`]. A
 /// fence a driver failed to project is invisible across hosts, so the timer alone cannot
-/// guarantee that a foreign dispatch stopped. Entry 138 records that residual.
+/// guarantee that a foreign dispatch stopped. Entry 139 records that residual.
 ///
 /// A claim stating no lease terms has no timer fallback: acknowledgement or local
 /// evidence is required.
