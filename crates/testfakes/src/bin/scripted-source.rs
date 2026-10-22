@@ -58,6 +58,9 @@
 //!   Each plan read is a command, and so is each write-back attempt on the store the worker
 //!   keeps, so this holds one call per attempt: the first task a copy writes, say, which is
 //!   how a journey holds a copy without holding each of its writes in turn.
+//! * `<key>.set_project_metadata#<metadata-key>.rendezvous` — the same, for every write of
+//!   that metadata key alone, escaped as its refusal is: how a journey makes the driver's
+//!   fence writes slow without holding its claim.
 //! * `<key>.task.key` — the short handle every task this source answers `query_tasks` and
 //!   `get_task` with carries, read verbatim, for as long as the file is there: what a hosted
 //!   source with a handle of its own answers with, and the one field `local-md` never
@@ -344,6 +347,11 @@ impl Scripted {
         let mut holds = vec![format!("{}.{method}", self.key.0)];
         if first {
             holds.push(format!("{}.{method}.first", self.key.0));
+        }
+        if method == "set_project_metadata" {
+            if let Some(key) = request.params.get("key").and_then(Value::as_str) {
+                holds.push(format!("{}.{method}#{}", self.key.0, fake::segment(key)));
+            }
         }
         // A hold that cannot be read is answered as the source's own `config` failure naming
         // the script, rather than by ending the connection: an engine reports a plugin's own

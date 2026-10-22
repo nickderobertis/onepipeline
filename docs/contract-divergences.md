@@ -12557,7 +12557,9 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
 4. **Store fences are best-effort projections.** The project's
    `onepipeline.publishing` names dispatches and publications, retaining its existing
    shape. Its writes run on a worker, are reported and retried when refused, and never
-   gate dispatch or settlement. A missing, unreachable or rate-limited plan store does
+   gate dispatch or settlement. Snapshots that arrive while a write is in flight are
+   coalesced into the newest, so at most one write is pending and none carries a state
+   older than one already written. A missing, unreachable or rate-limited plan store does
    not prevent a run from making progress while its claim remains confirmed.
    At closeout, terminal fence release shares the existing bounded writeback attempt,
    including after retirement; it clears only a fence still naming this run and host.
@@ -12664,5 +12666,7 @@ superseded, its claim thread having read the takeover during the hold.
 Entry 128's refusal journey is replaced by
 `a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it`: refusing every fence
 write leaves both dispatch and settlement free to proceed, and the worker retries the
-projection independently. The two closeout-release journeys make the store slow only once
+projection independently. `fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest`
+holds the coalescing against a slow store that answers every write, and
+`tests/e2e/writeback_cost.rs` counts every fence request in the comparable plan's record. The two closeout-release journeys make the store slow only once
 the dispatch is under way.

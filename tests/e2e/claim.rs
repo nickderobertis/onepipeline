@@ -910,6 +910,103 @@ fn a_read_finding_another_drivers_claim_ends_the_dispatch_in_flight_and_supersed
     assert_eq!(settled(&successor, run, "x")["status"], "done");
 }
 
+/// The writes of the project's `onepipeline.publishing` — the claim fence — in the order the
+/// store was handed them, each as the nodes it names.
+fn fence_writes(world: &World) -> Vec<Vec<String>> {
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == crate::harness::SCRIPTED_KEY
+                && call["args"][0] == "set_project_metadata"
+                && call["key"] == "onepipeline.publishing"
+        })
+        .map(|call| {
+            call["value"]["nodes"]
+                .as_array()
+                .map(|nodes| {
+                    nodes
+                        .iter()
+                        .map(|node| node.as_str().expect("a fenced node").to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The snapshots a driver makes while one of its fence writes is in flight are coalesced into
+/// the newest: however many arrive, one write is pending, and the next write carries the
+/// newest state, so the snapshots between are never written and none lands after a newer
+/// one — against a store that is slow but answers every write.
+#[test]
+fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
+    let world = claim_world("claim-fence-coalesced");
+    let fence = world.rendezvous(&format!(
+        "{}.set_project_metadata#onepipeline-publishing",
+        crate::harness::SCRIPTED_KEY
+    ));
+    let held: Vec<Rendezvous> = ["x", "y", "z"]
+        .iter()
+        .map(|node| world.rendezvous(node))
+        .collect();
+    let run = "claim-fence-coalesced";
+    let project = world.plan(
+        run,
+        &plan_of(run, vec![agent("x", &[]), agent("y", &[]), agent("z", &[])]),
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    // The first snapshot's write reaches the store and is held there, slow.
+    let first = fence.arrived();
+    let running: Vec<_> = held.iter().map(Rendezvous::arrived).collect();
+    // Each later admission made a snapshot of its own while that write was in flight, and
+    // none of them waited on it.
+    for node in ["x", "y", "z"] {
+        assert_eq!(
+            records_of(&world, run, "node-dispatched", node).len(),
+            1,
+            "{node}"
+        );
+    }
+    assert_eq!(
+        fence_writes(&world),
+        vec![vec!["x".to_owned()]],
+        "a second fence write began while the first was in flight"
+    );
+    first.release();
+    // The one write that follows carries the newest snapshot, not the ones made between.
+    let second = fence.arrived();
+    let newest = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
+    assert_eq!(
+        fence_writes(&world),
+        vec![vec!["x".to_owned()], newest.clone()]
+    );
+    second.release();
+    let_through(fence, Arc::new(AtomicBool::new(false)), Duration::ZERO);
+    for arrival in running {
+        arrival.release();
+    }
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    for node in ["x", "y", "z"] {
+        assert_eq!(settled(&world, run, node)["status"], "done", "{node}");
+    }
+    // Both held writes were answered: the store was slow, never failing.
+    let answered = std::fs::read_to_string(world.fakes.join("store.answered.jsonl"))
+        .expect("the store answered");
+    assert!(
+        answered
+            .lines()
+            .filter(|line| line.contains("\"set_project_metadata\""))
+            .count()
+            >= 2,
+        "{answered}"
+    );
+}
+
 /// `host` taking `project` over, in the background.
 fn take_over(host: &World, project: &str) -> std::process::Child {
     let mut command = host.cmd(&["start", project, "--detach", "--take-over"]);
