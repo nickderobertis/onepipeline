@@ -349,6 +349,23 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     (events, at)
 }
 
+/// Read a retained view's verified append range, without the boundary byte
+/// `Reader::open_at` otherwise checks in the consumed prefix.
+pub(crate) fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>, u64) {
+    let mut at = from;
+    let mut events = Vec::new();
+    for line in ledger::read_appended_envelope_lines(path, from, len) {
+        if !line.terminated {
+            break;
+        }
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
+            events.push(envelope);
+        }
+    }
+    (events, at)
+}
+
 /// [`finished_after`], stopping just past the first record `stop` answers
 /// `true` for — so a reader that reports one record at a time resumes from
 /// where it stopped rather than past everything it read.
@@ -425,6 +442,8 @@ enum Reading {
 /// line as JSON — and a line that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
 fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
+    #[cfg(test)]
+    crate::readprobe::parsed(path, line.offset);
     if let Some(envelope) = line.envelope {
         return Reading::Whole(envelope);
     }

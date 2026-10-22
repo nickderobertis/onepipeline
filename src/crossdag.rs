@@ -388,11 +388,25 @@ impl Observer {
 /// edit is judged against. Both need the same answer the loop would get; neither
 /// may append to the journal.
 pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status_recently)
+}
+
+/// A retained view must notice upstream changes before calling itself unchanged.
+/// Refresh the quiet readers' cache too, so a subsequent `RunView::open` agrees.
+pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status)
+}
+
+fn resolve_with(
+    root: &Path,
+    graph: &Graph,
+    read: fn(&Path, &Reference) -> Option<NodeStatus>,
+) -> BTreeMap<String, NodeStatus> {
     edges(graph)
         .into_keys()
         .filter_map(|dependency| {
             let reference = parse(&dependency)?;
-            let status = match settled_status_recently(root, &reference) {
+            let status = match read(root, &reference) {
                 Some(NodeStatus::Done) => NodeStatus::Done,
                 _ => NodeStatus::Blocked,
             };
