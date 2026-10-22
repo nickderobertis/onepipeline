@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("134.")["bundle_versions"]["events"],
+        divergence_block("136.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("133.")["bundle_versions"]["planner_channel"],
+        divergence_block("136.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -10424,6 +10424,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
         }),
         paused: None,
         unanswered: Vec::new(),
+        inbox: Vec::new(),
     };
     assert_eq!(
         example,
@@ -11589,4 +11590,93 @@ fn the_label_overlay_is_the_contract_document() {
     let mut typo = example;
     typo["lables"] = json!({});
     assert!(serde_json::from_value::<LabelOverlay>(typo).is_err());
+}
+
+/// Entry 136 names every word of `CommandVerdict`, the `queued` word among them, and
+/// the published layout document and the run reading carry what that entry's ruling
+/// adds: `queued` in the channel's outcome vocabulary, and a `queued` delivery beside
+/// `RunReading`'s `inbox`.
+#[test]
+fn the_command_verdict_words_are_what_entry_136_names() {
+    use onepipeline::channel::CommandVerdict;
+    let block = divergence_block("136.");
+    let stated: Vec<String> =
+        serde_json::from_value(block["command_verdict"].clone()).expect("a list of words");
+    let every = [
+        CommandVerdict::Applied,
+        CommandVerdict::Validated,
+        CommandVerdict::Delivered,
+        CommandVerdict::Refused,
+        CommandVerdict::Queued,
+    ];
+    // Exhaustive, so a word the type gains fails to compile here until the entry
+    // and this list name it.
+    for verdict in every {
+        match verdict {
+            CommandVerdict::Applied
+            | CommandVerdict::Validated
+            | CommandVerdict::Delivered
+            | CommandVerdict::Refused
+            | CommandVerdict::Queued => {}
+        }
+    }
+    let words: Vec<String> = every
+        .iter()
+        .map(|verdict| {
+            serde_json::to_value(verdict)
+                .expect("a verdict serialises")
+                .as_str()
+                .expect("a verdict is a word")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        words, stated,
+        "entry 136 does not name CommandVerdict's words"
+    );
+    for word in &stated {
+        let read: CommandVerdict =
+            serde_json::from_value(json!(word)).expect("each stated word reads back");
+        assert_eq!(json!(read), json!(word));
+    }
+
+    let bundle: Value =
+        serde_json::from_str(&onepipeline::channel::layout::bundle_json()).expect("JSON");
+    let outcome = bundle["schemas"]
+        .as_array()
+        .expect("the bundle's schemas")
+        .iter()
+        .find(|schema| schema["id"] == "agent.command-outcome@1")
+        .expect("the bundle carries the command outcome");
+    assert_eq!(
+        outcome["schema"]["$defs"]["CommandVerdict"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(stated.len()),
+        "the layout document's CommandVerdict is not one schema per word"
+    );
+    let document = outcome["schema"]["$defs"]["CommandVerdict"].to_string();
+    for word in &stated {
+        assert!(
+            document.contains(&format!("\"{word}\"")),
+            "the planner-channel document's CommandVerdict does not state `{word}`"
+        );
+    }
+
+    let reading: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        reading["properties"]["inbox"].is_object(),
+        "the run reading does not state `inbox`"
+    );
+    assert!(
+        reading["$defs"]["Delivery"]["oneOf"]
+            .as_array()
+            .is_some_and(|variants| variants
+                .iter()
+                .any(|variant| variant["properties"]["state"]["const"] == "queued")),
+        "the run reading does not state a `queued` delivery"
+    );
 }
