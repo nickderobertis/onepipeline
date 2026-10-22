@@ -403,6 +403,35 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Give a library observer's members time to cancel before its host is ended.
+/// A blocked command provider needs the graph's reaper, not just a signal to
+/// the hosting process. Executable overrides retain their process-tree teardown.
+pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Result<bool> {
+    if recorded.trim().is_empty() || std::env::var_os(BINARY_ENV).is_some() {
+        return Ok(false);
+    }
+    let id = recorded_graph_run(recorded, run)?;
+    let state = state_dir(&process_env());
+    // A missing record belongs to another host or to a run already swept.
+    // Never manufacture a graph directory from a stale launch record.
+    if oneagentgraph::history::show(&state, id.as_str()).is_err() || graph_run_ended(recorded, run)
+    {
+        return Ok(false);
+    }
+    oneagentgraph::run::cancel(
+        &state.join(&id),
+        &id,
+        &oneagentgraph::run::CancelScope::run(),
+        oneagentgraph::run::CancelMode::Stop,
+    )
+    .map_err(|error| sibling(format!("cancel observer {id}: {error}")))?;
+    let deadline = Instant::now() + patience;
+    while !graph_run_ended(recorded, run) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(true)
+}
+
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
 ///

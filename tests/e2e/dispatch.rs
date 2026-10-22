@@ -6438,3 +6438,125 @@ fn a_detached_runs_worker_turn_can_ask_its_manager() {
         world.dump()
     );
 }
+
+/// Stopping an attached engine reaps its observer's blocked command provider.
+/// The linked bus package has no binary target. This command reads one request,
+/// then uses the suite's real TERM-resistant process fixture to require the
+/// graph's final reaper, just as a blocked command provider does.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_its_observers_command_judge() {
+    use crate::harness::process_ended;
+
+    let world = World::new("observer-command-stop");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("judge.pid");
+    let script = world.root.join("judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "IFS= read -r request\nexec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display()
+        ),
+    )
+    .expect("the command provider is written");
+    std::fs::write(
+        world.graphs().join("dag-scope.yaml"),
+        format!(
+            "version: 1\nname: command-observer\nmembers:\n  monitor:\n    task: {}\n    kind: onejudge\n    base_config: ./onejudge.base.yaml\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      command: [sh, '{}']\n    mode: bypass\n",
+            serde_json::to_string(crate::harness::MONITOR_TASK).expect("the monitor task is quoted"),
+            script.display()
+        ),
+    )
+    .expect("the observer declares a command judge");
+    let path = world.plan(
+        "command-stop",
+        &plan_of("command-stop", vec![agent("work", &[])]),
+    );
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        pid_file.is_file()
+    });
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the provider recorded its PID")
+        .trim()
+        .parse()
+        .expect("the provider PID is numeric");
+    assert!(!process_ended(pid), "the provider must be live before stop");
+    // Capture only this engine's tree before stop can reparent its children.
+    let listing = std::process::Command::new("ps")
+        .args(["-e", "-o", "pid=,ppid=,comm="])
+        .output()
+        .expect("the host describes the controlled engine's children");
+    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((
+                columns.next()?.parse().ok()?,
+                columns.next()?.parse().ok()?,
+                columns.next()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut owned = vec![owner.id()];
+    loop {
+        let before = owned.len();
+        for (child, parent, _) in &table {
+            if owned.contains(parent) && !owned.contains(child) {
+                owned.push(*child);
+            }
+        }
+        if owned.len() == before {
+            break;
+        }
+    }
+    // stop confirms process absence; reap our direct child while it does so,
+    // rather than making stop wait for a zombie only this test can collect.
+    let reaped = std::thread::spawn(move || owner.wait());
+    let stopped = world.run_on_agentgraph(&["stop", "command-stop"]);
+    let surviving: Vec<_> = table
+        .iter()
+        .filter(|(child, _, _)| owned.contains(child) && !process_ended(*child))
+        .collect();
+    eprintln!(
+        "judge PID {pid} ended: {}; engine-tree survivors: {surviving:?}",
+        process_ended(pid)
+    );
+    if stopped.code != 0 {
+        for (child, _, _) in &surviving {
+            end_process(*child);
+        }
+    }
+    stopped.exited(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !process_ended(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let ended = process_ended(pid);
+    if !ended {
+        end_process(pid);
+    }
+    reaped
+        .join()
+        .expect("the engine reaper finishes")
+        .expect("the stopped engine exits");
+    assert!(
+        ended,
+        "observer command {pid} survived five seconds after stop"
+    );
+}
