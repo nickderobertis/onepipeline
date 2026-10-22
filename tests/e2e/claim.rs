@@ -981,7 +981,8 @@ fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
     let newest = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
     assert_eq!(
         fence_writes(&world),
-        vec![vec!["x".to_owned()], newest.clone()]
+        vec![vec!["x".to_owned()], newest.clone()],
+        "the write after the held one carried other than the newest snapshot"
     );
     second.release();
     let_through(fence, Arc::new(AtomicBool::new(false)), Duration::ZERO);
@@ -993,6 +994,17 @@ fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
     });
     for node in ["x", "y", "z"] {
         assert_eq!(settled(&world, run, node)["status"], "done", "{node}");
+    }
+    // Nothing the admissions offered was left queued behind the held writes: every write
+    // after the newest names a later state, each a subset of the one before as the nodes
+    // finish, and never `[x]` or `[x, y]` again.
+    let writes = fence_writes(&world);
+    assert_eq!(writes[..2], [vec!["x".to_owned()], newest], "{writes:?}");
+    for pair in writes[1..].windows(2) {
+        assert!(
+            pair[1].iter().all(|node| pair[0].contains(node)) && pair[1] != pair[0],
+            "a fence write carried an older state than one already written: {writes:?}"
+        );
     }
     // Both held writes were answered: the store was slow, never failing.
     let answered = std::fs::read_to_string(world.fakes.join("store.answered.jsonl"))

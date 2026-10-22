@@ -723,8 +723,9 @@ pub(crate) struct ClaimWatch {
     /// What the loop and the claim thread both know: the claim this driver writes, and the
     /// fence the newest read or write left.
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
-    /// Best-effort fence snapshots, consumed independently of the reconcile loop.
-    fence_tx: std::sync::mpsc::Sender<std::collections::BTreeSet<String>>,
+    /// The newest best-effort fence snapshot not yet taken by the writer, consumed
+    /// independently of the reconcile loop.
+    fence_tx: std::sync::Arc<FenceSlot>,
     fence_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
@@ -795,7 +796,8 @@ impl ClaimWatch {
             .name("claim-read".to_owned())
             .spawn(move || reader.run());
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let (fence_tx, fence_rx) = std::sync::mpsc::channel();
+        let fence_tx = std::sync::Arc::new(FenceSlot::default());
+        let fence_rx = std::sync::Arc::clone(&fence_tx);
         let fence_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = FenceWriter {
             store: Store::at(&launch.dir),
@@ -893,7 +895,7 @@ impl ClaimWatch {
             .lock()
             .ok()
             .is_some_and(|seen| seen.fenced.as_ref() == Some(nodes));
-        let _ = self.fence_tx.send(nodes.clone());
+        self.fence_tx.offer(nodes.clone());
         landed
     }
 
@@ -953,6 +955,76 @@ impl ClaimWatch {
     }
 }
 
+/// The one fence snapshot waiting for [`FenceWriter`]: a snapshot offered while a write is
+/// in flight replaces the one waiting, so however many arrive at most one write is pending,
+/// and it carries the newest state.
+#[derive(Default)]
+struct FenceSlot {
+    pending: std::sync::Mutex<FenceSlotState>,
+    offered: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct FenceSlotState {
+    nodes: Option<std::collections::BTreeSet<String>>,
+    closed: bool,
+}
+
+/// What [`FenceSlot::take`] found.
+#[derive(Debug, PartialEq, Eq)]
+enum Taken {
+    /// The newest snapshot offered since the last take.
+    Snapshot(std::collections::BTreeSet<String>),
+    /// None offered within the wait.
+    Nothing,
+    /// The driver is done with the fence, and nothing is waiting.
+    Closed,
+}
+
+impl FenceSlot {
+    /// Make `nodes` the snapshot waiting, replacing any not yet taken.
+    fn offer(&self, nodes: std::collections::BTreeSet<String>) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.nodes = Some(nodes);
+        }
+        self.offered.notify_one();
+    }
+
+    /// No snapshot follows: the writer takes what is waiting and then stops.
+    fn close(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.closed = true;
+        }
+        self.offered.notify_one();
+    }
+
+    /// The snapshot waiting, waiting up to `within` for one.
+    fn take(&self, within: Duration) -> Taken {
+        let Ok(pending) = self.pending.lock() else {
+            return Taken::Closed;
+        };
+        let Ok((mut pending, _)) = self.offered.wait_timeout_while(pending, within, |pending| {
+            pending.nodes.is_none() && !pending.closed
+        }) else {
+            return Taken::Closed;
+        };
+        match pending.nodes.take() {
+            Some(nodes) => Taken::Snapshot(nodes),
+            None if pending.closed => Taken::Closed,
+            None => Taken::Nothing,
+        }
+    }
+
+    /// Whether a snapshot is waiting to be taken.
+    #[cfg(test)]
+    fn waiting(&self) -> Option<std::collections::BTreeSet<String>> {
+        self.pending
+            .lock()
+            .ok()
+            .and_then(|pending| pending.nodes.clone())
+    }
+}
+
 /// Best-effort store projection, independent of dispatch admission and settlement.
 struct FenceWriter {
     store: Store,
@@ -972,17 +1044,15 @@ struct FenceWriter {
 }
 
 impl FenceWriter {
-    fn run(mut self, receiver: std::sync::mpsc::Receiver<std::collections::BTreeSet<String>>) {
+    fn run(mut self, slot: std::sync::Arc<FenceSlot>) {
         let mut desired = None;
         loop {
-            match receiver.recv_timeout(FENCE_RETRY) {
-                Ok(nodes) => desired = Some(nodes),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-            // Coalesce queued snapshots: only the newest projection is useful.
-            while let Ok(nodes) = receiver.try_recv() {
-                desired = Some(nodes);
+            // The slot holds only the newest snapshot offered while the last write was in
+            // flight; with none, a refused write is attempted again when its retry is due.
+            match slot.take(FENCE_RETRY) {
+                Taken::Snapshot(nodes) => desired = Some(nodes),
+                Taken::Nothing => {}
+                Taken::Closed => return,
             }
             if self.paused.load(std::sync::atomic::Ordering::SeqCst) {
                 continue;
@@ -1101,6 +1171,7 @@ impl FenceWriter {
 
 impl Drop for ClaimWatch {
     fn drop(&mut self) {
+        self.fence_tx.close();
         self.lease.close();
     }
 }
@@ -2087,6 +2158,69 @@ pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nodes(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// While a write is in flight the writer takes nothing, and every snapshot the loop offers
+    /// meanwhile replaces the one waiting: one snapshot is pending however many arrive, and
+    /// the writer's next take is the newest, after which nothing is pending.
+    #[test]
+    fn snapshots_offered_during_a_write_leave_one_pending_and_the_next_take_is_the_newest() {
+        let slot = std::sync::Arc::new(FenceSlot::default());
+        slot.offer(nodes(&["n0"]));
+        assert_eq!(slot.take(Duration::ZERO), Taken::Snapshot(nodes(&["n0"])));
+        // The write of `n0` is in flight: the loop offers a thousand snapshots, from another
+        // thread as the reconcile loop does.
+        let offering = {
+            let slot = std::sync::Arc::clone(&slot);
+            std::thread::spawn(move || {
+                for at in 1..=1000 {
+                    let names: Vec<String> = (0..=at % 7).map(|n| format!("n{n}")).collect();
+                    slot.offer(names.into_iter().collect());
+                    let waiting = slot.waiting().expect("a snapshot is waiting");
+                    assert_eq!(
+                        waiting.len(),
+                        at % 7 + 1,
+                        "the waiting snapshot is not the newest"
+                    );
+                }
+            })
+        };
+        offering.join().expect("the loop's offers");
+        let newest = nodes(&["n0", "n1", "n2", "n3", "n4", "n5", "n6"][..=1000 % 7]);
+        assert_eq!(slot.waiting(), Some(newest.clone()));
+        assert_eq!(slot.take(Duration::ZERO), Taken::Snapshot(newest));
+        assert_eq!(slot.waiting(), None, "a taken snapshot is still pending");
+        assert_eq!(slot.take(Duration::from_millis(10)), Taken::Nothing);
+    }
+
+    /// A take waits for an offer from another thread, and a snapshot offered before the
+    /// driver closes the slot is still taken, once, before the writer is told to stop.
+    #[test]
+    fn a_take_waits_for_an_offer_and_a_closed_slot_yields_its_last_snapshot_first() {
+        let slot = std::sync::Arc::new(FenceSlot::default());
+        let offering = {
+            let slot = std::sync::Arc::clone(&slot);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                slot.offer(nodes(&["a"]));
+            })
+        };
+        assert_eq!(
+            slot.take(Duration::from_secs(60)),
+            Taken::Snapshot(nodes(&["a"]))
+        );
+        offering.join().expect("the offer");
+        slot.offer(nodes(&["b"]));
+        slot.close();
+        assert_eq!(
+            slot.take(Duration::from_secs(60)),
+            Taken::Snapshot(nodes(&["b"]))
+        );
+        assert_eq!(slot.take(Duration::from_secs(60)), Taken::Closed);
+    }
 
     #[test]
     fn a_stored_superseded_head_is_read_only_as_a_full_commit_id() {
