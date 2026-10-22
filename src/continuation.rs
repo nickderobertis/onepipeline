@@ -125,8 +125,9 @@ const TAKEOVER_POLL_MAX: Duration = Duration::from_secs(30);
 /// How soon a driver writes its publications under way again after the store refused it.
 const FENCE_RETRY: Duration = Duration::from_secs(5);
 
-/// The test failpoint met before a driver decides whether to start a dispatch of the node
-/// [`BEGIN_GATE_NODE_ENV`] names: a journey holds a driver there past its lease.
+/// The test failpoint met before a driver decides whether to start a dispatch of a node
+/// [`BEGIN_GATE_NODE_ENV`] names, one or several separated by commas: a journey holds a
+/// driver there past its lease, or before each admission queues its fence.
 const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
 const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
 
@@ -865,7 +866,9 @@ impl ClaimWatch {
     /// could have held it.
     pub(crate) fn may_start(&self, node: Option<&str>) -> bool {
         if let Some(node) = node {
-            if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
+            if std::env::var(BEGIN_GATE_NODE_ENV)
+                .is_ok_and(|named| named.split(',').any(|named| named == node))
+            {
                 let _ = crate::ordering::meet(BEGIN_GATE_ENV);
             }
         }

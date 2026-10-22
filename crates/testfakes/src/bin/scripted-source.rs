@@ -74,7 +74,12 @@
 //! Every call is recorded into the directory's `invocations.jsonl` as
 //! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`, the
 //! handshake included as `initialize`, naming each credential the engine handed over with a
-//! SHA-256 digest of its value — `NAME=<hex>` — never the value itself.
+//! SHA-256 digest of its value — `NAME=<hex>` — never the value itself. Beside `args`, each
+//! record names its `connection` — this source's process id, one per store the engine opened —
+//! and a `set_project_metadata` names the metadata `key` and the `value` it sets, so a journey
+//! can tell one store's calls from another's where several run at once. Each request is
+//! appended to `<key>.answered.jsonl` as `{"method": <method>, "connection": <pid>}` once its
+//! answer is made, just before it is written.
 
 // llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` has no `project.json`
 // of its own, like every double beside this file: its files are inputs of the
@@ -230,10 +235,11 @@ fn main() -> ExitCode {
         .iter()
         .map(|(name, value)| format!("{name}={:x}", Sha256::digest(value.as_bytes())))
         .collect();
-    fake::record(
+    record(
         &settings.script,
         &settings.key.0,
         &["initialize".to_owned(), handed.join(",")],
+        None,
     );
     // A handshake held open is a source slow to start: every connection meets it here, before
     // anything is answered.
@@ -307,12 +313,21 @@ impl Scripted {
             // request to answer: there is no id to answer under.
             let request: Request = serde_json::from_str(&line)
                 .map_err(|error| format!("unreadable request: {error}"))?;
-            fake::record(
+            let set = (request.method.0 == "set_project_metadata").then_some(&request.params);
+            record(
                 &self.script,
                 &self.key.0,
                 &[request.method.0.clone(), named(&request.params)?],
+                set,
             );
             let answer = self.answer(host, &request)?;
+            // Recorded once the answer is made and before it is written, so a journey can tell
+            // a call still being answered from one this source has done: an engine may stop a
+            // store of its own the moment it reads the answer.
+            fake::append(
+                &self.scenario("answered.jsonl"),
+                &json!({"method": request.method.0, "connection": std::process::id()}).to_string(),
+            );
             println!("{answer}");
             // A command's end starts the next command's firsts: a store kept across commands
             // is asked each method's first call again in every command it runs.
@@ -426,6 +441,18 @@ impl Scripted {
             }
         }
     }
+}
+
+/// Record one call as [`fake::record`] does, naming the connection it came on and, for a
+/// metadata write, the key it sets and the value it sets it to.
+fn record(script: &Path, tool: &str, args: &[String], set: Option<&Value>) {
+    let mut line = json!({"tool": tool, "args": args, "connection": std::process::id()});
+    if let Some(params) = set {
+        line["key"] = params.get("key").cloned().unwrap_or(Value::Null);
+        line["value"] = params.get("value").cloned().unwrap_or(Value::Null);
+    }
+
+    fake::append(&script.join("invocations.jsonl"), &line.to_string());
 }
 
 /// The id one request names — a read's `id`, or a write's `target` — or nothing, for a
