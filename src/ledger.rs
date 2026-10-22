@@ -1923,11 +1923,15 @@ fn write_record(path: &Path, file: &mut fs::File, line: &str) -> Result<()> {
     // answer is the boundary this append starts on, which is what a failure
     // restores.
     let boundary = file.seek(SeekFrom::End(0)).map_err(ledger)?;
+    let receipt = crate::appendstamp::before(path, file);
     let written = file
         .write_all(format!("{line}\n").as_bytes())
         .and_then(|()| file.flush());
     match written {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::appendstamp::after(path, file, receipt);
+            Ok(())
+        }
         Err(e) => {
             // Whatever of the record reached the file goes back off it. A
             // failure to undo leaves the original failure as the one reported:
@@ -2049,6 +2053,8 @@ pub fn read_records(path: &Path) -> Vec<Record> {
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
     counted(bytes.len(), ());
+    #[cfg(test)]
+    crate::readprobe::read(path, 0, bytes.len() as u64);
     records_of(&bytes, 0)
 }
 
@@ -2119,8 +2125,9 @@ impl EnvelopeLine {
 /// Every line of a run's journal from its first `from` bytes, as the bus reader
 /// read each one, or nothing where the file cannot be read from there.
 ///
-/// The one decoder of journal envelope lines. `from` is a record boundary, as
-/// [`read_records_from`] requires; a file that does not exist, cannot be opened,
+/// The ordinary decoder of journal envelope lines; the trusted append-range
+/// reader below shares its envelope serde implementation but omits its boundary
+/// probe. `from` is a record boundary; a file that does not exist, cannot be opened,
 /// or is shorter than `from` reads as holding nothing past it, which is the rule
 /// every ledger reader here follows.
 pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
@@ -2168,7 +2175,35 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
             }
         }
     }
+    #[cfg(test)]
+    crate::readprobe::read(path, from, start - from);
     counted(usize::try_from(start - from).unwrap_or(usize::MAX), lines)
+}
+
+/// Decode a range starting at a boundary already established by a retained
+/// view. Unlike `Reader::open_at`, this does not read the byte before `from`:
+/// the append receipt establishes continuity and the cursor supplies the boundary.
+/// Envelope validation still belongs to the vocabulary's serde implementation.
+pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> Vec<EnvelopeLine> {
+    let Some(bytes) = read_range(path, from, len) else {
+        return Vec::new();
+    };
+    records_of(&bytes, from)
+        .into_iter()
+        .map(|record| EnvelopeLine {
+            line: record.line,
+            offset: record.offset,
+            bytes: record.bytes,
+            terminated: record.terminated,
+            envelope: record
+                .terminated
+                .then(|| {
+                    let start = (record.offset - from) as usize;
+                    serde_json::from_slice(&bytes[start..start + record.bytes as usize]).ok()
+                })
+                .flatten(),
+        })
+        .collect()
 }
 
 /// The **raw bytes** of a byte range of a file, or `None` where the file does not
@@ -2190,6 +2225,8 @@ pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
     let want = usize::try_from(len).ok()?;
     let mut bytes = vec![0u8; want];
     file.read_exact(&mut bytes).ok()?;
+    #[cfg(test)]
+    crate::readprobe::read(path, from, len);
     Some(counted(bytes.len(), bytes))
 }
 
