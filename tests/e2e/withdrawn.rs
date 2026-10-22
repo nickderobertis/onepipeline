@@ -169,7 +169,6 @@ fn engine_cancelled_continuation(legacy: bool) {
     let task = withdraw(&world, &project, "build");
     let id = crate::harness::global(&task);
     let key = |name| onetaskgraph_plugin_api::MetadataKey::new(name).expect("a metadata key");
-    // The legacy input omits the additive key a current engine would record.
     // llmlint: ignore-block[tests_mirror_real_usage] The projection is private and no CLI
     // path writes this current cancelled board word: stop ends the driver without projecting,
     // channel cancel parks, and retry replaces the lineage head. The manager approved this

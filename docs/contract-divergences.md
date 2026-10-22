@@ -3470,8 +3470,9 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "fields": [
+    "labels", "group",
     "schema_version",
     "run_id",
     "last_write_at",
