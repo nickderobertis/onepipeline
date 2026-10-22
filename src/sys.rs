@@ -339,6 +339,17 @@ fn aimable(roots: &[u32]) -> Vec<u32> {
     aimed
 }
 
+/// The test failpoint a teardown meets once it has listed the tree it is about
+/// to signal, before it signals any of it.
+const STOP_LISTED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_LISTED_GATE";
+
+/// Meet [`STOP_LISTED_GATE_ENV`]: a journey holds a teardown here so what the
+/// run starts after the listing is placed on the far side of it. Nothing at all
+/// where the variable is unset.
+fn listed() {
+    let _ = crate::ordering::meet(STOP_LISTED_GATE_ENV);
+}
+
 /// What one round of signalling established, the pids it aimed at, and the pids
 /// its signal was delivered to.
 type Signalling = (Teardown, Vec<u32>, Vec<u32>);
@@ -359,6 +370,7 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     let Some(table) = process_table() else {
         return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
+    listed();
     // The roots first, so what is left has stopped growing while its members are
     // taken down.
     for root in aimed.clone() {
@@ -597,6 +609,7 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
     let Some(table) = process_table() else {
         return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
+    listed();
     let mut tree = aimed_roots.clone();
     for root in &aimed_roots {
         tree.extend(descended_from(&table, *root));

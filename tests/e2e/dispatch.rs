@@ -6445,27 +6445,30 @@ fn a_detached_runs_worker_turn_can_ask_its_manager() {
     );
 }
 
-/// Stopping an attached engine reaps its observer's blocked command provider.
-/// The linked bus package has no binary target. This command reads one request,
-/// then uses the suite's real TERM-resistant process fixture to require the
-/// graph's final reaper, just as a blocked command provider does.
+/// A world whose observer graph declares one command judge, and the plan of the
+/// one-node run it observes.
+///
+/// The linked bus package has no binary target. The judge's command reads one
+/// request, then becomes the suite's real TERM-resistant process fixture, which
+/// requires the graph's final reaper just as a blocked command provider does.
+/// Every judge any observer of the run starts records its own pid in its own
+/// file under the returned directory, so one an observer restart started is
+/// found as surely as the first.
 #[cfg(unix)]
-#[test]
-fn stopping_a_run_ends_its_observers_command_judge() {
-    use crate::harness::process_ended;
-
-    let world = World::new("observer-command-stop");
+fn observed_by_a_command_judge(name: &str) -> (World, String, std::path::PathBuf) {
+    let world = World::new(name);
     world.write_graphs();
     world.write_supervised_node_graph();
     world.script("turn.hold", "hold");
-    let pid_file = world.root.join("judge.pid");
+    let judges = world.root.join("judges");
+    std::fs::create_dir_all(&judges).expect("the judges' directory is made");
     let script = world.root.join("judge.sh");
     std::fs::write(
         &script,
         format!(
-            "IFS= read -r request\nexec '{}' outlive-the-graph '{}'\n",
+            "IFS= read -r request\nexec '{}' outlive-the-graph '{}/'\"$$\".pid\n",
             crate::harness::double("fake-claude").display(),
-            pid_file.display()
+            judges.display()
         ),
     )
     .expect("the command provider is written");
@@ -6482,6 +6485,54 @@ fn stopping_a_run_ends_its_observers_command_judge() {
         "command-stop",
         &plan_of("command-stop", vec![agent("work", &[])]),
     );
+    (world, path, judges)
+}
+
+/// Every judge that has recorded its pid under `judges`, in no order.
+///
+/// A file the fixture has created and not yet written is skipped rather than
+/// read as a pid: it is a judge still starting, and the next look finds it.
+#[cfg(unix)]
+fn judges_started(judges: &std::path::Path) -> Vec<u32> {
+    std::fs::read_dir(judges)
+        .expect("the judges' directory is readable")
+        .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+        .filter_map(|recorded| recorded.trim().parse().ok())
+        .collect()
+}
+
+/// Every judge under `judges` still running five seconds after a stop answered,
+/// each ended here once it is found — so a journey that fails on one leaves
+/// nothing behind it.
+#[cfg(unix)]
+fn judges_surviving_the_stop(judges: &std::path::Path) -> Vec<u32> {
+    use crate::harness::process_ended;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while judges_started(judges).into_iter().any(|pid| !process_ended(pid))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let surviving: Vec<u32> = judges_started(judges)
+        .into_iter()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    surviving
+}
+
+/// Stopping an attached engine reaps its observer's blocked command provider —
+/// and every other one its observers started, a restarted observer's included,
+/// so a passing run leaves no judge running.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_its_observers_command_judge() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("observer-command-stop");
     let mut owner = world
         .agentgraph_cmd(&[
             "start",
@@ -6495,13 +6546,9 @@ fn stopping_a_run_ends_its_observers_command_judge() {
         .spawn()
         .expect("the attached engine starts");
     world.until("the observer command provider to start", |_| {
-        pid_file.is_file()
+        !judges_started(&judges).is_empty()
     });
-    let pid: u32 = std::fs::read_to_string(&pid_file)
-        .expect("the provider recorded its PID")
-        .trim()
-        .parse()
-        .expect("the provider PID is numeric");
+    let pid = judges_started(&judges)[0];
     assert!(!process_ended(pid), "the provider must be live before stop");
     // Capture only this engine's tree before stop can reparent its children.
     let listing = std::process::Command::new("ps")
@@ -6548,23 +6595,152 @@ fn stopping_a_run_ends_its_observers_command_judge() {
             end_process(*child);
         }
     }
+    let judges_left = judges_surviving_the_stop(&judges);
     stopped.exited(0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !process_ended(pid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    let ended = process_ended(pid);
-    if !ended {
-        end_process(pid);
-    }
     reaped
         .join()
         .expect("the engine reaper finishes")
         .expect("the stopped engine exits");
     assert!(
-        ended,
-        "observer command {pid} survived five seconds after stop"
+        judges_left.is_empty(),
+        "observer command(s) {judges_left:?} of {:?} survived five seconds after stop",
+        judges_started(&judges)
     );
+}
+
+/// Where, inside a `stop`, the driver's observer watch sees the observer the
+/// stop cancelled settle and asks whether to start another.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum RestartAsked {
+    /// Once the stop has cancelled the recorded observer, before it lists and
+    /// signals the run's tree: a judge a restart started here is in the tree
+    /// the stop signals, and ignores the signal.
+    BetweenTheCancelAndTheSignal,
+    /// Once the stop has listed the tree it signals: a judge a restart started
+    /// here is in no tree the stop looks at.
+    AfterTheSignalsListing,
+}
+
+/// A `stop` ends a run whose driver's observer watch sees the stop's own cancel
+/// of the observer and asks to restart it at `asked` — with no observer
+/// restarted, the stop clean, and no judge left running.
+///
+/// Both processes are the real ones, and so is the sibling the observer runs
+/// on. The stop meets its own ordering failpoints, after its cancel and after
+/// its listing; the driver's watch meets one where it first sees an observer
+/// stop. Held rather than raced, so which side of the stop the restart is asked
+/// on is the journey's order and not the host's, on any host.
+#[cfg(unix)]
+fn a_stop_ends_an_observer_restart_asked(asked: RestartAsked) {
+    let (world, path, judges) =
+        observed_by_a_command_judge(&format!("observer-restart-stop-{asked:?}"));
+    let driver_log = world.root.join("driver.err");
+    // llmlint: ignore-block[tests_mirror_real_usage] which point of a stop the
+    // driver's restart is asked at is the property, and no user-facing input can
+    // place it. The failpoints only order the real binaries; the attached launch,
+    // the stop, the observer graph and every outcome asserted are the binaries' own.
+    let settled = crate::harness::Rendezvous::failpoint();
+    let cancelled = crate::harness::Rendezvous::failpoint();
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    start
+        .env("ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE", settled.address())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&driver_log).expect("the driver's log is made"));
+    let mut stop = world.agentgraph_cmd(&["stop", "command-stop"]);
+    stop.env(
+        "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE",
+        cancelled.address(),
+    )
+    .env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let mut owner = start.spawn().expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let first = judges_started(&judges);
+    // The driver is this journey's child, so it is reaped here while the stop
+    // watches it go, rather than leaving a zombie the stop would wait out.
+    let reaped = std::thread::spawn(move || owner.wait());
+    let answered = |_: &World| {
+        let said = std::fs::read_to_string(&driver_log).unwrap_or_default();
+        said.contains("no other is started")
+            || (said.contains("started another observer graph")
+                && judges_started(&judges).len() > first.len())
+    };
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop command-stop"));
+        let at_the_cancel = cancelled.arrived();
+        let watch = settled.arrived();
+        match asked {
+            RestartAsked::BetweenTheCancelAndTheSignal => {
+                watch.release();
+                world.until("the driver to answer the observer that settled", answered);
+                at_the_cancel.release();
+                listed.arrived().release();
+            }
+            RestartAsked::AfterTheSignalsListing => {
+                at_the_cancel.release();
+                let at_the_listing = listed.arrived();
+                watch.release();
+                world.until("the driver to answer the observer that settled", answered);
+                at_the_listing.release();
+            }
+        }
+        stopping.join().expect("the stop returns")
+    });
+    let started = judges_started(&judges);
+    let judges_left = judges_surviving_the_stop(&judges);
+    reaped
+        .join()
+        .expect("the engine reaper finishes")
+        .expect("the stopped engine exits");
+    stopped.exited(0);
+    assert!(
+        judges_left.is_empty(),
+        "{asked:?}: observer command(s) {judges_left:?} of {started:?} survived five seconds after stop"
+    );
+    let said = std::fs::read_to_string(&driver_log).expect("the driver's log");
+    assert!(
+        !said.contains("started another observer graph"),
+        "{asked:?}: the driver restarted an observer a stop had begun ending; judges {started:?}:\n{said}"
+    );
+    assert_eq!(
+        started, first,
+        "{asked:?}: a judge was started after the stop began"
+    );
+    let run_stopped = world.events_of("command-stop", "run-stopped");
+    assert_eq!(
+        run_stopped
+            .last()
+            .map(|stopped| stopped["payload"]["teardown"].clone()),
+        Some(json!("signalled")),
+        "{asked:?}: {run_stopped:?}"
+    );
+}
+
+/// [`a_stop_ends_an_observer_restart_asked`] with the restart asked once the
+/// stop has cancelled the recorded observer and before it signals the run's
+/// tree.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_an_observer_restart_asked_between_its_cancel_and_its_signal() {
+    a_stop_ends_an_observer_restart_asked(RestartAsked::BetweenTheCancelAndTheSignal);
+}
+
+/// [`a_stop_ends_an_observer_restart_asked`] with the restart asked once the
+/// stop has listed the tree it signals.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_an_observer_restart_asked_after_its_signals_listing() {
+    a_stop_ends_an_observer_restart_asked(RestartAsked::AfterTheSignalsListing);
 }
 
 /// A missing observer record cannot create a replacement graph directory or

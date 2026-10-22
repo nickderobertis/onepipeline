@@ -64,6 +64,14 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// it rather than watching a command hang.
 const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
+/// The test failpoint a driver's observer watch meets the first time it sees an
+/// observer stop, before it asks whether to start another.
+const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE";
+
+/// The test failpoint a `stop` meets once it has cancelled the run's observer,
+/// before it signals the run's tree.
+const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
+
 /// How many of a failed driver's last lines a refusal repeats.
 ///
 /// Enough for the sibling's own refusal and the sentence around it, and few
@@ -2436,6 +2444,13 @@ impl<'a> ObserverWatch<'a> {
     /// holds the run; [`Self::restart`] says what becomes of one the loop lets go
     /// of while it is under way.
     fn stopped(&mut self, observer: &mut agentgraph::GraphRun) -> Stopped {
+        // Test failpoint only, and nothing at all where its variable is unset: a
+        // journey holds the first observer this watch sees stop here, so where
+        // its restart lands against a `stop` is the journey's order.
+        static MET: AtomicBool = AtomicBool::new(false);
+        if !MET.swap(true, Ordering::SeqCst) {
+            let _ = crate::ordering::meet(OBSERVER_SETTLED_GATE_ENV);
+        }
         if !self.holds() {
             // Still said as a stop, because it is one: a run that settles before
             // its watch next looks — an observer refused at once does — has its
@@ -3395,6 +3410,8 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
                     eprintln!("onepipeline: {error}; continuing process-tree teardown");
                 }
             }
+            // Test failpoint only, and nothing at all where its variable is unset.
+            let _ = crate::ordering::meet(STOP_OBSERVER_CANCELLED_GATE_ENV);
         }
     }
     let Aim::Here {
