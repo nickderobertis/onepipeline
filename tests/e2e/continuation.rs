@@ -1663,10 +1663,6 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
         |world| stored_publishing(world, &project).is_null(),
     );
     again.release();
-    // Every later read past the wait is let through.
-    std::thread::spawn(move || loop {
-        polls.arrived().release();
-    });
     let said = launched_over(taking);
     assert!(
         said.contains("and its publication of 'x' has been under way since"),
