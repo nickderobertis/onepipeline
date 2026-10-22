@@ -4206,6 +4206,44 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
     use crate::harness::process_ended;
     use std::os::unix::fs::PermissionsExt;
 
+    // Re-enter the test executable as an embedding host, without parsing the
+    // CLI: LocalExecutor then runs the graph in process. A CLI dispatch retains
+    // a child that exits on settlement before the graph's final reap, masking
+    // the sweeper's inherited-stamp regression.
+    if let Some(graph) = std::env::var_os("ONEPIPELINE_TEST_POOL_GRAPH") {
+        use oneagentgraph::config::ConfigRef;
+        use onepipeline::controls::NodeControls;
+        use onepipeline::event::Labels;
+        use onepipeline::executor::{
+            CancellationToken, DispatchRequest, Executor, LocalExecutor, WorkspaceSpec,
+        };
+        let mut handle = LocalExecutor
+            .dispatch(DispatchRequest {
+                graph: ConfigRef(graph.to_string_lossy().into_owned()),
+                task: "Complete the controlled turn.".into(),
+                labels: Labels::default(),
+                controls: NodeControls::default(),
+                workspace: WorkspaceSpec::Path(
+                    std::env::current_dir().expect("the work directory exists"),
+                ),
+                cancel: CancellationToken::new(),
+                attempt: std::num::NonZeroU32::MIN,
+            })
+            .expect("the public executor starts the controlled turn");
+        for event in handle.events() {
+            event.expect("the engine relays the real graph events");
+        }
+        handle.wait().expect("the dispatch ends");
+        std::fs::write(
+            std::env::var_os("ONEPIPELINE_TEST_POOL_SETTLED").unwrap(),
+            "settled",
+        )
+        .expect("the dispatch ending is recorded");
+        // Keep the embedding host alive while the graph's final reap runs.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+
     for (tag, fault) in [("complete", ""), ("refused", "refuse-thread-start")] {
         let name = format!("codex-pool-retirement-{tag}");
         let world = World::new(&name);
@@ -4216,7 +4254,6 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
             "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n",
         )
         .expect("the controlled turn selects Codex");
-        let path = world.plan(&name, &plan_of(&name, vec![agent("work", &[])]));
         let wrapper = world.root.join("mock-codex");
         // exec preserves the PID the pool records. Only the harness process,
         // never the real oneharness CLI driving it, enters mock mode.
@@ -4235,7 +4272,28 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
         let state = ShortDir::new(if fault.is_empty() { "op-rc" } else { "op-rf" });
         let records = world.root.join("mock-server");
         let release = world.root.join("complete-turn");
-        let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
+        let settled = world.root.join("dispatch-settled");
+        // A concurrent build can replace this test image. Linux keeps the
+        // running image available here even when current_exe names a deleted file.
+        let executable = if cfg!(target_os = "linux") {
+            std::path::PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe().expect("the embedding test executable exists")
+        };
+        let mut command = std::process::Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "dispatch::a_judged_codex_dispatch_retires_its_shared_server_and_sweeper",
+                "--nocapture",
+            ])
+            .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            .env(
+                "ONEPIPELINE_TEST_POOL_GRAPH",
+                world.graphs().join("node-scope.yaml"),
+            )
+            .env("ONEPIPELINE_TEST_POOL_SETTLED", &settled)
+            .env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
         command
             .env(
                 "ONEAGENTGRAPH_ONEHARNESS_BIN",
@@ -4277,11 +4335,7 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
         });
         assert!(pids.iter().all(|pid| !process_ended(*pid)), "{pids:?}");
         std::fs::write(&release, "complete").expect("the controlled turn may finish");
-        world.until("the dispatch to settle", |world| {
-            world.run_file(&name, "result.json").is_file()
-        });
-        let _status = launch.wait().expect("the dispatch ends");
-        assert!(world.run_file(&name, "result.json").is_file());
+        world.until("the dispatch to settle", |_| settled.is_file());
         assert!(std::fs::read_dir(&records)
             .expect("the mock ran")
             .flatten()
@@ -4310,6 +4364,8 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
         for pid in &survivors {
             end_process(*pid);
         }
+        launch.kill().expect("end the captured embedding host");
+        launch.wait().expect("reap the embedding host");
         assert!(
             survivors.is_empty(),
             "{tag}: pool processes survived linger and stop deadline: {survivors:?}"

@@ -802,6 +802,10 @@ resolver = "2"
 # preemption withdraw a live note through it, and `tests/note`'s live-withdrawal
 # journeys hold it. It requires nothing this lock did not already resolve.
 #
+# `oneagentgraph` 0.7.1 ends a member's blocked command provider when the graph
+# stops. The attached observer stop journey in
+# `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -822,7 +826,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.7.0"
+oneagentgraph = "0.7.1"
 onevcs = "0.56.3"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -1063,7 +1067,12 @@ onejudge = "0.20.0"
 # **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
 # `oneagentgraph` 0.6.0 and `onejudge` 0.20.0 admit this core, so the lock
 # resolves the core once.
-oneharness-core = "0.28.5"
+# 0.28.8 removes the dispatch's environment stamp from the pool sweeper
+# (oneharness #1520), so a member's final reap leaves it alive to stop the
+# server after its last lease and linger. The retirement journey in
+# `tests/e2e/dispatch.rs` holds this through the public in-process executor.
+# All linked consumers admit this 0.28.x core, so it resolves once.
+oneharness-core = "0.28.8"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
