@@ -4197,6 +4197,126 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
     );
 }
 
+/// A completed or refused controlled turn leaves neither the shared server nor
+/// its sweeper alive after the last lease's linger. The sibling's mock stays
+/// listening until the pool stops it, unlike our short-lived Codex double.
+#[cfg(unix)]
+#[test]
+fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
+    use crate::harness::process_ended;
+    use std::os::unix::fs::PermissionsExt;
+
+    for (tag, fault) in [("complete", ""), ("refused", "refuse-thread-start")] {
+        let name = format!("codex-pool-retirement-{tag}");
+        let world = World::new(&name);
+        world.write_graphs();
+        world.write_supervised_node_graph();
+        std::fs::write(
+            world.graphs().join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n",
+        )
+        .expect("the controlled turn selects Codex");
+        let path = world.plan(&name, &plan_of(&name, vec![agent("work", &[])]));
+        let wrapper = world.root.join("mock-codex");
+        // exec preserves the PID the pool records. Only the harness process,
+        // never the real oneharness CLI driving it, enters mock mode.
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport ONEHARNESS_INTERNAL_MOCK_HARNESS=1\nexec '{}' \"$@\"\n",
+                crate::harness::oneharness_binary()
+                    .to_string_lossy()
+                    .replace('\'', "'\"'\"'")
+            ),
+        )
+        .expect("the mock harness launcher is written");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("the mock harness launcher is executable");
+        let state = ShortDir::new(if fault.is_empty() { "op-rc" } else { "op-rf" });
+        let records = world.root.join("mock-server");
+        let release = world.root.join("complete-turn");
+        let mut command = world.agentgraph_cmd(&["start", &path, "--attach"]);
+        command
+            .env(
+                "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                crate::harness::oneharness_binary(),
+            )
+            .env("ONEHARNESS_BIN_CODEX", &wrapper)
+            .env("CODEX_MOCK_DIR", &records)
+            .env("CODEX_MOCK_FAULT", fault)
+            .env("MOCK_CODEX_HOLD_UNTIL", &release)
+            .env(oneharness_core::io::app_server::LINGER_ENV, "2000")
+            .env(
+                oneharness_core::io::app_server::DAEMON_DIR_ENV,
+                world.root.join("daemon"),
+            )
+            .env(crate::harness::STATE_HOME_ENV, &state.0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut launch = command.spawn().expect("the engine starts the dispatch");
+        let mut pids = Vec::new();
+        world.until("the pool to record its server and sweeper", |_| {
+            let Ok(entries) = std::fs::read_dir(state.0.join("oneharness/servers")) else {
+                return false;
+            };
+            for entry in entries.flatten() {
+                let read_pid = |file: &str| -> Option<u32> {
+                    let record: Value =
+                        serde_json::from_slice(&std::fs::read(entry.path().join(file)).ok()?)
+                            .ok()?;
+                    u32::try_from(record["pid"].as_u64()?).ok()
+                };
+                if let (Some(server), Some(sweeper)) =
+                    (read_pid("server.json"), read_pid("sweeper.json"))
+                {
+                    pids = vec![server, sweeper];
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(pids.iter().all(|pid| !process_ended(*pid)), "{pids:?}");
+        std::fs::write(&release, "complete").expect("the controlled turn may finish");
+        world.until("the dispatch to settle", |world| {
+            world.run_file(&name, "result.json").is_file()
+        });
+        let _status = launch.wait().expect("the dispatch ends");
+        assert!(world.run_file(&name, "result.json").is_file());
+        assert!(std::fs::read_dir(&records)
+            .expect("the mock ran")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("server-")));
+        let frames = std::fs::read_dir(&records)
+            .expect("the mock recorded its connections")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("conn-"))
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("the frames read back"))
+            .collect::<String>();
+        let expected = if fault.is_empty() {
+            "turn/completed"
+        } else {
+            "the mock refuses thread/start"
+        };
+        assert!(frames.contains(expected), "{tag}: no {expected}: {frames}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(17);
+        while pids.iter().any(|pid| !process_ended(*pid)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let survivors: Vec<_> = pids
+            .into_iter()
+            .filter(|pid| !process_ended(*pid))
+            .collect();
+        // On a regression, clean up only the PIDs captured from this pool entry.
+        for pid in &survivors {
+            end_process(*pid);
+        }
+        assert!(
+            survivors.is_empty(),
+            "{tag}: pool processes survived linger and stop deadline: {survivors:?}"
+        );
+    }
+}
+
 /// A directory directly under `/tmp`, removed when dropped: a world's root sits
 /// under the platform temp directory, which on macOS is long enough to put a
 /// socket the journey above needs past that platform's `sun_path` budget.
