@@ -1856,10 +1856,26 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
             && !world.events_of(name, "driver-exited").is_empty()
     });
 
+    // Each write of the issue's status, in the order the double took it, by the request's
+    // place in the log and the state it set: the last one is the write that left the status
+    // this assertion saw.
+    let status_writes: Vec<(usize, Option<String>)> = linear
+        .log()
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::IssueUpdate && request.variables["id"] == only.as_str()
+        })
+        .filter_map(|(at, request)| {
+            request.variables["input"]["stateId"]
+                .as_str()
+                .map(|state| (at, linear.state_named(state)))
+        })
+        .collect();
     assert_eq!(
         linear.state_of(&only),
         "Done",
-        "Linear::state_of observed the unexpected issue status below; projection writes come from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
+        "the issue's status writes, as (request, state set), the last of which left the status seen: {status_writes:?}. A projection's write comes from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate, and a landing's closure from writeback::closer; the journal says which ran. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
         linear.log(),
         std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
             .unwrap_or_default(),
