@@ -162,10 +162,11 @@ static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
 /// One upstream node, under the runs root it was asked beneath.
 type Asked = (PathBuf, String, String);
 
+type JournalStamp = Option<crate::appendstamp::Stamp>;
+
 /// What that question answered, and when it was paid for.
 // The outer option withholds provenance when the journal moved during its read;
 // the inner option records a source journal that did not exist.
-type JournalStamp = Option<crate::appendstamp::Stamp>;
 type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>, Option<JournalStamp>)>;
 
 fn key(root: &Path, reference: &Reference) -> Asked {
