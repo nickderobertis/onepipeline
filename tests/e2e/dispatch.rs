@@ -6560,3 +6560,160 @@ fn stopping_a_run_ends_its_observers_command_judge() {
         "observer command {pid} survived five seconds after stop"
     );
 }
+
+/// A missing observer record cannot create a replacement graph directory or
+/// prevent the engine's existing process-tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_a_missing_observer_record_does_not_recreate_it() {
+    let world = World::new("stop-missing-observer-record");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("observer.wait", "hold");
+    let run = "missing-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer to take its turn", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("the observer run to be recorded", |world| {
+        world.run_json(run, "launch.json")["graph_run"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    });
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let record = root.join(oneagentgraph::run::RECORD_FILE);
+    std::fs::remove_file(&record).expect("the observer record is absent");
+    let reaped = std::thread::spawn(move || owner.wait());
+    world.run_on_agentgraph(&["stop", run]).exited(0);
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    assert!(!record.exists(), "stop recreated the missing record");
+    assert!(
+        !root
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("stop")
+            .exists(),
+        "stop wrote a signal into an unproven graph"
+    );
+}
+
+/// A pre-turn command can be stuck before the member's cancellation loop is
+/// running. Stop must bound its cooperative wait and continue tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_unresponsive_observer_bounds_the_cooperative_wait() {
+    use crate::harness::process_ended;
+
+    let world = World::new("stop-unresponsive-observer");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("pre-turn.pid");
+    let script = world.root.join("pre-turn.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "exec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display(),
+        ),
+    )
+    .expect("the blocking pre-turn command is written");
+    let mut graph: Value = onepipeline_testfakes::yaml::from_str(
+        &std::fs::read_to_string(world.dag_graph()).expect("the observer graph exists"),
+    )
+    .expect("the observer graph parses");
+    graph["version"] = json!(oneagentgraph::config::SCHEMA_VERSION);
+    graph["members"]["monitor"]["pre_turn"] = json!([{
+        "command": ["sh", script.to_str().expect("the command path is text")],
+        "timeout": 120,
+    }]);
+    std::fs::write(
+        world.dag_graph(),
+        serde_json::to_string_pretty(&graph).unwrap(),
+    )
+    .expect("the observer declares its pre-turn command");
+    let run = "unresponsive-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the pre-turn command to start", |_| pid_file.is_file());
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!process_ended(pid), "the pre-turn command is held");
+    let owner_pid = owner.id();
+    let reaped = std::thread::spawn(move || owner.wait());
+    let started = std::time::Instant::now();
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    let elapsed = started.elapsed();
+    let owner_ended = process_ended(owner_pid);
+    let provider_ended = process_ended(pid);
+    // The command resists TERM to prove the fallback's partial-stop verdict;
+    // clean up only the PID this command recorded before asserting the result.
+    if !provider_ended {
+        end_process(pid);
+    }
+    if !owner_ended {
+        end_process(owner_pid);
+    }
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    stopped.exited(REFUSED).err_has("partly stopped");
+    assert!(
+        owner_ended,
+        "the engine was not ended after the cooperative bound"
+    );
+    assert!(
+        !provider_ended,
+        "the pre-turn command did not hold past cancellation"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "stop waited past its bounded fallback: {elapsed:?}"
+    );
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    assert!(
+        world
+            .graph_state()
+            .join(graph)
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("stop")
+            .is_file(),
+        "stop never requested cooperative cancellation"
+    );
+}
