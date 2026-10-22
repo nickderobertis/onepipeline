@@ -444,12 +444,17 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     );
     world.script("store.metering", &meter().to_string());
     // Every admission meets the driver's begin failpoint, which the pacer stands at.
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI input can hold one admission
+    // until the fence's previous write has finished, and without that the fence coalesces on
+    // the store's timing and the record's figures cannot be the same on every run. The
+    // failpoint only orders the run: every figure is a store call the real binary made.
     let begin = Rendezvous::failpoint();
     let world = world
         .through_scripted_source()
         .with_env(RENDEZVOUS_SECONDS_ENV, "600")
         .with_env(BEGIN_GATE, &begin.address())
         .with_env(BEGIN_NODES, "a,b,c,d,e,d-2,f");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let go = |node: &str| world.release(&format!("{node}.go"));
     let pacer = Pacer::start(&world, begin);
 

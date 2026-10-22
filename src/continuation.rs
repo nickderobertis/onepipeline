@@ -957,13 +957,17 @@ impl ClaimWatch {
 struct FenceWriter {
     store: Store,
     project: QualifiedId,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the run and host `ClaimWatch`
+    // carries, copied from it, as it says.
     run: String,
     host: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     run_dir: std::path::PathBuf,
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     lease: Lease,
     fence_refused: Option<Instant>,
     paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // llmlint: ignore[invalid_states_unrepresentable] `ClaimWatch::term_scope`, copied from it: the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
 }
 
@@ -1699,12 +1703,15 @@ fn watch(lease: &std::sync::Weak<LeaseInner>) {
     }
 }
 
-/// How a `--take-over` came to start: on the displaced driver's acknowledgement, or once
-/// the wait for one had passed with none of its publications under way.
+/// How a `--take-over` came to start: on the displaced driver's acknowledgement, on this
+/// host's records proving it gone, or once the wait for one had passed with none of its
+/// publications under way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HandedOver {
     /// The displaced driver wrote that it had stopped.
     Acknowledged(Acknowledgement),
+    /// This host's records prove the displaced driver gone, so nothing is waited on.
+    ProvenGone,
     /// Nothing answered within [`takeover_wait`], and the project named none of the
     /// displaced driver's publications under way.
     WaitedOut,
@@ -1778,7 +1785,7 @@ pub(crate) fn hand_over(
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
         if locally_gone()? {
-            return Ok(HandedOver::WaitedOut);
+            return Ok(HandedOver::ProvenGone);
         }
         let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
         std::thread::sleep(if left.is_zero() {

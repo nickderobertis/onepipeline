@@ -334,6 +334,7 @@ enum DriverWrite {
     /// Touch no claim: a driver that has none to write.
     Leave,
     /// Release only this run's best-effort fence after retirement, touching no task or claim.
+    // llmlint: ignore[invalid_states_unrepresentable] the same run and host as `Release`'s, for the same reason: compared only against the fence's own strings, `crate::continuation::Publishing`'s.
     ReleaseFence { run: String, host: String },
 }
 
