@@ -127,7 +127,9 @@ mod tests {
             epoch: "writer-epoch".into(),
             stamp: Stamp {
                 len: 4096,
-                modified: SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 123),
+                // Windows file metadata uses 100 ns ticks; keep the fixture representable
+                // there as well as on platforms with nanosecond SystemTime precision.
+                modified: SystemTime::UNIX_EPOCH + std::time::Duration::new(1700000000, 100),
                 created: None,
                 identity: Some((1, 42, 1700000000, 123)),
             },
