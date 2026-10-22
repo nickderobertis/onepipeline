@@ -19,13 +19,14 @@
 //! claim replaced stops — and `docs/contract-divergences.md` entry 119 says exactly what it
 //! does not.
 //!
-//! A running driver reads the claim once per [claim interval](claim_interval), and works
-//! on a **lease** that read gives it: it starts a dispatch or a publication only on a read
-//! younger than one interval, and ends every dispatch it still has once its read is two
-//! intervals and a read's deadline old. So the waiting is the adopter's: a `--take-over` writes its claim, and
-//! starts nothing until the driver it displaced has acknowledged it — on the claim — or
-//! until [`takeover_wait`] has passed, by which time the lease of a driver that never
-//! answered has run out. Entry 128 states the contract.
+//! A running driver reads the claim only where it must: on an adoption's first pass, and
+//! once immediately before each publication it starts, after the fence naming that
+//! publication has landed. Nothing reads it on a timer, nothing reads it before a dispatch,
+//! and a read that is not answered ends nothing. So the waiting is the adopter's: a
+//! `--take-over` writes its claim, and starts nothing until the driver it displaced has
+//! acknowledged it — on the claim, once it has read the takeover at a publication, its
+//! closeout or its stop — or until [`takeover_wait`] has passed with no publication of that
+//! driver's under way. Entry 128 states the contract.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -86,37 +87,33 @@ pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
     Ok(stored)
 }
 
-/// The claim interval's default: how often a running driver reads its project's claim, and
-/// the age a read may have when the driver starts a dispatch or a publication on it.
+/// The claim interval's default. It paces the one read of the claim still made on a timer —
+/// a takeover's, while it waits — and is stated in each claim's `lease` for a build that
+/// still sizes a takeover's wait by it.
 pub(crate) const CLAIM_INTERVAL: Duration = Duration::from_secs(300);
 
-/// The longest claim interval the setting may name: a day. A longer one would make a
-/// takeover wait days for a driver that never answers, and arithmetic on the instants it
-/// is added to has to stay representable.
+/// The longest claim interval the setting may name, and a claim's `lease` may state: a day.
+/// A build that still sizes a takeover's wait by a claim's interval would wait days on a
+/// longer one, and arithmetic on the instants it is added to has to stay representable.
 pub(crate) const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 
 /// The setting naming the claim interval, in whole seconds.
 ///
-/// Each host is given its own; its claim states it, and a run taking the project over waits
-/// out the interval that claim states rather than its own.
+/// Each host is given its own, and its claim states it. It governs only how often a
+/// takeover reads the claim while it waits; no running driver reads its claim on a timer.
 pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The longest one read of the claim may take before the driver goes on without its answer
-/// — renewing nothing, so starting nothing more on it: a reconcile pass that waited on a
-/// store for longer would hold every settlement behind a board.
+/// — a publication waiting on it waits for the next: a reconcile pass that waited on a store
+/// for longer would hold every settlement behind a board.
 pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 
-/// What [`takeover_wait`] leaves beyond a lapsed lease and the cancel grace: a dispatch
-/// thread noticing the cancellation, and the reaping of what it killed.
-const LAPSE_SLACK: Duration = Duration::from_secs(10);
+/// What [`takeover_wait`] adds to the displaced host's cancel grace.
+const TAKEOVER_SLACK: Duration = Duration::from_secs(10);
 
-/// How many claim intervals old a read may be when a dispatch or a publication starts on it.
-const STARTS_WITHIN_INTERVALS: u32 = 1;
-
-/// How many claim intervals old the newest confirming read may be — beyond the
-/// [`CLAIM_READ_DEADLINE`] the read due then is given to answer — before the driver's
-/// dispatches in progress are ended.
-const LAPSES_AFTER_INTERVALS: u32 = 2;
+/// How long a superseded driver waits, once, for what it settled to land on the store
+/// before it goes on passing and says the settlement has not reached it.
+pub(crate) const SETTLEMENT_LANDING_WAIT: Duration = Duration::from_secs(20);
 
 /// A takeover reads the claim every this-many-th of an interval while it waits, bounded by
 /// [`TAKEOVER_POLL_MIN`] and [`TAKEOVER_POLL_MAX`].
@@ -124,17 +121,9 @@ const TAKEOVER_POLLS_PER_INTERVAL: u32 = 10;
 const TAKEOVER_POLL_MIN: Duration = Duration::from_secs(1);
 const TAKEOVER_POLL_MAX: Duration = Duration::from_secs(30);
 
-/// How soon a driver writes its publications under way again after the store refused it.
+/// How soon a driver writes its publications under way again after the store refused it,
+/// and reads the claim again before a publication after a read that was not answered.
 const FENCE_RETRY: Duration = Duration::from_secs(5);
-
-/// The test failpoint met before a driver decides whether to start a dispatch of the node
-/// [`BEGIN_GATE_NODE_ENV`] names: a journey holds a driver there past its lease.
-const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
-const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
-
-/// The test failpoint met before each read of the claim, so a journey can tell when a
-/// driver's lease began and hold it there.
-const READ_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_READ_GATE";
 
 /// The test failpoint met before each read a takeover makes once its wait has passed, so a
 /// journey can hold that read until the displaced driver has got where it needs it.
@@ -151,19 +140,14 @@ const CLAIM_KEYS: [&str; 6] = ["run", "host", "session", "pid", "claimed_at", "l
 /// The keys a claim's `lease` carries, and the only ones.
 const LEASE_KEYS: [&str; 2] = ["interval_seconds", "cancel_grace_seconds"];
 
-/// The terms this driver's lease runs on, as its claim states them: the claim interval and
-/// the cancel grace it was given, which a run taking the project over waits out.
+/// The terms this host's claim states: the claim interval and the cancel grace it was given,
+/// both at least a second, as [`claim_interval`] and the grace's own setting read them. A run
+/// taking the project over waits out the grace these state rather than its own.
 pub(crate) fn lease_terms() -> ClaimLease {
-    terms_of(claim_interval())
-}
-
-/// The terms a lease on `interval` runs on, with this host's cancel grace: both are at
-/// least a second, as [`claim_interval`] and the grace's own setting read them.
-fn terms_of(interval: Duration) -> ClaimLease {
     let positive =
         |seconds: u64| std::num::NonZeroU64::new(seconds).unwrap_or(std::num::NonZeroU64::MIN);
     ClaimLease {
-        interval_seconds: positive(interval.as_secs()),
+        interval_seconds: positive(claim_interval().as_secs()),
         cancel_grace_seconds: positive(crate::engine::cancel_grace().as_secs()),
     }
 }
@@ -696,12 +680,13 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
     Ok(continued)
 }
 
-/// What a driver knows about its project's claim, and when it last asked.
+/// What a driver knows about its project's claim.
 ///
-/// One store read per [claim interval](claim_interval), whatever the driver is doing: a
-/// read is due once the last one began an interval ago, and never sooner. The read that
-/// finds the project still this driver's renews its [`Lease`], which is what every start of
-/// a dispatch or a publication asks — never the store.
+/// Read only where a driver must know: an adoption's first pass, and once immediately before
+/// each publication starts, after the fence naming it has landed — never on a timer, and
+/// never before a dispatch. A project changes driver only where somebody says so with
+/// `--take-over`, so a driver reading its claim on a clock would spend the board's quota
+/// confirming that nothing changed; and a read that cannot be answered ends nothing.
 pub(crate) struct ClaimWatch {
     store: Store,
     project: QualifiedId,
@@ -717,19 +702,18 @@ pub(crate) struct ClaimWatch {
     /// The claim this run's launch knowingly took over: still on the store until this
     /// driver's first projection replaces it, and no sign that anybody else drives.
     displaced: Option<DriverClaim>,
-    /// The claim this driver writes, once it has made one.
-    mine: Option<DriverClaim>,
-    /// When the next read is due: an interval after the last one began, or — where the
-    /// store asked to be left alone — once that wait has passed. `None` is due now.
-    next_read: Option<Instant>,
-    every: Duration,
-    lease: Lease,
+    /// An adoption whose first read is still to be made: made on its first pass the store
+    /// has not asked to be left alone over.
+    adopting: bool,
     /// The nodes the project's [`PUBLISHING_KEY`] names as this driver's publications under
     /// way, as far as this driver knows: `None` where it cannot say — an adoption before its
     /// first read, or after a write the store refused.
     fenced: Option<std::collections::BTreeSet<String>>,
     /// When the store last refused that write, so the loop wakes to write it again.
     fence_refused: Option<Instant>,
+    /// When the read before a publication last went unanswered, so the loop wakes to read
+    /// again.
+    read_unanswered: Option<Instant>,
     /// A read found another run's claim: the fence this driver clears may since be that
     /// run's, so it reads before it clears.
     superseded: bool,
@@ -738,26 +722,32 @@ pub(crate) struct ClaimWatch {
     term_scope: Vec<String>,
 }
 
+/// What the read immediately before a publication lets the driver do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BeforePublishing {
+    /// The read found the project this driver's — its own claim, the one it took over, or
+    /// none: the publications go ahead.
+    Publish,
+    /// The read failed, outlasted its deadline, or was not made inside a wait the store asked
+    /// for: the publications wait, and the read is made again once [`FENCE_RETRY`] has passed.
+    Wait,
+    /// The read found another run's claim, which supersedes this driver.
+    Superseded(DriverClaim),
+}
+
 impl ClaimWatch {
     /// The watch over the project `launch` names, or `None` for a run naming none.
     ///
     /// A launch's driver starts on the read that let it launch — its own, or the one its
-    /// takeover made once the driver it displaced had let go — so its lease and its interval
-    /// both start now. An adoption's starts on nothing: its first pass reads.
+    /// takeover made once the driver it displaced had let go — and reads nothing more until
+    /// a publication. An adoption's first pass reads.
     pub(crate) fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
         term_scope: Vec<String>,
     ) -> Option<Self> {
         let project = launch.project.parse().ok()?;
-        let every = claim_interval();
-        let lease = Lease::new(every, CLAIM_READ_DEADLINE);
         let launched = launch.adoptions == 0;
-        let next_read = launched.then(|| {
-            let now = Instant::now();
-            lease.confirm(now);
-            now + every
-        });
         Some(Self {
             store: Store::at(&launch.dir),
             project,
@@ -767,13 +757,11 @@ impl ClaimWatch {
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             displaced: taken_over(paths),
-            mine: None,
-            next_read,
-            every,
-            lease,
+            adopting: !launched,
             // A launch minted its run, so nothing on the store names its publications yet.
             fenced: launched.then(std::collections::BTreeSet::new),
             fence_refused: None,
+            read_unanswered: None,
             superseded: false,
             term_scope,
         })
@@ -781,107 +769,128 @@ impl ClaimWatch {
 
     /// The claim this driver writes: this run, this host, the session that launched it,
     /// this process, from `claimed_at`.
-    pub(crate) fn claim(&mut self, session: &str, claimed_at: &str) -> DriverClaim {
-        let mine = DriverClaim {
+    pub(crate) fn claim(&self, session: &str, claimed_at: &str) -> DriverClaim {
+        DriverClaim {
             run: self.run.clone(),
             host: self.host.clone(),
             // Only a session a line can carry, which is the only one `claim_of` reads back.
             session: crate::vcs::usable(session),
             pid: crate::sys::pid(),
             claimed_at: claimed_at.to_owned(),
-            lease: Some(terms_of(self.every)),
-        };
-        self.mine = Some(mine.clone());
-        mine
+            lease: Some(lease_terms()),
+        }
     }
 
-    /// Whether the claim is due to be read.
-    pub(crate) fn read_due(&self) -> bool {
-        self.until_read() == Duration::ZERO
+    /// How long until the adoption's first read is due: now, where it is still to be made
+    /// and the store has asked for no wait, and `Duration::MAX` once it has been made.
+    pub(crate) fn until_adoption_read(&self) -> Duration {
+        if !self.adopting {
+            return Duration::MAX;
+        }
+        crate::writeback::store_wait_left(&self.run_dir).unwrap_or(Duration::ZERO)
     }
 
-    /// How long until the next read is due: now where this driver has never read.
-    pub(crate) fn until_read(&self) -> Duration {
-        self.next_read.map_or(Duration::ZERO, |at| {
-            at.saturating_duration_since(Instant::now())
-        })
-    }
-
-    /// Whether the claim this driver wrote has landed on the store: a claim it then reads
-    /// gone was released or cleared by somebody else, which says nothing about whether this
-    /// driver still drives — the run that took the project over may have finished it.
-    fn landed_mine(&self) -> bool {
-        self.mine.as_ref().is_some_and(|mine| {
-            crate::writeback::landed_claim(&self.run_dir) == serde_json::to_value(mine).ok()
-        })
-    }
-
-    /// Read the claim, and answer the claim that supersedes this driver, if one does. A
-    /// read finding the project still this driver's — its own claim, the one it took over,
-    /// or none where its own has never landed — renews its lease from the moment the read
-    /// began. One finding none where its own had landed renews nothing.
+    /// Make an adoption's first read, once: the claim that supersedes this driver, if one
+    /// does. `None` where this driver is no adoption or has read already, and — the read
+    /// still due — inside a wait the store asked for.
     ///
-    /// A read the store fails is said on standard error and answers nothing: a claim is
-    /// best effort, and a store that cannot be read has not said anybody else drives. Nor
-    /// does it renew anything, so a driver whose reads keep failing runs out of lease.
-    pub(crate) fn check(&mut self) -> Option<DriverClaim> {
-        // A failpoint, so a journey knows when a lease began and can hold a driver there.
-        let _ = crate::ordering::meet(READ_GATE_ENV);
-        let began = Instant::now();
-        self.next_read = Some(began + self.every);
+    /// A read the store fails is said on standard error and answers nothing: a claim is best
+    /// effort, and a store that cannot be read has not said anybody else drives.
+    pub(crate) fn adoption_read(&mut self) -> Option<DriverClaim> {
+        if !self.adopting {
+            return None;
+        }
         // A store that asked to be left alone is asked nothing inside the wait: every further
         // call extends a limiter nothing reports. The write-back is waiting it out too, and
-        // the next check after it has passed reads the claim.
+        // the first pass after it has passed reads the claim.
         // llmlint: ignore-block[changed_behavior_has_e2e] driven end to end by `tests/e2e/store.rs`'s
         // `a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` and
         // `a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing`, which hold that an adopted
-        // driver inside a wait the store asked for makes no store call at all — the adoption's own
-        // claim read was the one call each caught before this skip existed — and that the driver
+        // driver inside a wait the store asked for makes no store call at all, and that the driver
         // reaches the store again once the wait has passed.
-        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
-            // Asked nothing, so not a read: the next one is due once the wait has passed.
-            self.next_read = Some(began + left.min(self.every));
+        if crate::writeback::store_wait_left(&self.run_dir).is_some() {
             return None;
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        crate::loopstats::claim_read();
-        let read = self
-            .store
-            .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
-            .and_then(|metadata| {
-                self.fenced = self.fence_on(&metadata);
-                claim_of(self.project.as_str(), &metadata)
-            });
-        match read {
+        self.adopting = false;
+        match self.read() {
             Ok(Some(claim)) if self.supersedes(&claim) => {
                 self.superseded = true;
                 Some(claim)
             }
-            Ok(None) if self.landed_mine() => {
+            Ok(_) => None,
+            Err(why) => {
                 eprintln!(
-                    "onepipeline: run '{}' found no claim on {} where its own had landed; it \
-                     starts nothing on that read",
+                    "onepipeline: run '{}' could not read the claim on {}: {why}; it goes on \
+                     driving, and reads it again before its next publication",
                     self.run,
                     self.project.as_str()
                 );
                 None
             }
+        }
+    }
+
+    /// Read the claim immediately before a publication starts, once the fence naming it has
+    /// landed: only a claim naming another run holds it back, for good, and a read that was
+    /// not answered holds it until a later read is.
+    ///
+    /// A read finding no claim publishes: the claim may never have reached the board, and a
+    /// run that took the project over and finished it has nothing left this driver could
+    /// publish beside.
+    pub(crate) fn before_publishing(&mut self) -> BeforePublishing {
+        if self
+            .read_unanswered
+            .is_some_and(|at| at.elapsed() < FENCE_RETRY)
+        {
+            return BeforePublishing::Wait;
+        }
+        // Inside a wait the store asked for, as the fence's own write is not made in one.
+        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
+            eprintln!(
+                "onepipeline: run '{}' waits {}s, as the store asked, to read the claim on {} \
+                 before it publishes",
+                self.run,
+                left.as_secs(),
+                self.project.as_str()
+            );
+            self.read_unanswered = Some(Instant::now());
+            return BeforePublishing::Wait;
+        }
+        match self.read() {
+            Ok(Some(claim)) if self.supersedes(&claim) => {
+                self.read_unanswered = None;
+                self.superseded = true;
+                BeforePublishing::Superseded(claim)
+            }
             Ok(_) => {
-                self.lease.confirm(began);
-                None
+                self.read_unanswered = None;
+                BeforePublishing::Publish
             }
             Err(why) => {
                 eprintln!(
-                    "onepipeline: run '{}' could not read the claim on {}: {why}; it starts \
-                     nothing more on a lease older than {}s, and reads it again in {}s",
+                    "onepipeline: run '{}' could not read the claim on {} before it publishes: \
+                     {why}; the publication waits, and it reads again in {}s",
                     self.run,
                     self.project.as_str(),
-                    self.every.as_secs(),
-                    self.every.as_secs()
+                    FENCE_RETRY.as_secs()
                 );
-                None
+                self.read_unanswered = Some(Instant::now());
+                BeforePublishing::Wait
             }
         }
+    }
+
+    /// One read of the project's claim, bounded by [`CLAIM_READ_DEADLINE`], which also
+    /// refreshes what this driver knows of its fence.
+    fn read(&mut self) -> Result<Option<DriverClaim>> {
+        crate::loopstats::claim_read();
+        self.store
+            .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
+            .and_then(|metadata| {
+                self.fenced = self.fence_on(&metadata);
+                claim_of(self.project.as_str(), &metadata)
+            })
     }
 
     /// Whether `claim` names a run other than this one and other than the one this launch
@@ -890,28 +899,15 @@ impl ClaimWatch {
         !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
     }
 
-    /// Whether this driver may start a dispatch of `node` — or, for `None`, a publication —
-    /// now: only on a read that found the project its own and began less than an interval
-    /// ago. Asked at the moment of the start, after anything that could have held it.
-    pub(crate) fn may_start(&self, node: Option<&str>) -> bool {
-        if let Some(node) = node {
-            if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
-                let _ = crate::ordering::meet(BEGIN_GATE_ENV);
-            }
-        }
-        self.lease.may_start()
-    }
-
-    /// The lease this driver's dispatches are ended by once it runs out.
-    pub(crate) fn lease(&self) -> &Lease {
-        &self.lease
-    }
-
-    /// How long until a write of this driver's publications the store refused is due again.
+    /// How long until a write of this driver's publications the store refused, or a read
+    /// before a publication it did not answer, is due again.
     pub(crate) fn until_fence_retry(&self) -> Duration {
-        self.fence_refused.map_or(Duration::MAX, |at| {
-            (at + FENCE_RETRY).saturating_duration_since(Instant::now())
-        })
+        [self.fence_refused, self.read_unanswered]
+            .into_iter()
+            .flatten()
+            .map(|at| (at + FENCE_RETRY).saturating_duration_since(Instant::now()))
+            .min()
+            .unwrap_or(Duration::MAX)
     }
 
     /// The nodes `metadata`'s [`PUBLISHING_KEY`] names as this driver's: none where it is
@@ -1028,8 +1024,8 @@ impl ClaimWatch {
         });
         let outcome = match written {
             // llmlint: ignore-block[changed_behavior_has_e2e] the store's own wait is the
-            // write-back's to keep, as `check` keeps it; the adopter's journeys drive the wait
-            // it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`).
+            // write-back's to keep, as every read of the claim keeps it; the adopter's journeys
+            // drive the wait it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_wait_has_passed`).
             _ if crate::writeback::store_asked_to_wait(&self.run_dir) => {
                 Err("the store asked to be left alone".to_owned())
             }
@@ -1056,188 +1052,10 @@ impl ClaimWatch {
             ),
             Err(why) => eprintln!(
                 "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; that \
-                 run starts once this one's lease has run out",
+                 run starts once its wait has passed with no publication of this one's under way",
                 self.run, by.run, by.host
             ),
         }
-    }
-}
-
-/// How long a driver's last read of its claim lets it act.
-///
-/// A read that found the project the driver's own, from the moment it **began**, lets the
-/// driver start a dispatch or a publication for one claim interval, and keep a dispatch
-/// going for two and the [`CLAIM_READ_DEADLINE`] the read due then is given to answer — so
-/// one read the board fails is not, alone, a lapse. Past that, a watchdog thread of the
-/// lease's own — not the reconcile loop, which a slow call or a held step could be inside —
-/// cancels every dispatch the driver has in progress that is not publishing: a driver that
-/// cannot say the project is still its own goes on with nothing an adopter could be
-/// starting beside.
-#[derive(Clone)]
-pub(crate) struct Lease {
-    inner: std::sync::Arc<LeaseInner>,
-}
-
-struct LeaseInner {
-    interval: Duration,
-    /// How long a confirming read lets a dispatch go on: [`LAPSES_AFTER_INTERVALS`] intervals
-    /// and the answer the read due then is given.
-    holds_for: Duration,
-    state: std::sync::Mutex<LeaseState>,
-    changed: std::sync::Condvar,
-}
-
-#[derive(Default)]
-struct LeaseState {
-    /// When the newest read that found the project this driver's began.
-    confirmed: Option<Instant>,
-    /// The cancellation of each dispatch in progress that is not publishing, by node.
-    // llmlint: ignore[invalid_states_unrepresentable] a node id is the plain `String` every map of `RunState` keys by, copied from the loop's own `in_flight` map whose ids the graph validated.
-    held: Vec<(String, crate::executor::CancellationToken)>,
-    /// Whether the lapse has been said, so it is said once per lapse.
-    said: bool,
-    /// The driver has let go of the lease, so the watchdog ends.
-    closed: bool,
-}
-
-impl Lease {
-    /// A lease starting a dispatch for one `interval` after a read and keeping one going
-    /// for [`LAPSES_AFTER_INTERVALS`] of them and `answer` more.
-    fn new(interval: Duration, answer: Duration) -> Self {
-        let lease = Self {
-            inner: std::sync::Arc::new(LeaseInner {
-                interval,
-                holds_for: LAPSES_AFTER_INTERVALS * interval + answer,
-                state: std::sync::Mutex::new(LeaseState::default()),
-                changed: std::sync::Condvar::new(),
-            }),
-        };
-        let watched = std::sync::Arc::downgrade(&lease.inner);
-        // llmlint: ignore-block[changed_behavior_has_e2e] a host refusing this process one
-        // thread is resource exhaustion no journey can arrange; the lease then has no watchdog,
-        // and every start still asks it.
-        let _ = std::thread::Builder::new()
-            .name("claim-lease".to_owned())
-            .spawn(move || watch(&watched));
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        lease
-    }
-
-    fn confirm(&self, began: Instant) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            if state.confirmed.is_none_or(|was| was < began) {
-                state.confirmed = Some(began);
-                state.said = false;
-            }
-            self.inner.changed.notify_all();
-        }
-    }
-
-    /// Whether a start may go ahead on the newest confirming read.
-    fn may_start(&self) -> bool {
-        self.inner.state.lock().is_ok_and(|state| {
-            state
-                .confirmed
-                .is_some_and(|at| at.elapsed() < STARTS_WITHIN_INTERVALS * self.inner.interval)
-        })
-    }
-
-    /// Whether any read — or the launch — ever confirmed this lease.
-    pub(crate) fn ever_held(&self) -> bool {
-        self.inner
-            .state
-            .lock()
-            .is_ok_and(|state| state.confirmed.is_some())
-    }
-
-    /// Whether the driver has been without a confirming read for as long as one holds a
-    /// dispatch, so its dispatches have been ended — or never had one.
-    pub(crate) fn lapsed(&self) -> bool {
-        self.inner.state.lock().is_ok_and(|state| {
-            state
-                .confirmed
-                .is_none_or(|at| at.elapsed() >= self.inner.holds_for)
-        })
-    }
-
-    /// Hand the watchdog the dispatches in progress it ends at a lapse: every one not
-    /// publishing. A lease that has lapsed already ends them at once.
-    pub(crate) fn hold(&self, held: Vec<(String, crate::executor::CancellationToken)>) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.held = held;
-            self.inner.changed.notify_all();
-        }
-    }
-
-    /// End the watchdog: the driver is going.
-    pub(crate) fn close(&self) {
-        if let Ok(mut state) = self.inner.state.lock() {
-            state.closed = true;
-            self.inner.changed.notify_all();
-        }
-    }
-}
-
-impl Drop for ClaimWatch {
-    fn drop(&mut self) {
-        self.lease.close();
-    }
-}
-
-/// The lease's watchdog: asleep until the lease's newest read has held a dispatch as long as
-/// one may, and then cancelling every dispatch the driver handed it, until a newer read
-/// renews the lease.
-fn watch(lease: &std::sync::Weak<LeaseInner>) {
-    let Some(inner) = lease.upgrade() else { return };
-    let Ok(mut state) = inner.state.lock() else {
-        return;
-    };
-    loop {
-        if state.closed {
-            return;
-        }
-        let wait = match state.confirmed {
-            Some(at) => {
-                let lapses = at + inner.holds_for;
-                let now = Instant::now();
-                if now >= lapses {
-                    if !state.held.is_empty() {
-                        for (_, cancel) in &state.held {
-                            cancel.cancel();
-                        }
-                        if !state.said {
-                            state.said = true;
-                            eprintln!(
-                                "onepipeline: no read of the project's claim has found it this \
-                                 driver's for {}s, so it ends its dispatches in progress — {} — \
-                                 and starts nothing until a read does",
-                                inner.holds_for.as_secs(),
-                                state
-                                    .held
-                                    .iter()
-                                    .map(|(node, _)| format!("'{node}'"))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                        }
-                    }
-                    None
-                } else {
-                    Some(lapses - now)
-                }
-            }
-            None => None,
-        };
-        state = match wait {
-            Some(wait) => match inner.changed.wait_timeout(state, wait) {
-                Ok((state, _)) => state,
-                Err(_) => return,
-            },
-            None => match inner.changed.wait(state) {
-                Ok(state) => state,
-                Err(_) => return,
-            },
-        };
     }
 }
 
@@ -1253,16 +1071,22 @@ pub(crate) enum HandedOver {
 }
 
 /// Take the project over from the driver its claim named: write `mine`, then start nothing
-/// until that driver has acknowledged it on the claim — or until it is proven to have
-/// stopped: [`takeover_wait`], sized by the lease terms **its own claim** states, has passed
-/// since the write landed, by when it can start and continue no dispatch, and a read after
-/// that finds no publication of its under way on the project's [`PUBLISHING_KEY`]. A
-/// publication starts only once that fence has landed and ends before it is cleared, so a
-/// publication held for any length of time holds the takeover with it.
+/// until that driver has acknowledged it on the claim — which it does once it has read `mine`
+/// before a publication, at its closeout or at its stop, with nothing of its own in progress —
+/// or until [`takeover_wait`], sized by the cancel grace **its own claim** states, has passed
+/// since the write landed and a read after that finds no publication of its under way on the
+/// project's [`PUBLISHING_KEY`].
 ///
-/// A claim stating no lease terms — one a build that kept no lease wrote, or a value that is
-/// not a claim — names a driver no wait outlasts: the takeover then starts only on an
-/// acknowledgement, which a driver of this build writes once it reads `mine`.
+/// No publication of the displaced driver runs beside this run's: that driver writes the
+/// fence naming a publication, and only once it has landed reads the claim, publishing only
+/// on a read that answered and did not find `mine`; this run writes `mine`, and only once it
+/// has landed reads the fence. So one of the two reads finds the other's write. A dispatch is
+/// not fenced: a displaced driver that has not read `mine` yet may still start one, which
+/// publishes nothing once it does.
+///
+/// A claim stating no lease terms — one an older build wrote, or a value that is not a
+/// claim — names a driver whose fence this build cannot vouch for: the takeover then starts
+/// only on an acknowledgement, which a driver of this build writes once it reads `mine`.
 ///
 /// The store is read every tenth of an interval while it waits, at least a second and at
 /// most thirty apart: the adopter carries the cost of a takeover, not every running driver.
@@ -1390,9 +1214,8 @@ pub(crate) fn hand_over(
         match standing {
             None => {
                 eprintln!(
-                    "onepipeline: {whom} has not acknowledged in {}s, by when it can start and \
-                     continue nothing for {}, and none of its publications is under way: run \
-                     '{}' starts",
+                    "onepipeline: {whom} has not acknowledged in {}s, and none of its \
+                     publications is under way on {}: run '{}' starts",
                     wait.as_secs(),
                     project.as_str(),
                     mine.run
@@ -1510,8 +1333,9 @@ pub(crate) fn claim_interval() -> Duration {
 
 /// The interval the setting's value names: a positive whole number of seconds no longer than
 /// [`MAX_CLAIM_INTERVAL`], and the default for anything else — unset, blank, zero, longer or
-/// not a number — so a setting written wrong never turns the reads off or overflows a wait.
-// llmlint: ignore[changed_behavior_has_e2e] what a fallback produces is the five-minute default, which a journey could only observe by idling a driver for five minutes; every takeover journey drives a parsed value end to end (`tests/e2e/continuation.rs` sets the setting on each host), and `the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day` holds every value that falls back.
+/// not a number — so a setting written wrong never stalls a takeover's reads or overflows a
+/// wait.
+// llmlint: ignore[changed_behavior_has_e2e] what a fallback produces is the five-minute default, which a journey could only observe by holding a takeover for minutes; every takeover journey drives a parsed value end to end (`tests/e2e/continuation.rs` sets the setting on each host), and `the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day` holds every value that falls back.
 fn claim_interval_of(setting: Option<&str>) -> Duration {
     setting
         .and_then(|seconds| seconds.trim().parse::<u64>().ok())
@@ -1523,27 +1347,21 @@ fn claim_interval_of(setting: Option<&str>) -> Duration {
 
 /// How often a takeover reads the claim while it waits: a tenth of the interval, at least
 /// a second and at most thirty apart.
-// llmlint: ignore[changed_behavior_has_e2e] the thirty-second cap binds only on an interval over five minutes, whose takeover wait is over ten; every takeover journey polls at its short interval's floor end to end, and `a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart` holds both ends of the clamp.
+// llmlint: ignore[changed_behavior_has_e2e] the thirty-second cap binds only on an interval over five minutes, which no journey waits a takeover through; every takeover journey polls at its short interval's floor end to end, and `a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart` holds both ends of the clamp.
 fn takeover_poll(interval: Duration) -> Duration {
     (interval / TAKEOVER_POLLS_PER_INTERVAL).clamp(TAKEOVER_POLL_MIN, TAKEOVER_POLL_MAX)
 }
 
 /// How long an adopter waits for a displaced driver that does not acknowledge it, from the
-/// moment its own claim landed — by the terms the displaced driver's **own** claim states,
-/// since a host is given its interval and its cancel grace by itself.
-///
-/// Every read the displaced driver started before that moment began before it, so none of
-/// them lets it start anything an interval later, nor keep a dispatch past two and the read
-/// deadline: by then its lease's watchdog has asked each one to stop, and its cancel grace
-/// later killed it. The slack covers the dispatch thread noticing, and the reaping.
-/// Saturating: the grace is an operator's setting no smaller bound holds, and a wait that
-/// could not be represented is one no takeover outlives anyway.
+/// moment its own claim landed, before it starts on finding no publication of that driver's
+/// under way: the cancel grace the displaced driver's **own** claim states — the time its
+/// host gives a dispatch to wind down, since a host is given its grace by itself — and
+/// [`TAKEOVER_SLACK`]. No wait proves a driver that reads nothing on a timer has stopped; it
+/// gives a live one the moment to answer, and the fence is what keeps the two drivers'
+/// publications apart. Saturating: the grace is an operator's setting no smaller bound
+/// holds, and a wait that could not be represented is one no takeover outlives anyway.
 pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
-    Duration::from_secs(terms.interval_seconds.get())
-        .saturating_mul(LAPSES_AFTER_INTERVALS)
-        .saturating_add(CLAIM_READ_DEADLINE)
-        .saturating_add(Duration::from_secs(terms.cancel_grace_seconds.get()))
-        .saturating_add(LAPSE_SLACK)
+    Duration::from_secs(terms.cancel_grace_seconds.get()).saturating_add(TAKEOVER_SLACK)
 }
 
 #[cfg(test)]
@@ -1606,10 +1424,6 @@ mod tests {
         assert_eq!(claim_interval_of(Some(" 5 ")), Duration::from_secs(5));
         assert_eq!(claim_interval_of(Some("1200")), Duration::from_secs(1200));
         assert_eq!(claim_interval_of(Some("86400")), MAX_CLAIM_INTERVAL);
-        // The longest interval's whole wait is still an instant away from now.
-        assert!(Instant::now()
-            .checked_add(takeover_wait(terms(MAX_CLAIM_INTERVAL.as_secs(), 30)))
-            .is_some());
         for unusable in [
             None,
             Some(""),
@@ -1621,62 +1435,6 @@ mod tests {
         ] {
             assert_eq!(claim_interval_of(unusable), CLAIM_INTERVAL, "{unusable:?}");
         }
-    }
-
-    /// A lease lets a start go ahead for one interval from the read that confirmed it, and
-    /// lapses at two; a newer confirmation renews it and an older one changes nothing.
-    #[test]
-    fn a_lease_starts_for_one_interval_and_lapses_at_two() {
-        let interval = Duration::from_millis(400);
-        let lease = Lease::new(interval, Duration::ZERO);
-        assert!(
-            !lease.may_start(),
-            "a lease nothing confirmed started something"
-        );
-        assert!(lease.lapsed());
-        let now = Instant::now();
-        lease.confirm(now);
-        assert!(lease.may_start() && !lease.lapsed());
-        lease.confirm(now - 3 * interval);
-        assert!(lease.may_start(), "an older read moved the lease back");
-        lease.confirm(now - interval);
-        assert!(lease.may_start(), "an older read moved the lease back");
-        let lapsing = Lease::new(interval, Duration::ZERO);
-        lapsing.confirm(Instant::now() - interval);
-        assert!(!lapsing.may_start() && !lapsing.lapsed());
-        lapsing.confirm(Instant::now() - 2 * interval);
-        assert!(!lapsing.may_start());
-        let stale = Lease::new(interval, Duration::ZERO);
-        stale.confirm(Instant::now() - 2 * interval);
-        assert!(stale.lapsed());
-        for watched in [lease, lapsing, stale] {
-            watched.close();
-        }
-    }
-
-    /// The watchdog ends every dispatch it holds once the lease is two intervals old, and
-    /// not before.
-    #[test]
-    fn a_lapsed_lease_cancels_what_it_holds() {
-        let interval = Duration::from_millis(300);
-        let lease = Lease::new(interval, Duration::ZERO);
-        let held = crate::executor::CancellationToken::new();
-        lease.confirm(Instant::now());
-        lease.hold(vec![("work".to_owned(), held.clone())]);
-        std::thread::sleep(interval);
-        assert!(
-            !held.is_cancelled(),
-            "a dispatch was ended inside its lease"
-        );
-        let deadline = Instant::now() + 20 * interval;
-        while !held.is_cancelled() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            held.is_cancelled(),
-            "a lapsed lease left its dispatch running"
-        );
-        lease.close();
     }
 
     /// A claim's lease reads only as this build writes one — a positive interval no longer
@@ -1807,24 +1565,20 @@ mod tests {
         assert_eq!(takeover_poll(MAX_CLAIM_INTERVAL), Duration::from_secs(30));
     }
 
-    /// The adopter's wait outlasts the displaced driver's lease — two intervals and the read
-    /// deadline — its cancel grace and the slack, so a driver that never answers has stopped
-    /// by the time it ends.
+    /// The adopter's wait is the displaced driver's own cancel grace and the slack, whatever
+    /// interval either host reads on.
     #[test]
-    fn the_takeover_wait_outlasts_the_lease_and_the_cancel_grace() {
-        let interval = Duration::from_secs(7);
-        let lease = Lease::new(interval, CLAIM_READ_DEADLINE);
-        assert_eq!(lease.inner.holds_for, 2 * interval + CLAIM_READ_DEADLINE);
-        // Sized by the displaced driver's own terms, whatever this host was given.
-        let theirs = terms(interval.as_secs(), 45);
+    fn the_takeover_wait_is_the_displaced_cancel_grace_and_the_slack() {
         assert_eq!(
-            takeover_wait(theirs),
-            lease.inner.holds_for + Duration::from_secs(45) + LAPSE_SLACK
+            takeover_wait(terms(7, 45)),
+            Duration::from_secs(45) + TAKEOVER_SLACK
         );
-        // Terms no duration can be added to saturate rather than overflowing.
-        let unbounded = terms(u64::MAX, u64::MAX);
-        assert_eq!(takeover_wait(unbounded), Duration::MAX);
-        lease.close();
+        assert_eq!(
+            takeover_wait(terms(7, 45)),
+            takeover_wait(terms(86_400, 45))
+        );
+        // A grace no duration can be added to saturates rather than overflowing.
+        assert_eq!(takeover_wait(terms(1, u64::MAX)), Duration::MAX);
     }
 
     #[test]
@@ -2010,7 +1764,7 @@ mod tests {
     /// poll are the constants, its acknowledged claim reads at the boundary, and the README
     /// states the setting and its default.
     #[test]
-    fn entry_128s_block_is_this_builds_claim_lease() {
+    fn entry_128s_block_is_what_this_build_does() {
         let record = include_str!("../docs/contract-divergences.md");
         let entry = record
             .split("\n## ")
@@ -2038,18 +1792,24 @@ mod tests {
             json!(MAX_CLAIM_INTERVAL.as_secs())
         );
         assert_eq!(
-            block["lease"],
-            json!({"starts_within_intervals": STARTS_WITHIN_INTERVALS,
-                   "dispatches_end_after_intervals": LAPSES_AFTER_INTERVALS,
-                   "plus_read_deadline": true})
+            block["claim_reads"],
+            json!({"timed": false, "before_dispatch": false, "adoption": "its first pass",
+                   "before_publication": "once, after its fence has landed"})
+        );
+        assert_eq!(
+            block["unanswered_read_before_publication"],
+            json!({"holds": "that publication", "retry_seconds": FENCE_RETRY.as_secs()})
         );
         assert_eq!(
             block["takeover_wait"],
-            json!({"intervals": LAPSES_AFTER_INTERVALS, "plus_read_deadline": true,
-                   "cancel_grace": crate::engine::CANCEL_GRACE_ENV,
-                   "slack_seconds": LAPSE_SLACK.as_secs(),
+            json!({"cancel_grace": crate::engine::CANCEL_GRACE_ENV,
+                   "slack_seconds": TAKEOVER_SLACK.as_secs(),
                    "terms": "the displaced claim's lease",
                    "without_terms": "acknowledgement only"})
+        );
+        assert_eq!(
+            block["settlement_landing_wait_seconds"],
+            json!(SETTLEMENT_LANDING_WAIT.as_secs())
         );
         assert_eq!(block["publishing_key"], json!(PUBLISHING_KEY));
         assert_eq!(block["fence_retry_seconds"], json!(FENCE_RETRY.as_secs()));

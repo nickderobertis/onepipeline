@@ -229,21 +229,27 @@ once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
 
 A run claims its project on the store (`onepipeline.driver`), and a launch finding
-another run's claim is refused unless told `--take-over`. A running driver reads that
-claim once per **claim interval** — `ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by
-default — and never more often, however busy it is. It starts a dispatch or a
-publication only on a read younger than one interval, and ends any dispatch it still has
-in progress once its newest read is two intervals and twenty seconds — the time a read
-may take — old. Before a publication starts, the driver names it on the project
-(`onepipeline.publishing`), and it clears that once the publication has finished. So a
-takeover waits rather than every driver: `start --take-over` writes its claim, and starts
-nothing until the driver it displaced has stopped and acknowledged that on the claim —
-which that driver does at its next read — or, where it never does, until two of *that
-driver's* intervals, twenty seconds, *its* cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`,
-which its claim states beside its interval) and ten seconds have passed and the project
-names none of its publications under way. A publication held for any length of time holds
-the takeover with it. A claim stating no lease — one an older build wrote — is taken over
-only on an acknowledgement. A run of this host that nothing drives is taken over at once.
+another run's claim is refused unless told `--take-over`. A project changes driver only
+when somebody says so, so a running driver reads that claim only where it must: on an
+adoption's first pass, and once immediately before each publication it starts. It never
+reads it on a timer or before a dispatch, and a read that fails, times out, is rate
+limited or finds no claim ends nothing. Before a publication starts, the driver names it
+on the project (`onepipeline.publishing`), and only then reads the claim. A read naming
+another run withholds the publication and stops the driver. A read that was not answered
+holds that one publication until a later read is. Once the publication has finished, the
+name is cleared. So a takeover waits rather than every driver: `start --take-over` writes
+its claim, and starts nothing until the driver it displaced has stopped and acknowledged
+that on the claim, which that driver does once it has read the takeover at a publication,
+its closeout or its stop. Where it does not, the takeover starts once *that driver's*
+cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`, which its claim states) and ten seconds
+have passed and the project names none of its publications under way. A publication held
+for any length of time holds the takeover with it. A driver that has not read the takeover
+yet may still start a dispatch, which then publishes nothing. While it waits, the takeover
+reads the claim every tenth of its **claim interval** —
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by default — at least one and at most thirty
+seconds apart; that is all the setting governs. A claim stating no lease — one an older
+build wrote — is taken over only on an acknowledgement. A run of this host that nothing
+drives is taken over at once.
 
 A task's shape is a template its host owns. A host registers names in
 `<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always

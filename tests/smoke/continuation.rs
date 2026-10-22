@@ -36,7 +36,7 @@ use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 const ALIAS: &str = "continue-smoke";
 
 /// The claim interval every driver here runs under, shortened through entry 128's setting
-/// so a driver notices a takeover inside the journey.
+/// so a takeover reads the claim every second while it waits.
 const CLAIM_INTERVAL_SECONDS: &str = "10";
 
 /// How long a step may take against the real services before the journey gives up on it.
@@ -681,7 +681,8 @@ pub(crate) fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
 
 /// A project on a shared plan store, drafted by one host, is refused to a cold host while that
 /// host's claim stands, taken over by it while the first driver is still live — which stops
-/// at its next claim check — and carried on from the store alone: no node the first host
+/// at its next claim read, before a publication — and carried on from the store alone: no
+/// node the first host
 /// settled `done` is dispatched again, a failed one is continued on its branch, and a node
 /// depending on the stacked one is drafted on that one's branch. Then two hosts launch the
 /// drafted project at the same moment, and every draft is still the one pull request open
@@ -891,6 +892,11 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
     let claimed = claim(&first, &project);
     println!("smoke: the store's claim after the takeover: {claimed}");
+    // Let the node above the stack go: the first driver reads the claim before the
+    // publication its next node makes, finds the takeover, withholds that publication,
+    // ends, and acknowledges; the second carries on.
+    first.release("turn.go");
+    first.release("turn.settle");
     let since = Instant::now();
     until(
         "the first driver to notice the takeover",
@@ -899,7 +905,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         both_held,
     );
     println!(
-        "smoke: the first driver noticed the takeover {:?} after the claim reached the store",
+        "smoke: the first driver noticed the takeover {:?} after its node was let go",
         since.elapsed()
     );
     let journal = first.journal(&run);
@@ -919,10 +925,6 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         after.is_empty(),
         "the superseded driver started work after its check: {after:?}"
     );
-    // Let the node above the stack go: the first driver ends, acknowledges the takeover,
-    // and the second carries on.
-    first.release("turn.go");
-    first.release("turn.settle");
     until(
         "the first driver to end",
         PATIENCE,
@@ -1003,7 +1005,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
 
     // Two hosts launch the drafted project at the same moment, with one more node to keep
-    // each driving long enough to read the claim.
+    // each driving: neither publishes, so each reads the claim only as it lets go.
     first.add_task(
         &name,
         "004-linger",
@@ -1084,17 +1086,14 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             dispatched(host, &run)
         );
     }
-    println!("smoke: the store's claim once both had checked it: {claim_then}");
+    println!("smoke: the store's claim once both had launched: {claim_then}");
     for host in &racing {
         println!(
             "smoke: what a racing host recorded:\n{}",
             recorded(host, &run)
         );
     }
-    assert!(
-        left <= 1,
-        "{left} racing drivers were left driving past their claim checks"
-    );
+    println!("smoke: {left} racing drivers were driving with nothing to publish");
     first.release("turn.go");
     first.release("turn.settle");
     for (host, output) in racing.iter().zip(&outputs) {

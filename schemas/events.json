@@ -1,5 +1,5 @@
 {
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -4661,7 +4661,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
+                "description": "The terms the claiming driver's host was given, whose cancel grace a run taking the\nproject over waits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4679,7 +4679,7 @@
                 "type": "integer",
                 "format": "uint64",
                 "minimum": 1,
-                "description": "The driver's claim interval, in whole seconds."
+                "description": "The host's claim interval, in whole seconds."
               },
               "cancel_grace_seconds": {
                 "type": "integer",
@@ -4692,7 +4692,7 @@
               "interval_seconds",
               "cancel_grace_seconds"
             ],
-            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
+            "description": "The terms a claiming driver's host was given: its claim interval, which paces how often a\ntakeover reads the claim, and its cancel grace, which a run taking the project over waits\nout before it starts without an acknowledgement."
           }
         }
       }
@@ -4751,7 +4751,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "The terms the claiming driver's lease runs on, which a run taking the project over\nwaits out; absent from a claim written by a build that kept no lease."
+                "description": "The terms the claiming driver's host was given, whose cancel grace a run taking the\nproject over waits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -4769,7 +4769,7 @@
                 "type": "integer",
                 "format": "uint64",
                 "minimum": 1,
-                "description": "The driver's claim interval, in whole seconds."
+                "description": "The host's claim interval, in whole seconds."
               },
               "cancel_grace_seconds": {
                 "type": "integer",
@@ -4782,7 +4782,7 @@
               "interval_seconds",
               "cancel_grace_seconds"
             ],
-            "description": "The terms a claiming driver's lease runs on: how often it reads its claim, and how long\na dispatch its lease ends has to stop before it is killed."
+            "description": "The terms a claiming driver's host was given: its claim interval, which paces how often a\ntakeover reads the claim, and its cancel grace, which a run taking the project over waits\nout before it starts without an acknowledgement."
           }
         }
       }

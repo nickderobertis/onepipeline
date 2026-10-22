@@ -996,8 +996,8 @@ impl Found {
 
 /// Whether the driver `claim` names provably can no longer act, by this host's own records:
 /// a run of this host, under this runs root, that nothing drives — its ownership lock taken
-/// and let go again here. Anything else is a driver only its acknowledgement, or its lease
-/// running out, can say has let go.
+/// and let go again here. Anything else is a driver only its acknowledgement, or the
+/// takeover's wait passing with no publication of its under way, can say has let go.
 fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>) -> Result<bool> {
     let Some(claim) =
         claim.filter(|claim| claim.host == sys::hostname() && ledger::is_valid_run_id(&claim.run))
