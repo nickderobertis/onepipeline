@@ -347,6 +347,8 @@ fn read_views(world: &World, run: &str) -> (String, String) {
         [
             "driven",
             "ending",
+            "group",
+            "labels",
             "liveness",
             "paused",
             "public_id",
