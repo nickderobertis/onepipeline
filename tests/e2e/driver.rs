@@ -2105,6 +2105,58 @@ fn a_driver_that_cannot_take_its_restart_lock_restarts_no_observer_until_it_can(
     world.run(&["stop", &run]).exited(0);
 }
 
+/// A driver that cannot make its run's restart lock as it starts watching says
+/// so and drives the run all the same; the observer that then stops is not
+/// restarted while the lock cannot be taken, and is once it can.
+///
+/// Met through an adoption, which is what starts a fresh driver's watch over a
+/// run that already exists: the run's first driver is ended mid-flight, the
+/// state an adoption recovers from.
+#[test]
+fn a_driver_that_cannot_make_its_restart_lock_drives_on_and_restarts_once_it_can() {
+    let world = World::new("driver-restart-lock-unmade");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "restart-unmade", vec![agent("build", &[])]);
+    world.until(
+        "the observer to watch and a node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty() && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    end_driver(&world, &run);
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(needle)
+            .count()
+    };
+
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.until("the adopted driver to say it cannot make its lock", |_| {
+        said("observer-restart.lock cannot be made") > 0
+    });
+    // Every observer of this world stops once released, the adopted driver's
+    // own among them.
+    world.release("observer.go");
+    world.until("the driver to say it restarts nothing", |_| {
+        said("cannot be taken") > 0
+    });
+    assert_eq!(
+        said("started another observer graph"),
+        0,
+        "the driver restarted its observer without its restart lock"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph") > 0
+    });
+    world.run(&["stop", &run]).exited(0);
+}
+
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
     // llmlint: ignore-block[tests_mirror_real_usage] no CLI command occupies the
