@@ -1159,17 +1159,18 @@ onevcs-testing = "0.19.13"
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
 #
-# **0.10.0 links the cheaper approval**: approving a plan on a GitHub Projects board
+# **0.11.0 links the cheaper approval**: approving a plan on a GitHub Projects board
 # lists its members and writes its document metadata in one request each, and a host
 # holds its plan-store CLI to the release this engine links, so it adopts that approval
-# only once this pin does. It is breaking: `EngineError` gains `NoProjectCounterpart`
-# and `VersionMoved`, which `src/writeback.rs` names in the store's own word.
-#
-# **0.10.0 is the floor** for the public held-task-image read that creating write-backs
-# use to carry authoring images through the shadow store.
-onetaskgraph-core = "=0.10.0"
-onetaskgraph-plugin-api = "=0.10.0"
-onetaskgraph-local-md = "=0.10.0"
+# only once this pin does. The public held-task-image read (0.9.4) is what creating
+# write-backs use to carry authoring images through the shadow store.
+# Breaking since 0.9.2: `EngineError` gains `NoProjectCounterpart`, `VersionMoved` and
+# the five `TargetTask*` refusals, which `src/writeback.rs` names in the store's own
+# word; and `CopyRequest` gains `status_policy` and `target_task`, which every copy here
+# sets to `StatusPolicy::Source` and `None`, the behaviour before either existed.
+onetaskgraph-core = "=0.11.0"
+onetaskgraph-plugin-api = "=0.11.0"
+onetaskgraph-local-md = "=0.11.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

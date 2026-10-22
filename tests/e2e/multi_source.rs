@@ -91,6 +91,8 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
                 scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
                     .expect("a source name"),
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 match_by: None,
                 recreate: false,
                 create: false,
@@ -1091,6 +1093,8 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
                 scope: onetaskgraph_core::CopyScope::Documents,
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
                     .expect("a source name"),
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 match_by: None,
                 recreate: false,
                 create: false,
@@ -1211,6 +1215,8 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
                     scope: onetaskgraph_core::CopyScope::Documents,
                     destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
                         .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     match_by: None,
                     recreate: false,
                     create: false,
