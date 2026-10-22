@@ -1245,6 +1245,22 @@ fn a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recor
     an_adoption_after_its_driver_is_gone_waits_on_nothing(
         "claim-shutdown",
         |world, run, project| {
+            // A board can still fence a node from an earlier plan whose settlement
+            // has not reached it. Shutdown may release only the dispatch it stops.
+            let mut before = world.store_project(project)["items"][0]["item"]["metadata"]
+                ["onepipeline.publishing"]
+                .clone();
+            assert_eq!(before["nodes"], json!(["x"]));
+            before["nodes"] = json!(["x", "earlier-plan-node"]);
+            let key =
+                onetaskgraph_plugin_api::MetadataKey::new("onepipeline.publishing".to_owned())
+                    .expect("a key");
+            let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
+            world
+                .store_call(|engine| async move {
+                    engine.set_project_metadata(&id, &key, &before).await
+                })
+                .expect("the board's outstanding fence is recorded");
             let shutdown = world.run(&["shutdown", run, "--grace", "1"]);
             assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
             assert!(!world.events_of(run, "host-shutdown").is_empty());
@@ -1253,12 +1269,10 @@ fn a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recor
                 .get("onepipeline.publishing")
                 .cloned()
                 .unwrap_or(Value::Null);
-            assert!(
-                fence.is_null()
-                    || !fence["nodes"]
-                        .as_array()
-                        .is_some_and(|nodes| nodes.contains(&json!("x"))),
-                "the shutdown left x on the fence: {fence}"
+            assert_eq!(
+                fence["nodes"],
+                json!(["earlier-plan-node"]),
+                "shutdown must release x while retaining the board's other fenced node: {fence}"
             );
         },
     );

@@ -1874,7 +1874,6 @@ pub(crate) fn release_stopped(
             let Some(fenced) = fence_on(&run, &host, &project, &metadata) else {
                 return Ok(());
             };
-            // llmlint: ignore[changed_behavior_has_e2e] what stays is a dispatch the teardown could not end — a process a kill did not reach, which no journey can arrange — or a settlement the store had not taken at that instant; the release of what stopped is asserted by `claim::a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recorded_branch`.
             let left: std::collections::BTreeSet<String> =
                 fenced.difference(stopped).cloned().collect();
             if left == fenced {
