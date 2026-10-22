@@ -1822,6 +1822,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/other".into(),
             ],
         }),
+        assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");

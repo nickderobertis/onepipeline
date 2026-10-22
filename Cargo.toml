@@ -1148,7 +1148,7 @@ onevcs-testing = "0.19.13"
 # GitHub Projects board read only the plan, never the whole board, and a copied
 # item takes fewer requests. The test CLI is provisioned at this same release.
 #
-# **0.9.2 is the floor**, for the two changes a plan homed in Linear launches on. A copy to
+# **0.9.2 supplies the two changes a plan homed in Linear launches on.** A copy to
 # Linear sends each item's content in the form Linear stores it — the rewrite the linear
 # plugin declares in its "Ruling: what Linear does to Markdown on write, declared" — so the
 # `body_digest` its `onetaskgraph.template` provenance records is of what a read hands back,
@@ -1158,9 +1158,11 @@ onevcs-testing = "0.19.13"
 # repository-naming tasks route, refusing a split private home as
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
-onetaskgraph-core = "=0.9.2"
-onetaskgraph-plugin-api = "=0.9.2"
-onetaskgraph-local-md = "=0.9.2"
+# **0.10.0 is the floor** for the public held-task-image read that creating write-backs
+# use to carry authoring images through the shadow store.
+onetaskgraph-core = "=0.10.0"
+onetaskgraph-plugin-api = "=0.10.0"
+onetaskgraph-local-md = "=0.10.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1322,6 +1324,8 @@ schemars = { version = "1", features = ["preserve_order"] }
 # llmlint: ignore[new_command_or_client_gets_its_own_project] plugins of the linked store library, not a command or client of this repository; required in this package so the bill of materials declares them.
 onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
 onetaskgraph-plugin-api = { workspace = true }
+# The shadow store writes assets through its public source API.
+onetaskgraph-local-md = { workspace = true }
 # The store's plugin traits are async, so each call into it runs on a runtime this crate
 # builds for that one logical command — a plan read, a write-back attempt — and drops
 # with it: a current-thread runtime, because what the store needs is several sources
