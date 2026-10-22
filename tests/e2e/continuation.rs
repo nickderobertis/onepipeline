@@ -2044,7 +2044,25 @@ fn a_superseded_driver_whose_read_before_clearing_its_fence_fails_still_hands_ov
     superseded_by(&world, run, &claim);
     world.store_refuses("get_project", &board_down());
     held.release();
-    world.until_run_file_holds(run, "driver.log", "could not read its publications");
+    // Terminal fence reads now belong to writeback's bounded closeout. Observe that
+    // real failed read in its projection record before allowing the store to recover.
+    world.until("the terminal fence read failure to be recorded", |world| {
+        std::fs::read_to_string(world.run_file(run, "writeback-projections.jsonl")).is_ok_and(
+            |records| {
+                records.lines().any(|line| {
+                    let record: Value = serde_json::from_str(line).expect("a projection record");
+                    record["outcome"] == "failed"
+                        && record["items"] == json!([])
+                        && record["calls"]["project-show"]
+                            .as_u64()
+                            .is_some_and(|calls| calls > 0)
+                        && record["reason"]
+                            .as_str()
+                            .is_some_and(|reason| reason.contains("the board is down"))
+                })
+            },
+        )
+    });
     world.store_stops_refusing("get_project");
     let said = launched_over(taking);
     assert!(said.contains("acknowledged the takeover"), "{said}");
@@ -2435,8 +2453,8 @@ fn a_takeover_whose_claim_the_board_refuses_is_refused_before_anything_is_minted
 }
 
 /// A takeover goes on waiting through a poll the board refuses, and a displaced driver
-/// that cannot write its acknowledgement says so: the adopter then starts once its wait
-/// has passed, by when that driver can start and continue nothing.
+/// whose every acknowledgement attempt is refused says so. Its fence can still clear,
+/// and the adopter starts only on the retained cross-host timer fallback.
 #[test]
 fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     let interval = 5;
@@ -2466,7 +2484,11 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     world.until("the takeover's poll to be refused", |world| {
         !refusal_pending(world, "get_project")
     });
-    world.store_refuses_once("set_project_metadata", &board_down());
+    let acknowledgement = format!(
+        "set_project_metadata#{}",
+        onepipeline_testfakes::segment("onepipeline.driver")
+    );
+    world.store_refuses(&acknowledgement, &board_down());
     read.release();
     world.until("the driver to read the takeover", |world| {
         !world.events_of(run, "driver-superseded").is_empty()
@@ -2486,7 +2508,7 @@ fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
         )),
         "{said}"
     );
-    assert!(!refusal_pending(&world, "set_project_metadata"));
+    world.store_stops_refusing(&acknowledgement);
     in_turn(&world, &successor, run);
     drop(successor);
 }

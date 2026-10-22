@@ -31,6 +31,9 @@
 //! * `<key>.<method>@<id>.refuse` — the same, for the calls that name one item alone, where
 //!   `<id>` is that item's native id as `fake::segment` spells a file name: one ticket of
 //!   several refused and the rest written.
+//! * `<key>.set_project_metadata#<metadata-key>.refuse` — refuse every write of that
+//!   metadata key, with the key escaped by `fake::segment`, while other project keys
+//!   still reach the real store. A claim acknowledgement can fail while a fence clears.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
 //! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
 //!   source is handed in a command, which the real store answers; `end_command` starts the
@@ -353,6 +356,14 @@ impl Scripted {
             let one = self.scenario(&format!("{method}@{}.refuse", fake::segment(&item)));
             if let Some(error) = refusal(&one)? {
                 return Ok(json!({"id": request.id, "error": error}));
+            }
+        }
+        if method == "set_project_metadata" {
+            if let Some(key) = request.params.get("key").and_then(Value::as_str) {
+                let keyed = self.scenario(&format!("{method}#{}.refuse", fake::segment(key)));
+                if let Some(error) = refusal(&keyed)? {
+                    return Ok(json!({"id": request.id, "error": error}));
+                }
             }
         }
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {

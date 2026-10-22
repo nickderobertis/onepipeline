@@ -1503,7 +1503,9 @@ impl Writeback {
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
         }
-        if retired {
+        // An adoption superseded before holding a claim has no fence of its own to
+        // release and must project nothing onto the successor's board.
+        if retired && self.held.lock().is_ok_and(|held| held.is_some()) {
             if let Some(mut snapshot) = snapshot_of(
                 paths,
                 launch,
