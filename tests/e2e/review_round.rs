@@ -723,6 +723,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
             &crate::harness::RealClock::started(),
         )
     };
+    eprintln!("busy round: preparing start command and its subprocess doubles");
     let mut launch = world.cmd(&[
         "start",
         &project,
