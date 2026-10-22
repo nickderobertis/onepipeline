@@ -301,14 +301,18 @@ fn refresh_rereads_landing_information_with_and_without_growth() {
 
 #[test]
 fn refresh_recovers_from_missing_or_unreadable_append_receipts() {
-    for contents in [None, Some("not json"), Some("{\"schema_version\":999}")] {
+    for contents in [None, Some("not json"), Some("unsupported")] {
         let mut run = Run::new(
             &format!("receipt-{}", contents.unwrap_or("missing").len()),
             super::tests::plan(),
         );
         let mut view = run.open();
         let receipt = run.paths.journal().with_extension("append.json");
-        if let Some(contents) = contents {
+        if contents == Some("unsupported") {
+            let mut document: Value = ledger::read_json(&receipt).expect("valid receipt");
+            document["schema_version"] = json!(999);
+            ledger::write_json(&receipt, &document).expect("unsupported but well-formed receipt");
+        } else if let Some(contents) = contents {
             std::fs::write(&receipt, contents).expect("corrupt receipt");
         } else {
             std::fs::remove_file(&receipt).expect("remove receipt");
@@ -680,6 +684,93 @@ fn refresh_decodes_malformed_glued_and_unsupported_suffix_records_as_open_does()
     assert!(
         !view.state.strict,
         "unknown pipeline schema cannot prove a strict fold"
+    );
+    same_as_open(&view);
+}
+
+/// The kernel accepts part of a record, refuses the rest, and the real writer
+/// rolls it back. Run the resource ceiling in a child so other tests are untouched.
+#[cfg(unix)]
+#[test]
+fn refresh_rereads_after_a_failed_append_rolls_back_and_then_recovers() {
+    use std::os::unix::process::CommandExt;
+    const CHILD: &str = "ONEPIPELINE_REFRESH_SHORT_WRITE_CHILD";
+    const TEST: &str =
+        "views::refresh_tests::refresh_rereads_after_a_failed_append_rolls_back_and_then_recovers";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let paths = RunPaths::under(Path::new(&root), "demo");
+        let error = Journal::open(&paths)
+            .emit(
+                PipelineKind::NodeSettled,
+                journal::labels("demo", Some("build")),
+                journal::payload(&[
+                    ("status", json!("done")),
+                    ("outcome", json!("x".repeat(3000))),
+                ]),
+            )
+            .expect_err("the kernel's file-size ceiling refuses the append");
+        match error {
+            crate::Error::Ledger { path, source } => {
+                assert_eq!(path, paths.journal());
+                assert_eq!(source.raw_os_error(), Some(libc::EFBIG));
+            }
+            error => panic!("unexpected refusal: {error}"),
+        }
+        return;
+    }
+    let mut run = Run::new("short-write", super::tests::plan());
+    let mut view = run.open();
+    let before = std::fs::read(run.paths.journal()).expect("journal");
+    let ceiling = before.len() as u64 + 64;
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD, &run.root)
+        .env(
+            "LLVM_PROFILE_FILE",
+            run.root.join("under-ceiling-%p.profraw"),
+        );
+    // SAFETY: only async-signal-safe syscalls run between fork and exec;
+    // the resource limit and signal disposition belong to this child alone.
+    unsafe {
+        command.pre_exec(move || {
+            let ceiling = libc::rlimit {
+                rlim_cur: ceiling,
+                rlim_max: ceiling,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &ceiling) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().expect("limited child runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(run.paths.journal()).expect("journal after refusal"),
+        before,
+        "the failed append rolled back to the original boundary"
+    );
+    assert_eq!(
+        view.refresh().expect("reread rolled-back journal"),
+        Refreshed::Reread
+    );
+    same_as_open(&view);
+    run.settle("done");
+    assert_eq!(view.refresh().expect("new epoch"), Refreshed::Reread);
+    same_as_open(&view);
+    let first = view.events.len();
+    run.settle("failed");
+    assert_eq!(
+        view.refresh().expect("recovered suffix processing"),
+        Refreshed::Appended { first }
     );
     same_as_open(&view);
 }
