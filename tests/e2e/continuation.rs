@@ -3179,7 +3179,8 @@ fn a_claim_neither_release_can_land_is_left_standing_and_said() {
 
 /// A closeout releasing a claim that is no longer on the store — somebody cleared it — still
 /// projects the run's ending, and writes no claim; one finding a claim that is not one leaves
-/// it as it stands and writes nothing to the project at all, since it cannot tell whose it is.
+/// it as it stands and writes no task or claim. Its own fence is released independently
+/// within the existing closeout projection.
 #[test]
 fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
     let world = World::new("claim-cleared-or-mangled");
@@ -3240,7 +3241,12 @@ fn a_closeout_over_a_cleared_or_mangled_claim_writes_no_claim_of_its_own() {
     let closeout: Value =
         serde_json::from_str(projections.lines().last().expect("a line")).expect("a record");
     assert_eq!(closeout["items"], json!([]), "{closeout}");
-    assert_eq!(closeout["calls"], json!({"project-show": 1}), "{closeout}");
+    assert_eq!(
+        closeout["calls"],
+        json!({"project-show": 2, "project-metadata-set": 1}),
+        "the terminal projection may only read the claim and release its own fence: {closeout}"
+    );
+    assert_eq!(stored_publishing(&world, &mangled), Value::Null);
     assert_eq!(
         stored_claim(&world, &mangled),
         stranger,
