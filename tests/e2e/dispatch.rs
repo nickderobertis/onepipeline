@@ -6728,17 +6728,16 @@ fn a_stop_ends_an_observer_restart_asked(asked: RestartAsked) {
     );
 }
 
-/// [`a_stop_ends_an_observer_restart_asked`] with the restart asked once the
-/// stop has cancelled the recorded observer and before it signals the run's
-/// tree.
+/// Before the stop held its run's observer restarts, a judge restarted here was
+/// in the tree the stop signalled and ignored the signal, so the stop refused.
 #[cfg(unix)]
 #[test]
 fn a_stop_ends_an_observer_restart_asked_between_its_cancel_and_its_signal() {
     a_stop_ends_an_observer_restart_asked(RestartAsked::BetweenTheCancelAndTheSignal);
 }
 
-/// [`a_stop_ends_an_observer_restart_asked`] with the restart asked once the
-/// stop has listed the tree it signals.
+/// Before the stop held its run's observer restarts, a judge restarted here was
+/// in no tree the stop looked at, so the stop answered clean and left it running.
 #[cfg(unix)]
 #[test]
 fn a_stop_ends_an_observer_restart_asked_after_its_signals_listing() {

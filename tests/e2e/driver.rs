@@ -1835,6 +1835,123 @@ fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_t
     the_departed_driver_writes_nothing(&world, held);
 }
 
+/// A stop that meets a restart already under way waits for it, says so, and
+/// then ends the run with the observer that restart started — which is
+/// recorded on the run before the stop reads which observer to cancel, rather
+/// than started behind it.
+#[cfg(unix)]
+#[test]
+fn a_stop_waits_out_an_observer_restart_under_way_and_ends_what_it_started() {
+    let world = World::new("driver-stop-waits-restart");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "stop-waits", vec![agent("build", &[])]);
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
+    let observer = restart.pid;
+    let said = world.root.join("stop.err");
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&said).expect("the stop's log is made"));
+    let mut stopping = stop.spawn().expect("the stop starts");
+    world.until("the stop to wait for the restart under way", |_| {
+        std::fs::read_to_string(&said)
+            .unwrap_or_default()
+            .contains("waiting up to")
+    });
+    restart.release();
+    let status = stopping.wait().expect("the stop returns");
+    let said = std::fs::read_to_string(&said).expect("the stop's log");
+    assert!(status.success(), "the stop was not clean: {status}\n{said}");
+    assert!(
+        said.contains("for the observer its driver is restarting before the driver is stopped"),
+        "{said}"
+    );
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "the stop answered before the restart it waited for was recorded:\n{}",
+        world.dump()
+    );
+    world.until("the driver to be ended", |_| process_ended(driver));
+    world.until("the observer the restart started to be ended", |_| {
+        process_ended(observer)
+    });
+    drop(dispatch);
+}
+
+/// A stop that refused lets go of its run's observer restarts. The observer
+/// that stopped while it held them is not replaced under it; once it has
+/// refused, the run it left running is still being driven, and is watched
+/// again.
+///
+/// Linux only: the refusal is a stop with no `ps` to list the tree with, and
+/// only Linux proves the driver without one — from `/proc` — so only there does
+/// that stop reach the hold at all. macOS reads the driver's start through `ps`,
+/// and a stop that cannot prove its driver holds nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_that_refused_leaves_its_runs_observer_restarted() {
+    let world = World::new("driver-stop-refused-restart");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "refused-restart", vec![agent("build", &[])]);
+    world.until("the observer to watch", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(needle)
+    };
+    // llmlint: ignore-block[tests_mirror_real_usage] that the observer stops while the stop
+    // holds its restarts is the property, and no user-facing input can place it there. The
+    // failpoint only orders the real binary; the run, its driver, the refused stop and every
+    // outcome asserted are the binary's own.
+    let cancelled = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.env("PATH", world.empty_path()).env(
+        "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE",
+        cancelled.address(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let refused = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop with no ps to spawn"));
+        let held = cancelled.arrived();
+        world.release("observer.go.1");
+        world.until("the driver to start no observer under the stop", |_| {
+            said("while the run is being stopped; no other is started")
+        });
+        assert!(
+            !said("started another observer graph"),
+            "the driver restarted its observer under a stop holding its restarts"
+        );
+        held.release();
+        stopping.join().expect("the stop returns")
+    });
+    refused.exited(REFUSED).err_has("was not stopped");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph")
+    });
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "{}",
+        world.dump()
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
     // llmlint: ignore-block[tests_mirror_real_usage] no CLI command occupies the
