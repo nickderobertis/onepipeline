@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0](https://github.com/nickderobertis/onepipeline/compare/v0.84.1...v0.85.0) - 2026-10-22
+
+### Added
+
+- *(edits)* [**breaking**] carry a live-added task's image assets onto the board ([#1106](https://github.com/nickderobertis/onepipeline/pull/1106))
+- *(views)* refresh a run view from only what its journal appended ([#1105](https://github.com/nickderobertis/onepipeline/pull/1105))
+
 ## [0.84.1](https://github.com/nickderobertis/onepipeline/compare/v0.84.0...v0.84.1) - 2026-10-22
 
 ### Fixed
