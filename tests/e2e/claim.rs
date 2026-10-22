@@ -1247,6 +1247,11 @@ fn a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recor
         |world, run, project| {
             // A board can still fence a node from an earlier plan whose settlement
             // has not reached it. Shutdown may release only the dispatch it stops.
+            // llmlint: ignore-block[tests_mirror_real_usage] the boundary under test is
+            // shutdown preserving an outstanding fence from an older plan. The current
+            // driver can fence only its own plan's nodes, so it cannot produce this
+            // foreign entry through dispatch. Seed it through the real store API;
+            // the real shutdown, store readback and adoption below prove its handling.
             let mut before = world.store_project(project)["items"][0]["item"]["metadata"]
                 ["onepipeline.publishing"]
                 .clone();
@@ -1261,6 +1266,7 @@ fn a_run_adopted_after_a_host_shutdown_waits_on_nothing_and_resumes_on_the_recor
                     engine.set_project_metadata(&id, &key, &before).await
                 })
                 .expect("the board's outstanding fence is recorded");
+            // llmlint: ignore-end[tests_mirror_real_usage]
             let shutdown = world.run(&["shutdown", run, "--grace", "1"]);
             assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
             assert!(!world.events_of(run, "host-shutdown").is_empty());
