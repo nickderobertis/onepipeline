@@ -238,7 +238,7 @@ pub struct Paused {
 const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
-const RUN_READING_SCHEMA_VERSION: u32 = 1;
+const RUN_READING_SCHEMA_VERSION: u32 = 2;
 
 /// Whether a run is driven or ended, as one document a script reads:
 /// `onepipeline status <RUN> --json`.
@@ -262,11 +262,25 @@ const RUN_READING_SCHEMA_VERSION: u32 = 1;
     ])
 )]
 pub struct RunReading {
+    /// Effective opaque labels, including the overlay.
+    // llmlint: ignore[invalid_states_unrepresentable] the public reading is the contract's string-to-string map, matching RunSummary and LaunchRecord; launch and overlay deserializers validate keys and values through LabelKey/LabelValue before RunView can serve them, and reading accepts no independent label input. Changing this field's Rust type would change that shared view contract.
+    pub labels: BTreeMap<String, String>,
+    /// Effective project group; null suppresses grouping.
+    // llmlint: ignore[invalid_states_unrepresentable] this is the contract's nullable string view field, matching RunSummary and LaunchRecord; explicit groups and origins are validated with RunGroup at launch and deserialization, and overlays carry RunGroup. The reader only projects those checked records; a new public field type would change the shared view contract.
+    pub group: Option<String>,
     /// The version of this document.
-    #[schemars(extend("const" = 1))]
+    #[schemars(extend("const" = 2))]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
+    /// What the run is named by wherever the destination is not private: the run id itself
+    /// where the linked `onevcs`'s public-output check passes it as metadata bound for a
+    /// public destination, over every private identity registered on the host, and
+    /// otherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the
+    /// run id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run
+    /// whose record holds none reads the same derivation over its id.
+    // llmlint: ignore[invalid_states_unrepresentable] a field of the published `RunReading`, which the approved contract fixes as exactly its fields and `schemas/run-reading.schema.json` types as a string; the checked id is `publicid::PublicId` everywhere inside the crate, and `reading` is the only constructor, filling it from `publicid::of_record`, so a public newtype here would add surface the contract does not name and check nothing the crate's own type does not.
+    pub public_id: String,
     // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
     // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
     // `liveness` as the printed words, and `driven`, `ending` and `paused` as three fields
@@ -296,6 +310,24 @@ pub struct RunReading {
     /// in claim order — omitted when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<UnansweredEnvelope>,
+    /// Every live note the run's live driver holds in a receiver's inbox — its
+    /// envelope already answered, with that note `queued` — in envelope order:
+    /// omitted when there is none, and when no driver is live.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbox: Vec<InboxNote>,
+}
+
+/// One envelope's live note waiting in a receiver's inbox, as `status <RUN>
+/// --json` reads it: the envelope is answered, and its `delivery` is `queued`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct InboxNote {
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
+    /// The receiving node and since when its note has waited there, as the run's
+    /// live driver last wrote it — `queued`, the one state a note in an inbox has.
+    pub delivery: InboxDelivery,
 }
 
 /// One command envelope claimed off a run's queue with no outcome yet, as
@@ -316,7 +348,7 @@ pub struct UnansweredEnvelope {
 
 /// Where one claimed envelope's live note stands — the one type the run's
 /// live-delivery sidecar and this reading both carry.
-pub use crate::channel::deliveries::Delivery;
+pub use crate::channel::deliveries::{Delivery, InboxDelivery};
 
 /// Each envelope claimed off the run's queue with no outcome, in claim order,
 /// with where its live note stands when a driver is live.
@@ -341,6 +373,28 @@ fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnve
         .collect()
 }
 
+/// Each live note the run's live driver holds in a receiver's inbox, from its
+/// sidecar — nothing where no driver is live, since a driver that is gone holds
+/// no inbox and the next one records an answer for each note it left.
+fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
+    if liveness.is_undriven() {
+        return Vec::new();
+    }
+    crate::channel::deliveries::LiveDeliveries::read(&view.paths)
+        .map(|live| {
+            live.deliveries
+                .into_iter()
+                .filter_map(|entry| {
+                    Some(InboxNote {
+                        envelope: entry.envelope,
+                        delivery: entry.delivery.into_inbox()?,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Read one run's ending, its pause, or neither, off its fold.
 ///
 /// The run-end hook judge's own verdict — `hooks::verdict` is
@@ -361,15 +415,20 @@ pub fn reading(view: &RunView) -> RunReading {
         Reached::Paused(paused) => (None, Some(paused.clone())),
         Reached::Neither => (None, None),
     };
+
     RunReading {
+        labels: view.launch.labels.clone(),
+        group: view.launch.group.clone(),
         schema_version: RUN_READING_SCHEMA_VERSION,
         run_id: view.paths.run.clone(),
+        public_id: crate::publicid::of_record(&view.launch).into_string(),
         word: standing.word(),
         liveness: liveness.as_str(),
         driven: !liveness.is_undriven(),
         ending,
         paused,
         unanswered: unanswered_of(view, liveness),
+        inbox: inbox_of(view, liveness),
     }
 }
 
@@ -1370,17 +1429,74 @@ fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>) {
     });
 }
 
-/// Everything a view needs about one run, read once.
+/// Everything a view needs about one run, read once or kept current with
+/// [`refresh`](Self::refresh).
+///
+/// Refresh returns [`Refreshed::Unchanged`] without parsing or folding a journal
+/// record when the journal and externally resolved view data are unchanged.
+/// [`Refreshed::Appended`] preserves the previous events exactly as a prefix;
+/// only appended records are read, parsed and folded, in merge order.
+/// [`Refreshed::Reread`] reads the whole store when its prefix changed, it shrank,
+/// appended records sort before held records under the checkpoint coverage rule,
+/// or labels, cross-DAG resolution or landing information changed incompatibly
+/// with suffix processing. After every outcome, `events`, `state` and `launch`
+/// equal a fresh [`open`](Self::open), including its label overlay and external
+/// resolution. Existing callers of `open` retain the same behavior.
 #[derive(Debug)]
 pub struct RunView {
     /// Where the run's state lives.
     pub paths: RunPaths,
-    /// Who launched it, and with what.
+    /// Launch attribution with effective labels and group applied for this reading.
+    /// The stored launch record remains immutable.
     pub launch: LaunchRecord,
     /// Its merged event store, in merge order.
     pub events: Vec<Envelope>,
     /// What the journal says about it.
     pub state: RunState,
+    refresh: RefreshCursor,
+}
+
+/// What changed when a long-lived [`RunView`] refreshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Nothing changed; no journal record was parsed or folded.
+    Unchanged,
+    /// Only the suffix starting at `first` was read, parsed and folded.
+    Appended {
+        /// The previous event count; earlier events are unchanged.
+        first: usize,
+    },
+    /// The whole store was read again, as by [`RunView::open`].
+    Reread,
+}
+
+#[derive(Debug)]
+struct RefreshCursor {
+    dir: PathBuf,
+    stamp: Option<crate::appendstamp::Stamp>,
+    receipt: Option<crate::appendstamp::Receipt>,
+    coverage: crate::checkpoint::Coverage,
+    result: Option<serde_json::Value>,
+    upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
+}
+
+fn upstream_stamps(
+    paths: &RunPaths,
+    state: &RunState,
+) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
+    let root = paths
+        .dir
+        .parent()
+        .map_or_else(ledger::runs_root, Path::to_path_buf);
+    crate::crossdag::edges(&state.graph)
+        .keys()
+        .filter_map(|edge| {
+            let reference = crate::crossdag::parse(edge)?;
+            let journal = RunPaths::under(&root, &reference.run).journal();
+            let stamp = crate::appendstamp::Stamp::read(&journal);
+            Some((edge.clone(), stamp))
+        })
+        .collect()
 }
 
 impl RunView {
@@ -1392,7 +1508,9 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
-        let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        let stamp = crate::appendstamp::Stamp::read(&paths.journal());
+        let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         // Resumed from the run's checkpoint rather than folded from nothing: the
@@ -1412,12 +1530,136 @@ impl RunView {
                 .map_or_else(ledger::runs_root, Path::to_path_buf),
             &state.graph,
         );
+        let receipt = stamp.as_ref().and_then(|stamp| {
+            (Some(stamp) == crate::appendstamp::Stamp::read(&paths.journal()).as_ref())
+                .then(|| crate::appendstamp::Receipt::read(&paths.journal(), stamp))
+                .flatten()
+        });
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in &events {
+            coverage.absorb(Some(event), 0);
+        }
+        coverage.bytes = stamp.as_ref().map_or(0, |stamp| stamp.len);
+        let refresh = RefreshCursor {
+            dir: paths.dir.clone(),
+            stamp,
+            receipt,
+            coverage,
+            result: ledger::read_json_opt(&paths.result()),
+            upstreams: crate::crossdag::resolution_stamps(
+                &paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+                &state.cross_dag,
+            ),
+        };
         Ok(Self {
             paths: paths.clone(),
             launch,
             events,
             state,
+            refresh,
         })
+    }
+
+    /// Bring this view up to date, preserving its event prefix on an append.
+    ///
+    /// See [`RunView`] and [`Refreshed`] for the outcomes and equality guarantee.
+    /// An unsuccessful refresh leaves the previous view intact.
+    pub fn refresh(&mut self) -> crate::Result<Refreshed> {
+        let journal = self.paths.journal();
+        let stamp = crate::appendstamp::Stamp::read(&journal);
+        let mut launch: LaunchRecord = ledger::read_json(&self.paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
+        let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
+        let upstreams = upstream_stamps(&self.paths, &self.state);
+        if self.refresh.upstreams.as_ref() != Some(&upstreams) {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &self.state.graph,
+            );
+            return self.reread();
+        }
+        let external_changed = serde_json::to_value(&launch)
+            .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            != serde_json::to_value(&self.launch)
+                .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            || result != self.refresh.result;
+        if self.paths.dir != self.refresh.dir || external_changed {
+            return self.reread();
+        }
+        if stamp == self.refresh.stamp {
+            return Ok(Refreshed::Unchanged);
+        }
+        let receipt = stamp
+            .as_ref()
+            .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
+        let continuous = receipt
+            .as_ref()
+            .zip(self.refresh.receipt.as_ref())
+            .is_some_and(|(now, previous)| now.continues(previous));
+        if !continuous
+            || stamp
+                .as_ref()
+                .is_none_or(|stamp| stamp.len <= self.refresh.coverage.bytes)
+        {
+            return self.reread();
+        }
+        #[cfg(test)]
+        refresh_tests::before_appended_read();
+        let (mut grown, offset) = crate::journal::appended_range(
+            &journal,
+            self.refresh.coverage.bytes,
+            stamp
+                .as_ref()
+                .map_or(0, |stamp| stamp.len - self.refresh.coverage.bytes),
+        );
+        if stamp.as_ref().is_none_or(|stamp| offset != stamp.len)
+            || crate::appendstamp::Stamp::read(&journal) != stamp
+            || !grown
+                .iter()
+                .all(|event| self.refresh.coverage.is_in_front_of(event))
+        {
+            return self.reread();
+        }
+        crate::journal::merge_order(&mut grown);
+        let first = self.events.len();
+        let mut state = self.state.clone();
+        for event in &grown {
+            crate::projection::fold_one(&mut state, event);
+        }
+        if upstream_stamps(&self.paths, &state) != upstreams {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+            );
+            return self.reread();
+        }
+        landings_the_run_re_read(&mut state, &self.paths);
+        self.state = state;
+        for event in &grown {
+            self.refresh.coverage.absorb(Some(event), 0);
+        }
+        self.events.extend(grown);
+        self.refresh.coverage.bytes = offset;
+        self.refresh.stamp = stamp;
+        self.refresh.receipt = receipt;
+        Ok(Refreshed::Appended { first })
+    }
+
+    fn reread(&mut self) -> crate::Result<Refreshed> {
+        *self = Self::open(&self.paths)?;
+        Ok(Refreshed::Reread)
     }
 
     /// How the run is being driven.
@@ -2282,12 +2524,10 @@ pub struct Projects {
 /// One project's runs, as a grouped listing reads them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectGroup {
-    /// The qualified onetaskgraph project id every run in the group was launched
-    /// with, or `None` for the runs whose summary carries none.
-    // llmlint: ignore[invalid_states_unrepresentable] the id as `RunSummary::project` carries it — a serialized field of a document an older build wrote, for the reason `src/summary.rs`'s file-level suppression states — grouped on by equality and never parsed; the qualified-id type is `taskgraph::QualifiedId`, private, and parsing a recorded id into it would refuse a row this build lists today.
+    /// The effective qualified project group, or `None` for ungrouped runs.
+    // llmlint: ignore[invalid_states_unrepresentable] ProjectGroup.project is the existing public Option<String> field the contract preserves; replacing it with RunGroup would change that public shape beyond the tasked field additions. Its value is projected from RunSummary.group, whose launch and overlay inputs are validated, and grouping only compares those recorded ids.
     pub project: Option<String>,
-    /// The plan's name, off the newest run in the group that recorded one: what
-    /// a header labels the project by, beside its id.
+    /// The newest launch name from the project or its copies, else the native id.
     pub name: Option<String>,
     /// The newest [`RunSummary::last_write_at`] in the group — the recency the
     /// group is ordered by.
@@ -2307,14 +2547,13 @@ pub const GROUP_HEADER: &str = "== ";
 impl Projects {
     /// Group a listing's rows by project.
     ///
-    /// Keyed by [`RunSummary::project`], an empty project being the `None`
-    /// group. Groups take their order from their newest run and their name from
-    /// the newest run that carries one; runs keep the listing's order inside a
-    /// group.
+    /// Keyed by effective [`RunSummary::group`]. Groups take their order from
+    /// newest activity and their name from the newest launch belonging to that
+    /// project or a recorded copy; runs keep the listing's order inside a group.
     pub fn of(listing: &Listing) -> Self {
         let mut groups: Vec<ProjectGroup> = Vec::new();
         for summary in &listing.summaries {
-            let project = (!summary.project.is_empty()).then(|| summary.project.clone());
+            let project = summary.group.clone();
             let group = match groups.iter_mut().find(|group| group.project == project) {
                 Some(group) => group,
                 None => {
@@ -2327,11 +2566,31 @@ impl Projects {
                     groups.last_mut().expect("the group just pushed")
                 }
             };
-            if group.name.is_none() {
-                group.name.clone_from(&summary.name);
-            }
             group.last_write_at = group.last_write_at.max(summary.last_write_at);
             group.runs.push(summary.clone());
+        }
+        for group in &mut groups {
+            group.name = group
+                .runs
+                .iter()
+                .rev()
+                .filter(|run| {
+                    let launch = ledger::read_json::<LaunchRecord>(
+                        &RunPaths::under(&listing.root, &run.run_id).launch(),
+                    );
+                    run.group.is_some()
+                        && (run.group.as_deref() == Some(run.project.as_str())
+                            || launch.is_ok_and(|launch| launch.project_origin == run.group))
+                })
+                .max_by_key(|run| &run.started_at)
+                .and_then(|run| run.name.clone())
+                .or_else(|| {
+                    group.project.as_deref().map(|id| {
+                        id.split_once(':')
+                            .map_or(id, |(_, native)| native)
+                            .to_owned()
+                    })
+                });
         }
         groups.sort_by(|a, b| {
             b.last_write_at
@@ -2705,6 +2964,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&note_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
         // them would otherwise find drafts with no dispatch behind them.
@@ -4466,9 +4726,170 @@ fn driver_exit_lines(view: &RunView) -> String {
     out
 }
 
+/// How many notes answered `queued` that have left their inbox `status` names
+/// with what became of each, the latest first being the last printed.
+const NOTES_SHOWN: usize = 5;
+
+/// What `status` says of the run's queued notes: each the live driver holds in
+/// a receiver's inbox, and then each of the latest [`NOTES_SHOWN`] answered
+/// `queued` that has left it, with its own record — taken, carried or refused.
+///
+/// An envelope carrying a live note is answered as the note is handed to its
+/// receiver's inbox, so a submitter is told at once what applied and what waits
+/// for a turn; these lines are where the rest of that note's story is read.
+fn note_lines(view: &RunView) -> String {
+    let inbox = inbox_of(view, view.liveness());
+    let mut out = String::new();
+    for note in &inbox {
+        let InboxDelivery::Queued {
+            node,
+            since,
+            deadline,
+        } = &note.delivery;
+        let until = deadline.map_or_else(String::new, |deadline| {
+            format!(
+                ", until its deadline {}",
+                sys::rfc3339_from_millis(deadline)
+            )
+        });
+        out.push_str(&format!(
+            "  inbox: {node} holds envelope {}'s note, queued since {}{until} — the \
+             envelope is answered, and {node}'s turn takes the note when it takes notes\n",
+            note.envelope,
+            sys::rfc3339_from_millis(*since)
+        ));
+    }
+    let channel = crate::channel::ChannelState::new(&view.paths);
+    // The latest answer per envelope: a withdrawal answers one again.
+    let answers: BTreeMap<u64, crate::channel::CommandOutcome> = channel
+        .outcomes()
+        .into_iter()
+        .map(|outcome| (outcome.id, outcome))
+        .collect();
+    let waiting = |id: u64, node: &str| {
+        inbox.iter().any(|note| {
+            note.envelope == id
+                && matches!(&note.delivery, InboxDelivery::Queued { node: at, .. } if at == node)
+        })
+    };
+    let mut left: Vec<(u64, usize, crate::channel::Command)> = Vec::new();
+    for (id, answer) in &answers {
+        let queued: Vec<usize> = answer
+            .results
+            .iter()
+            .filter(|result| result.outcome == crate::channel::CommandVerdict::Queued)
+            .map(|result| result.index)
+            .collect();
+        if queued.is_empty() {
+            continue;
+        }
+        let Some(sent) = channel.commands_of(*id) else {
+            continue;
+        };
+        for index in queued {
+            if let Some(command @ crate::channel::Command::Note { id: node, .. }) =
+                sent.commands.get(index)
+            {
+                if !waiting(*id, node) {
+                    left.push((*id, index, command.clone()));
+                }
+            }
+        }
+    }
+    let earlier = left.len().saturating_sub(NOTES_SHOWN);
+    if earlier > 0 {
+        out.push_str(&format!(
+            "  {earlier} earlier note(s) answered queued are not shown here\n"
+        ));
+    }
+    let delivered = crate::withdrawal::readable(&view.events);
+    for (id, index, command) in left.split_off(earlier) {
+        let crate::channel::Command::Note { id: node, .. } = &command else {
+            continue;
+        };
+        let result = crate::withdrawal::delivered(
+            &delivered,
+            id,
+            u32::try_from(index).unwrap_or(u32::MAX),
+        )
+        .map(|reached| {
+            format!(
+                "note-delivered {}",
+                crate::withdrawal::disposition(&reached)
+            )
+        })
+        .or_else(|| refused_note(&view.events, id, index, &command))
+        .unwrap_or_else(|| {
+            "no answer is recorded yet: the driver that handed it is gone, and the run's next \
+                 driver records one"
+                .to_string()
+        });
+        out.push_str(&format!(
+            "  note: envelope {id}'s note {index} to {node}, answered queued — {result}\n"
+        ));
+    }
+    out
+}
+
+/// The refusal the run journalled for `command`, at `index` of envelope `id`,
+/// if it journalled one: named by its index, or — in a record written before
+/// refusals named one — by the command as sent.
+fn refused_note(
+    events: &[Envelope],
+    id: u64,
+    index: usize,
+    command: &crate::channel::Command,
+) -> Option<String> {
+    let sent = serde_json::json!(command);
+    events.iter().find_map(|event| {
+        let at = event
+            .payload
+            .get("index")
+            .and_then(serde_json::Value::as_u64);
+        (event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditRejected)
+            && event
+                .payload
+                .get("envelope")
+                .and_then(serde_json::Value::as_u64)
+                == Some(id)
+            && at.map_or_else(
+                || event.payload.get("command") == Some(&sent),
+                |at| usize::try_from(at).ok() == Some(index),
+            ))
+        .then(|| {
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason was recorded");
+            // A refusal's reason is recorded as its error reads, `refused: …`.
+            format!(
+                "refused: {}",
+                one_line(reason.strip_prefix("refused: ").unwrap_or(reason))
+            )
+        })
+    })
+}
+
 /// What `status` says of one claimed envelope's live note.
 fn delivery_phrase(delivery: &Delivery) -> String {
     match delivery {
+        Delivery::Queued {
+            node,
+            since,
+            deadline,
+        } => match deadline {
+            Some(deadline) => format!(
+                "its note queued in {node}'s inbox since {}, until its deadline {}",
+                sys::rfc3339_from_millis(*since),
+                sys::rfc3339_from_millis(*deadline)
+            ),
+            None => format!(
+                "its note queued in {node}'s inbox since {}",
+                sys::rfc3339_from_millis(*since)
+            ),
+        },
         Delivery::Delivering {
             node,
             since,
@@ -5673,7 +6094,7 @@ mod tests {
         );
     }
 
-    fn plan() -> Plan {
+    pub(super) fn plan() -> Plan {
         Plan {
             schema_version: PLAN_SCHEMA_VERSION,
             goal: Some(crate::plan::Goal {
@@ -5691,10 +6112,13 @@ mod tests {
         }
     }
 
-    fn launch(pid: u32) -> LaunchRecord {
+    pub(super) fn launch(pid: u32) -> LaunchRecord {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -5732,6 +6156,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
@@ -6378,6 +6804,121 @@ mod tests {
             view.liveness(),
             DriverLiveness::Driving,
             "a pid means nothing across machines"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `status` names what became of the latest notes answered `queued` that have
+    /// left their inbox — each by its own record, taken or refused — and says how
+    /// many earlier ones it leaves out rather than dropping them silently. Seven
+    /// notes, each in an envelope of its own: the first two are left out, and the
+    /// last five are each named once, with the record that answered it.
+    ///
+    /// Built from a real run directory and channel rather than a driven run: a
+    /// journey reaching six queued notes holds six turns open one after another,
+    /// and what is under test is only how the reading bounds what it prints.
+    #[test]
+    fn status_names_the_latest_queued_notes_results_and_counts_the_rest() {
+        let root = scratch("queued-notes");
+        let note = |text: &str| -> crate::channel::Command {
+            serde_json::from_value(json!({
+                "op": "note", "id": "build", "addressee": "worker", "text": text,
+            }))
+            .expect("a note command")
+        };
+        let texts: Vec<String> = (0..7).map(|at| format!("note number {at}")).collect();
+        let mut events = vec![event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        )];
+        for (id, text) in texts.iter().enumerate() {
+            let command = json!(note(text));
+            events.push(if id == 6 {
+                event(
+                    crate::journal::PipelineKind::EditRejected,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        ("reason", json!("refused: the note was not delivered")),
+                        ("envelope", json!(id)),
+                        ("index", json!(0)),
+                    ],
+                )
+            } else {
+                event(
+                    crate::journal::PipelineKind::EditCommitted,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        (
+                            "operations",
+                            json!([{
+                                "kind": "note-delivered", "node": "build",
+                                "addressee": "worker", "text": text,
+                                "reached": "worker", "turn": "turn-end",
+                                "envelope": id, "index": 0,
+                            }]),
+                        ),
+                    ],
+                )
+            });
+        }
+        let paths = write_run(&root, "demo", dead_pid(), &events);
+        let channel = crate::channel::ChannelState::new(&paths);
+        for text in &texts {
+            let id = channel
+                .submit(crate::channel::Author::planner(), &[note(text)])
+                .expect("queued");
+            channel
+                .answer_commands(&crate::channel::CommandOutcome {
+                    id,
+                    applied: true,
+                    reason: None,
+                    results: vec![crate::channel::CommandResult {
+                        index: 0,
+                        op: "note".into(),
+                        outcome: crate::channel::CommandVerdict::Queued,
+                        reason: None,
+                        refusal: None,
+                        turn: None,
+                    }],
+                })
+                .expect("answered");
+        }
+        let view = RunView::open(&paths).expect("the run reads");
+        let lines = note_lines(&view);
+        assert!(
+            lines.contains("  2 earlier note(s) answered queued are not shown here\n"),
+            "{lines}"
+        );
+        for id in 0..2 {
+            assert!(
+                !lines.contains(&format!("envelope {id}'s note")),
+                "an earlier note was named: {lines}"
+            );
+        }
+        for id in 2..6 {
+            assert!(
+                lines.contains(&format!(
+                    "  note: envelope {id}'s note 0 to build, answered queued — note-delivered \
+                     `worker` (turn: turn-end)\n"
+                )),
+                "{lines}"
+            );
+        }
+        assert!(
+            lines.contains(
+                "  note: envelope 6's note 0 to build, answered queued — refused: the note was \
+                 not delivered\n"
+            ),
+            "{lines}"
+        );
+        assert!(
+            !lines.contains("inbox:"),
+            "a dead driver's inbox was read: {lines}"
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -8241,7 +8782,7 @@ mod tests {
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
         let mut summary: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v10.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v11.json"))
                 .expect("the summary golden reads");
         // Naming a driver this host proves gone: nothing drives the run, so what
         // its graph holds is what decides its word.
@@ -8274,3 +8815,7 @@ mod tests {
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }
+
+#[cfg(test)]
+#[path = "views_refresh_tests.rs"]
+mod refresh_tests;

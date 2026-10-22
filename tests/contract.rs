@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("134.")["bundle_versions"]["events"],
+        divergence_block("136.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("133.")["bundle_versions"]["planner_channel"],
+        divergence_block("136.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -1822,6 +1822,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/other".into(),
             ],
         }),
+        assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
@@ -1848,9 +1849,17 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         .map(ToOwned::to_owned)
         .chain(history["label_prefix"].as_str().map(ToOwned::to_owned))
         .collect();
+    // Settlement provenance is engine output on the board, not authorable plan
+    // input. The taskgraph and writeback tests exercise these private keys; keep
+    // their documented classification explicit without adding public fields.
+    let projection_keys = ["onepipeline.settlement", "onepipeline.projected_status"];
+    for key in projection_keys {
+        assert!(CONTRACT.contains(&format!("`{key}`")));
+    }
+    assert!(CONTRACT.contains("projection-only"));
     let named: BTreeSet<String> = backticked()
         .iter()
-        .filter(|token| !stamped.contains(*token))
+        .filter(|token| !stamped.contains(*token) && !projection_keys.contains(&token.as_str()))
         .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
         .filter(|field| field != "<field>")
         .collect();
@@ -3396,6 +3405,8 @@ fn the_branch_name_template_is_what_the_contract_names() {
 /// wire — so what this answers is the whole inventory a consumer can read.
 fn summary_fields() -> BTreeSet<String> {
     let document = RunSummary {
+        labels: Default::default(),
+        group: None,
         schema_version: SUMMARY_SCHEMA_VERSION,
         run_id: "gated".into(),
         last_write_at: Some(1_786_000_000_000),
@@ -4572,10 +4583,9 @@ fn the_run_history_surface_is_what_the_contract_names() {
     let at = history["summary_schema_version"]
         .as_u64()
         .expect("the block states the summary version the field arrived at");
-    assert_eq!(
-        u64::from(SUMMARY_SCHEMA_VERSION),
-        at,
-        "the summary schema moved past the version the block states"
+    assert!(
+        u64::from(SUMMARY_SCHEMA_VERSION) >= at,
+        "the summary schema predates the history field's introduction"
     );
     assert!(
         CONTRACT.contains(&spelled(&["opt_out"])),
@@ -7153,7 +7163,7 @@ fn the_contract_names_the_retention_path_and_the_release_it_ships_in() {
 
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
-    let documented = "onepipeline start PROJECT [--attach|--detach] \
+    let documented = "onepipeline start PROJECT [--label KEY=VALUE]... [--group SOURCE:PROJECT] [--attach|--detach] \
                       [--dag-graph off|REF] [--pr-author-graph REF] \
                       [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
@@ -7850,6 +7860,12 @@ const RULINGS: &[(&str, &str)] = &[
         "117.",
         "An **armed** `checks-unsettled` is recovered the same way",
     ),
+    // op-link-linear-store: every run has a public id, which `status --json` carries.
+    (
+        "135.",
+        "`public_id` is what the run is named by wherever the destination is not private",
+    ),
+    ("137.", "onepipeline.projected_status"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -9273,12 +9289,22 @@ fn verb_functions_in_contract() -> BTreeSet<String> {
     backticked_in(verbs_paragraph())
         .into_iter()
         .chain(backticked_in(
+            CONTRACT
+                .split("\n\n")
+                .find(|paragraph| paragraph.contains("The SDK exposes\n`verbs::label("))
+                .expect("the label SDK declaration")
+                .split("`verbs::{")
+                .next()
+                .expect("the functions precede their supporting types"),
+        ))
+        .chain(backticked_in(
             include_str!("../docs/contract-divergences.md")
                 .split("## 123.")
                 .nth(1)
                 .expect("scratch proposal"),
         ))
         .filter_map(|span| {
+            let span = span.strip_prefix("verbs::").unwrap_or(&span);
             let name: String = span
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -9361,6 +9387,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
     let _: fn(&RunPaths, SurfaceKind, String) -> Result<Surfaced> = verbs::surface;
     let _: fn(&Surfaced) -> String = verbs::render_surfaced;
+    let _: fn(&RunPaths, verbs::LabelRequest<'_>) -> Result<verbs::LabelOverlay> = verbs::label;
+    let _: fn(&verbs::LabelOverlay) -> String = verbs::render_labelled;
     let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
     let _: fn(&Stopped) -> String = verbs::render_stopped;
     let _: fn(&Path, ShutdownRequest) -> Result<Shutdown> = verbs::shutdown;
@@ -9475,11 +9503,12 @@ fn the_grouped_listing_is_what_the_contract_states() {
 
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
-    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v10.json"))
+    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v11.json"))
         .expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),
+        group: (!project.is_empty()).then(|| project.to_owned()),
         name: name.map(str::to_owned),
         last_write_at: at,
         ..golden.clone()
@@ -9523,7 +9552,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
             ),
             (None, None, Some(250), vec!["orphan"]),
             (Some("plans:a"), Some("A"), Some(100), vec!["only-a"]),
-            (Some("plans:c"), None, None, vec!["undated"]),
+            (Some("plans:c"), Some("c"), None, vec!["undated"]),
         ]
     );
     assert_eq!(
@@ -10387,8 +10416,11 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"liveness\""))
         .expect("the contract's run reading example is JSON");
     let reading = RunReading {
-        schema_version: 1,
+        labels: Default::default(),
+        group: None,
+        schema_version: 2,
         run_id: "demo-1".into(),
+        public_id: "demo-1".into(),
         word: "ENDED failed",
         liveness: "DRIVER DEAD",
         driven: false,
@@ -10402,6 +10434,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
         }),
         paused: None,
         unanswered: Vec::new(),
+        inbox: Vec::new(),
     };
     assert_eq!(
         example,
@@ -11529,4 +11562,158 @@ fn the_interrupting_note_surface_is_what_entry_133_names() {
             "the run reading's `delivering` does not state `{field}`"
         );
     }
+}
+
+/// The overlay example is the public SDK's document, including absent versus null grouping.
+#[test]
+fn the_label_overlay_is_the_contract_document() {
+    use onepipeline::verbs::{LabelGroup, LabelKey, LabelOverlay, LabelValue, RunGroup};
+    assert_eq!(SUMMARY_SCHEMA_VERSION, 11);
+    assert!(CONTRACT.contains("11 (one after 10)"));
+    let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"set_by\"")).unwrap();
+    let overlay: LabelOverlay = serde_json::from_value(example.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&overlay).unwrap(), example);
+    assert_eq!(
+        overlay.labels[&LabelKey::try_from("kind".to_owned()).unwrap()].as_str(),
+        "spikes"
+    );
+    assert_eq!(
+        overlay.group,
+        LabelGroup::Set(RunGroup::try_from("authoring:example".to_owned()).unwrap())
+    );
+    let mut absent = example.clone();
+    absent.as_object_mut().unwrap().remove("group");
+    let kept: LabelOverlay = serde_json::from_value(absent.clone()).unwrap();
+    assert_eq!(kept.group, LabelGroup::Keep);
+    assert_eq!(serde_json::to_value(kept).unwrap(), absent);
+    let mut cleared = example.clone();
+    cleared["group"] = Value::Null;
+    let clear: LabelOverlay = serde_json::from_value(cleared.clone()).unwrap();
+    assert_eq!(clear.group, LabelGroup::Clear);
+    assert_eq!(serde_json::to_value(clear).unwrap(), cleared);
+    assert!(LabelKey::try_from("Kind".to_owned()).is_err());
+    assert!(LabelValue::try_from("two\nlines".to_owned()).is_err());
+    assert!(RunGroup::try_from("unqualified".to_owned()).is_err());
+    let mut bad_time = example.clone();
+    bad_time["set_at"] = json!("not-a-time");
+    assert!(serde_json::from_value::<LabelOverlay>(bad_time).is_err());
+    let mut typo = example;
+    typo["lables"] = json!({});
+    assert!(serde_json::from_value::<LabelOverlay>(typo).is_err());
+}
+
+/// Entry 136 names every word of `CommandVerdict`, the `queued` word among them, and
+/// the published layout document and the run reading carry what that entry's ruling
+/// adds: `queued` in the channel's outcome vocabulary, and a `queued` delivery beside
+/// `RunReading`'s `inbox`.
+#[test]
+fn the_command_verdict_words_are_what_entry_136_names() {
+    use onepipeline::channel::CommandVerdict;
+    let block = divergence_block("136.");
+    let stated: Vec<String> =
+        serde_json::from_value(block["command_verdict"].clone()).expect("a list of words");
+    let every = [
+        CommandVerdict::Applied,
+        CommandVerdict::Validated,
+        CommandVerdict::Delivered,
+        CommandVerdict::Refused,
+        CommandVerdict::Queued,
+    ];
+    // Exhaustive, so a word the type gains fails to compile here until the entry
+    // and this list name it.
+    for verdict in every {
+        match verdict {
+            CommandVerdict::Applied
+            | CommandVerdict::Validated
+            | CommandVerdict::Delivered
+            | CommandVerdict::Refused
+            | CommandVerdict::Queued => {}
+        }
+    }
+    let words: Vec<String> = every
+        .iter()
+        .map(|verdict| {
+            serde_json::to_value(verdict)
+                .expect("a verdict serialises")
+                .as_str()
+                .expect("a verdict is a word")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        words, stated,
+        "entry 136 does not name CommandVerdict's words"
+    );
+    for word in &stated {
+        let read: CommandVerdict =
+            serde_json::from_value(json!(word)).expect("each stated word reads back");
+        assert_eq!(json!(read), json!(word));
+    }
+
+    let bundle: Value =
+        serde_json::from_str(&onepipeline::channel::layout::bundle_json()).expect("JSON");
+    let outcome = bundle["schemas"]
+        .as_array()
+        .expect("the bundle's schemas")
+        .iter()
+        .find(|schema| schema["id"] == "agent.command-outcome@1")
+        .expect("the bundle carries the command outcome");
+    assert_eq!(
+        outcome["schema"]["$defs"]["CommandVerdict"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(stated.len()),
+        "the layout document's CommandVerdict is not one schema per word"
+    );
+    let document = outcome["schema"]["$defs"]["CommandVerdict"].to_string();
+    for word in &stated {
+        assert!(
+            document.contains(&format!("\"{word}\"")),
+            "the planner-channel document's CommandVerdict does not state `{word}`"
+        );
+    }
+
+    let reading: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        reading["properties"]["inbox"].is_object(),
+        "the run reading does not state `inbox`"
+    );
+    assert!(
+        reading["$defs"]["Delivery"]["oneOf"]
+            .as_array()
+            .is_some_and(|variants| variants
+                .iter()
+                .any(|variant| variant["properties"]["state"]["const"] == "queued")),
+        "the run reading does not state a `queued` delivery"
+    );
+}
+
+#[test]
+fn retained_run_views_publish_the_contracts_refresh_outcomes() {
+    use onepipeline::views::{Refreshed, RunView};
+    let _: fn(&mut RunView) -> onepipeline::Result<Refreshed> = RunView::refresh;
+    let outcomes = [
+        Refreshed::Unchanged,
+        Refreshed::Appended { first: 7 },
+        Refreshed::Reread,
+    ];
+    let offsets: Vec<_> = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Refreshed::Unchanged => None,
+            Refreshed::Appended { first } => Some(first),
+            Refreshed::Reread => None,
+        })
+        .collect();
+    assert_eq!(offsets, [None, Some(7), None]);
+    assert_contract_names(
+        "retained view refresh",
+        &[
+            "`views::RunView::refresh(&mut self) -> crate::Result<views::Refreshed>`",
+            "`views::Refreshed { Unchanged, Appended { first: usize }, Reread }`",
+        ],
+    );
 }

@@ -71,6 +71,7 @@ pub mod vocabulary;
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
 mod agentgraph;
+mod appendstamp;
 mod ask;
 mod boundary;
 mod changes;
@@ -96,6 +97,7 @@ mod hooks;
 mod hostphases;
 mod hostview;
 mod journal;
+mod labels;
 mod land;
 mod ledger;
 mod lifecycle;
@@ -104,7 +106,10 @@ mod ordering;
 mod plancheck;
 mod pool;
 mod projection;
+mod publicid;
 mod readjust;
+#[cfg(test)]
+mod readprobe;
 mod refusal;
 mod release;
 mod rendercost;

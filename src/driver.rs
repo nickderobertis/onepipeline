@@ -95,6 +95,34 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Label(args) => {
+            let labels = crate::labels::parse(&args.labels)?;
+            let unlabel = args
+                .unlabel
+                .into_iter()
+                .map(verbs::LabelKey::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::Refused)?;
+            let group = if args.no_group {
+                verbs::LabelGroup::Clear
+            } else {
+                crate::labels::group(args.group.as_deref())?
+                    .map_or(verbs::LabelGroup::Keep, verbs::LabelGroup::Set)
+            };
+            let overlay = verbs::label(
+                &resolve(&args.run)?,
+                verbs::LabelRequest {
+                    labels: &labels,
+                    unlabel: &unlabel,
+                    group,
+                    force: args.force,
+                    launcher: &sys::launcher(),
+                    session: &sys::launching_session(),
+                },
+            )?;
+            println!("{}", verbs::render_labelled(&overlay));
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Scratch(crate::cli::ScratchCommand::Discard { run }) => {
             let discarded = verbs::scratch_discard(&ledger::runs_root(), &run)?;
             print!("{}", verbs::render_scratch_discard(&discarded));
@@ -976,10 +1004,11 @@ fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>)
     else {
         return Ok(false);
     };
-    let paths = RunPaths::under(root, &claim.run);
-    if !paths.dir.is_dir() {
+    // A store not declared private names the run by its public id.
+    let Some(run) = crate::publicid::run_named(root, &claim.run) else {
         return Ok(false);
-    }
+    };
+    let paths = RunPaths::under(root, &run);
     Ok(match engine::take_if_undriven(&paths)? {
         Some(lock) => {
             lock.release();
@@ -1200,6 +1229,8 @@ fn read_rendering(named: &str) -> Result<String> {
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
+    let labels = crate::labels::parse(&args.labels)?;
+    let group = crate::labels::group(args.group.as_deref())?;
     // The store first: a plan that cannot be read is a launch that never starts,
     // and a store this build cannot read a project out of is named here rather
     // than by a node that fails on its first dispatch. Nothing is dispatched and
@@ -1212,6 +1243,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     // check below reads each task's own record, and the write-back's landed baseline is seeded
     // from this one read, so its first projection reads nothing the launch has just read.
     let mut read = store.read_plan(&project).map_err(Error::from)?;
+    let mut project_origin = crate::labels::origin(&read.project_metadata)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
@@ -1504,6 +1536,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
+    // Its public id, decided where the id is minted and before anything records the run: a
+    // check that cannot answer gives the hashed form, which names nothing.
+    let public = crate::publicid::decide(&run, plan.name.as_deref());
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has
@@ -1513,8 +1548,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         && found.may_stand_over_a_driver()
         && !gone_from_this_host(&root, claim.as_ref())?
     {
+        // Named on the store as every write-back of the run names it there.
         let mine = crate::payload::DriverClaim {
-            run: run.clone(),
+            run: if store.source_declared_private(project.source()) {
+                run.clone()
+            } else {
+                public.id.as_str().to_owned()
+            },
             host: sys::hostname(),
             session: crate::vcs::usable(&sys::launching_session()),
             pid: sys::pid(),
@@ -1529,6 +1569,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             &crate::boundary::of_run(&plan).scope,
         )?;
         read = store.read_plan(&project).map_err(Error::from)?;
+        project_origin = crate::labels::origin(&read.project_metadata)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;
         if !args.fresh {
@@ -1618,6 +1659,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut record = LaunchRecord {
         run_id: run.clone(),
         project: args.project.clone(),
+        labels: crate::labels::raw(&labels),
+        group: group.map(|group| group.as_str().to_owned()),
+        project_origin,
         // Absolute, once, here: this is the only process that knows where the
         // operator launched from, and every later driver — including the one a
         // fresh `adopt` starts from some other directory — replays this value
@@ -1692,6 +1736,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
+        public_id: public.id.into_string(),
+        name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -3333,11 +3379,29 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined` drives for a teardown whose
 // signal reached nothing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+    let mut aim = roots_to_stop(paths, record)?;
+    if let Aim::Here { roots, .. } = &aim {
+        if !roots.is_empty() {
+            // An attached observer runs on threads in its host. Let its graph
+            // reap providers before signalling the host that owns those threads.
+            match agentgraph::stop_observer(&record.graph_run, &paths.run, TEARDOWN_PATIENCE) {
+                Ok(true) => {
+                    // Cancellation can take time, and can end a root. Re-read
+                    // ownership before signalling any PID that might be reused.
+                    aim = roots_to_stop(paths, record)?;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("onepipeline: {error}; continuing process-tree teardown");
+                }
+            }
+        }
+    }
     let Aim::Here {
         roots,
         unproven,
         declined,
-    } = roots_to_stop(paths, record)?
+    } = aim
     else {
         return Ok(None);
     };
@@ -3738,13 +3802,13 @@ pub(crate) fn deliver_note_envelope(
     paths: &RunPaths,
     envelope: &Reply,
 ) -> Result<crate::note::Delivered> {
-    let [Command::Note { id, text, .. }] = &envelope.commands[..] else {
+    let [Command::Note { id, .. }] = &envelope.commands[..] else {
         return Err(Error::Refused(
             "a note is delivered one at a time, and this envelope carries something else"
                 .to_string(),
         ));
     };
-    let (id, text) = (id.clone(), text.clone());
+    let id = id.clone();
     match submit_envelope(paths, None, envelope)? {
         // Compiled here, so what it answered is in hand.
         Submitted::AppliedHere { operations } => reached_in(&operations)
@@ -3754,16 +3818,24 @@ pub(crate) fn deliver_note_envelope(
                     "note: node '{id}': the delivery recorded no disposition"
                 ))
             }),
-        // Compiled by the run's own reconciler, which recorded it: the record is
-        // written before the outcome this returned on, so it is there to be read.
-        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)?
-            .map(crate::note::Delivered::To)
-            .ok_or_else(|| {
-                Error::Refused(format!(
-                    "note: node '{id}': the run applied the note and recorded no disposition \
-                     for it"
-                ))
-            }),
+        // Answered by the run's own reconciler as it handed the note to its
+        // receiver's inbox — `queued` — so what became of it is the note's own
+        // record, written once that receiver's turn answers it: waited for here,
+        // for as long as a reply waits for its answer.
+        Submitted::AppliedByRun { reply } => {
+            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            loop {
+                match note_record(paths, reply)? {
+                    Some(Ok(reached)) => break Ok(crate::note::Delivered::To(reached)),
+                    Some(Err(reason)) => break Err(note_refused(&id, &reason)),
+                    // llmlint: ignore[changed_behavior_has_e2e] the reply timeout elapsing is
+                    // read from the calling process's environment, as the `Queued` arm below
+                    // says, and this call is a library call a journey cannot bound from outside.
+                    None if Instant::now() >= deadline => break Ok(crate::note::Delivered::Queued),
+                    None => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }
         // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the reply
         // timeout elapsing, which is read from the *calling process's*
         // environment — and this call is a library call, so a journey driving it
@@ -3780,6 +3852,21 @@ pub(crate) fn deliver_note_envelope(
     }
 }
 
+/// The refusal a note's own `edit-rejected` record states, as the call's error.
+///
+/// That record's reason is the refusal the run wrote, already worded in full —
+/// `refused: note: node '…': …` — so it is returned as it stands rather than
+/// prefixed a second time; only a reason that does not name the node is given
+/// the node's name.
+fn note_refused(id: &str, reason: &str) -> Error {
+    let reason = reason.strip_prefix("refused: ").unwrap_or(reason);
+    if reason.starts_with(&format!("note: node '{id}': ")) {
+        Error::Refused(reason.to_owned())
+    } else {
+        Error::Refused(format!("note: node '{id}': {reason}"))
+    }
+}
+
 /// The disposition one compiled note recorded.
 fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     operations.iter().find_map(|operation| match operation {
@@ -3788,48 +3875,65 @@ fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     })
 }
 
-/// What the run recorded for the last note of this text delivered to this node,
-/// or nothing where it recorded none.
+/// What the run recorded for the note at the head of envelope `envelope`: the
+/// party or dispatch it reached, or the reason it was refused — or nothing yet,
+/// while it waits in its receiver's inbox.
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] for a committed edit whose recorded operations are not a
 /// shape this build reads. That is the run's own record being unreadable, and it
-/// is **not** the same answer as no disposition: the caller turns the second into
-/// "the run applied the note and recorded no disposition for it", which would
-/// send a manager looking for a delivery that is sitting in the journal all
-/// along. So it is said rather than folded into that.
-fn last_note_delivered(
+/// is **not** the same answer as no record yet: the caller would wait out its
+/// whole timeout for a delivery that is sitting in the journal all along. So it
+/// is said rather than folded into that.
+fn note_record(
     paths: &RunPaths,
-    node: &str,
-    text: &crate::note::NoteText,
-) -> Result<Option<crate::note::Reached>> {
-    for envelope in journal::read(&paths.journal()).into_iter().rev() {
-        if envelope.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+    envelope: u64,
+) -> Result<Option<std::result::Result<crate::note::Reached, String>>> {
+    for record in journal::read(&paths.journal()).into_iter().rev() {
+        if record
+            .payload
+            .get("envelope")
+            .and_then(serde_json::Value::as_u64)
+            != Some(envelope)
+        {
             continue;
         }
-        let Some(recorded) = envelope.payload.get("operations") else {
+        if record.kind.0 == journal::PipelineKind::EditRejected.as_str()
+            && record
+                .payload
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+        {
+            return Ok(Some(Err(record
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the run refused it and recorded no reason")
+                .to_owned())));
+        }
+        if record.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+            continue;
+        }
+        let Some(recorded) = record.payload.get("operations") else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] an `edit-committed` of this crate's own,
+        // naming this very envelope, whose operations this build cannot read is a journal
+        // edited by hand — no verb, driver or death writes one — so a journey reaching it
+        // would prove the fixture; it is said rather than waited out, as this read said it
+        // before it was keyed on the envelope.
         let operations: Vec<edits::Operation> =
             serde_json::from_value(recorded.clone()).map_err(|why| {
                 Error::Invalid(format!(
                     "run '{}': a committed edit at seq {} records operations this build does \
                      not read, so what it did with a note cannot be said: {why}",
-                    paths.run, envelope.seq
+                    paths.run, record.seq
                 ))
             })?;
-        let reached = operations.iter().find_map(|operation| match operation {
-            edits::Operation::NoteDelivered {
-                node: written,
-                text: said,
-                reached,
-                ..
-            } if written == node && said == text => Some(reached.clone()),
-            _ => None,
-        });
-        if reached.is_some() {
-            return Ok(reached);
+        if let Some(reached) = reached_in(&operations) {
+            return Ok(Some(Ok(reached)));
         }
     }
     Ok(None)
@@ -4803,6 +4907,9 @@ mod tests {
         LaunchRecord {
             run_id: "stopped".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -4838,6 +4945,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 

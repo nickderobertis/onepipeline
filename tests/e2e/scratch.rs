@@ -347,8 +347,11 @@ fn read_views(world: &World, run: &str) -> (String, String) {
         [
             "driven",
             "ending",
+            "group",
+            "labels",
             "liveness",
             "paused",
+            "public_id",
             "run_id",
             "schema_version",
             "word"
@@ -573,9 +576,14 @@ fn discard_reports_its_own_walk_and_preserves_everything_else() {
         // The journal is held to its prefix above; only the run's own derived
         // caches at its root may be rewritten, as any append or view does.
         if !path.starts_with(world.run_file(&run, "scratch"))
-            && !["events.jsonl", "summary.json", "checkpoint.json"]
-                .iter()
-                .any(|cache| path == world.run_file(&run, cache))
+            && ![
+                "events.jsonl",
+                "events.append.json",
+                "summary.json",
+                "checkpoint.json",
+            ]
+            .iter()
+            .any(|cache| path == world.run_file(&run, cache))
         {
             assert_eq!(
                 std::fs::read(&path).unwrap(),

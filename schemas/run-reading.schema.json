@@ -1,16 +1,34 @@
 {
   "type": "object",
   "properties": {
+    "labels": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Effective opaque labels, including the overlay."
+    },
+    "group": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Effective project group; null suppresses grouping."
+    },
     "schema_version": {
       "type": "integer",
       "format": "uint32",
       "minimum": 0,
       "description": "The version of this document.",
-      "const": 1
+      "const": 2
     },
     "run_id": {
       "type": "string",
       "description": "The run."
+    },
+    "public_id": {
+      "type": "string",
+      "description": "What the run is named by wherever the destination is not private: the run id itself\nwhere the linked `onevcs`'s public-output check passes it as metadata bound for a\npublic destination, over every private identity registered on the host, and\notherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the\nrun id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run\nwhose record holds none reads the same derivation over its id."
     },
     "word": {
       "type": "string",
@@ -69,11 +87,21 @@
         "$ref": "#/$defs/UnansweredEnvelope"
       },
       "description": "Every command envelope claimed off the run's queue and not answered yet,\nin claim order — omitted when there is none."
+    },
+    "inbox": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/InboxNote"
+      },
+      "description": "Every live note the run's live driver holds in a receiver's inbox — its\nenvelope already answered, with that note `queued` — in envelope order:\nomitted when there is none, and when no driver is live."
     }
   },
   "required": [
+    "labels",
+    "group",
     "schema_version",
     "run_id",
+    "public_id",
     "word",
     "liveness",
     "driven",
@@ -135,7 +163,7 @@
           "items": {
             "$ref": "#/$defs/EndedNode"
           },
-          "description": "Every node not `done`, in plan order — the list a failure hook is handed,\nand empty for `complete`."
+          "description": "Every node not `done`, in plan order \u2014 the list a failure hook is handed,\nand empty for `complete`."
         }
       },
       "required": [
@@ -205,7 +233,7 @@
         "status",
         "outcome"
       ],
-      "description": "One node that was not `done` when a run ended — as a failure hook is handed it."
+      "description": "One node that was not `done` when a run ended \u2014 as a failure hook is handed it."
     },
     "Paused": {
       "type": "object",
@@ -233,7 +261,7 @@
       "properties": {
         "envelope": {
           "type": "string",
-          "description": "The channel envelope id — a decimal string in the document."
+          "description": "The channel envelope id \u2014 a decimal string in the document."
         },
         "delivery": {
           "anyOf": [
@@ -244,7 +272,7 @@
               "type": "null"
             }
           ],
-          "description": "Where its live note stands, as the run's live driver last wrote it —\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
+          "description": "Where its live note stands, as the run's live driver last wrote it \u2014\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
         }
       },
       "required": [
@@ -263,14 +291,14 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
+              "description": "When it was offered, in epoch milliseconds \u2014 RFC 3339 on the wire."
             },
             "deadline": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds — RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
+              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds \u2014 RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
             },
             "state": {
               "type": "string",
@@ -282,7 +310,37 @@
             "node",
             "since"
           ],
-          "description": "The driver is waiting on `node`'s conversation to answer the envelope's\nlive note."
+          "description": "The driver is waiting on `node`'s conversation to answer the envelope's\nlive note before it answers the envelope.\n\nWritten by a driver built before envelopes were answered as their notes\nare handed off; this build writes [`Queued`](Self::Queued) instead, and\nreads this from such a driver's sidecar."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "description": "The node whose inbox holds the note."
+            },
+            "since": {
+              "type": "string",
+              "description": "When it was handed to that inbox, in epoch milliseconds — RFC 3339 on\nthe wire."
+            },
+            "deadline": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "When the note stops waiting for a turn to take it, as `Delivering`'s\n`deadline` says: present exactly where the note being offered carries\na `delivery_timeout_seconds`."
+            },
+            "state": {
+              "type": "string",
+              "const": "queued"
+            }
+          },
+          "required": [
+            "state",
+            "node",
+            "since"
+          ],
+          "description": "The envelope is answered, and its live note waits in `node`'s inbox for\nthat node's turn to take it: the state a live driver writes for every\nnote it has handed off and not yet recorded an answer for."
         },
         {
           "type": "object",
@@ -293,11 +351,11 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was first held, in epoch milliseconds — RFC 3339 on the wire."
+              "description": "When it was first held, in epoch milliseconds \u2014 RFC 3339 on the wire."
             },
             "behind_envelope": {
               "type": "string",
-              "description": "The channel envelope id of the envelope whose note it waits behind —\na decimal string on the wire."
+              "description": "The channel envelope id of the envelope whose note it waits behind \u2014\na decimal string on the wire."
             },
             "state": {
               "type": "string",
@@ -310,10 +368,63 @@
             "since",
             "behind_envelope"
           ],
-          "description": "The driver holds the envelope unjudged behind `behind_envelope`'s live\nnote to `node`, so that no later edit to that node overtakes it."
+          "description": "The driver holds the envelope unjudged behind `behind_envelope`'s live\nnote to `node`, so that no later edit to that node overtakes it.\n\nWritten by a driver built before envelopes were answered as their notes\nare handed off; this build writes [`Queued`](Self::Queued) instead, and\nreads this from such a driver's sidecar."
         }
       ],
       "description": "Where one claimed, unanswered envelope's live note stands, as the run's live\ndriver last wrote it.\n\nEnvelope ids and instants are carried as numbers and written as the strings\nthe document states — a channel envelope id in decimal, an instant in RFC\n3339 — so a value read back that is neither is refused where it is read\nrather than shown."
+    },
+    "InboxNote": {
+      "type": "object",
+      "properties": {
+        "envelope": {
+          "type": "string",
+          "description": "The channel envelope id — a decimal string in the document."
+        },
+        "delivery": {
+          "$ref": "#/$defs/InboxDelivery",
+          "description": "The receiving node and since when its note has waited there, as the run's\nlive driver last wrote it — `queued`, the one state a note in an inbox has."
+        }
+      },
+      "required": [
+        "envelope",
+        "delivery"
+      ],
+      "description": "One envelope's live note waiting in a receiver's inbox, as `status <RUN>\n--json` reads it: the envelope is answered, and its `delivery` is `queued`."
+    },
+    "InboxDelivery": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "node": {
+              "type": "string",
+              "description": "The node whose inbox holds the note."
+            },
+            "since": {
+              "type": "string",
+              "description": "When it was handed to that inbox, in epoch milliseconds — RFC 3339 on\nthe wire."
+            },
+            "deadline": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "When the note stops waiting for a turn to take it, as\n`Delivery::Queued`'s `deadline` says."
+            },
+            "state": {
+              "type": "string",
+              "const": "queued"
+            }
+          },
+          "required": [
+            "state",
+            "node",
+            "since"
+          ],
+          "description": "The envelope is answered, and its live note waits in `node`'s inbox for\nthat node's turn to take it."
+        }
+      ],
+      "description": "A note waiting in its receiver's inbox: [`Delivery`]'s `queued` state and no\nother, so a reading of the inbox cannot name a delivery that is not waiting\nthere. Its wire shape is that state's, `state` included."
     }
   }
 }

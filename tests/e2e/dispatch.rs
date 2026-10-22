@@ -4197,6 +4197,188 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
     );
 }
 
+/// A completed or refused controlled turn leaves neither the shared server nor
+/// its sweeper alive after the last lease's linger. The sibling's mock stays
+/// listening until the pool stops it, unlike our short-lived Codex double.
+#[cfg(unix)]
+#[test]
+fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
+    use crate::harness::process_ended;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Re-enter the test executable as an embedding host, without parsing the
+    // CLI: LocalExecutor then runs the graph in process. A CLI dispatch retains
+    // a child that exits on settlement before the graph's final reap, masking
+    // the sweeper's inherited-stamp regression.
+    if let Some(graph) = std::env::var_os("ONEPIPELINE_TEST_POOL_GRAPH") {
+        use oneagentgraph::config::ConfigRef;
+        use onepipeline::controls::NodeControls;
+        use onepipeline::event::Labels;
+        use onepipeline::executor::{
+            CancellationToken, DispatchRequest, Executor, LocalExecutor, WorkspaceSpec,
+        };
+        let mut handle = LocalExecutor
+            .dispatch(DispatchRequest {
+                graph: ConfigRef(graph.to_string_lossy().into_owned()),
+                task: "Complete the controlled turn.".into(),
+                labels: Labels::default(),
+                controls: NodeControls::default(),
+                workspace: WorkspaceSpec::Path(
+                    std::env::current_dir().expect("the work directory exists"),
+                ),
+                cancel: CancellationToken::new(),
+                attempt: std::num::NonZeroU32::MIN,
+            })
+            .expect("the public executor starts the controlled turn");
+        for event in handle.events() {
+            event.expect("the engine relays the real graph events");
+        }
+        handle.wait().expect("the dispatch ends");
+        std::fs::write(
+            std::env::var_os("ONEPIPELINE_TEST_POOL_SETTLED").unwrap(),
+            "settled",
+        )
+        .expect("the dispatch ending is recorded");
+        // Keep the embedding host alive while the graph's final reap runs.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+
+    for (tag, fault) in [("complete", ""), ("refused", "refuse-thread-start")] {
+        let name = format!("codex-pool-retirement-{tag}");
+        let world = World::new(&name);
+        world.write_graphs();
+        world.write_supervised_node_graph();
+        std::fs::write(
+            world.graphs().join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n",
+        )
+        .expect("the controlled turn selects Codex");
+        let wrapper = world.root.join("mock-codex");
+        // exec preserves the PID the pool records. Only the harness process,
+        // never the real oneharness CLI driving it, enters mock mode.
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport ONEHARNESS_INTERNAL_MOCK_HARNESS=1\nexec '{}' \"$@\"\n",
+                crate::harness::oneharness_binary()
+                    .to_string_lossy()
+                    .replace('\'', "'\"'\"'")
+            ),
+        )
+        .expect("the mock harness launcher is written");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("the mock harness launcher is executable");
+        let state = ShortDir::new(if fault.is_empty() { "op-rc" } else { "op-rf" });
+        let records = world.root.join("mock-server");
+        let release = world.root.join("complete-turn");
+        let settled = world.root.join("dispatch-settled");
+        // A concurrent build can replace this test image. Linux keeps the
+        // running image available here even when current_exe names a deleted file.
+        let executable = if cfg!(target_os = "linux") {
+            std::path::PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe().expect("the embedding test executable exists")
+        };
+        let mut command = std::process::Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "dispatch::a_judged_codex_dispatch_retires_its_shared_server_and_sweeper",
+                "--nocapture",
+            ])
+            .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            // Match World::agentgraph_cmd: an embedding host must not inherit
+            // the outer dispatch's harness or model selection.
+            .env_remove("ONEHARNESS_HARNESSES")
+            .env_remove("ONEHARNESS_MODEL")
+            .env_remove("ONEHARNESS_MODELS")
+            .env_remove("ONEHARNESS_MODE")
+            .env(
+                "ONEPIPELINE_TEST_POOL_GRAPH",
+                world.graphs().join("node-scope.yaml"),
+            )
+            .env("ONEPIPELINE_TEST_POOL_SETTLED", &settled)
+            .env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+        command
+            .env(
+                "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                crate::harness::oneharness_binary(),
+            )
+            .env("ONEHARNESS_BIN_CODEX", &wrapper)
+            .env("CODEX_MOCK_DIR", &records)
+            .env("CODEX_MOCK_FAULT", fault)
+            .env("MOCK_CODEX_HOLD_UNTIL", &release)
+            .env(oneharness_core::io::app_server::LINGER_ENV, "2000")
+            .env(
+                oneharness_core::io::app_server::DAEMON_DIR_ENV,
+                world.root.join("daemon"),
+            )
+            .env(crate::harness::STATE_HOME_ENV, &state.0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut launch = command.spawn().expect("the engine starts the dispatch");
+        let mut pids = Vec::new();
+        world.until("the pool to record its server and sweeper", |_| {
+            let Ok(entries) = std::fs::read_dir(state.0.join("oneharness/servers")) else {
+                return false;
+            };
+            for entry in entries.flatten() {
+                let read_pid = |file: &str| -> Option<u32> {
+                    let record: Value =
+                        serde_json::from_slice(&std::fs::read(entry.path().join(file)).ok()?)
+                            .ok()?;
+                    u32::try_from(record["pid"].as_u64()?).ok()
+                };
+                if let (Some(server), Some(sweeper)) =
+                    (read_pid("server.json"), read_pid("sweeper.json"))
+                {
+                    pids = vec![server, sweeper];
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(pids.iter().all(|pid| !process_ended(*pid)), "{pids:?}");
+        std::fs::write(&release, "complete").expect("the controlled turn may finish");
+        world.until("the dispatch to settle", |_| settled.is_file());
+        assert!(std::fs::read_dir(&records)
+            .expect("the mock ran")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("server-")));
+        let frames = std::fs::read_dir(&records)
+            .expect("the mock recorded its connections")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("conn-"))
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("the frames read back"))
+            .collect::<String>();
+        let expected = if fault.is_empty() {
+            "turn/completed"
+        } else {
+            "the mock refuses thread/start"
+        };
+        assert!(frames.contains(expected), "{tag}: no {expected}: {frames}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(17);
+        while pids.iter().any(|pid| !process_ended(*pid)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let survivors: Vec<_> = pids
+            .into_iter()
+            .filter(|pid| !process_ended(*pid))
+            .collect();
+        // On a regression, clean up only the PIDs captured from this pool entry.
+        for pid in &survivors {
+            end_process(*pid);
+        }
+        launch.kill().expect("end the captured embedding host");
+        launch.wait().expect("reap the embedding host");
+        assert!(
+            survivors.is_empty(),
+            "{tag}: pool processes survived linger and stop deadline: {survivors:?}"
+        );
+    }
+}
+
 /// A directory directly under `/tmp`, removed when dropped: a world's root sits
 /// under the platform temp directory, which on macOS is long enough to put a
 /// socket the journey above needs past that platform's `sun_path` budget.
@@ -6260,5 +6442,931 @@ fn a_detached_runs_worker_turn_can_ask_its_manager() {
         "complete",
         "the run did not settle: {}",
         world.dump()
+    );
+}
+
+/// Stopping an attached engine reaps its observer's blocked command provider.
+/// The linked bus package has no binary target. This command reads one request,
+/// then uses the suite's real TERM-resistant process fixture to require the
+/// graph's final reaper, just as a blocked command provider does.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_its_observers_command_judge() {
+    use crate::harness::process_ended;
+
+    let world = World::new("observer-command-stop");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("judge.pid");
+    let script = world.root.join("judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "IFS= read -r request\nexec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display()
+        ),
+    )
+    .expect("the command provider is written");
+    std::fs::write(
+        world.graphs().join("dag-scope.yaml"),
+        format!(
+            "version: 1\nname: command-observer\nmembers:\n  monitor:\n    task: {}\n    kind: onejudge\n    base_config: ./onejudge.base.yaml\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      command: [sh, '{}']\n    mode: bypass\n",
+            serde_json::to_string(crate::harness::MONITOR_TASK).expect("the monitor task is quoted"),
+            script.display()
+        ),
+    )
+    .expect("the observer declares a command judge");
+    let path = world.plan(
+        "command-stop",
+        &plan_of("command-stop", vec![agent("work", &[])]),
+    );
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        pid_file.is_file()
+    });
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the provider recorded its PID")
+        .trim()
+        .parse()
+        .expect("the provider PID is numeric");
+    assert!(!process_ended(pid), "the provider must be live before stop");
+    // Capture only this engine's tree before stop can reparent its children.
+    let listing = std::process::Command::new("ps")
+        .args(["-e", "-o", "pid=,ppid=,comm="])
+        .output()
+        .expect("the host describes the controlled engine's children");
+    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((
+                columns.next()?.parse().ok()?,
+                columns.next()?.parse().ok()?,
+                columns.next()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut owned = vec![owner.id()];
+    loop {
+        let before = owned.len();
+        for (child, parent, _) in &table {
+            if owned.contains(parent) && !owned.contains(child) {
+                owned.push(*child);
+            }
+        }
+        if owned.len() == before {
+            break;
+        }
+    }
+    // stop confirms process absence; reap our direct child while it does so,
+    // rather than making stop wait for a zombie only this test can collect.
+    let reaped = std::thread::spawn(move || owner.wait());
+    let stopped = world.run_on_agentgraph(&["stop", "command-stop"]);
+    let surviving: Vec<_> = table
+        .iter()
+        .filter(|(child, _, _)| owned.contains(child) && !process_ended(*child))
+        .collect();
+    eprintln!(
+        "judge PID {pid} ended: {}; engine-tree survivors: {surviving:?}",
+        process_ended(pid)
+    );
+    if stopped.code != 0 {
+        for (child, _, _) in &surviving {
+            end_process(*child);
+        }
+    }
+    stopped.exited(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !process_ended(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let ended = process_ended(pid);
+    if !ended {
+        end_process(pid);
+    }
+    reaped
+        .join()
+        .expect("the engine reaper finishes")
+        .expect("the stopped engine exits");
+    assert!(
+        ended,
+        "observer command {pid} survived five seconds after stop"
+    );
+}
+
+/// A missing observer record cannot create a replacement graph directory or
+/// prevent the engine's existing process-tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_a_missing_observer_record_does_not_recreate_it() {
+    stop_with_observer_record_fault(true);
+}
+
+/// An unwritable signal directory is reported without preventing OS teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_observer_cancellation_error_reports_it_and_continues() {
+    stop_with_observer_record_fault(false);
+}
+
+#[cfg(unix)]
+fn stop_with_observer_record_fault(missing: bool) {
+    let world = World::new(if missing {
+        "stop-missing-observer-record"
+    } else {
+        "stop-observer-cancellation-error"
+    });
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("observer.wait", "hold");
+    let run = "missing-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer to take its turn", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("the observer run to be recorded", |world| {
+        world.run_json(run, "launch.json")["graph_run"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    });
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let record = root.join(oneagentgraph::run::RECORD_FILE);
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    if missing {
+        // llmlint: ignore[tests_mirror_real_usage] A lost persisted record is a host-filesystem failure, with no CLI verb that manufactures it. Remove the real file, then exercise only the public stop verb and assert that it leaves this unproven graph untouched.
+        std::fs::remove_file(&record).expect("the observer record is absent");
+    } else {
+        // llmlint: ignore-block[tests_mirror_real_usage] Force a real OS write refusal in this world's own graph store, not a mocked cancellation result. A public verb cannot manufacture a non-directory where the producer's signal directory belongs; stop must still report this filesystem failure and end its processes.
+        std::fs::remove_dir_all(&signals).expect("the world's signal directory is removed");
+        std::fs::write(&signals, "not a directory").expect("cancellation cannot create its signal");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+    }
+    let reaped = std::thread::spawn(move || owner.wait());
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    stopped.exited(0);
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    if missing {
+        assert!(!record.exists(), "stop recreated the missing record");
+        assert!(
+            !signals.join("stop").exists(),
+            "stop wrote a signal into an unproven graph"
+        );
+    } else {
+        stopped
+            .err_has("cancel observer")
+            .err_has("continuing process-tree teardown");
+        assert_eq!(std::fs::read_to_string(signals).unwrap(), "not a directory");
+    }
+}
+
+/// A pre-turn command can be stuck before the member's cancellation loop is
+/// running. Stop must bound its cooperative wait and continue tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_unresponsive_observer_bounds_the_cooperative_wait() {
+    use crate::harness::process_ended;
+
+    let world = World::new("stop-unresponsive-observer");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("pre-turn.pid");
+    let script = world.root.join("pre-turn.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "exec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display(),
+        ),
+    )
+    .expect("the blocking pre-turn command is written");
+    let mut graph: Value = onepipeline_testfakes::yaml::from_str(
+        &std::fs::read_to_string(world.dag_graph()).expect("the observer graph exists"),
+    )
+    .expect("the observer graph parses");
+    graph["version"] = json!(oneagentgraph::config::SCHEMA_VERSION);
+    graph["members"]["monitor"]["pre_turn"] = json!([{
+        "command": ["sh", script.to_str().expect("the command path is text")],
+        "timeout": 120,
+    }]);
+    std::fs::write(
+        world.dag_graph(),
+        serde_json::to_string_pretty(&graph).unwrap(),
+    )
+    .expect("the observer declares its pre-turn command");
+    let run = "unresponsive-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the pre-turn command to start", |_| pid_file.is_file());
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!process_ended(pid), "the pre-turn command is held");
+    let owner_pid = owner.id();
+    let reaped = std::thread::spawn(move || owner.wait());
+    let started = std::time::Instant::now();
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    let elapsed = started.elapsed();
+    let owner_ended = process_ended(owner_pid);
+    let provider_ended = process_ended(pid);
+    // The command resists TERM to prove the fallback's partial-stop verdict;
+    // clean up only the PID this command recorded before asserting the result.
+    if !provider_ended {
+        end_process(pid);
+    }
+    if !owner_ended {
+        end_process(owner_pid);
+    }
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    stopped.exited(REFUSED).err_has("partly stopped");
+    assert!(
+        owner_ended,
+        "the engine was not ended after the cooperative bound"
+    );
+    assert!(
+        !provider_ended,
+        "the pre-turn command did not hold past cancellation"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "stop waited past its bounded fallback: {elapsed:?}"
+    );
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    assert!(
+        world
+            .graph_state()
+            .join(graph)
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("stop")
+            .is_file(),
+        "stop never requested cooperative cancellation"
+    );
+}
+
+/// Launch, adoption, cached summaries and grouping all expose the same opaque metadata.
+#[test]
+fn run_labels_survive_real_start_and_adopt() {
+    use onepipeline::views::{Listing, Projects, RunSummary, SUMMARY_SCHEMA_VERSION};
+    let world = World::new("launch-labels");
+    world.write_graphs();
+    let project = world.plan(
+        "labelled",
+        &plan_of(
+            "labelled",
+            vec![human("approve", &[]), agent("build", &["approve"])],
+        ),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &project,
+            "--attach",
+            "--label",
+            "kind=spikes",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0);
+    let launch = world.run_json("labelled", "launch.json");
+    assert_eq!(launch["labels"], json!({"kind":"spikes"}));
+    assert_eq!(launch["group"], "authoring:example");
+    world.run(&["attest", "labelled", "approve"]).exited(0);
+    world
+        .run_on_agentgraph(&["adopt", "labelled", "--attach"])
+        .exited(0);
+    let adopted = world.run_json("labelled", "launch.json");
+    for key in ["labels", "group", "project_origin"] {
+        assert_eq!(adopted[key], launch[key]);
+    }
+    assert!(
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do build.")),
+        "the real agent never ran"
+    );
+    let status = world.run(&["status", "labelled", "--json"]);
+    status.exited(0);
+    let reading: Value = serde_json::from_str(&status.stdout).unwrap();
+    assert_eq!(reading["labels"], launch["labels"]);
+    assert_eq!(reading["group"], launch["group"]);
+    let paths = onepipeline::views::RunPaths::under(&world.runs, "labelled");
+    let summary = RunSummary::of(&paths).unwrap();
+    assert_eq!(summary.schema_version, SUMMARY_SCHEMA_VERSION);
+    assert_eq!(SUMMARY_SCHEMA_VERSION, 11);
+    assert_eq!(summary.labels["kind"], "spikes");
+    assert_eq!(summary.group.as_deref(), Some("authoring:example"));
+    let listing = Listing::of(&world.runs);
+    assert_eq!(listing.summaries[0].labels, summary.labels);
+    assert_eq!(listing.summaries[0].group, summary.group);
+    let projects = Projects::of(&listing);
+    assert_eq!(projects.groups[0].project, summary.group);
+    assert_eq!(projects.groups[0].name.as_deref(), Some("example"));
+    assert_eq!(projects.groups[0].runs[0].labels, summary.labels);
+    assert_eq!(
+        world.run_json("labelled", "summary.json")["labels"],
+        launch["labels"]
+    );
+}
+
+/// A real local plan-store copy groups beside an explicitly grouped planning run.
+#[test]
+fn run_labels_copy_origin_resolves_group_and_name() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("origin-labels");
+    let authoring = world.store_apart("authoring");
+    let newer = world.store_apart("newer");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        )
+        .with_env("ONETASKGRAPH_SOURCES__NEWER__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__NEWER__CONFIG__ROOT",
+            newer.to_str().unwrap(),
+        );
+    world.write_graphs();
+    let copy = world.plan("copied", &plan_of("copied", vec![agent("build", &[])]));
+    let file = world.store().join("projects/copied-board.md");
+    let text = std::fs::read_to_string(&file).unwrap();
+    for invalid in ["unqualified", "42"] {
+        std::fs::write(
+            &file,
+            text.replacen(
+                "metadata:",
+                &format!("metadata:\n  onetaskgraph.origin: {invalid}"),
+                1,
+            ),
+        )
+        .unwrap();
+        world
+            .run_on_agentgraph(&["start", &copy, "--attach"])
+            .exited(REFUSED)
+            .err_has("onetaskgraph.origin");
+        assert!(!world.run_file("copied", "launch.json").exists());
+    }
+    std::fs::write(&file, &text).unwrap();
+    world.plan_in(&authoring, "example", &plan_of("copied", vec![]));
+    world.copy_project_metadata("authoring:example-board", crate::harness::STORE_SOURCE);
+    world
+        .run_on_agentgraph(&["start", &copy, "--attach"])
+        .exited(0);
+    let launch = world.run_json("copied", "launch.json");
+    assert_eq!(launch["project_origin"], "authoring:example-board");
+    let newest = world.plan_in(
+        &newer,
+        "newest-copy",
+        &plan_of("newest-copy", vec![agent("build", &[])]),
+    );
+    world.plan_in(&authoring, "example", &plan_of("newest-copy", vec![]));
+    world.copy_project_metadata("authoring:example-board", "newer");
+    let newest = newest.replacen(crate::harness::STORE_SOURCE, "newer", 1);
+    let mut command = world.agentgraph_cmd(&["start", &newest, "--attach"]);
+    command.env("ONETASKGRAPH_DEFAULT_SOURCES", "newer");
+    world.run_on(command, "start the newer copy").exited(0);
+    // New activity on the earlier run must not rename a project after its newest launch.
+    world
+        .run_on_agentgraph(&["adopt", "copied", "--attach"])
+        .exited(0);
+    let planning = world.plan(
+        "planning",
+        &plan_of("planning", vec![human("approve", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &planning,
+            "--attach",
+            "--group",
+            "authoring:example-board",
+        ])
+        .exited(0);
+    let projects = Projects::of(&Listing::of(&world.runs));
+    assert_eq!(projects.groups.len(), 1);
+    assert_eq!(
+        projects.groups[0].project.as_deref(),
+        Some("authoring:example-board")
+    );
+    assert_eq!(projects.groups[0].name.as_deref(), Some("newest-copy"));
+    assert_eq!(projects.groups[0].runs.len(), 3);
+    let status = world.run(&["status", "copied", "--json"]);
+    status.exited(0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&status.stdout).unwrap()["group"],
+        "authoring:example-board"
+    );
+    world
+        .run_on_agentgraph(&["start", &copy, "--attach", "--group", "authoring:override"])
+        .exited(0);
+    let override_launch = world.run_json("copied-2", "launch.json");
+    assert_eq!(override_launch["project_origin"], "authoring:example-board");
+    assert_eq!(override_launch["group"], "authoring:override");
+    assert_eq!(
+        world.run(&["status", "copied-2", "--json"]).json()["group"],
+        "authoring:override"
+    );
+    assert!(Projects::of(&Listing::of(&world.runs))
+        .groups
+        .iter()
+        .any(|group| group.project.as_deref() == Some("authoring:override")));
+}
+
+/// Whole replacement removes only named launch keys, and explicit null suppresses inference.
+#[test]
+fn run_labels_overlay_replaces_and_selectively_removes_launch_values() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("overlay-labels");
+    let project = world.plan("overlay", &plan_of("overlay", vec![human("approve", &[])]));
+    world
+        .run(&[
+            "start",
+            &project,
+            "--attach",
+            "--label",
+            "kind=main",
+            "--label",
+            "owner=kept",
+        ])
+        .exited(0);
+    let launch = std::fs::read(world.run_file("overlay", "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file("overlay", "events.jsonl")).unwrap();
+    let labelled = world.run(&[
+        "label",
+        "overlay",
+        "--unlabel",
+        "kind",
+        "--label",
+        "phase=design",
+        "--no-group",
+    ]);
+    labelled.exited(0);
+    let written = world.run_json("overlay", "labels.json");
+    assert_eq!(
+        labelled.stdout.lines().count(),
+        1,
+        "label must print one JSON line"
+    );
+    assert_eq!(
+        labelled.json(),
+        written,
+        "label must state the whole overlay it wrote"
+    );
+    assert_eq!(written["set_by"]["session"], world.session);
+    assert_eq!(
+        written["set_by"]["launcher"],
+        world.run_json("overlay", "launch.json")["launcher"]
+    );
+    let stamp = written["set_at"].as_str().unwrap();
+    onepipeline::verbs::LabelTimestamp::try_from(stamp.to_owned()).unwrap();
+    assert!(
+        stamp
+            >= world.run_json("overlay", "launch.json")["started_at"]
+                .as_str()
+                .unwrap()
+    );
+    let listing = Listing::of(&world.runs);
+    assert_eq!(
+        listing.summaries[0].labels,
+        std::collections::BTreeMap::from([
+            ("owner".into(), "kept".into()),
+            ("phase".into(), "design".into())
+        ])
+    );
+    assert_eq!(listing.summaries[0].group, None);
+    assert_eq!(Projects::of(&listing).groups[0].project, None);
+    let status = world.run(&["status", "overlay", "--json"]);
+    status.exited(0);
+    let status: Value = serde_json::from_str(&status.stdout).unwrap();
+    assert_eq!(status["labels"], json!({"owner":"kept","phase":"design"}));
+    assert!(status["group"].is_null());
+    assert!(world.run_json("overlay", "labels.json")["group"].is_null());
+    world.run(&["runs"]).exited(0).out_has("(no project)");
+    world
+        .run(&[
+            "label",
+            "overlay",
+            "--label",
+            "kind=spikes",
+            "--unlabel",
+            "kind",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0)
+        .out_has("spikes");
+    assert_eq!(
+        Listing::of(&world.runs).summaries[0].labels,
+        std::collections::BTreeMap::from([
+            ("owner".into(), "kept".into()),
+            ("kind".into(), "spikes".into())
+        ])
+    );
+    world.run(&["label", "overlay"]).exited(0);
+    let row = &Listing::of(&world.runs).summaries[0];
+    assert_eq!(row.labels["kind"], "main");
+    assert_eq!(row.group.as_deref(), Some(project.as_str()));
+    assert!(!world
+        .run_json("overlay", "labels.json")
+        .as_object()
+        .unwrap()
+        .contains_key("group"));
+    assert_eq!(
+        std::fs::read(world.run_file("overlay", "launch.json")).unwrap(),
+        launch
+    );
+    assert_eq!(
+        std::fs::read(world.run_file("overlay", "events.jsonl")).unwrap(),
+        journal
+    );
+}
+
+/// Invalid and duplicate label keys fail before minting a run or replacing an overlay.
+#[test]
+fn run_labels_refuse_invalid_inputs_by_name() {
+    let world = World::new("invalid-labels");
+    let project = world.plan("invalid", &plan_of("invalid", vec![human("approve", &[])]));
+    for label in [
+        "Kind=spikes",
+        "kind=",
+        "kind=a\nb",
+        "kind",
+        "bad_key=x",
+        "=x",
+        "1kind=x",
+        "kind=a\rb",
+    ] {
+        let key = label.split('=').next().unwrap();
+        let expected = if key.is_empty() {
+            "invalid label key ''"
+        } else {
+            key
+        };
+        world
+            .run(&["start", &project, "--attach", "--label", label])
+            .exited(REFUSED)
+            .err_has(expected);
+    }
+    world
+        .run(&[
+            "start", &project, "--label", "kind=one", "--label", "kind=two",
+        ])
+        .exited(REFUSED)
+        .err_has("kind");
+    assert!(!world.run_file("invalid", "launch.json").exists());
+    world
+        .run(&["start", &project, "--group", "unqualified"])
+        .exited(REFUSED)
+        .err_has("unqualified");
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let launch_bytes = std::fs::read(world.run_file("invalid", "launch.json")).unwrap();
+    let launch = world.run_json("invalid", "launch.json");
+    for (field, value, error) in [
+        ("labels", json!({"Kind":"main"}), "Kind"),
+        ("labels", json!({"kind":""}), "label value"),
+        ("group", json!("unqualified"), "unqualified"),
+        ("project_origin", json!("unqualified"), "unqualified"),
+    ] {
+        let mut corrupt = launch.clone();
+        corrupt[field] = value;
+        std::fs::write(
+            world.run_file("invalid", "launch.json"),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        world
+            .run(&["status", "invalid", "--json"])
+            .exited(REFUSED)
+            .err_has(error);
+    }
+    std::fs::write(world.run_file("invalid", "launch.json"), launch_bytes).unwrap();
+    for args in [
+        vec!["--label", "kind="],
+        vec!["--label", "kind=a", "--label", "kind=b"],
+        vec!["--unlabel", "Kind"],
+    ] {
+        let mut command = vec!["label", "invalid"];
+        command.extend(args);
+        world.run(&command).exited(REFUSED).err_has("ind");
+    }
+    assert!(!world.run_file("invalid", "labels.json").exists());
+    for label in [
+        format!("{}=x", "k".repeat(33)),
+        format!("kind={}", "x".repeat(65)),
+    ] {
+        world
+            .run(&["label", "invalid", "--label", &label])
+            .exited(REFUSED)
+            .err_has(label.split('=').next().unwrap());
+    }
+    world
+        .run(&["label", "invalid", "--group", "unqualified"])
+        .exited(REFUSED)
+        .err_has("unqualified");
+    world
+        .run(&[
+            "label",
+            "invalid",
+            "--group",
+            "authoring:example",
+            "--no-group",
+        ])
+        .exited(REFUSED)
+        .err_has("cannot be used");
+    let boundary_key = "k".repeat(32);
+    world
+        .run(&[
+            "label",
+            "invalid",
+            "--label",
+            &format!("{boundary_key}=valid"),
+        ])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"][&boundary_key],
+        "valid"
+    );
+    let unicode = "é".repeat(64);
+    world
+        .run(&["label", "invalid", "--label", &format!("kind={unicode}")])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"]["kind"],
+        unicode
+    );
+    let overlay = world.run_json("invalid", "labels.json");
+    for (field, value, error) in [
+        ("schema_version", json!(2), "schema_version 2"),
+        ("labels", json!({"Kind":"spikes"}), "Kind"),
+        ("labels", json!({"kind":""}), "label value"),
+        ("group", json!("unqualified"), "unqualified"),
+        ("set_at", json!("not-a-time"), "set_at"),
+        ("unknown", json!(true), "unknown field"),
+    ] {
+        let mut corrupt = overlay.clone();
+        corrupt[field] = value;
+        std::fs::write(
+            world.run_file("invalid", "labels.json"),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        world
+            .run(&["status", "invalid", "--json"])
+            .exited(REFUSED)
+            .err_has(error);
+    }
+    std::fs::write(world.run_file("invalid", "labels.json"), "{").unwrap();
+    world
+        .run(&["status", "invalid", "--json"])
+        .exited(REFUSED)
+        .err_has("labels.json");
+    // Replacement is also recovery: the label verb does not depend on the old overlay reading.
+    world
+        .run(&["label", "invalid", "--label", "kind=recovered"])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"]["kind"],
+        "recovered"
+    );
+}
+
+/// Real pre-label host records remain readable and the label verb never edits their history.
+#[test]
+fn run_labels_recorded_host_runs_and_force_authorization() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("recorded-labels");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded/run-root/run-labels");
+    for (fixture, run) in [
+        ("ended", "nx-heal-removal-revise"),
+        ("driven", "dag-ui-project-centric"),
+    ] {
+        let dir = world.runs.join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["launch.json", "plan.json", "events.jsonl", "summary.json"] {
+            std::fs::copy(fixtures.join(fixture).join(file), dir.join(file)).unwrap();
+        }
+    }
+    let ended = "nx-heal-removal-revise";
+    let original = world.run_json(ended, "launch.json");
+    assert!(original.get("labels").is_none());
+    let listing = Listing::of(&world.runs);
+    let old = listing
+        .summaries
+        .iter()
+        .find(|row| row.run_id == ended)
+        .unwrap();
+    assert!(old.labels.is_empty());
+    assert_eq!(old.group.as_deref(), original["project"].as_str());
+    let launch = std::fs::read(world.run_file(ended, "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file(ended, "events.jsonl")).unwrap();
+    world
+        .run(&[
+            "label",
+            ended,
+            "--label",
+            "kind=spikes",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0);
+    world.run(&["runs"]).exited(0).out_has("authoring:example");
+    let status = world.run(&["status", ended, "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["labels"], json!({"kind":"spikes"}));
+    assert_eq!(status.json()["group"], "authoring:example");
+    let projects = Projects::of(&Listing::of(&world.runs));
+    let group = projects
+        .groups
+        .iter()
+        .find(|g| g.project.as_deref() == Some("authoring:example"))
+        .unwrap();
+    assert_eq!(group.runs[0].labels["kind"], "spikes");
+    world
+        .run(&["label", ended, "--unlabel", "kind", "--no-group"])
+        .exited(0);
+    let status = world.run(&["status", ended, "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["labels"], json!({}));
+    assert!(status.json()["group"].is_null());
+    assert_eq!(
+        std::fs::read(world.run_file(ended, "launch.json")).unwrap(),
+        launch
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(ended, "events.jsonl")).unwrap(),
+        journal
+    );
+
+    // Replay the captured active claim with a driver this test owns. No dependency on
+    // the original host process staying alive, and no signal ever reaches that process.
+    let meeting = world.rendezvous("build");
+    let project = world.plan("claim", &plan_of("claim", vec![agent("build", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let arrival = meeting.arrived();
+    let status = world.run(&["status", "claim", "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["driven"], true);
+    world
+        .run(&["label", "claim", "--label", "kind=owned"])
+        .exited(0);
+    let foreign = world.as_session("other-session");
+    foreign
+        .run(&["label", "claim", "--label", "kind=foreign"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    foreign
+        .run(&["label", "claim", "--label", "kind=forced", "--force"])
+        .exited(0);
+    assert_eq!(
+        world.run_json("claim", "labels.json")["set_by"]["session"],
+        "other-session"
+    );
+    assert_eq!(
+        world.run(&["status", "claim", "--json"]).json()["labels"]["kind"],
+        "forced"
+    );
+    let claim = world.run_json("claim", "launch.json");
+    let driven = "dag-ui-project-centric";
+    let mut recorded = world.run_json(driven, "launch.json");
+    // llmlint: ignore[tests_mirror_real_usage] this is a captured external launch record, whose original process claim cannot remain live on another host; only its kernel-specific pid/host/start are rebound to the real driver this test just started and holds. The replay neither touches the original host process nor executes the recorded graph, and the separate real-start ownership assertions above prove same-owner success, foreign refusal and forced success without editing any claim.
+    for key in ["pid", "host", "started"] {
+        recorded[key] = claim[key].clone();
+    }
+    // llmlint: ignore[tests_mirror_real_usage] this persists only the captured fixture's pid/host/start transplant above so its foreign ownership can be replayed against a real held driver on this host. The original host process and recorded graph are never run or touched; the preceding real-start journey separately proves ownership refusal and force authorization without rewriting a claim.
+    std::fs::write(
+        world.run_file(driven, "launch.json"),
+        serde_json::to_vec(&recorded).unwrap(),
+    )
+    .unwrap();
+    let before = std::fs::read(world.run_file(driven, "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file(driven, "events.jsonl")).unwrap();
+    world
+        .run(&["label", driven, "--label", "kind=main"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    assert!(!world.run_file(driven, "labels.json").exists());
+    world
+        .run(&["label", driven, "--label", "kind=main", "--force"])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", driven, "--json"]).json()["labels"],
+        json!({"kind":"main"})
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(driven, "launch.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(driven, "events.jsonl")).unwrap(),
+        journal
+    );
+    arrival.release();
+    world.until("the test's own driver to finish", |world| {
+        world.run_file("claim", "result.json").is_file()
+    });
+}
+
+/// Foreign-host exit evidence permits labelling only after the matching lock is released.
+#[test]
+fn run_labels_foreign_exit_requires_released_ownership() {
+    let world = World::new("labels-foreign-exit");
+    let run = "nx-heal-removal-revise";
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/recorded/run-root/run-labels/ended");
+    let dir = world.runs.join(run);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["launch.json", "plan.json", "events.jsonl", "summary.json"] {
+        std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+    }
+    let launch = world.run_json(run, "launch.json");
+    let foreign_host = format!("reader-{}", launch["host"].as_str().unwrap());
+    let on_foreign_host = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.env("HOSTNAME", &foreign_host);
+        world.run_on(command, &args.join(" "))
+    };
+    // llmlint: ignore-block[tests_mirror_real_usage] captured run directories may include an ownership lock. Replaying that external lock state proves that driver-exited alone cannot authorize a label while the same claim still owns the run; no recorded process is signalled or graph executed, and a separate real-start release-gate journey proves the live ordering.
+    std::fs::write(
+        dir.join("owner.lock"),
+        serde_json::to_vec(&json!({
+            "host": launch["host"], "pid": launch["pid"], "started": launch["started"],
+            "acquired_at": launch["started_at"], "verb": "drive-run"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let before_launch = std::fs::read(dir.join("launch.json")).unwrap();
+    let before_journal = std::fs::read(dir.join("events.jsonl")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    assert!(!dir.join("labels.json").exists());
+    // llmlint: ignore[tests_mirror_real_usage] this releases only the replayed external lock above, never a live driver's lock. The recorded graph must not execute; the separate real-start release-gate journey proves that a real driver holds the same protection until its own release.
+    std::fs::remove_file(dir.join("owner.lock")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"]).exited(0);
+    let reading = on_foreign_host(&["status", run, "--json"]);
+    reading.exited(0);
+    assert_eq!(reading.json()["labels"]["kind"], "spikes");
+    assert_eq!(
+        std::fs::read(dir.join("launch.json")).unwrap(),
+        before_launch
+    );
+    assert_eq!(
+        std::fs::read(dir.join("events.jsonl")).unwrap(),
+        before_journal
     );
 }

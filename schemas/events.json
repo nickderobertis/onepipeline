@@ -1,5 +1,5 @@
 {
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1758,6 +1758,15 @@
             "format": "uint64",
             "minimum": 0,
             "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
+          },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Where in that envelope's `commands` the refused command sat, from zero:\nwhat names a refused note among several alike in one envelope. Present\nbeside `envelope`, and absent from a record written before the field\nexisted."
           },
           "refusal": {
             "anyOf": [

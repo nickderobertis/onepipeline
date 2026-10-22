@@ -26,10 +26,10 @@ use crate::harness::{World, STORE_SOURCE};
 use crate::linear_loopback::{described, metadata_of, Fault, Linear, Operation, PATIENCE, PROJECT};
 
 /// The source the launch directory's `onetaskgraph.yaml` names the loopback Linear as.
-const SOURCE: &str = "tracker";
+pub(super) const SOURCE: &str = "tracker";
 
 /// The variable that source reads its key from.
-const KEY_ENV: &str = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
+pub(super) const KEY_ENV: &str = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
 
 /// The per-kind mapping, exactly as an ai-orchestrator launch's tracked `onetaskgraph.yaml`
 /// states it, indented as it sits under the source's `config`.
@@ -46,7 +46,7 @@ const MAPPING: &str = "      status_mapping:
 
 /// The team's workflow states, by Linear's `WorkflowState.type`. `Needs Attention` is not among
 /// them: a journey adds it once the run is under way, as a person would in Linear's settings.
-const STATES: &[(&str, &str)] = &[
+pub(super) const STATES: &[(&str, &str)] = &[
     ("Proposed", "backlog"),
     ("Backlog", "backlog"),
     ("Todo", "unstarted"),
@@ -58,7 +58,7 @@ const STATES: &[(&str, &str)] = &[
 
 /// The workspace's project statuses: a vocabulary of their own, sharing two names with the
 /// team's states and no more.
-const STATUSES: &[(&str, &str)] = &[
+pub(super) const STATUSES: &[(&str, &str)] = &[
     ("Proposal", "backlog"),
     ("Idea", "backlog"),
     ("Planned", "planned"),
@@ -70,7 +70,7 @@ const STATUSES: &[(&str, &str)] = &[
 ];
 
 /// The settlement record's key on a destination item.
-const SETTLEMENT: &str = "onepipeline.settlement";
+pub(super) const SETTLEMENT: &str = "onepipeline.settlement";
 
 /// One run against the loopback Linear: the world, the endpoint, the issue each node lives in,
 /// and the directory the launch ran from, whose `onetaskgraph.yaml` every write-back reads.
@@ -88,7 +88,7 @@ fn task_text(id: &str) -> String {
 }
 
 /// The store configuration a launch directory holds: one `linear` source over the loopback.
-fn configuration(linear: &Linear) -> String {
+pub(super) fn configuration(linear: &Linear) -> String {
     format!(
         "sources:\n  {SOURCE}:\n    plugin: linear\n    config:\n      api_key_env: {KEY_ENV}\n      \
          team: {}\n      endpoint: {}\n{MAPPING}",
@@ -434,8 +434,10 @@ fn six_settlements(scenario: &Scenario, mut each: impl FnMut(usize, &Spent)) -> 
         assert!(
             written["description"]
                 .as_str()
-                .is_some_and(|description| description.starts_with(&task_text("work"))),
-            "settlement {step}'s mutation did not keep the issue's content: {written}"
+                .is_some_and(|description| description
+                    .starts_with(&crate::linear_loopback::stored_form(&task_text("work")))),
+            "settlement {step}'s mutation did not keep the issue's content as Linear stores it: \
+             {written}"
         );
         assert_eq!(
             scenario.landed_work(),

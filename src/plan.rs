@@ -1546,6 +1546,10 @@ pub struct Node {
     /// states none inherits the one the node it supersedes carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_record: Option<TaskRecord>,
+    /// The qualified authoring task whose held images a creating write-back carries.
+    /// Stated only by live `add` and `retry` edits; absent on nodes read from a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets_from: Option<onetaskgraph_core::GlobalId>,
     /// Whether the node's work is public or private, as its task — and the project it
     /// was read out of — classify it: the stricter of the two, filled from the store's
     /// own `classification` and never from metadata. Omitted when public, the default,
@@ -1863,6 +1867,23 @@ mod tests {
             serde_json::from_value::<TaskRecord>(misnamed).is_err(),
             "a record naming no source a store could carry was read"
         );
+    }
+
+    #[test]
+    fn snapshots_without_assets_from_stay_byte_identical_and_stated_sources_round_trip() {
+        let old = r#"{"schema_version":3,"concurrency":4,"tasks":[{"id":"drawn","task":"prose"}]}"#;
+        let read: Plan = serde_json::from_str(old).expect("the older snapshot reads");
+        assert!(read.tasks[0].assets_from.is_none());
+        assert_eq!(
+            serde_json::to_string(&read).expect("the snapshot writes"),
+            old
+        );
+        let mut read = read;
+        read.tasks[0].assets_from = Some("images:author/task".parse().expect("a qualified task"));
+        let written = serde_json::to_string(&read).expect("the source writes");
+        let again: Plan = serde_json::from_str(&written).expect("the source reads");
+        assert_eq!(again, read);
+        assert_eq!(again.schema_version, PLAN_SCHEMA_VERSION);
     }
 
     /// C6b, called directly: each rule is refused by its own name, in order, and

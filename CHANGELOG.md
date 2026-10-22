@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.0](https://github.com/nickderobertis/onepipeline/compare/v0.84.1...v0.85.0) - 2026-10-22
+
+### Added
+
+- *(edits)* [**breaking**] carry a live-added task's image assets onto the board ([#1106](https://github.com/nickderobertis/onepipeline/pull/1106))
+- *(views)* refresh a run view from only what its journal appended ([#1105](https://github.com/nickderobertis/onepipeline/pull/1105))
+
+## [0.84.1](https://github.com/nickderobertis/onepipeline/compare/v0.84.0...v0.84.1) - 2026-10-22
+
+### Fixed
+
+- *(deps)* link the oneharness core that stops a pooled server after its last lease ([#1107](https://github.com/nickderobertis/onepipeline/pull/1107))
+- *(launch)* leave a board plan's withdrawn tasks out of the executable graph ([#1101](https://github.com/nickderobertis/onepipeline/pull/1101))
+
+## [0.84.0](https://github.com/nickderobertis/onepipeline/compare/v0.83.0...v0.84.0) - 2026-10-22
+
+### Added
+
+- [**breaking**] record run labels and the project each run belongs to, and let them be set later ([#1100](https://github.com/nickderobertis/onepipeline/pull/1100))
+
+## [0.83.0](https://github.com/nickderobertis/onepipeline/compare/v0.82.1...v0.83.0) - 2026-10-22
+
+### Fixed
+
+- *(channel)* [**breaking**] answer an envelope as soon as its notes are queued for their receivers ([#1094](https://github.com/nickderobertis/onepipeline/pull/1094))
+
+## [0.82.1](https://github.com/nickderobertis/onepipeline/compare/v0.82.0...v0.82.1) - 2026-10-21
+
+### Fixed
+
+- *(tests)* keep onepipeline's rework retitle journey reliable on a slower runner ([#1098](https://github.com/nickderobertis/onepipeline/pull/1098))
+
+## [0.82.0](https://github.com/nickderobertis/onepipeline/compare/v0.81.0...v0.82.0) - 2026-10-21
+
+### Added
+
+- *(deps)* [**breaking**] link the store that verifies Linear copies, and give each run a public id ([#1080](https://github.com/nickderobertis/onepipeline/pull/1080))
+
 ## [0.81.0](https://github.com/nickderobertis/onepipeline/compare/v0.80.2...v0.81.0) - 2026-10-21
 
 ### Performance

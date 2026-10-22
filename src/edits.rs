@@ -782,6 +782,21 @@ pub fn compile(
             _ => {}
         }
     }
+    if let Command::Add { node } | Command::Retry { node, .. } = &resolved {
+        if let Some(id) = &node.assets_from {
+            let base = frontier
+                .graph_validation
+                .as_ref()
+                .ok_or_else(|| refuse("assets_from requires the run's launch directory"))?;
+            let built = crate::taskgraph::Store::at(&base.launch_dir)
+                .engine(&onetaskgraph_core::config::Layer::default())
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
+            crate::taskgraph::runtime()
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?
+                .block_on(built.engine.task_assets(id))
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
+        }
+    }
     let operations = compile_into(&mut candidate, frontier, author, &resolved)?;
     if !matches!(
         command,
@@ -2142,6 +2157,12 @@ fn compile_requeue(
                 forbidden.join(", ")
             )));
         }
+    }
+
+    if amend.is_some_and(|amend| amend.contains_key("assets_from")) {
+        return Err(refuse(format!(
+            "requeue: node '{id}' cannot amend `assets_from`, which only add and retry may state"
+        )));
     }
 
     if amend.is_some_and(|amend| amend.contains_key("task_record")) {

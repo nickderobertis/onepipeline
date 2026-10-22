@@ -486,6 +486,16 @@ fn a_failed_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
 /// shows it `parked`: a cold host continues it pinned to that branch, and its draft adopted.
 #[test]
 fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
+    cancelled_node_continuation(false);
+}
+
+/// A person closing a task after the engine parked it withdraws it from the next graph.
+#[test]
+fn a_persons_close_after_a_real_engine_park_withdraws_the_task() {
+    cancelled_node_continuation(true);
+}
+
+fn cancelled_node_continuation(withdrawn: bool) {
     let run = "cancelled";
     let world = team_world("continue-cancelled")
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
@@ -529,6 +539,13 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         .find(|task| task["item"]["metadata"]["onepipeline.id"] == "b")
         .expect("b's item");
     assert_eq!(item["item"]["status"]["name"], "parked", "{item}");
+    assert_eq!(
+        item["item"]["metadata"]["onepipeline.projected_status"], "parked",
+        "{item}"
+    );
+    if withdrawn {
+        crate::withdrawn::withdraw(&world, &project, "b");
+    }
     world.unscript("b.rendezvous");
 
     // The park is the manager's, and the board carries it: a host continuing the project
@@ -553,6 +570,20 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         "a parked node was dispatched"
     );
     assert_eq!(settled(&cold, run, "a")["continued"]["source"], "store");
+    if withdrawn {
+        let result = cold.run_json(run, "result.json");
+        assert_eq!(
+            result["nodes"].as_array().expect("nodes").len(),
+            1,
+            "{result}"
+        );
+        assert_eq!(result["nodes"][0]["id"], "a", "{result}");
+        assert_eq!(
+            crate::withdrawn::stored_status(&cold, &project, "b")["category"],
+            "cancelled"
+        );
+        return;
+    }
     cold.run_with_stdin(
         &["reply", run],
         &json!({"version": 2, "commands": [{"op": "requeue", "id": "b"}]}).to_string(),
@@ -1369,6 +1400,34 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let x = world.rendezvous("x");
     let run = "idle";
     let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
+    let authoring = world.store_apart("authoring");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        );
+    let origin = |name: &str| {
+        let mut plan = world.store_project(&project)["items"][0]["item"].clone();
+        // Use the launched plan's current metadata so copying the replacement origin
+        // preserves its active claim and the driver's projection.
+        let file = authoring.join("projects").join(format!("{name}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        plan["title"] = json!("idle");
+        std::fs::write(
+            &file,
+            format!(
+                "---\n{}---\n",
+                serde_saphyr::to_string(&json!({
+                    "title": plan["title"], "metadata": plan["metadata"]
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        world.copy_project_metadata(&format!("authoring:{name}"), crate::harness::STORE_SOURCE);
+    };
+    origin("before");
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
@@ -1396,6 +1455,8 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let taking = take_over_in_background(&successor, &project);
     let claim = until_claimed_on(&world, &project, "host-b");
     let landed = std::time::Instant::now();
+    // The successor has read the old origin and written its claim, but cannot yet launch.
+    origin("after");
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run before the driver it displaced had let go"
@@ -1408,6 +1469,19 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
         landed.elapsed()
     );
     assert!(said.contains("acknowledged the takeover"), "{said}");
+    assert_eq!(
+        world.run_json(run, "launch.json")["project_origin"],
+        "authoring:before"
+    );
+    assert_eq!(
+        successor.run_json(run, "launch.json")["project_origin"],
+        "authoring:after"
+    );
+    assert_eq!(
+        successor.run(&["status", run, "--json"]).json()["group"],
+        "authoring:after"
+    );
+
     superseded_by(&world, run, &claim);
     world.until_run_file_holds(
         run,
