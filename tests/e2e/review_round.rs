@@ -518,7 +518,10 @@ fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what:
 /// A command's own exit is the completion signal. File captures keep a blocked child
 /// from filling a pipe and let a deadline report bytes the child has already written.
 /// The same single-step backstop as the other journeys fires before nextest can erase
-/// the round's evidence with its bare 540-second timeout.
+/// the round's evidence with its bare 540-second timeout. It counts one step from the
+/// last thing the command wrote, not from its start: an attached `start` settles the
+/// whole stack, several steps in a row, and streams each event as it lands, so a slower
+/// host lengthens it without failing it, while one that goes silent for a step fails.
 fn round_command(
     world: &World,
     mut command: std::process::Command,
@@ -556,14 +559,25 @@ fn round_command(
     }
     eprintln!("busy round: starting {args}");
     let mut child = Child(command.spawn().expect("the round's command starts"));
-    let deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
+    let written = || {
+        [&stdout, &stderr]
+            .map(|capture| std::fs::metadata(capture).map_or(0, |capture| capture.len()))
+    };
+    let mut seen = written();
+    let mut deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
     let status = loop {
         if let Some(status) = child.0.try_wait().expect("the command can be observed") {
             break status;
         }
+        let now = written();
+        let elapsed = clock.elapsed();
+        if now != seen {
+            seen = now;
+            deadline = elapsed.saturating_add(crate::harness::ONE_STEP);
+        }
         assert!(
-            clock.elapsed() < deadline,
-            "busy round: waiting for `{args}` (pid {}) to exit; stdout:\n{}\nstderr:\n{}\nlast invocations:\n{:#?}\nthe runs root held:\n{}",
+            elapsed < deadline,
+            "busy round: waiting for `{args}` (pid {}) to exit, with nothing written for one step; stdout:\n{}\nstderr:\n{}\nlast invocations:\n{:#?}\nthe runs root held:\n{}",
             child.0.id(),
             std::fs::read_to_string(&stdout).expect("the stdout capture is readable"),
             std::fs::read_to_string(&stderr).expect("the stderr capture is readable"),
@@ -624,7 +638,7 @@ fn a_blocked_round_command_names_its_wait_and_last_observation() {
         "{message}"
     );
     for evidence in [
-        "to exit; stdout:",
+        "to exit, with nothing written for one step; stdout:",
         "stderr:",
         "last invocations:",
         "get_project",
@@ -643,6 +657,67 @@ fn a_blocked_round_command_names_its_wait_and_last_observation() {
         &crate::harness::RealClock::started(),
     )
     .exited(0);
+}
+
+/// An attached `start` settles a whole stack, one step after another, so it can run past
+/// a step of wall time while every step lands. Hold the real command at two store calls,
+/// with a step's worth of clock spent before each: what it writes between them is the
+/// progress that keeps it alive, and it then exits on its own.
+#[test]
+fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
+    let world = World::new("round-command-progress").through_scripted_source();
+    let project = world.plan(
+        "progressing-round",
+        &plan_of("progressing-round", vec![crate::harness::agent("n1", &[])]),
+    );
+    let first = world.store_holds("get_project");
+    let later = world.store_holds("update_task");
+    let clock = crate::harness::ManualClock::default();
+    let almost = crate::harness::ONE_STEP - std::time::Duration::from_secs(1);
+    let finished = std::thread::scope(|scope| {
+        let _expires = clock.expiring();
+        let waiting = scope.spawn(|| {
+            round_command(
+                &world,
+                world.cmd(&["start", &project, "--attach"]),
+                None,
+                &clock,
+            )
+        });
+        let held = first.arrived();
+        world.until("the command's deadline to be established", |_| {
+            clock.read_again()
+        });
+        let written = |capture: &str| {
+            std::fs::metadata(world.root.join(capture)).map_or(0, |capture| capture.len())
+        };
+        let before = written("round-command.stderr");
+        clock.advance(almost);
+        held.release();
+        let held = later.arrived();
+        assert!(
+            written("round-command.stderr") > before,
+            "the command wrote nothing between the two held calls"
+        );
+        // Restart the count so two reads mean a whole look that came after what it wrote.
+        clock.advance(std::time::Duration::ZERO);
+        world.until("the command's progress to be seen", |_| clock.read_again());
+        clock.advance(almost);
+        world.until("the command to be looked at past its first step", |_| {
+            clock.read_again() || waiting.is_finished()
+        });
+        held.release();
+        waiting.join()
+    });
+    match finished {
+        Ok(run) => run.exited(0),
+        Err(panic) => panic!(
+            "a command still writing was failed after one step from its start: {}",
+            panic
+                .downcast_ref::<String>()
+                .map_or("(not text)", String::as_str)
+        ),
+    };
 }
 
 /// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
