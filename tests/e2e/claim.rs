@@ -760,15 +760,18 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
     // Several lease windows of reads while the pass is held, each counted at its failpoint.
     let windows: u64 = 4;
     let mut arrivals = Vec::new();
-    let mut confirmed = std::collections::BTreeSet::new();
     let from = Instant::now();
     while from.elapsed() < Duration::from_secs(windows * INTERVAL) {
         let read = reads.arrived();
         arrivals.push(Instant::now());
+        let previous = claim_file(&world, run)
+            .expect("the preceding confirmation")
+            .reading
+            .last_confirmed_at;
         read.release();
         world.until("the read to be written down", |world| {
             claim_file(world, run)
-                .is_some_and(|file| !confirmed.contains(&file.reading.last_confirmed_at))
+                .is_some_and(|file| file.reading.last_confirmed_at > previous)
         });
         let file = claim_file(&world, run).expect("claim.json");
         assert_eq!(
@@ -776,7 +779,6 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
             "confirmed",
             "a read inside a held pass did not confirm the claim: {file:?}"
         );
-        confirmed.insert(file.reading.last_confirmed_at);
         assert_eq!(claim_read(&world, run)["state"], "confirmed");
     }
     assert!(arrivals.len() as u64 >= windows - 1, "{arrivals:?}");
