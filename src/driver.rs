@@ -64,6 +64,18 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// it rather than watching a command hang.
 const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
+/// The file in the run's directory a `stop` holds locked for the whole of its
+/// teardown, and a driver's observer watch holds across each restart.
+///
+/// A stop cancels the observer the launch record names and then signals the
+/// tree its driver heads, and the watch starts another observer the moment it
+/// sees one stop — which the stop's own cancel is. Unheld, a restart landing
+/// between the cancel and the signal started a judge the signal then met and
+/// could not end, and one landing after the stop listed the tree started a judge
+/// nothing ended at all. Held, every restart is either recorded before the stop
+/// reads which observer to cancel, or never made. See [`hold_observer_restarts`].
+const OBSERVER_RESTART_LOCK_FILE: &str = "observer-restart.lock";
+
 /// The test failpoint a driver's observer watch meets the first time it sees an
 /// observer stop, before it asks whether to start another.
 const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE";
@@ -71,6 +83,17 @@ const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE"
 /// The test failpoint a `stop` meets once it has cancelled the run's observer,
 /// before it signals the run's tree.
 const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
+
+/// How often a stop looks again at a restart lock a restart in flight holds.
+const RESTART_LOCK_POLL: Duration = Duration::from_millis(20);
+
+fn observer_restart_lock(paths: &RunPaths) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.dir.join(OBSERVER_RESTART_LOCK_FILE))
+}
 
 /// How many of a failed driver's last lines a refusal repeats.
 ///
@@ -2405,6 +2428,19 @@ struct ObserverWatch<'a> {
     /// Whether this driver has said that an observer stopped as it let go, so a
     /// watch polling through the release says it once.
     said_let_go: bool,
+    /// Whether this driver has said that an observer stopped while a `stop` of
+    /// the run held its restarts, so a watch polling through the stop says it
+    /// once.
+    said_stopping: bool,
+}
+
+/// Whether a watch may restart an observer now, as the run's restart lock says.
+enum RestartHold {
+    /// It may: the lock, held until the restart is recorded — or nothing, where
+    /// the lock could not be taken at all and the restart goes on unheld.
+    Free(Option<std::fs::File>),
+    /// It may not: a `stop` of the run holds the lock.
+    Stopping,
 }
 
 /// What a watch did about an observer that stopped watching the run.
@@ -2414,6 +2450,11 @@ enum Stopped {
     /// None, because the loop is letting go of the run and the record is no
     /// longer this driver's to move.
     LettingGo,
+    /// None yet, because a `stop` of the run holds its restarts: the stop ends
+    /// this driver, and an observer started under it would be one the stop had
+    /// already looked past. Asked again at the next look, so a stop that refused
+    /// and let go leaves the run watched again.
+    Stopping,
     /// None, and nothing this driver runs will start another.
     Over,
 }
@@ -2435,6 +2476,7 @@ impl<'a> ObserverWatch<'a> {
             limit: observer_restart_limit(),
             restarted: 0,
             said_let_go: false,
+            said_stopping: false,
         }
     }
 
@@ -2465,10 +2507,56 @@ impl<'a> ObserverWatch<'a> {
             }
             return Stopped::LettingGo;
         }
+        // Held across the restart, record write included, so a stop that takes
+        // it next reads the graph run this restart recorded and ends that one.
+        let RestartHold::Free(_restarts) = self.restart_hold() else {
+            return Stopped::Stopping;
+        };
         observer_stopped_watching(&self.paths.run);
         match self.restart(observer) {
             Some(()) => Stopped::Restarted,
             None => Stopped::Over,
+        }
+    }
+
+    /// Take the run's restart lock for one restart — see
+    /// [`hold_observer_restarts`].
+    ///
+    /// A lock that cannot be taken at all leaves the restart unheld, as every
+    /// restart was before the lock existed, and says so: a run left unwatched
+    /// over a file this driver could not open is the worse failure.
+    fn restart_hold(&mut self) -> RestartHold {
+        let taken = observer_restart_lock(self.paths).and_then(|file| match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        });
+        match taken {
+            Ok(Some(file)) => {
+                self.said_stopping = false;
+                RestartHold::Free(Some(file))
+            }
+            Ok(None) => {
+                if !std::mem::replace(&mut self.said_stopping, true) {
+                    eprintln!(
+                        "onepipeline: the observer graph for '{}' has stopped watching while \
+                         the run is being stopped; no other is started",
+                        self.paths.run
+                    );
+                }
+                RestartHold::Stopping
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] a run directory this driver cannot
+            // open a file in is one whose launch record its restart cannot write either; no
+            // journey arranges it, and the arm keeps the restart every build before the lock made.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: the observer graph for '{}' is restarted without holding \
+                     {OBSERVER_RESTART_LOCK_FILE} ({error}); a stop under way may not see it",
+                    self.paths.run
+                );
+                RestartHold::Free(None)
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 
@@ -2868,7 +2956,7 @@ fn attach(
                             relay_observer(paths, run, tx.clone())?;
                         }
                     }
-                    Stopped::LettingGo => {}
+                    Stopped::LettingGo | Stopped::Stopping => {}
                     Stopped::Over => observer_gone = true,
                 }
             }
@@ -3395,11 +3483,20 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // signal reached nothing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let mut aim = roots_to_stop(paths, record)?;
+    // Held until this teardown has answered, so the driver it ends starts no
+    // observer after the one below is cancelled.
+    let mut _restarts = None;
     if let Aim::Here { roots, .. } = &aim {
         if !roots.is_empty() {
+            _restarts = hold_observer_restarts(paths);
+            // Read again under the lock: a restart that finished while it was
+            // waited for recorded the graph run now watching, and that is the
+            // one to cancel.
+            let observer = ledger::read_json_opt::<LaunchRecord>(&paths.launch())
+                .map_or_else(|| record.graph_run.clone(), |current| current.graph_run);
             // An attached observer runs on threads in its host. Let its graph
             // reap providers before signalling the host that owns those threads.
-            match agentgraph::stop_observer(&record.graph_run, &paths.run, TEARDOWN_PATIENCE) {
+            match agentgraph::stop_observer(&observer, &paths.run, TEARDOWN_PATIENCE) {
                 Ok(true) => {
                     // Cancellation can take time, and can end a root. Re-read
                     // ownership before signalling any PID that might be reused.
@@ -3479,6 +3576,65 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
         #[cfg(unix)]
         sys::Teardown::Refused => sys::Teardown::Refused,
     }))
+}
+
+/// Hold the run's observer restarts still for a teardown: wait out a restart in
+/// flight, so it is recorded before the teardown reads which observer to cancel,
+/// and keep the next from starting for as long as the answer is held.
+///
+/// The wait is bounded by what one restart is allowed — the graph's startup
+/// backstop, and the record write after it — and said on standard error while it
+/// lasts. Past it, or where the lock cannot be taken at all, the teardown goes on
+/// unheld, as every teardown did before the lock existed, and says so. `None` is
+/// that: nothing is held.
+fn hold_observer_restarts(paths: &RunPaths) -> Option<std::fs::File> {
+    let file = match observer_restart_lock(paths) {
+        Ok(file) => file,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
+        // cannot open a file in is one whose `run-stopped` it cannot journal either, so the stop
+        // fails a moment later whatever this arm does; no journey arranges it.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} cannot be opened ({error}); \
+                 the driver is stopped without holding its observer restarts",
+                paths.run
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    let mut until = None;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock)
+                if until.is_none_or(|until| Instant::now() < until) =>
+            {
+                if until.is_none() {
+                    let bound = agentgraph::startup_timeout() + TEARDOWN_PATIENCE;
+                    eprintln!(
+                        "onepipeline: run '{}': waiting up to {} seconds for the observer its \
+                         driver is restarting before the driver is stopped",
+                        paths.run,
+                        bound.as_secs()
+                    );
+                    until = Some(Instant::now() + bound);
+                }
+                std::thread::sleep(RESTART_LOCK_POLL);
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] a restart is bounded by the same
+            // startup backstop this wait is, so outliving it needs a driver wedged inside a
+            // launch, and a lock call that fails outright is a host fault; no journey stages
+            // either, and both keep the teardown every build before the lock made.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} was not taken ({error}); \
+                     the driver is stopped without holding its observer restarts",
+                    paths.run
+                );
+                return None;
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
 }
 
 /// What a stop of this run may aim at on this host.

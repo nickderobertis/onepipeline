@@ -210,7 +210,7 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// An unusable value falls back to the default rather than to zero: a `0` would
 /// make every launch time out before its graph could answer, which fails every
 /// run rather than the one the operator was configuring.
-fn startup_timeout() -> Duration {
+pub(crate) fn startup_timeout() -> Duration {
     let seconds = std::env::var(STARTUP_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse().ok())

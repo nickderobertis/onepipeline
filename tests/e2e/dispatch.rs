@@ -6509,7 +6509,9 @@ fn judges_surviving_the_stop(judges: &std::path::Path) -> Vec<u32> {
     use crate::harness::process_ended;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while judges_started(judges).into_iter().any(|pid| !process_ended(pid))
+    while judges_started(judges)
+        .into_iter()
+        .any(|pid| !process_ended(pid))
         && std::time::Instant::now() < deadline
     {
         std::thread::sleep(std::time::Duration::from_millis(50));
