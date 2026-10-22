@@ -22,7 +22,7 @@
 //! A running driver reads the claim on its own schedule. Unconfirmed claims pause new
 //! dispatches and publications while keeping work in flight alive. A read naming another
 //! driver supersedes it. Same-host takeovers require local evidence or acknowledgement;
-//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 137 amends
+//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 138 amends
 //! entry 128 with these rules.
 
 use std::collections::BTreeMap;
@@ -515,6 +515,15 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
         status: read.status,
         fields: settlement.clone(),
     }))
+}
+
+/// Whether the stored settlement on a task says the engine itself settled it `cancelled`:
+/// a park, a stopped dispatch or a superseded attempt, each of which a continuing launch
+/// resumes. `false` where the task carries none, and a refusal where it carries anything that
+/// is not a settlement.
+pub(crate) fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>) -> Result<bool> {
+    Ok(settlement_of(task, Some(metadata))?
+        .is_some_and(|settlement| settlement.status == crate::payload::Status::Cancelled))
 }
 
 /// A stored settlement as the boundary read it: its status, typed, and every field it
@@ -1702,7 +1711,7 @@ pub(crate) enum HandedOver {
 /// evidence that the displaced driver has let go. For another host, the existing
 /// best-effort fallback still accepts an empty store fence after [`takeover_wait`]. A
 /// fence a driver failed to project is invisible across hosts, so the timer alone cannot
-/// guarantee that a foreign dispatch stopped. Entry 137 records that residual.
+/// guarantee that a foreign dispatch stopped. Entry 138 records that residual.
 ///
 /// A claim stating no lease terms has no timer fallback: acknowledgement or local
 /// evidence is required.

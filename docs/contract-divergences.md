@@ -12467,6 +12467,7 @@ it wrote before.
 **What this build does.** `src/publicid.rs` decides and derives it; `tests/e2e/public_id.rs`
 drives every rule above through the compiled binary.
 
+
 ## 136. An envelope carrying a live note went unanswered for as long as its receiver's turn ran — OPEN
 
 **Proposal, for the planner who owns the contract: the Channel paragraph's sentence on what
@@ -12499,7 +12500,27 @@ public-type change is a new type.
 }
 ```
 
-## 137. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
+## 137. Withdrawn project tasks are outside the executable plan — RESOLVED
+
+**Ruling:** The manager of issue #789 approved excluding withdrawn tasks before node ids
+are claimed or the first launch projection runs. A store task with status category
+`Cancelled` is withdrawn unless its stored `onepipeline.settlement` has status `cancelled`
+and its `onepipeline.projected_status` is `cancelled`. This new additive, projection-only,
+onepipeline-owned metadata key records the board word projected beside a settlement;
+it changes no public type or serialized schema. An engine park records `parked`, so a
+person closing that task afterwards withdraws it. A task the engine itself cancelled stays
+eligible for continuation. The one residual is a `cancelled` settlement with no recorded
+board word, which is kept for compatibility with older projections. Tasks in other status
+categories remain eligible. Dependencies from remaining tasks onto excluded tasks refuse
+launch, naming both qualified ids and the cancellation status name the store reports.
+Excluded tasks receive no queued projection and are never reopened by that launch.
+
+**Proof.** `src/taskgraph.rs` tests the partition and refusal. `tests/e2e/withdrawn.rs`
+launches the real binary over a local-md project and checks exclusion, stored status, and
+dependency refusal. `tests/e2e/continuation.rs` parks through the engine's real projection,
+then proves both continuation of the parked task and exclusion after a person's close.
+
+## 138. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
 
 **Proposal, approved by the manager for this build: amendment of #965's ruling (entry 128).
 An unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128
