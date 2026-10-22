@@ -12533,20 +12533,19 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    supersedes as entry 128 and entry 129 say, with one change. It lets go once its
    acknowledgement or its cleared fence has landed, either of which its adopter starts
    on. Where neither lands, it tries both again when the fence's five-second retry is due.
-4. **The fence names dispatches as well as publications.** Before any dispatch starts,
-   the driver writes the project's `onepipeline.publishing`, entry 128's fence (whose
-   publication half #1014 tightened), naming that node beside its publications under way.
-   The dispatch starts only once the write has landed and the claim still admits it.
-   A node leaves the fence only once a projection carrying its settlement has landed, as
-   entry 129 says of a publication. A run closing out, with nothing in flight and nothing
-   left that can move, writes what its fence lets go of once, as it lets go of the run,
-   rather than on every pass a slow store would hold. The fence keeps its shape, `{"run", "host", "nodes",
-   "at"}`, so a build that reads `nodes` as publications only waits on them all the same.
-   An adopting driver therefore dispatches no node the displaced driver may still be running
-   until the store shows it settled or released. Entry 128's wait is kept only as a floor,
-   bounding when a displaced driver of either build can start anything more. The adopter no
-   longer treats it as proof that driver stopped: past it, the fence must name none of the
-   displaced driver's nodes, or the displaced driver must acknowledge.
+4. **Store fences are best-effort projections.** The project's
+   `onepipeline.publishing` names dispatches and publications, retaining its existing
+   shape. Its writes run on a worker, are reported and retried when refused, and never
+   gate dispatch or settlement. A missing, unreachable or rate-limited plan store does
+   not prevent a run from making progress while its claim remains confirmed.
+   On this host, a successor must also establish that the predecessor has let go of
+   its local ownership; an empty store fence and an elapsed takeover timer do not
+   establish that a live local predecessor stopped. The successor keeps waiting for
+   local evidence or acknowledgement before dispatching the predecessor's work.
+   Cross-host takeover retains the existing timer plus empty-fence rule. Its protection
+   remains best-effort while the store is unreachable: a fence the predecessor could not
+   write is invisible to a successor on another host. This amendment adds no cross-host
+   acknowledgement requirement or stopped-evidence record.
 5. **A displaced driver that is provably gone makes nobody wait.** On the same host that is
    its run's ownership lock found free, as before, or, for a run this runs root does not
    hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
@@ -12632,7 +12631,8 @@ dispatch in flight ended and dispatched again by the adopter, in turn.
 publication asked for while the claim was unconfirmed.
 `a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing` resumes already
 superseded, its claim thread having read the takeover during the hold.
-Entry 128's `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands`
-refuses the fence a dispatch needs, as
-`a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands`. The two closeout-release journeys make the store slow only once the
-dispatch is under way.
+Entry 128's refusal journey is replaced by
+`a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it`: refusing every fence
+write leaves both dispatch and settlement free to proceed, and the worker retries the
+projection independently. The two closeout-release journeys make the store slow only once
+the dispatch is under way.

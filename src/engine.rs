@@ -1956,11 +1956,8 @@ fn converge(
                 waiting.push(due);
             }
         }
-        // The project names this driver's publications under way before any of them starts,
-        // and stops naming each once it has settled: a run taking the project over that finds
-        // none named knows none is under way. One that cannot be named yet waits, as one on
-        // a stale lease does — and the lease is asked again once the fence has landed.
-        // llmlint: ignore[changed_behavior_has_e2e] the lease asked again after the fence lands is the one admission every start asks, whose refusal on a stale lease is driven by `continuation::a_publication_asked_for_on_a_stale_lease_waits_for_the_next_read`; reaching it *between* the fence's write and that question needs a store that holds one write for a whole claim interval and then answers, which is the sibling suspended mid-command — host-level process control no CLI journey exposes.
+        // Project the work under way off-thread. Admission depends on the claim,
+        // never on whether the store takes this best-effort fence.
         unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
         // A run with nothing in flight, starting or publishing, and nothing left that can
         // move, is closing out: what its fence lets go of then is written once, as it lets go
@@ -1969,16 +1966,17 @@ fn converge(
             let statuses = statuses_of(&mut derived, state);
             graph::is_terminal(&statuses) || !any_node_can_still_move(&statuses)
         };
-        let fenced = closing
+        let may_publish = closing
             || claims.as_mut().is_none_or(|watch| {
                 let mut nodes = publishing.clone();
                 nodes.extend(unlanded.iter().cloned());
                 nodes.extend(dispatching.iter().cloned());
                 nodes.extend(starting.iter().map(|due| due.node.clone()));
-                watch.fence(&nodes) && (starting.is_empty() || watch.may_start(None))
+                watch.fence(&nodes);
+                starting.is_empty() || watch.may_start(None)
             });
         for due in starting {
-            if fenced {
+            if may_publish {
                 publishing.insert(due.node.clone());
                 let _ = due.answer.send(PublicationVerdict::Publish);
             } else {
@@ -2065,8 +2063,7 @@ fn converge(
         let started_here = if superseded_by.is_some() {
             false
         } else {
-            // A dispatch starts only once the fence naming it has landed, and the lease is
-            // asked again after that write.
+            // Queue the best-effort fence, then ask the claim again at admission.
             let mut admit = |node: &str| {
                 claims.as_mut().is_none_or(|watch| {
                     if !watch.may_start(Some(node)) {
@@ -2076,7 +2073,8 @@ fn converge(
                     nodes.extend(unlanded.iter().cloned());
                     nodes.extend(dispatching.iter().cloned());
                     nodes.insert(node.to_owned());
-                    if !(watch.fence(&nodes) && watch.may_start(None)) {
+                    watch.fence(&nodes);
+                    if !watch.may_start(None) {
                         return false;
                     }
                     dispatching.insert(node.to_owned());
@@ -2338,11 +2336,6 @@ fn converge(
                 .as_ref()
                 .filter(|_| superseded_by.is_none())
                 .map_or(Duration::MAX, |watch| watch.lease().until_surface()),
-            // And when it next writes the publications under way the store last refused.
-            claims.as_ref().map_or(
-                Duration::MAX,
-                crate::continuation::ClaimWatch::until_fence_retry,
-            ),
         ];
         let deadline = if moved {
             Duration::ZERO

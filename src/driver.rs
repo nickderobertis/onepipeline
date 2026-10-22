@@ -1581,6 +1581,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             &mine,
             claim.as_ref(),
             &crate::boundary::of_run(&plan).scope,
+            || gone_from_this_host(&root, claim.as_ref()),
         )?;
         read = store.read_plan(&project).map_err(Error::from)?;
         project_origin = crate::labels::origin(&read.project_metadata)?;

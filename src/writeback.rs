@@ -1501,8 +1501,8 @@ impl Writeback {
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
         }
-        // Settlements that landed no longer need the driver's dispatch fence. Clear it
-        // before marking the home complete, so that status remains the final store write.
+        // Queue the best-effort fence projection for the settlements this closeout landed.
+        // Its independent worker does not delay marking the home complete.
         before_home();
         if !retired {
             // The run's home, marked `done` once the run has reached the success ending and

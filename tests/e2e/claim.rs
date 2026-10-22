@@ -968,7 +968,13 @@ fn a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_la
     );
     world.store_stops_refusing("set_project_metadata");
     let said = taken_over(taking);
-    assert!(said.contains("acknowledged the takeover"), "{said}");
+    // Either successful best-effort handover write releases a cross-host successor:
+    // the fence worker can clear it before the acknowledgement attempt lands.
+    assert!(
+        said.contains("acknowledged the takeover")
+            || said.contains("none of its publications is under way"),
+        "{said}"
+    );
     world.until("the displaced driver to let go", |world| {
         world.run_file(run, "result.json").is_file()
     });
@@ -1099,9 +1105,28 @@ fn sessions_opened_after(world: &World, run: &str, after: usize) -> Vec<String> 
 /// then does the second dispatch `x`, onto the branch the first left it on.
 #[test]
 fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() {
+    two_drivers(false);
+}
+
+/// An empty best-effort store fence cannot release a live predecessor on this host.
+#[test]
+fn a_same_host_takeover_waits_on_the_local_driver_even_with_no_store_fence() {
+    two_drivers(true);
+}
+
+fn two_drivers(same_host: bool) {
     let base = claim_world("claim-two-drivers");
     base.script("x.work", "x's change\n");
-    let successor = base.on_host("host-b");
+    let successor = if same_host {
+        base.as_session("successor")
+    } else {
+        base.on_host("host-b")
+    };
+    let successor_run = if same_host {
+        "claim-two-drivers-2"
+    } else {
+        "claim-two-drivers"
+    };
     // llmlint: ignore-block[tests_mirror_real_usage] a driver alive but unable to read its claim
     // is a store that answers one host and not another, which one offline store cannot be; the
     // failpoint holds the first driver's real reads, and the second driver reads freely.
@@ -1128,6 +1153,24 @@ fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() 
     );
     let reader = ClaimReader::start(&world, run);
 
+    if same_host {
+        // llmlint: ignore-block[tests_mirror_real_usage] the store is external, best-effort
+        // projection state, and a missing fence is a permitted store input, not local driver
+        // state. No onepipeline command deletes that projection. Set it through the real store
+        // API while the real predecessor keeps running; the successor's CLI must consult
+        // local ownership even when that external fence is absent. Dispatch, cancellation,
+        // takeover, settlement and branch resumption below all use the compiled application.
+        let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.publishing".to_owned())
+            .expect("a key");
+        let id: onetaskgraph_core::GlobalId = project.parse().expect("a project");
+        world
+            .store_call(|engine| async move {
+                engine.set_project_metadata(&id, &key, &Value::Null).await
+            })
+            .expect("the absent fence is recorded through the store");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+    }
+
     let mut taking = successor.cmd(&["start", &project, "--detach", "--take-over"]);
     taking
         .current_dir(&successor.project)
@@ -1135,7 +1178,11 @@ fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() 
         .stderr(std::process::Stdio::piped());
     let mut taking = taking.spawn().expect("the takeover starts");
     world.until("the takeover's claim to land", |world| {
-        stored_claim(world, &project)["host"] == "host-b"
+        if same_host {
+            stored_claim(world, &project)["run"] == successor_run
+        } else {
+            stored_claim(world, &project)["host"] == "host-b"
+        }
     });
     // Past the whole wait a claim's terms give — two intervals, a read's deadline, the
     // cancel grace and the slack — the first driver's fence still names `x`, so the second
@@ -1149,7 +1196,9 @@ fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() 
     );
     assert!(records_of(&world, run, "node-settled", "x").is_empty());
     assert!(
-        successor.events_of(run, "node-dispatched").is_empty(),
+        successor
+            .events_of(successor_run, "node-dispatched")
+            .is_empty(),
         "the second driver dispatched beside the first"
     );
 
@@ -1169,16 +1218,19 @@ fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() 
     let theirs = x.arrived();
     theirs.release();
     successor.until("the second driver to settle", |world| {
-        world.run_file(run, "result.json").is_file()
+        world.run_file(successor_run, "result.json").is_file()
     });
-    assert_eq!(sessions_opened_after(&successor, run, 0), vec![branch]);
+    assert_eq!(
+        sessions_opened_after(&successor, successor_run, 0),
+        vec![branch]
+    );
     let ended = records_of(&world, run, "node-settled", "x")[0]["ts"]
         .as_str()
         .expect("a time")
         .to_owned();
     let mut both = dispatches(&world, run);
-    both.extend(dispatches(&successor, run));
-    for (node, at) in dispatches(&successor, run) {
+    both.extend(dispatches(&successor, successor_run));
+    for (node, at) in dispatches(&successor, successor_run) {
         assert!(
             at >= ended,
             "the second driver dispatched {node} at {at}, before the first's ended at {ended}"

@@ -19,13 +19,11 @@
 //! claim replaced stops — and `docs/contract-divergences.md` entry 119 says exactly what it
 //! does not.
 //!
-//! A running driver reads the claim once per [claim interval](claim_interval), and works
-//! on a **lease** that read gives it: it starts a dispatch or a publication only on a read
-//! younger than one interval, and ends every dispatch it still has once its read is two
-//! intervals and a read's deadline old. So the waiting is the adopter's: a `--take-over` writes its claim, and
-//! starts nothing until the driver it displaced has acknowledged it — on the claim — or
-//! until [`takeover_wait`] has passed, by which time the lease of a driver that never
-//! answered has run out. Entry 128 states the contract.
+//! A running driver reads the claim on its own schedule. Unconfirmed claims pause new
+//! dispatches and publications while keeping work in flight alive. A read naming another
+//! driver supersedes it. Same-host takeovers require local evidence or acknowledgement;
+//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 137 amends
+//! entry 128 with these rules.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -715,8 +713,8 @@ pub(crate) struct ClaimWatch {
     /// What the loop and the claim thread both know: the claim this driver writes, and the
     /// fence the newest read or write left.
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
-    /// When the store last refused that write, so the loop wakes to write it again.
-    fence_refused: Option<Instant>,
+    /// Best-effort fence snapshots, consumed independently of the reconcile loop.
+    fence_tx: std::sync::mpsc::Sender<std::collections::BTreeSet<String>>,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
@@ -786,6 +784,29 @@ impl ClaimWatch {
             .name("claim-read".to_owned())
             .spawn(move || reader.run());
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        let (fence_tx, fence_rx) = std::sync::mpsc::channel();
+        let writer = FenceWriter {
+            store: Store::at(&launch.dir),
+            project: project.clone(),
+            run: crate::publicid::on_store(launch),
+            host: crate::sys::hostname(),
+            run_dir: paths.dir.clone(),
+            seen: std::sync::Arc::clone(&seen),
+            lease: lease.clone(),
+            fence_refused: None,
+            term_scope: term_scope.clone(),
+        };
+        // llmlint: ignore-block[changed_behavior_has_e2e] refusing this one OS thread is
+        // host resource exhaustion no CLI journey can induce selectively. As with the
+        // adjacent reader startup, report the failure and preserve local work; store fences
+        // are best-effort, and same-host takeover still consults local ownership.
+        if let Err(why) = std::thread::Builder::new()
+            .name("claim-fence".to_owned())
+            .spawn(move || writer.run(fence_rx))
+        {
+            eprintln!("onepipeline: could not start the best-effort claim fence worker: {why}");
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(Self {
             store: Store::at(&launch.dir),
             project,
@@ -797,7 +818,7 @@ impl ClaimWatch {
             every,
             lease,
             seen,
-            fence_refused: None,
+            fence_tx,
             term_scope,
         })
     }
@@ -843,8 +864,111 @@ impl ClaimWatch {
         &self.lease
     }
 
+    /// Queue the best-effort store fence without waiting for the store.
+    pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+        let landed = self
+            .seen
+            .lock()
+            .ok()
+            .is_some_and(|seen| seen.fenced.as_ref() == Some(nodes));
+        let _ = self.fence_tx.send(nodes.clone());
+        landed
+    }
+
+    /// Record on the claim that superseded this driver that it has stopped, over the claim
+    /// exactly as it was read, with the acknowledgement beside it, and answer whether it
+    /// landed. What could not be written is said on standard error, and the adopter then
+    /// waits for this driver's fence to clear instead.
+    pub(crate) fn acknowledge(&self, by: &DriverClaim) -> bool {
+        let written = serde_json::to_value(by).map(|mut claim| {
+            claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
+                run: self.run.clone(),
+                host: self.host.clone(),
+                at: crate::sys::now_rfc3339(),
+            });
+            claim
+        });
+        let outcome = match written {
+            // llmlint: ignore-block[changed_behavior_has_e2e] the store's own wait is the
+            // write-back's to keep, as the claim thread keeps it; the adopter's journeys drive the
+            // wait it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`).
+            _ if crate::writeback::store_asked_to_wait(&self.run_dir) => {
+                Err("the store asked to be left alone".to_owned())
+            }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            Ok(claim) => self
+                .store
+                .set_project_metadata_within(
+                    &self.project,
+                    DRIVER_KEY,
+                    &claim,
+                    CLAIM_READ_DEADLINE,
+                    &self.term_scope,
+                )
+                .map_err(|why| why.to_string()),
+            Err(why) => Err(why.to_string()),
+        };
+        match outcome {
+            Ok(()) => {
+                eprintln!(
+                    "onepipeline: run '{}' acknowledged run '{}' on host '{}' as the driver of {}",
+                    self.run,
+                    by.run,
+                    by.host,
+                    self.project.as_str()
+                );
+                true
+            }
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; \
+                     that run starts once this one's fence has cleared",
+                    self.run, by.run, by.host
+                );
+                false
+            }
+        }
+    }
+}
+
+/// Best-effort store projection, independent of dispatch admission and settlement.
+struct FenceWriter {
+    store: Store,
+    project: QualifiedId,
+    run: String,
+    host: String,
+    run_dir: std::path::PathBuf,
+    seen: std::sync::Arc<std::sync::Mutex<Seen>>,
+    lease: Lease,
+    fence_refused: Option<Instant>,
+    term_scope: Vec<String>,
+}
+
+impl FenceWriter {
+    fn run(mut self, receiver: std::sync::mpsc::Receiver<std::collections::BTreeSet<String>>) {
+        let mut desired = None;
+        loop {
+            match receiver.recv_timeout(FENCE_RETRY) {
+                Ok(nodes) => desired = Some(nodes),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            // Coalesce queued snapshots: only the newest projection is useful.
+            while let Ok(nodes) = receiver.try_recv() {
+                desired = Some(nodes);
+            }
+            if let Some(nodes) = &desired {
+                let refused = self.fence_refused;
+                let previous = self.fenced();
+                self.fence(nodes);
+                if self.fence_refused != refused || self.fenced() != previous {
+                    self.lease.wake();
+                }
+            }
+        }
+    }
     /// How long until a write of this driver's fence the store refused is due again.
-    pub(crate) fn until_fence_retry(&self) -> Duration {
+    fn until_fence_retry(&self) -> Duration {
         self.fence_refused.map_or(Duration::MAX, |at| {
             (at + FENCE_RETRY).saturating_duration_since(Instant::now())
         })
@@ -860,15 +984,13 @@ impl ClaimWatch {
         }
     }
 
-    /// Make the project's [`PUBLISHING_KEY`] name `nodes` as this driver's dispatches and
-    /// publications under way — `null` for none — and answer whether it does: a dispatch or
-    /// a publication starts only once the fence naming it has landed, so a run taking the
-    /// project over that finds no fence of this driver's knows none is under way.
+    /// Project this driver's dispatches and publications under way to the store.
+    /// Failure is reported and retried; the local journal remains authoritative.
     ///
     /// Written only where it differs from what the store is known to hold, bounded by
     /// [`CLAIM_READ_DEADLINE`], and not inside a wait the store asked for. A superseded
     /// driver reads before it clears, and clears only a fence of its own.
-    pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+    fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         if self.fenced().as_ref() == Some(nodes) {
             return true;
         }
@@ -934,68 +1056,13 @@ impl ClaimWatch {
             Err(why) => {
                 eprintln!(
                     "onepipeline: run '{}' could not write its dispatches and publications \
-                     under way on {}: {why}; it starts none until a write lands",
+                     under way on {}: {why}; the best-effort projection will be retried",
                     self.run,
                     self.project.as_str()
                 );
                 // What the store holds now is not known: the write may yet land.
                 self.set_fenced(None);
                 self.fence_refused = Some(Instant::now());
-                false
-            }
-        }
-    }
-
-    /// Record on the claim that superseded this driver that it has stopped, over the claim
-    /// exactly as it was read, with the acknowledgement beside it, and answer whether it
-    /// landed. What could not be written is said on standard error, and the adopter then
-    /// waits for this driver's fence to clear instead.
-    pub(crate) fn acknowledge(&self, by: &DriverClaim) -> bool {
-        let written = serde_json::to_value(by).map(|mut claim| {
-            claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
-                run: self.run.clone(),
-                host: self.host.clone(),
-                at: crate::sys::now_rfc3339(),
-            });
-            claim
-        });
-        let outcome = match written {
-            // llmlint: ignore-block[changed_behavior_has_e2e] the store's own wait is the
-            // write-back's to keep, as the claim thread keeps it; the adopter's journeys drive the
-            // wait it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_lease_has_run_out`).
-            _ if crate::writeback::store_asked_to_wait(&self.run_dir) => {
-                Err("the store asked to be left alone".to_owned())
-            }
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-            Ok(claim) => self
-                .store
-                .set_project_metadata_within(
-                    &self.project,
-                    DRIVER_KEY,
-                    &claim,
-                    CLAIM_READ_DEADLINE,
-                    &self.term_scope,
-                )
-                .map_err(|why| why.to_string()),
-            Err(why) => Err(why.to_string()),
-        };
-        match outcome {
-            Ok(()) => {
-                eprintln!(
-                    "onepipeline: run '{}' acknowledged run '{}' on host '{}' as the driver of {}",
-                    self.run,
-                    by.run,
-                    by.host,
-                    self.project.as_str()
-                );
-                true
-            }
-            Err(why) => {
-                eprintln!(
-                    "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; \
-                     that run starts once this one's fence has cleared",
-                    self.run, by.run, by.host
-                );
                 false
             }
         }
@@ -1329,10 +1396,15 @@ impl Lease {
         self.inner.changed.notify_all();
         drop(state);
         if wakes {
-            if let Some(wake) = &self.inner.wake {
-                if let Ok(wake) = wake.lock() {
-                    wake();
-                }
+            self.wake();
+        }
+    }
+
+    /// Wake the reconcile loop after a claim or its best-effort projection changes.
+    fn wake(&self) {
+        if let Some(wake) = &self.inner.wake {
+            if let Ok(wake) = wake.lock() {
+                wake();
             }
         }
     }
@@ -1609,17 +1681,14 @@ pub(crate) enum HandedOver {
     WaitedOut,
 }
 
-/// Take the project over from the driver its claim named: write `mine`, then start nothing
-/// until that driver has acknowledged it on the claim — or until it is proven to have
-/// stopped: [`takeover_wait`], sized by the lease terms **its own claim** states, has passed
-/// since the write landed, by when it can start and continue no dispatch, and a read after
-/// that finds no publication of its under way on the project's [`PUBLISHING_KEY`]. A
-/// publication starts only once that fence has landed and ends before it is cleared, so a
-/// publication held for any length of time holds the takeover with it.
+/// Take the project over: write `mine`, then await acknowledgement or local ownership
+/// evidence that the displaced driver has let go. For another host, the existing
+/// best-effort fallback still accepts an empty store fence after [`takeover_wait`]. A
+/// fence a driver failed to project is invisible across hosts, so the timer alone cannot
+/// guarantee that a foreign dispatch stopped. Entry 137 records that residual.
 ///
-/// A claim stating no lease terms — one a build that kept no lease wrote, or a value that is
-/// not a claim — names a driver no wait outlasts: the takeover then starts only on an
-/// acknowledgement, which a driver of this build writes once it reads `mine`.
+/// A claim stating no lease terms has no timer fallback: acknowledgement or local
+/// evidence is required.
 ///
 /// The store is read every tenth of an interval while it waits, at least a second and at
 /// most thirty apart: the adopter carries the cost of a takeover, not every running driver.
@@ -1634,6 +1703,7 @@ pub(crate) fn hand_over(
     mine: &DriverClaim,
     displaced: Option<&DriverClaim>,
     term_scope: &[String],
+    locally_gone: impl Fn() -> Result<bool>,
 ) -> Result<HandedOver> {
     store
         .set_project_metadata_within(
@@ -1678,6 +1748,9 @@ pub(crate) fn hand_over(
     // What has been said of the displaced driver's publications, so each is said once.
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
+        if locally_gone()? {
+            return Ok(HandedOver::WaitedOut);
+        }
         let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
         std::thread::sleep(if left.is_zero() {
             every
@@ -1731,9 +1804,8 @@ pub(crate) fn hand_over(
         let Some(wait) = wait.filter(|wait| written.elapsed() >= *wait) else {
             continue;
         };
-        // Past the wait the displaced driver can start nothing, and every fence it wrote for
-        // a publication it started has landed: one standing names a publication still under
-        // way, and one this read cannot make out could be hiding one.
+        // The cross-host fallback consults the best-effort store fence. A local
+        // predecessor still requires ownership evidence even when this fence is absent.
         let standing = match publishing {
             Ok(Some(publishing))
                 if displaced
@@ -1745,6 +1817,11 @@ pub(crate) fn hand_over(
             Err(why) => Some(Err(why.to_string())),
         };
         match standing {
+            None if displaced.is_some_and(|claim| claim.host == crate::sys::hostname()) => {
+                // Only local ownership/journal evidence or acknowledgement releases a live
+                // predecessor. A missing store fence is not evidence of stopped work.
+                continue;
+            }
             None => {
                 eprintln!(
                     "onepipeline: {whom} has not acknowledged in {}s, by when it can start and \

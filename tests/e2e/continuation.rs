@@ -1884,20 +1884,14 @@ fn restate_publishing(world: &World, project: &str, value: Value) {
         .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
 }
 
-/// A dispatch whose fence the board refuses to take starts nothing: the driver says so,
-/// writes the fence again a few seconds later, and dispatches — and then publishes, on the
-/// fence that already names the node — once that write lands: one change request, and the
-/// fence cleared once the publication has settled.
-///
-/// The claim interval is far longer than the fence's retry, so the next claim read cannot be
-/// what wakes the driver to write it again: the retry is due on its own clock, neither at
-/// once nor an interval later — and a pass something else wakes inside that window, here a
-/// surface queued on the run's channel, writes nothing.
+/// A refused store fence never prevents dispatch or settlement. The projection is
+/// reported and retried independently while the node remains in flight.
 #[test]
-fn a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
+fn a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it() {
     let world = takeover_world("fence-refused", 60).through_scripted_source();
-    world.script("y.work", "y's change\n");
+    world.script("y.work", "y publishes despite refused fences\n");
     let x = world.rendezvous("x");
+    let y = world.rendezvous("y");
     let run = "fence-refused";
     let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
     world
@@ -1905,51 +1899,29 @@ fn a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands() {
         .exited(0);
     let mine = x.arrived();
     until_claimed_by(&world, &project, run);
-    // The next project write the board is asked for is the fence y's dispatch needs, once
-    // `x` settles: the one that names `y` before it starts, and before its publication.
-    world.store_refuses_once("set_project_metadata", &board_down());
+    world.store_refuses("set_project_metadata", &board_down());
     mine.release();
+    let later = y.arrived();
     world.until_run_file_holds(
         run,
         "driver.log",
         "could not write its dispatches and publications under way",
     );
-    let refused_at = std::time::Instant::now();
     let refused = world.store_asked("set_project_metadata");
-    world
-        .run(&[
-            "surface",
-            run,
-            "--kind",
-            "check-in",
-            "--message",
-            "a pass inside the fence's retry",
-        ])
-        .exited(0);
-    world.until("the fence to be written again", |world| {
+    world.until("the refused projection to be retried", |world| {
         world.store_asked("set_project_metadata") > refused
     });
-    let retried_after = refused_at.elapsed();
-    assert!(
-        retried_after >= std::time::Duration::from_secs(3),
-        "the fence was written again {retried_after:?} after the refusal, before its retry was due"
-    );
-    assert!(
-        retried_after < std::time::Duration::from_secs(30),
-        "the fence was written again only {retried_after:?} after the refusal"
-    );
-    world.until("the driver to end", |world| {
+    later.release();
+    world.until("the run to settle despite refused fence writes", |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(
         dispatched(&world, run),
-        vec!["x".to_owned(), "y".to_owned()],
-        "y was dispatched on a fence the board refused"
+        vec!["x".to_owned(), "y".to_owned()]
     );
-    let y = settled(&world, run, "y");
-    assert_eq!(y["outcome"], "change-review-draft", "{y}");
-    assert_eq!(created_from(&world).len(), 1);
-    assert_eq!(stored_publishing(&world, &project), Value::Null);
+    assert_eq!(settled(&world, run, "y")["status"], "done");
+    assert_eq!(settled(&world, run, "y")["outcome"], "change-review-draft");
+    assert_eq!(created_from(&world).len(), 1, "publication never opened");
 }
 
 /// A takeover past its wait that finds the project's `onepipeline.publishing` holding

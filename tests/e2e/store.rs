@@ -2261,8 +2261,8 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
 /// A closeout that falls inside a wait the store asked for asks the store nothing: the run
 /// settles on time, and the terminal projection is not attempted inside the window the
 /// limiter named, which a closeout suspending the retry schedule would otherwise do.
-/// Both nodes are already in flight before the refusal: a new dispatch must first land its
-/// fence, which cannot ask the store anything during that wait.
+/// Both nodes are already in flight before the refusal, isolating the closeout's
+/// handling of the store's wait from dispatch admission.
 #[test]
 fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
     let wait = Duration::from_secs(30);
