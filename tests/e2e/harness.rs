@@ -3088,6 +3088,13 @@ impl World {
     /// command, so a journey waiting for the write-back's last command to have ended reads
     /// it here, where a fence write landing after that command cannot stand last.
     pub fn store_calls_beside_the_fence(&self) -> Vec<Vec<String>> {
+        self.store_calls_beside_the_fence_from(0)
+    }
+
+    /// [`World::store_calls_beside_the_fence`] from the `start`th of [`World::store_calls`]
+    /// on: a connection is told the fence's from every call it made, so one that had made
+    /// only its handshake at `start` is still left out once it has written.
+    pub fn store_calls_beside_the_fence_from(&self, start: usize) -> Vec<Vec<String>> {
         let calls: Vec<Value> = self
             .invocations()
             .into_iter()
@@ -3106,6 +3113,7 @@ impl World {
         }
         calls
             .into_iter()
+            .skip(start)
             .filter(|call| {
                 fencing[&call["connection"].as_u64().expect("a call's connection")] != (true, true)
             })

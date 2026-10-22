@@ -391,10 +391,20 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
         "the finished node to reach the board",
         |tasks| board_word(tasks, "work").as_deref() == Some("done"),
     );
+    // The claim fence follows the finished node off the reconcile loop, on a store of its own:
+    // once it names `aside` alone, none of its connections is still opening.
+    world.until("the claim fence to name the held node alone", |world| {
+        world.invocations().iter().any(|call| {
+            call["tool"] == crate::harness::SCRIPTED_KEY
+                && call["args"][0] == "set_project_metadata"
+                && call["key"] == "onepipeline.publishing"
+                && call["value"]["nodes"] == json!(["aside"])
+        })
+    });
 
     let later = records(&world, run)[recorded_before..].to_vec();
     assert!(!later.is_empty(), "the transition was never projected");
-    let later_calls = &store_calls(&world)[asked_before..];
+    let later_calls = &world.store_calls_beside_the_fence_from(asked_before);
     assert_eq!(
         later_calls
             .iter()
@@ -450,9 +460,9 @@ fn a_runs_first_projection_carries_its_claim_by_member_and_a_later_transition_th
     );
 
     // What the projection asked the store for: one targeted update of the named member — never
-    // the project, a page of tasks, a read of any item, a copy, or the unnamed member.
-    let calls = store_calls(&world);
-    let member_calls = &calls[asked_before..];
+    // the project, a page of tasks, a read of any item, a copy, or the unnamed member. The claim
+    // fence's write on a store of its own is the driver's, and no projection's.
+    let member_calls = &world.store_calls_beside_the_fence_from(asked_before);
     assert!(
         member_calls.iter().any(|call| is_call(call, "update_task")),
         "no targeted update wrote the transition: {member_calls:?}"
