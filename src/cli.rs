@@ -209,6 +209,8 @@ pub enum Command {
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
     Stop(StopArgs),
+    /// Replace a run's label overlay.
+    Label(LabelArgs),
     /// End the running work on this host: ask every live dispatch to wrap up
     /// and commit, wait, stop what is left, and put every branch on its origin.
     Shutdown(ShutdownArgs),
@@ -478,6 +480,13 @@ pub struct PlanCheckArgs {
 /// `onepipeline start`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct StartArgs {
+    /// Opaque launch label, repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// Qualified project group (syntax only; never looked up).
+    #[arg(long)]
+    pub group: Option<String>,
+
     /// The qualified onetaskgraph project id the plan is read from,
     /// `<source>:<native>`.
     ///
@@ -1807,4 +1816,26 @@ pub struct ResultsArgs {
     /// Print node outcomes and review state as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Replace a run's labels overlay.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct LabelArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Set an opaque label, repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// Remove a launch label, repeatable.
+    #[arg(long)]
+    pub unlabel: Vec<String>,
+    /// Override the run's project group.
+    #[arg(long, conflicts_with = "no_group")]
+    pub group: Option<String>,
+    /// Suppress all inferred grouping.
+    #[arg(long)]
+    pub no_group: bool,
+    /// Override another session's ownership.
+    #[arg(long)]
+    pub force: bool,
 }

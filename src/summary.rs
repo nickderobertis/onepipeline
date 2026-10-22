@@ -130,7 +130,9 @@ use crate::telemetry::{self, RunTelemetry};
 /// to do: a version-9 document carries no answer to where a node settled
 /// `preserved` kept its work rather than a run that kept none — so it is refolded
 /// once rather than served as a run whose kept branches nobody can find.
-pub const SUMMARY_SCHEMA_VERSION: u32 = 10;
+///
+/// **11** adds effective labels and project grouping, including copy origins and overlays.
+pub const SUMMARY_SCHEMA_VERSION: u32 = 11;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -244,6 +246,12 @@ pub struct NodePreserved {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSummary {
+    /// Effective opaque labels.
+    #[serde(deserialize_with = "crate::labels::launch_labels")]
+    pub labels: BTreeMap<String, String>,
+    /// Effective project group.
+    #[serde(deserialize_with = "crate::labels::launch_group")]
+    pub group: Option<String>,
     /// The document's own version, so a reader can refuse one it does not
     /// understand. See [`SUMMARY_SCHEMA_VERSION`].
     #[serde(deserialize_with = "this_version")]
@@ -553,7 +561,9 @@ impl RunSummary {
         if let Some(stored) = ledger::read_json_opt::<Self>(&paths.summary()) {
             if (stored.journal_len, stored.journal_mtime_ms) == stamp && stored.run_id == paths.run
             {
-                return Ok(stored.with_the_report_the_run_left(paths));
+                return stored
+                    .with_the_report_the_run_left(paths)
+                    .with_labels(paths);
             }
         }
         // Stamped with what the store held **before** the fold, for the reason
@@ -561,7 +571,12 @@ impl RunSummary {
         // this row may not claim to carry.
         let folded = Self::folded(paths, stamp)?;
         let _ = ledger::write_json(&paths.summary(), &folded);
-        Ok(folded)
+        folded.with_labels(paths)
+    }
+
+    fn with_labels(mut self, paths: &RunPaths) -> crate::Result<Self> {
+        (self.labels, self.group) = crate::labels::apply(paths, self.labels, self.group)?;
+        Ok(self)
     }
 
     /// Take the landings the run's **own settled report** re-read, where they say
@@ -616,6 +631,7 @@ impl RunSummary {
     /// to: one derivation, so the two accounts of a run cannot drift apart.
     fn folded(paths: &RunPaths, stamp: Stamp) -> crate::Result<Self> {
         let view = crate::views::RunView::open(paths)?;
+        let launch = ledger::read_json(&paths.launch())?;
         let judged: BTreeSet<String> = view
             .events
             .iter()
@@ -624,7 +640,7 @@ impl RunSummary {
             .collect();
         Ok(Self::derive(
             &paths.run,
-            &view.launch,
+            &launch,
             &Store {
                 state: &view.state,
                 name: plan_name(paths),
@@ -682,6 +698,8 @@ impl RunSummary {
             surfaces_queued: state.surfaces_queued,
             surfaces_read: state.surfaces_read,
             awaiting_human_action: state.awaiting_human_action(),
+            labels: launch.labels.clone(),
+            group: crate::labels::resolved_group(launch),
             project: launch.project.clone(),
             name: name.clone(),
             launcher: launch.launcher.clone(),
@@ -1286,6 +1304,9 @@ mod tests {
         let mut record = LaunchRecord {
             run_id: run.to_string(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -1839,7 +1860,7 @@ mod tests {
     /// Read rather than restated: this is the wire a consumer parses, and the
     /// only thing that stops a field being renamed, an absence becoming a zero,
     /// or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v10.json");
+    const GOLDEN: &str = include_str!("../tests/golden/run-summary-v11.json");
 
     /// The documents earlier builds wrote, kept exactly as those builds wrote them.
     ///
@@ -1857,7 +1878,7 @@ mod tests {
     /// actions wait — and a real schema 9 document, which carries no answer to
     /// where a kept branch is. The reader below has to refuse all nine rather
     /// than read any as one of its own.
-    const GOLDEN_EARLIER: [(u32, &str); 9] = [
+    const GOLDEN_EARLIER: [(u32, &str); 10] = [
         (1, include_str!("../tests/golden/run-summary-v1.json")),
         (2, include_str!("../tests/golden/run-summary-v2.json")),
         (3, include_str!("../tests/golden/run-summary-v3.json")),
@@ -1867,6 +1888,7 @@ mod tests {
         (7, include_str!("../tests/golden/run-summary-v7.json")),
         (8, include_str!("../tests/golden/run-summary-v8.json")),
         (9, include_str!("../tests/golden/run-summary-v9.json")),
+        (10, include_str!("../tests/golden/run-summary-v10.json")),
     ];
 
     /// The document the golden pins, built through the types.
@@ -1889,6 +1911,8 @@ mod tests {
             surfaces_queued: 2,
             surfaces_read: 1,
             awaiting_human_action: false,
+            labels: BTreeMap::new(),
+            group: Some("plans:golden".into()),
             project: "plans:golden".into(),
             name: Some("Golden".into()),
             launcher: "claude-code".into(),
@@ -1959,13 +1983,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_10_document_is_the_shape_the_golden_pins() {
+    fn a_schema_11_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&golden()).expect("it serialises");
         assert_eq!(
             rendered.trim(),
             GOLDEN.trim(),
             "the summary document changed shape. If that was deliberate, bump \
-             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v10.json together"
+             SUMMARY_SCHEMA_VERSION and update tests/golden/run-summary-v11.json together"
         );
     }
 
@@ -2096,6 +2120,35 @@ mod tests {
             bytes < sealed.journal_len,
             "the sealed document was folded rather than served: {bytes} bytes read"
         );
+        use crate::verbs::{LabelGroup, LabelKey, LabelRequest, LabelValue};
+        let labels = BTreeMap::from([(
+            LabelKey::try_from("kind".to_owned()).unwrap(),
+            LabelValue::try_from("spikes".to_owned()).unwrap(),
+        )]);
+        let cached = std::fs::read(paths.summary()).unwrap();
+        crate::verbs::label(
+            &paths,
+            LabelRequest {
+                labels: &labels,
+                unlabel: &[],
+                group: LabelGroup::Clear,
+                force: false,
+                launcher: "test",
+                session: "a-session",
+            },
+        )
+        .expect("the public label verb writes an overlay");
+        let (effective, bytes) = cost_of(&paths);
+        assert_eq!(effective.labels["kind"], "spikes");
+        assert_eq!(effective.group, None);
+        assert_eq!(bytes, cached.len() as u64 + std::fs::metadata(paths.dir.join("labels.json")).unwrap().len(),
+            "a cache hit must read only summary.json and labels.json, never launch.json or the journal");
+        assert_eq!(
+            std::fs::read(paths.summary()).unwrap(),
+            cached,
+            "serving an overlay must not cache its effective values as launch inputs"
+        );
+
         std::fs::remove_dir_all(&root).ok();
     }
 
