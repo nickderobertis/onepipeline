@@ -1733,7 +1733,7 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     let said = launched_over(taking);
     assert!(
         said.contains(&format!(
-            "has not acknowledged in {}s, and its publication of 'x' has been under way since",
+            "has not acknowledged in {}s, and its fence has named 'x' as under way since",
             theirs.as_secs()
         )),
         "{said}"
@@ -1881,7 +1881,7 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
     again.release();
     let said = launched_over(taking);
     assert!(
-        said.contains("and its publication of 'x' has been under way since"),
+        said.contains("and its fence has named 'x' as under way since"),
         "{said}"
     );
     let x = settled(&world, run, "x");
@@ -1915,12 +1915,13 @@ fn restate_publishing(world: &World, project: &str, value: Value) {
         .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
 }
 
-/// A refused store fence never prevents dispatch or settlement. The projection is
-/// reported and retried independently while the node remains in flight.
+/// The store's fence names a node before its dispatch starts: while the board refuses every
+/// fence write, a node that becomes ready is not dispatched, and the refused write is retried;
+/// once one lands, the node is dispatched and the run settles.
 #[test]
-fn a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it() {
+fn a_node_whose_fence_write_fails_is_not_dispatched_until_one_lands() {
     let world = takeover_world("fence-refused", 60).through_scripted_source();
-    world.script("y.work", "y publishes despite refused fences\n");
+    world.script("y.work", "y publishes once its fence lands\n");
     let x = world.rendezvous("x");
     let y = world.rendezvous("y");
     let run = "fence-refused";
@@ -1930,20 +1931,40 @@ fn a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it() {
         .exited(0);
     let mine = x.arrived();
     until_claimed_by(&world, &project, run);
+    assert_eq!(stored_publishing(&world, &project)["nodes"], json!(["x"]));
     world.store_refuses("set_project_metadata", &board_down());
     mine.release();
-    let later = y.arrived();
+    world.until("x to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
     world.until_run_file_holds(
         run,
         "driver.log",
         "could not write its dispatches and publications under way",
     );
     let refused = world.store_asked("set_project_metadata");
-    world.until("the refused projection to be retried", |world| {
-        world.store_asked("set_project_metadata") > refused
+    world.until("the refused fence to be retried twice", |world| {
+        world.store_asked("set_project_metadata") >= refused + 2
     });
+    assert_eq!(
+        dispatched(&world, run),
+        vec!["x".to_owned()],
+        "y was dispatched though no fence naming it had landed"
+    );
+    assert!(
+        stored_publishing(&world, &project)["nodes"] == json!(["x"]),
+        "the store's fence moved while every write was refused"
+    );
+
+    world.store_stops_refusing("set_project_metadata");
+    let later = y.arrived();
+    assert_eq!(
+        stored_publishing(&world, &project)["nodes"],
+        json!(["y"]),
+        "y was dispatched before the fence naming it landed"
+    );
     later.release();
-    world.until("the run to settle despite refused fence writes", |world| {
+    world.until("the run to settle once its fence landed", |world| {
         world.run_file(run, "result.json").is_file()
     });
     assert_eq!(
@@ -2024,7 +2045,7 @@ fn a_takeover_waits_until_a_fence_it_cannot_read_is_cleared(
         "{said}"
     );
     assert!(
-        said.contains("and none of its publications is under way"),
+        said.contains("and its fence names none of its work"),
         "{said}"
     );
     x.arrived().release();

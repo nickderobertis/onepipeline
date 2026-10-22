@@ -1483,6 +1483,7 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
 ) {
     let world = World::new("store-writeback-retry");
     world.script("work.wait", "hold");
+    world.script("later.wait", "hold");
     let project = world.plan(
         "writeback-retry",
         &plan_of(
@@ -1554,6 +1555,17 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
         "the store does not carry both of later's carried notes in carry order"
     );
 
+    // `later` is dispatched while the store is there: a dispatch starts only once the
+    // store's fence names it (`docs/contract-divergences.md` entry 139).
+    assert_eq!(
+        world.events_of("writeback-retry", "node-dispatched").len(),
+        1
+    );
+    world.release("work.go");
+    world.until("the dependent node to be dispatched", |world| {
+        world.events_of("writeback-retry", "node-dispatched").len() == 2
+    });
+
     // Take it away again for terminal settlement. It remains unreachable until
     // the journal says the graph is complete and the terminal publication has
     // failed, then returns while that failed publication is retryable.
@@ -1567,11 +1579,7 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     // store, still decides what executes. Both nodes settle while the store is
     // absent, which is the graph-completion boundary the terminal projection
     // cannot influence.
-    assert_eq!(
-        world.events_of("writeback-retry", "node-dispatched").len(),
-        1
-    );
-    world.release("work.go");
+    world.release("later.go");
     world.until(
         "the graph to settle while the store is unreachable",
         |world| world.events_of("writeback-retry", "node-settled").len() == 2,
@@ -5285,15 +5293,24 @@ fn a_published_node_is_closed_carrying_the_change_that_closed_it_landed_or_not()
 fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged() {
     let world = World::new("store-writeback-surface");
     world.script("work.wait", "hold");
+    world.script("later.wait", "hold");
     let name = "writeback-surface";
     let project = world.plan(
         name,
-        &plan_of(name, vec![agent("work", &[]), agent("later", &["work"])]),
+        &plan_of(name, vec![agent("work", &[]), agent("later", &[])]),
     );
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the running state to reach the store", |world| {
         projected_words(world, &project)
             .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    // Both nodes are dispatched while the store is there: a dispatch starts only once the
+    // store's fence names it (`docs/contract-divergences.md` entry 139), so the store goes
+    // once both are under way, and both settle without it.
+    world.until("the last node's dispatch to reach the store", |world| {
+        projected_words(world, &project)
+            .get("later")
             .is_some_and(|word| word == "in progress")
     });
 
@@ -5306,6 +5323,7 @@ fn a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchange
         "the store becomes unreachable",
     );
     world.release("work.go");
+    world.release("later.go");
     world.until("the run to settle without its store", |world| {
         world.run_file(name, "result.json").is_file()
     });

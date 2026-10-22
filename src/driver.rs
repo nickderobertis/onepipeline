@@ -337,6 +337,13 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 print!("{}", verbs::render_status(&status));
             }
+            // A takeover waiting on a displaced driver has no run of its own yet: the
+            // all-runs view says what it waits on, from the runs root.
+            if matches!(status, verbs::Status::Listing(_)) {
+                for line in crate::continuation::takeover_waits(&ledger::runs_root()) {
+                    println!("{line}");
+                }
+            }
             Ok(EXIT_SUCCESS)
         }
         Verb::Host(args) => {
@@ -1577,6 +1584,7 @@ fn start(args: &StartArgs) -> Result<i32> {
         };
         crate::continuation::hand_over(
             &store,
+            &root,
             &project,
             &mine,
             claim.as_ref(),

@@ -1631,6 +1631,9 @@ fn converge(
     // The nodes this driver has dispatched and not settled, which its fence names so that a
     // run taking the project over starts none of them while they may still be running.
     let mut dispatching: BTreeSet<String> = BTreeSet::new();
+    // The nodes asked to start whose fence has not landed yet: every fence this driver
+    // offers names them too, so the write a start waits on is not replaced by one without it.
+    let mut fencing: BTreeSet<String> = BTreeSet::new();
     // Where a note waits for its conversation, so this loop does not: see
     // [`NoteDeliveries`]. What it holds outstanding is shared with every
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
@@ -1956,8 +1959,8 @@ fn converge(
                 waiting.push(due);
             }
         }
-        // Project the work under way off-thread. Admission depends on the claim,
-        // never on whether the store takes this best-effort fence.
+        // The fence is written off-thread. A publication starts only once the store holds
+        // the fence naming it, and on the claim asked again after that.
         unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
         // A run with nothing in flight, starting or publishing, and nothing left that can
         // move, is closing out: what its fence lets go of then is written once, as it lets go
@@ -1971,9 +1974,10 @@ fn converge(
                 let mut nodes = publishing.clone();
                 nodes.extend(unlanded.iter().cloned());
                 nodes.extend(dispatching.iter().cloned());
+                nodes.extend(fencing.iter().cloned());
                 nodes.extend(starting.iter().map(|due| due.node.clone()));
-                watch.fence(&nodes);
-                starting.is_empty() || watch.may_start(None)
+                let landed = watch.fence(&nodes);
+                starting.is_empty() || (landed && watch.may_start(None))
             });
         for due in starting {
             if may_publish {
@@ -2063,20 +2067,26 @@ fn converge(
         let started_here = if superseded_by.is_some() {
             false
         } else {
-            // Queue the best-effort fence, then ask the claim again at admission.
+            // The store's fence names a node before its dispatch starts: one whose fence has
+            // not landed waits for the write, which wakes the loop when it lands, and the claim
+            // is asked again once it has. A node asked on an earlier pass and not on this one
+            // drops out of the fence.
+            let asked_before = std::mem::take(&mut fencing);
             let mut admit = |node: &str| {
                 claims.as_mut().is_none_or(|watch| {
                     if !watch.may_start(Some(node)) {
                         return false;
                     }
+                    fencing.insert(node.to_owned());
                     let mut nodes = publishing.clone();
                     nodes.extend(unlanded.iter().cloned());
                     nodes.extend(dispatching.iter().cloned());
-                    nodes.insert(node.to_owned());
-                    watch.fence(&nodes);
-                    if !watch.may_start(None) {
+                    nodes.extend(asked_before.iter().cloned());
+                    nodes.extend(fencing.iter().cloned());
+                    if !watch.fence(&nodes) || !watch.may_start(None) {
                         return false;
                     }
+                    fencing.remove(node);
                     dispatching.insert(node.to_owned());
                     true
                 })

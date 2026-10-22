@@ -18,6 +18,7 @@
 // `onevcs`'s own `ONEVCS_GH` override so a change request can be read back offline.
 // `harness.rs` carries the same suppression and the full rationale.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -938,7 +939,8 @@ fn fence_writes(world: &World) -> Vec<Vec<String>> {
 /// The snapshots a driver makes while one of its fence writes is in flight are coalesced into
 /// the newest: however many arrive, one write is pending, and the next write carries the
 /// newest state, so the snapshots between are never written and none lands after a newer
-/// one — against a store that is slow but answers every write.
+/// one — against a store that is slow but answers every write. No node is dispatched before
+/// the write naming it has landed.
 #[test]
 fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
     let world = claim_world("claim-fence-coalesced");
@@ -946,67 +948,91 @@ fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
         "{}.set_project_metadata#onepipeline-publishing",
         crate::harness::SCRIPTED_KEY
     ));
-    let held: Vec<Rendezvous> = ["x", "y", "z"]
-        .iter()
-        .map(|node| world.rendezvous(node))
-        .collect();
+    let nodes = ["w", "x", "y", "z"];
+    let held: Vec<Rendezvous> = nodes.iter().map(|node| world.rendezvous(node)).collect();
     let run = "claim-fence-coalesced";
     let project = world.plan(
         run,
-        &plan_of(run, vec![agent("x", &[]), agent("y", &[]), agent("z", &[])]),
+        &plan_of(run, nodes.iter().map(|node| agent(node, &[])).collect()),
     );
+    // Every fence write reaches the store and waits there until this test answers it.
+    let (writes_tx, writes) = std::sync::mpsc::channel();
+    std::thread::spawn(move || loop {
+        if writes_tx.send(fence.arrived()).is_err() {
+            return;
+        }
+    });
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
-    // The first snapshot's write reaches the store and is held there, slow.
-    let first = fence.arrived();
-    let running: Vec<_> = held.iter().map(Rendezvous::arrived).collect();
-    // Each later admission made a snapshot of its own while that write was in flight, and
-    // none of them waited on it.
-    for node in ["x", "y", "z"] {
-        assert_eq!(
-            records_of(&world, run, "node-dispatched", node).len(),
-            1,
-            "{node}"
+    // Each dispatch waits for the write naming it: the write is at the store, and the node is
+    // not dispatched until it has answered.
+    let mut fenced: Vec<String> = Vec::new();
+    for node in nodes {
+        let write = writes.recv().expect("a fence write");
+        fenced.push(node.to_owned());
+        assert_eq!(fence_writes(&world).last(), Some(&fenced), "{node}");
+        assert!(
+            records_of(&world, run, "node-dispatched", node).is_empty(),
+            "{node} was dispatched before the fence naming it had landed"
         );
+        write.release();
     }
+    let running: Vec<_> = held.iter().map(Rendezvous::arrived).collect();
+    let mut running = nodes.into_iter().zip(running).collect::<BTreeMap<_, _>>();
+    // w settles, and the write letting go of it is held at the store, slow.
+    running.remove("w").expect("w runs").release();
+    let slow = writes.recv().expect("a fence write");
+    let before = fence_writes(&world);
+    assert_eq!(before.last(), Some(&vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]));
+    // x and y settle while it is in flight, each making a snapshot of its own.
+    for node in ["x", "y"] {
+        running.remove(node).expect("it runs").release();
+        world.until(&format!("{node} to settle"), |world| {
+            !records_of(world, run, "node-settled", node).is_empty()
+        });
+    }
+    // The snapshots follow each settlement with nothing between; the pause only orders them
+    // against the held write's release.
+    std::thread::sleep(Duration::from_secs(2));
     assert_eq!(
         fence_writes(&world),
-        vec![vec!["x".to_owned()]],
+        before,
         "a second fence write began while the first was in flight"
     );
-    first.release();
+    slow.release();
     // The one write that follows carries the newest snapshot, not the ones made between.
-    let second = fence.arrived();
-    let newest = vec!["x".to_owned(), "y".to_owned(), "z".to_owned()];
+    let next = writes.recv().expect("a fence write");
+    let newest = vec!["z".to_owned()];
     assert_eq!(
-        fence_writes(&world),
-        vec![vec!["x".to_owned()], newest.clone()],
-        "the write after the held one carried other than the newest snapshot"
+        fence_writes(&world).last(),
+        Some(&newest),
+        "the write after the held one carried other than the newest snapshot: {:?}",
+        fence_writes(&world)
     );
-    second.release();
-    let_through(fence, Arc::new(AtomicBool::new(false)), Duration::ZERO);
-    for arrival in running {
-        arrival.release();
-    }
+    next.release();
+    std::thread::spawn(move || {
+        while let Ok(write) = writes.recv() {
+            write.release();
+        }
+    });
+    running.remove("z").expect("z runs").release();
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
-    for node in ["x", "y", "z"] {
+    for node in nodes {
         assert_eq!(settled(&world, run, node)["status"], "done", "{node}");
     }
-    // Nothing the admissions offered was left queued behind the held writes: every write
-    // after the newest names a later state, each a subset of the one before as the nodes
-    // finish, and never `[x]` or `[x, y]` again.
+    // No write carried an older state than one already written: from the held one on, each
+    // names a subset of the one before as the nodes finish.
     let writes = fence_writes(&world);
-    assert_eq!(writes[..2], [vec!["x".to_owned()], newest], "{writes:?}");
-    for pair in writes[1..].windows(2) {
+    for pair in writes[before.len() - 1..].windows(2) {
         assert!(
             pair[1].iter().all(|node| pair[0].contains(node)) && pair[1] != pair[0],
             "a fence write carried an older state than one already written: {writes:?}"
         );
     }
-    // Both held writes were answered: the store was slow, never failing.
+    // Every held write was answered: the store was slow, never failing.
     let answered = std::fs::read_to_string(world.fakes.join("store.answered.jsonl"))
         .expect("the store answered");
     assert!(
@@ -1014,7 +1040,7 @@ fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
             .lines()
             .filter(|line| line.contains("\"set_project_metadata\""))
             .count()
-            >= 2,
+            >= writes.len(),
         "{answered}"
     );
 }
@@ -1077,11 +1103,11 @@ fn a_superseded_driver_whose_handover_writes_fail_stays_and_retries_until_one_la
     );
     world.store_stops_refusing("set_project_metadata");
     let said = taken_over(taking);
-    // Either successful best-effort handover write releases a cross-host successor:
-    // the fence worker can clear it before the acknowledgement attempt lands.
+    // Either handover write releases a cross-host successor: the fence worker can clear the
+    // fence before the acknowledgement attempt lands.
     assert!(
         said.contains("acknowledged the takeover")
-            || said.contains("none of its publications is under way"),
+            || said.contains("and its fence names none of its work"),
         "{said}"
     );
     world.until("the displaced driver to let go", |world| {
@@ -1214,16 +1240,25 @@ fn sessions_opened_after(world: &World, run: &str, after: usize) -> Vec<String> 
 /// then does the second dispatch `x`, onto the branch the first left it on.
 #[test]
 fn an_adopter_dispatches_no_node_a_driver_unable_to_read_its_claim_still_runs() {
-    two_drivers(false);
+    two_drivers(false, false);
 }
 
-/// An empty best-effort store fence cannot release a live predecessor on this host.
+/// The same across hosts while the displaced driver, alive, also cannot write its fence: the
+/// adopter dispatches none of its in-flight nodes while it runs, past every wait the claim's
+/// terms give, and the all-runs `status` on the adopter's host says what it waits on and how
+/// to release it — and says nothing once the wait is over.
+#[test]
+fn a_takeover_from_another_host_dispatches_nothing_a_driver_unable_to_write_its_fence_runs() {
+    two_drivers(false, true);
+}
+
+/// An empty store fence cannot release a live predecessor on this host.
 #[test]
 fn a_same_host_takeover_waits_on_the_local_driver_even_with_no_store_fence() {
-    two_drivers(true);
+    two_drivers(true, false);
 }
 
-fn two_drivers(same_host: bool) {
+fn two_drivers(same_host: bool, fence_refused: bool) {
     let base = claim_world("claim-two-drivers");
     base.script("x.work", "x's change\n");
     let successor = if same_host {
@@ -1293,12 +1328,30 @@ fn two_drivers(same_host: bool) {
             stored_claim(world, &project)["host"] == "host-b"
         }
     });
+    if fence_refused {
+        // From here the first driver can write nothing to the store: not its fence, nor an
+        // acknowledgement.
+        world.store_refuses("set_project_metadata", &board_down());
+    }
     // Past the whole wait a claim's terms give — two intervals, a read's deadline, the
     // cancel grace and the slack — the first driver's fence still names `x`, so the second
     // has started nothing, and `x` runs on in the first.
     std::thread::sleep(Duration::from_secs(
         2 * INTERVAL + 20 + 1 + 10 + 2 * INTERVAL,
     ));
+    if !same_host {
+        let status = successor.run(&["status"]);
+        status.exited(0);
+        let waiting = format!("takeover of {project} by run '{successor_run}' waiting since ");
+        assert!(
+            status.stdout.lines().any(|line| line.starts_with(&waiting)
+                && line.contains(&format!("on run '{run}' on host '"))
+                && line.contains("its fence, which has named 'x' as under way since")
+                && line.contains("clearing the project's `onepipeline.publishing` key")),
+            "the all-runs status does not say what the takeover waits on:\n{}",
+            status.stdout
+        );
+    }
     assert!(
         taking.try_wait().expect("the takeover is asked").is_none(),
         "the takeover started while the displaced driver's dispatch could still be running"
@@ -1311,16 +1364,48 @@ fn two_drivers(same_host: bool) {
         "the second driver dispatched beside the first"
     );
 
-    // The first reads again, finds the takeover, and ends `x`; its settlement is on the store
-    // before the second starts.
-    held.release();
-    std::thread::spawn(move || loop {
-        reads.arrived().release();
-    });
+    if fence_refused {
+        // Alive, superseded once it reads, but owing both handover writes: the second still
+        // waits while the first runs.
+        held.release();
+        std::thread::spawn(move || loop {
+            reads.arrived().release();
+        });
+        world.until("the first driver to retry its handover", |world| {
+            std::fs::read_to_string(world.run_file(run, "driver.log")).is_ok_and(|log| {
+                log.matches("could not acknowledge run").count() >= 2
+            })
+        });
+        assert!(
+            taking.try_wait().expect("the takeover is asked").is_none(),
+            "the takeover started while the displaced driver could write nothing"
+        );
+        assert!(successor.run_file(successor_run, "launch.json").metadata().is_err());
+        world.store_stops_refusing("set_project_metadata");
+    } else {
+        // The first reads again, finds the takeover, and ends `x`; its settlement is on the
+        // store before the second starts.
+        held.release();
+        std::thread::spawn(move || loop {
+            reads.arrived().release();
+        });
+    }
     let answered = taking.wait_with_output().expect("the takeover answers");
     let said = String::from_utf8_lossy(&answered.stderr).into_owned();
     assert_eq!(answered.status.code(), Some(0), "{said}");
-    assert!(said.contains("acknowledged the takeover"), "{said}");
+    assert!(
+        said.contains("acknowledged the takeover")
+            || (fence_refused && said.contains("and its fence names none of its work")),
+        "{said}"
+    );
+    if !same_host {
+        let status = successor.run(&["status"]);
+        assert!(
+            !status.stdout.contains("takeover of "),
+            "the wait's line outlived it:\n{}",
+            status.stdout
+        );
+    }
     assert_eq!(settled(&world, run, "x")["status"], "cancelled");
     assert_eq!(world.events_of(run, "driver-superseded").len(), 1);
     drop(first);

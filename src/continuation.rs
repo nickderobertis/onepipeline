@@ -21,9 +21,11 @@
 //!
 //! A running driver reads the claim on its own schedule. Unconfirmed claims pause new
 //! dispatches and publications while keeping work in flight alive. A read naming another
-//! driver supersedes it. Same-host takeovers require local evidence or acknowledgement;
-//! cross-host takeovers retain the best-effort store fence and timer rule. Entry 139 amends
-//! entry 128 with these rules.
+//! driver supersedes it. The project's fence names every dispatch and publication a driver
+//! has under way before it starts, so an adopter on any host starts once the displaced
+//! driver has acknowledged, is proven gone on this host, or its fence — read once its lease
+//! can confirm nothing more — names nothing it may still run. Entry 139 amends entry 128
+//! with these rules.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -723,8 +725,8 @@ pub(crate) struct ClaimWatch {
     /// What the loop and the claim thread both know: the claim this driver writes, and the
     /// fence the newest read or write left.
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
-    /// The newest best-effort fence snapshot not yet taken by the writer, consumed
-    /// independently of the reconcile loop.
+    /// The newest fence snapshot not yet taken by the writer, written off the reconcile
+    /// loop.
     fence_tx: std::sync::Arc<FenceSlot>,
     fence_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The run's term scope, which a public boundary checks this driver's writes over.
@@ -804,7 +806,6 @@ impl ClaimWatch {
             project: project.clone(),
             run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
-            run_dir: paths.dir.clone(),
             seen: std::sync::Arc::clone(&seen),
             lease: lease.clone(),
             fence_refused: None,
@@ -813,13 +814,13 @@ impl ClaimWatch {
         };
         // llmlint: ignore-block[changed_behavior_has_e2e] refusing this one OS thread is
         // host resource exhaustion no CLI journey can induce selectively. As with the
-        // adjacent reader startup, report the failure and preserve local work; store fences
-        // are best-effort, and same-host takeover still consults local ownership.
+        // adjacent reader startup, report the failure and preserve local work; no fence then
+        // lands, so the driver starts nothing more.
         if let Err(why) = std::thread::Builder::new()
             .name("claim-fence".to_owned())
             .spawn(move || writer.run(fence_rx))
         {
-            eprintln!("onepipeline: could not start the best-effort claim fence worker: {why}");
+            eprintln!("onepipeline: could not start the claim fence worker: {why}");
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
         Some(Self {
@@ -888,7 +889,8 @@ impl ClaimWatch {
             .store(paused, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Queue the best-effort store fence without waiting for the store.
+    /// Queue the store fence without waiting for the store, and answer whether the store is
+    /// known to hold exactly `nodes` already: a start waits until it does.
     pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         let landed = self
             .seen
@@ -1034,7 +1036,6 @@ struct FenceWriter {
     run: String,
     host: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
-    run_dir: std::path::PathBuf,
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     lease: Lease,
     fence_refused: Option<Instant>,
@@ -1084,18 +1085,16 @@ impl FenceWriter {
         }
     }
 
-    /// Project this driver's dispatches and publications under way to the store.
-    /// Failure is reported and retried; the local journal remains authoritative.
+    /// Write this driver's dispatches and publications under way to the store. A start
+    /// waits for the write naming it to land; one the store refused is reported and retried.
     ///
-    /// Written only where it differs from what the store is known to hold, bounded by
-    /// [`CLAIM_READ_DEADLINE`], and not inside a wait the store asked for. A superseded
+    /// Written only where it differs from what the store is known to hold, and bounded by
+    /// [`CLAIM_READ_DEADLINE`]. It is made inside a wait the store asked for too: a start
+    /// waits on it, and the store's wait is about the write-back's own traffic. A superseded
     /// driver reads before it clears, and clears only a fence of its own.
     fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         if self.fenced().as_ref() == Some(nodes) {
             return true;
-        }
-        if crate::writeback::store_asked_to_wait(&self.run_dir) {
-            return false;
         }
         // A write the store refused is made again when its retry is due, and not on whatever
         // pass something else woke first.
@@ -1156,7 +1155,7 @@ impl FenceWriter {
             Err(why) => {
                 eprintln!(
                     "onepipeline: run '{}' could not write its dispatches and publications \
-                     under way on {}: {why}; the best-effort projection will be retried",
+                     under way on {}: {why}; nothing more starts until a retry lands",
                     self.run,
                     self.project.as_str()
                 );
@@ -1501,7 +1500,7 @@ impl Lease {
         }
     }
 
-    /// Wake the reconcile loop after a claim or its best-effort projection changes.
+    /// Wake the reconcile loop after a claim or its fence changes.
     fn wake(&self) {
         if let Some(wake) = &self.inner.wake {
             if let Ok(wake) = wake.lock() {
@@ -1775,27 +1774,150 @@ fn watch(lease: &std::sync::Weak<LeaseInner>) {
 }
 
 /// How a `--take-over` came to start: on the displaced driver's acknowledgement, on this
-/// host's records proving it gone, or once the wait for one had passed with none of its
-/// publications under way.
+/// host's records proving it gone, or on its fence naming nothing it may still run once its
+/// lease could confirm nothing more.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HandedOver {
     /// The displaced driver wrote that it had stopped.
     Acknowledged(Acknowledgement),
     /// This host's records prove the displaced driver gone, so nothing is waited on.
     ProvenGone,
-    /// Nothing answered within [`takeover_wait`], and the project named none of the
-    /// displaced driver's publications under way.
-    WaitedOut,
+    /// The displaced driver's fence, read once no read of its claim could still let it start
+    /// anything, names none of its dispatches or publications.
+    FenceClear,
 }
 
-/// Take the project over: write `mine`, then await acknowledgement or local ownership
-/// evidence that the displaced driver has let go. For another host, the existing
-/// best-effort fallback still accepts an empty store fence after [`takeover_wait`]. A
-/// fence a driver failed to project is invisible across hosts, so the timer alone cannot
-/// guarantee that a foreign dispatch stopped. Entry 139 records that residual.
+/// The prefix of the file a takeover keeps in the runs root while it waits.
+const TAKEOVER_WAIT_PREFIX: &str = "takeover-wait-";
+
+/// What a `start --take-over` waits on, kept in the runs root for as long as it waits so the
+/// all-runs `status` can say it: the run has no directory of its own yet.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TakeoverWait {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a file this host's own takeover
+    // writes and only this host's `status` reads, as a sentence: the project, the run, the
+    // driver it displaced and what it waits on are said, never acted on.
+    /// The waiting process, and its start token, so a file a dead process left is known.
+    pid: u32,
+    started: String,
+    /// The project taken over.
+    project: String,
+    /// The run taking it over.
+    run: String,
+    /// The driver it displaced, as a phrase.
+    displaced: String,
+    /// What it waits on, as a phrase.
+    waits_on: String,
+    /// When it began waiting, RFC 3339.
+    since: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// The runs-root file of one takeover's wait, removed when the wait ends however it ends.
+struct TakeoverWaitFile {
+    path: std::path::PathBuf,
+    wait: TakeoverWait,
+    written: bool,
+}
+
+impl TakeoverWaitFile {
+    fn new(root: &std::path::Path, project: &QualifiedId, run: &str, displaced: &str) -> Self {
+        let pid = crate::sys::pid();
+        Self {
+            path: root.join(format!("{TAKEOVER_WAIT_PREFIX}{pid}.json")),
+            wait: TakeoverWait {
+                pid,
+                started: crate::sys::process_start_token(pid)
+                    .map(|token| token.recorded().to_owned())
+                    .unwrap_or_default(),
+                project: project.as_str().to_owned(),
+                run: run.to_owned(),
+                displaced: displaced.to_owned(),
+                waits_on: String::new(),
+                since: crate::sys::now_rfc3339(),
+            },
+            written: false,
+        }
+    }
+
+    /// Say that the wait is on `waits_on`, where it was on something else.
+    fn waits_on(&mut self, waits_on: String) {
+        if self.written && self.wait.waits_on == waits_on {
+            return;
+        }
+        self.wait.waits_on = waits_on;
+        // llmlint: ignore-block[changed_behavior_has_e2e] a runs root this process cannot
+        // write is a host condition no journey can set; the wait goes on, and its standard
+        // error still says what it waits on.
+        if let Err(why) = crate::ledger::write_json(&self.path, &self.wait) {
+            eprintln!("onepipeline: the takeover's wait could not be recorded for `status`: {why}");
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        self.written = true;
+    }
+}
+
+impl Drop for TakeoverWaitFile {
+    fn drop(&mut self) {
+        if self.written {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// One line for each takeover waiting on this host, as the all-runs `status` says it: the
+/// file of one whose process has gone is removed rather than said.
+pub(crate) fn takeover_waits(root: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut lines: Vec<(String, String)> = entries
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(TAKEOVER_WAIT_PREFIX) && name.ends_with(".json")
+                })
+        })
+        .filter_map(|path| {
+            let wait: TakeoverWait = std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+            if crate::sys::claim_on(wait.pid, &wait.started).is_over() {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            }
+            Some((
+                wait.since.clone(),
+                format!(
+                    "takeover of {} by run '{}' waiting since {} on {}: {}",
+                    wait.project, wait.run, wait.since, wait.displaced, wait.waits_on
+                ),
+            ))
+        })
+        .collect();
+    lines.sort();
+    lines.into_iter().map(|(_, line)| line).collect()
+}
+
+/// What a person does to release a displaced driver on another host that is gone.
+const FENCE_RELEASE: &str = "if that driver is gone, clearing the project's \
+                             `onepipeline.publishing` key on the store releases them";
+
+/// Take the project over: write `mine`, then wait until the displaced driver has let go —
+/// it acknowledged, this host's records prove it gone, or its fence names nothing it may
+/// still run once no read of its claim could still let it start anything.
 ///
-/// A claim stating no lease terms has no timer fallback: acknowledgement or local
-/// evidence is required.
+/// A driver names every dispatch and publication on its project's fence before it starts
+/// it, so once its lease can confirm nothing more its fence names all it may still run. No
+/// timer stands in for that fence: the adopter waits while the fence names a node of the
+/// displaced driver's, or cannot be read, and says so on standard error and in the runs
+/// root, where the all-runs `status` reads it. A displaced driver on this host also needs
+/// this host's records or its acknowledgement, and a claim stating no lease terms its
+/// acknowledgement or this host's records.
 ///
 /// The store is read every tenth of an interval while it waits, at least a second and at
 /// most thirty apart: the adopter carries the cost of a takeover, not every running driver.
@@ -1806,6 +1928,7 @@ pub(crate) enum HandedOver {
 /// another launch's claim replaces this one while it waits.
 pub(crate) fn hand_over(
     store: &Store,
+    root: &std::path::Path,
     project: &QualifiedId,
     mine: &DriverClaim,
     displaced: Option<&DriverClaim>,
@@ -1833,26 +1956,37 @@ pub(crate) fn hand_over(
         || "the driver its claim named".to_owned(),
         |claim| format!("run '{}' on host '{}'", claim.run, claim.host),
     );
+    let local = displaced.is_some_and(|claim| claim.host == crate::sys::hostname());
+    let mut file = TakeoverWaitFile::new(root, project, &mine.run, &whom);
     match (wait, displaced) {
-        (Some(wait), _) => eprintln!(
-            "onepipeline: --take-over claimed {} for run '{}'; it starts once {whom} has \
-             acknowledged, or in {}s once none of its publications is under way",
-            project.as_str(),
-            mine.run,
-            wait.as_secs()
-        ),
-        (None, displaced) => eprintln!(
-            "onepipeline: --take-over claimed {} for run '{}'; {whom} states no lease, so no \
-             wait outlasts it: it starts once that driver has acknowledged{}",
-            project.as_str(),
-            mine.run,
-            displaced.map_or_else(String::new, |claim| format!(
-                ", or — taken over on host '{}' — once that host's records prove its run gone",
-                claim.host
-            ))
-        ),
+        (Some(wait), _) => {
+            eprintln!(
+                "onepipeline: --take-over claimed {} for run '{}'; it starts once {whom} has \
+                 acknowledged, or once its fence, read in {}s, names nothing it may still run",
+                project.as_str(),
+                mine.run,
+                wait.as_secs()
+            );
+            file.waits_on(format!(
+                "its acknowledgement, or its fence once its lease has run out in {}s",
+                wait.as_secs()
+            ));
+        }
+        (None, displaced) => {
+            eprintln!(
+                "onepipeline: --take-over claimed {} for run '{}'; {whom} states no lease, so no \
+                 wait outlasts it: it starts once that driver has acknowledged{}",
+                project.as_str(),
+                mine.run,
+                displaced.map_or_else(String::new, |claim| format!(
+                    ", or — taken over on host '{}' — once that host's records prove its run gone",
+                    claim.host
+                ))
+            );
+            file.waits_on("its acknowledgement".to_owned());
+        }
     }
-    // What has been said of the displaced driver's publications, so each is said once.
+    // What has been said of the displaced driver's fence, so each is said once.
     let mut said: Option<std::result::Result<Publishing, String>> = None;
     loop {
         if locally_gone()? {
@@ -1897,7 +2031,7 @@ pub(crate) fn hand_over(
                     claimed_at: other.claimed_at,
                 })
             }
-            // Cleared by somebody else: no answer, and the wait goes on to its end.
+            // Cleared by somebody else: no answer, and the wait goes on.
             Ok((None, publishing)) => publishing,
             Err(why) => {
                 eprintln!(
@@ -1905,14 +2039,15 @@ pub(crate) fn hand_over(
                      waiting",
                     project.as_str()
                 );
+                file.waits_on(format!("the project's claim and fence, which cannot be read: {why}"));
                 continue;
             }
         };
         let Some(wait) = wait.filter(|wait| written.elapsed() >= *wait) else {
             continue;
         };
-        // The cross-host fallback consults the best-effort store fence. A local
-        // predecessor still requires ownership evidence even when this fence is absent.
+        // Its lease can confirm nothing more, so its fence names all it may still run: the
+        // takeover starts once that names nothing of its, and never on the wait alone.
         let standing = match publishing {
             Ok(Some(publishing))
                 if displaced
@@ -1924,51 +2059,69 @@ pub(crate) fn hand_over(
             Err(why) => Some(Err(why.to_string())),
         };
         match standing {
-            None if displaced.is_some_and(|claim| claim.host == crate::sys::hostname()) => {
-                // Only local ownership/journal evidence or acknowledgement releases a live
-                // predecessor. A missing store fence is not evidence of stopped work.
-                continue;
+            None if local => {
+                // Only this host's records or an acknowledgement release a driver of this
+                // host: its fence is not all this host knows of it.
+                file.waits_on(
+                    "its acknowledgement, or this host's records showing its run let go"
+                        .to_owned(),
+                );
             }
             None => {
                 eprintln!(
-                    "onepipeline: {whom} has not acknowledged in {}s, by when it can start and \
-                     continue nothing for {}, and none of its publications is under way: run \
-                     '{}' starts",
+                    "onepipeline: {whom} has not acknowledged in {}s, by when it can start \
+                     nothing more on {}, and its fence names none of its work: run '{}' starts",
                     wait.as_secs(),
                     project.as_str(),
                     mine.run
                 );
-                return Ok(HandedOver::WaitedOut);
+                return Ok(HandedOver::FenceClear);
             }
-            Some(standing) if said.as_ref() != Some(&standing) => {
-                match &standing {
-                    Ok(publishing) => eprintln!(
-                        "onepipeline: {whom} has not acknowledged in {}s, and its publication of \
-                         {} has been under way since {}: run '{}' starts once that has finished, \
-                         or once {whom} acknowledges",
-                        wait.as_secs(),
-                        publishing
-                            .nodes
-                            .iter()
-                            .map(|node| format!("'{node}'"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        publishing.at,
-                        mine.run
+            Some(standing) => {
+                let (waits_on, why) = match &standing {
+                    Ok(publishing) => (
+                        format!(
+                            "its fence, which has named {} as under way since {}; {FENCE_RELEASE}",
+                            quoted_nodes(&publishing.nodes),
+                            publishing.at
+                        ),
+                        format!(
+                            "its fence has named {} as under way since {}",
+                            quoted_nodes(&publishing.nodes),
+                            publishing.at
+                        ),
                     ),
-                    Err(why) => eprintln!(
-                        "onepipeline: {whom} has not acknowledged in {}s, and {why}, so a \
-                         publication of its may be under way: run '{}' starts once {whom} \
-                         acknowledges",
-                        wait.as_secs(),
-                        mine.run
+                    Err(why) => (
+                        format!(
+                            "its fence, which cannot be read ({why}), so any of its nodes may be \
+                             under way; {FENCE_RELEASE}"
+                        ),
+                        format!("{why}, so a dispatch or publication of its may be under way"),
                     ),
+                };
+                if said.as_ref() != Some(&standing) {
+                    eprintln!(
+                        "onepipeline: {whom} has not acknowledged in {}s, and {why}: run '{}' \
+                         starts once its fence names none of its work, or once {whom} \
+                         acknowledges; {FENCE_RELEASE}",
+                        wait.as_secs(),
+                        mine.run,
+                    );
+                    said = Some(standing);
                 }
-                said = Some(standing);
+                file.waits_on(waits_on);
             }
-            Some(_) => {}
         }
     }
+}
+
+/// Node ids as a sentence lists them: each quoted, comma-separated.
+fn quoted_nodes(nodes: &[String]) -> String {
+    nodes
+        .iter()
+        .map(|node| format!("'{node}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Release this run's claim on its project directly, where the closeout's own projection —
@@ -2942,5 +3095,37 @@ mod tests {
                 "{refused}"
             );
         }
+    }
+
+    /// A takeover's wait is said by the all-runs `status` while it lasts and not after; a
+    /// file a process that has gone left is removed rather than said.
+    #[test]
+    fn a_takeover_wait_is_said_only_while_its_process_waits() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-takeover-wait-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("a runs root");
+        let project: QualifiedId = "plans:p".parse().expect("a project");
+        let mut file = TakeoverWaitFile::new(&root, &project, "adopter", "run 'r' on host 'h'");
+        assert!(takeover_waits(&root).is_empty(), "nothing is said before the wait says it");
+        file.waits_on("its fence, which has named 'x' as under way".to_owned());
+        let said = takeover_waits(&root);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("takeover of plans:p by run 'adopter' waiting since ")
+                && said[0]
+                    .ends_with("on run 'r' on host 'h': its fence, which has named 'x' as under way"),
+            "{said:?}"
+        );
+        let stale = root.join(format!("{TAKEOVER_WAIT_PREFIX}1.json"));
+        let mut gone = file.wait.clone();
+        gone.started = "not this process".to_owned();
+        std::fs::write(&stale, serde_json::to_vec(&gone).expect("a wait")).expect("written");
+        assert_eq!(takeover_waits(&root).len(), 1);
+        assert!(!stale.exists(), "a dead process's wait was left standing");
+        drop(file);
+        assert!(takeover_waits(&root).is_empty(), "the wait outlived its process's wait");
+        std::fs::remove_dir_all(&root).expect("removed");
     }
 }
