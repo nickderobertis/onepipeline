@@ -2209,6 +2209,14 @@ fn the_store_cli_and_the_engine_refuse_and_pass_the_same_writes_in_the_same_word
             ("library", "public"),
         ],
     );
+    // The keeper's dispatch fence must land before the declaration becomes unreadable:
+    // a refused fence admits no new work. The live edit below exercises the refusal
+    // while that already-fenced dispatch keeps the run open.
+    let unregistered = held_run(
+        &world,
+        "unregistered",
+        vec![citing("elsewhere", "gamma", "nothing")],
+    );
     std::fs::write(
         c.checkout.join("private-terms.toml"),
         "schema_version = 1\nterms = [\n",
@@ -2216,11 +2224,6 @@ fn the_store_cli_and_the_engine_refuse_and_pass_the_same_writes_in_the_same_word
     .expect("a broken declaration");
     crate::harness::git(&world, &c.checkout, &["add", "-A"]);
     crate::harness::git(&world, &c.checkout, &["commit", "-qm", "chore: break it"]);
-    let unregistered = held_run(
-        &world,
-        "unregistered",
-        vec![citing("elsewhere", "gamma", "nothing")],
-    );
     reply(
         &world,
         "unregistered",
