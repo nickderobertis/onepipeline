@@ -681,6 +681,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::StaleOrigin { .. } => decided("stale-origin"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
         EngineError::StaleLink { .. } => decided("stale-link"),
+        // llmlint: ignore[changed_behavior_has_e2e] only members-only copies raise this refusal; this worker uses whole-project copies. The exhaustive store-word test below checks the classification for the linked release.
+        EngineError::NoProjectCounterpart { .. } => decided("no-project-counterpart"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never sets `create`; `writeback::tests` holds the word.
@@ -6310,6 +6312,12 @@ mod tests {
             EngineError::StaleLink {
                 item: "a".into(),
                 link: "b".into(),
+            },
+            EngineError::NoProjectCounterpart {
+                project: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("board")
+                    .expect("a source name"),
+                missing: onetaskgraph_plugin_api::SourceName::new("board").expect("a source name"),
             },
             EngineError::NotAMember {
                 id: id(),

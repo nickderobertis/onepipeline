@@ -12545,7 +12545,7 @@ absent by default. An edit may state it on `add` and a `retry` replacement. A no
 loaded from a plan never states it: `onepipeline.assets_from` metadata is refused
 at load as not a node field, as `task_record` is. `requeue` cannot amend it.
 
-The edit compiler reads the named task's held images through onetaskgraph 0.9.4's
+The edit compiler reads the named task's held images through onetaskgraph 0.10.0's
 public `Engine::task_assets` read (the otg-task-images release). An unreadable
 `assets_from` refuses the edit before it is journalled, naming the qualified id
 and the store's reason. Before a creating copy, write-back reads the held images
