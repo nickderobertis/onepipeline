@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "2.0.0",
   "description": "The planner-channel layout onepipeline publishes for a host's onemessagebus to link.",
   "schemas": [
     {
@@ -326,7 +326,7 @@
               "op",
               "outcome"
             ],
-            "description": "What became of **one** command of an envelope.\n\nEvery command is evaluated, whatever the ones before it said, so each entry is\nthat command's **own** answer. The envelope is still atomic — a refusal\nanywhere in it applies none of it — and the four words of [`CommandVerdict`]\nare what tells apart the facts a single boolean could not: which commands\nwere wrong, which were fine and went down with them, and which of those had\nalready been read by a conversation that cannot unread it. A manager reading\nthem knows which to fix, which to resend unchanged, and which not to resend\nat all."
+            "description": "What became of **one** command of an envelope.\n\nEvery command is evaluated, whatever the ones before it said, so each entry is\nthat command's **own** answer. The envelope is still atomic — a refusal\nanywhere in it applies none of it — and the words of [`CommandVerdict`]\nare what tells apart the facts a single boolean could not: which commands\nwere wrong, which were fine and went down with them, and which of those had\nalready been read by a conversation that cannot unread it. A manager reading\nthem knows which to fix, which to resend unchanged, and which not to resend\nat all."
           },
           "CommandVerdict": {
             "oneOf": [
@@ -349,9 +349,14 @@
                 "type": "string",
                 "const": "refused",
                 "description": "It refused, and [`reason`](CommandResult::reason) is what it said."
+              },
+              {
+                "type": "string",
+                "const": "queued",
+                "description": "A live `note` handed to its receiver's inbox, waiting for that\nreceiver's turn to take it.\n\nThe envelope is answered as its notes are handed off rather than once\neach receiver's turn ends, which can be hours later. What the receiver's\nturn later makes of the note — taken, carried or refused — is that note's\nown record in the run's journal, and never rewrites this answer."
               }
             ],
-            "description": "The four things that can become of one command of an envelope.\n\nOne field rather than a boolean and a sentence, because \"not applied\" was two\nfacts wearing one word: a command that was wrong and a command that was fine.\nA reader that cannot tell them apart resends the wrong one and fixes the right\none."
+            "description": "The five things that can become of one command of an envelope.\n\nOne field rather than a boolean and a sentence, because \"not applied\" was two\nfacts wearing one word: a command that was wrong and a command that was fine.\nA reader that cannot tell them apart resends the wrong one and fixes the right\none."
           },
           "Refusal": {
             "oneOf": [
