@@ -12551,6 +12551,10 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    remains best-effort while the store is unreachable: a fence the predecessor could not
    write is invisible to a successor on another host. This amendment adds no cross-host
    acknowledgement requirement or stopped-evidence record.
+   The pre-existing empty-claim simultaneous-launch residual remains on this host too:
+   if every store write failed since the first launch, a second launch can find no stored
+   identity to resolve against local ownership. Store-independent discovery is outside this
+   amendment. Same-host protection here applies to takeover of a known recorded driver.
 5. **A displaced driver that is provably gone makes nobody wait.** On the same host that is
    its run's ownership lock found free, as before, or, for a run this runs root does not
    hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
