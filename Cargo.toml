@@ -1160,11 +1160,10 @@ onevcs-testing = "0.19.13"
 # store's own word.
 #
 # **0.10.0 links the cheaper approval**: approving a plan on a GitHub Projects board
-# lists the project's members and writes its document's metadata in one request each
-# (0.9.3). The test CLI is provisioned at this same release. It is breaking: a
-# members-only copy scope arrives with `EngineError::NoProjectCounterpart`, and a
-# document write expecting a version may be refused `EngineError::VersionMoved` (0.9.4);
-# `src/writeback.rs` names each in the store's own word, and a write-back reaches neither.
+# lists its members and writes its document metadata in one request each, and a host
+# holds its plan-store CLI to the release this engine links, so it adopts that approval
+# only once this pin does. It is breaking: `EngineError` gains `NoProjectCounterpart`
+# and `VersionMoved`, which `src/writeback.rs` names in the store's own word.
 onetaskgraph-core = "=0.10.0"
 onetaskgraph-plugin-api = "=0.10.0"
 onetaskgraph-local-md = "=0.10.0"
