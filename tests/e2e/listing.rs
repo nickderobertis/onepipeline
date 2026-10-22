@@ -526,7 +526,7 @@ fn a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_
     assert_eq!(
         headers,
         vec![
-            format!("{GROUP_HEADER}(no project) — orphan"),
+            format!("{GROUP_HEADER}(no project)"),
             format!("{GROUP_HEADER}{alpha_project} — alpha"),
             format!("{GROUP_HEADER}{beta_project} — beta"),
         ],

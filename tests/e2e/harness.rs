@@ -1361,6 +1361,37 @@ impl World {
             .block_on(call(engine))
     }
 
+    /// Copy a project's metadata onto its same-titled local counterpart through the store.
+    pub fn copy_project_metadata(&self, project: &str, destination: &str) {
+        let project = global(project);
+        let destination = onetaskgraph_plugin_api::SourceName::new(destination).unwrap();
+        let report = self.store_call(|engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    destination,
+                    match_by: Some(onetaskgraph_core::MatchBy::Title),
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .expect("the real store copies the project")
+        });
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.action.destination().is_some()),
+            "{report:?}"
+        );
+    }
+
     /// Read this world's project back through the store the engine links, as the page a
     /// `show` of it answers.
     pub fn store_project(&self, project: &str) -> Value {

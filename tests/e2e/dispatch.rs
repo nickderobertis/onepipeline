@@ -6753,3 +6753,620 @@ fn stopping_with_an_unresponsive_observer_bounds_the_cooperative_wait() {
         "stop never requested cooperative cancellation"
     );
 }
+
+/// Launch, adoption, cached summaries and grouping all expose the same opaque metadata.
+#[test]
+fn run_labels_survive_real_start_and_adopt() {
+    use onepipeline::views::{Listing, Projects, RunSummary, SUMMARY_SCHEMA_VERSION};
+    let world = World::new("launch-labels");
+    world.write_graphs();
+    let project = world.plan(
+        "labelled",
+        &plan_of(
+            "labelled",
+            vec![human("approve", &[]), agent("build", &["approve"])],
+        ),
+    );
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &project,
+            "--attach",
+            "--label",
+            "kind=spikes",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0);
+    let launch = world.run_json("labelled", "launch.json");
+    assert_eq!(launch["labels"], json!({"kind":"spikes"}));
+    assert_eq!(launch["group"], "authoring:example");
+    world.run(&["attest", "labelled", "approve"]).exited(0);
+    world
+        .run_on_agentgraph(&["adopt", "labelled", "--attach"])
+        .exited(0);
+    let adopted = world.run_json("labelled", "launch.json");
+    for key in ["labels", "group", "project_origin"] {
+        assert_eq!(adopted[key], launch[key]);
+    }
+    assert!(
+        world
+            .turns()
+            .iter()
+            .any(|turn| turn.prompt.contains("Do build.")),
+        "the real agent never ran"
+    );
+    let status = world.run(&["status", "labelled", "--json"]);
+    status.exited(0);
+    let reading: Value = serde_json::from_str(&status.stdout).unwrap();
+    assert_eq!(reading["labels"], launch["labels"]);
+    assert_eq!(reading["group"], launch["group"]);
+    let paths = onepipeline::views::RunPaths::under(&world.runs, "labelled");
+    let summary = RunSummary::of(&paths).unwrap();
+    assert_eq!(summary.schema_version, SUMMARY_SCHEMA_VERSION);
+    assert_eq!(SUMMARY_SCHEMA_VERSION, 11);
+    assert_eq!(summary.labels["kind"], "spikes");
+    assert_eq!(summary.group.as_deref(), Some("authoring:example"));
+    let listing = Listing::of(&world.runs);
+    assert_eq!(listing.summaries[0].labels, summary.labels);
+    assert_eq!(listing.summaries[0].group, summary.group);
+    let projects = Projects::of(&listing);
+    assert_eq!(projects.groups[0].project, summary.group);
+    assert_eq!(projects.groups[0].name.as_deref(), Some("example"));
+    assert_eq!(projects.groups[0].runs[0].labels, summary.labels);
+    assert_eq!(
+        world.run_json("labelled", "summary.json")["labels"],
+        launch["labels"]
+    );
+}
+
+/// A real local plan-store copy groups beside an explicitly grouped planning run.
+#[test]
+fn run_labels_copy_origin_resolves_group_and_name() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("origin-labels");
+    let authoring = world.store_apart("authoring");
+    let newer = world.store_apart("newer");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        )
+        .with_env("ONETASKGRAPH_SOURCES__NEWER__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__NEWER__CONFIG__ROOT",
+            newer.to_str().unwrap(),
+        );
+    world.write_graphs();
+    let copy = world.plan("copied", &plan_of("copied", vec![agent("build", &[])]));
+    let file = world.store().join("projects/copied-board.md");
+    let text = std::fs::read_to_string(&file).unwrap();
+    for invalid in ["unqualified", "42"] {
+        std::fs::write(
+            &file,
+            text.replacen(
+                "metadata:",
+                &format!("metadata:\n  onetaskgraph.origin: {invalid}"),
+                1,
+            ),
+        )
+        .unwrap();
+        world
+            .run_on_agentgraph(&["start", &copy, "--attach"])
+            .exited(REFUSED)
+            .err_has("onetaskgraph.origin");
+        assert!(!world.run_file("copied", "launch.json").exists());
+    }
+    std::fs::write(&file, &text).unwrap();
+    world.plan_in(&authoring, "example", &plan_of("copied", vec![]));
+    world.copy_project_metadata("authoring:example-board", crate::harness::STORE_SOURCE);
+    world
+        .run_on_agentgraph(&["start", &copy, "--attach"])
+        .exited(0);
+    let launch = world.run_json("copied", "launch.json");
+    assert_eq!(launch["project_origin"], "authoring:example-board");
+    let newest = world.plan_in(
+        &newer,
+        "newest-copy",
+        &plan_of("newest-copy", vec![agent("build", &[])]),
+    );
+    world.plan_in(&authoring, "example", &plan_of("newest-copy", vec![]));
+    world.copy_project_metadata("authoring:example-board", "newer");
+    let newest = newest.replacen(crate::harness::STORE_SOURCE, "newer", 1);
+    let mut command = world.agentgraph_cmd(&["start", &newest, "--attach"]);
+    command.env("ONETASKGRAPH_DEFAULT_SOURCES", "newer");
+    world.run_on(command, "start the newer copy").exited(0);
+    // New activity on the earlier run must not rename a project after its newest launch.
+    world
+        .run_on_agentgraph(&["adopt", "copied", "--attach"])
+        .exited(0);
+    let planning = world.plan(
+        "planning",
+        &plan_of("planning", vec![human("approve", &[])]),
+    );
+    world
+        .run(&[
+            "start",
+            &planning,
+            "--attach",
+            "--group",
+            "authoring:example-board",
+        ])
+        .exited(0);
+    let projects = Projects::of(&Listing::of(&world.runs));
+    assert_eq!(projects.groups.len(), 1);
+    assert_eq!(
+        projects.groups[0].project.as_deref(),
+        Some("authoring:example-board")
+    );
+    assert_eq!(projects.groups[0].name.as_deref(), Some("newest-copy"));
+    assert_eq!(projects.groups[0].runs.len(), 3);
+    let status = world.run(&["status", "copied", "--json"]);
+    status.exited(0);
+    assert_eq!(
+        serde_json::from_str::<Value>(&status.stdout).unwrap()["group"],
+        "authoring:example-board"
+    );
+    world
+        .run_on_agentgraph(&["start", &copy, "--attach", "--group", "authoring:override"])
+        .exited(0);
+    let override_launch = world.run_json("copied-2", "launch.json");
+    assert_eq!(override_launch["project_origin"], "authoring:example-board");
+    assert_eq!(override_launch["group"], "authoring:override");
+    assert_eq!(
+        world.run(&["status", "copied-2", "--json"]).json()["group"],
+        "authoring:override"
+    );
+    assert!(Projects::of(&Listing::of(&world.runs))
+        .groups
+        .iter()
+        .any(|group| group.project.as_deref() == Some("authoring:override")));
+}
+
+/// Whole replacement removes only named launch keys, and explicit null suppresses inference.
+#[test]
+fn run_labels_overlay_replaces_and_selectively_removes_launch_values() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("overlay-labels");
+    let project = world.plan("overlay", &plan_of("overlay", vec![human("approve", &[])]));
+    world
+        .run(&[
+            "start",
+            &project,
+            "--attach",
+            "--label",
+            "kind=main",
+            "--label",
+            "owner=kept",
+        ])
+        .exited(0);
+    let launch = std::fs::read(world.run_file("overlay", "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file("overlay", "events.jsonl")).unwrap();
+    let labelled = world.run(&[
+        "label",
+        "overlay",
+        "--unlabel",
+        "kind",
+        "--label",
+        "phase=design",
+        "--no-group",
+    ]);
+    labelled.exited(0);
+    let written = world.run_json("overlay", "labels.json");
+    assert_eq!(
+        labelled.stdout.lines().count(),
+        1,
+        "label must print one JSON line"
+    );
+    assert_eq!(
+        labelled.json(),
+        written,
+        "label must state the whole overlay it wrote"
+    );
+    assert_eq!(written["set_by"]["session"], world.session);
+    assert_eq!(
+        written["set_by"]["launcher"],
+        world.run_json("overlay", "launch.json")["launcher"]
+    );
+    let stamp = written["set_at"].as_str().unwrap();
+    onepipeline::verbs::LabelTimestamp::try_from(stamp.to_owned()).unwrap();
+    assert!(
+        stamp
+            >= world.run_json("overlay", "launch.json")["started_at"]
+                .as_str()
+                .unwrap()
+    );
+    let listing = Listing::of(&world.runs);
+    assert_eq!(
+        listing.summaries[0].labels,
+        std::collections::BTreeMap::from([
+            ("owner".into(), "kept".into()),
+            ("phase".into(), "design".into())
+        ])
+    );
+    assert_eq!(listing.summaries[0].group, None);
+    assert_eq!(Projects::of(&listing).groups[0].project, None);
+    let status = world.run(&["status", "overlay", "--json"]);
+    status.exited(0);
+    let status: Value = serde_json::from_str(&status.stdout).unwrap();
+    assert_eq!(status["labels"], json!({"owner":"kept","phase":"design"}));
+    assert!(status["group"].is_null());
+    assert!(world.run_json("overlay", "labels.json")["group"].is_null());
+    world.run(&["runs"]).exited(0).out_has("(no project)");
+    world
+        .run(&[
+            "label",
+            "overlay",
+            "--label",
+            "kind=spikes",
+            "--unlabel",
+            "kind",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0)
+        .out_has("spikes");
+    assert_eq!(
+        Listing::of(&world.runs).summaries[0].labels,
+        std::collections::BTreeMap::from([
+            ("owner".into(), "kept".into()),
+            ("kind".into(), "spikes".into())
+        ])
+    );
+    world.run(&["label", "overlay"]).exited(0);
+    let row = &Listing::of(&world.runs).summaries[0];
+    assert_eq!(row.labels["kind"], "main");
+    assert_eq!(row.group.as_deref(), Some(project.as_str()));
+    assert!(!world
+        .run_json("overlay", "labels.json")
+        .as_object()
+        .unwrap()
+        .contains_key("group"));
+    assert_eq!(
+        std::fs::read(world.run_file("overlay", "launch.json")).unwrap(),
+        launch
+    );
+    assert_eq!(
+        std::fs::read(world.run_file("overlay", "events.jsonl")).unwrap(),
+        journal
+    );
+}
+
+/// Invalid and duplicate label keys fail before minting a run or replacing an overlay.
+#[test]
+fn run_labels_refuse_invalid_inputs_by_name() {
+    let world = World::new("invalid-labels");
+    let project = world.plan("invalid", &plan_of("invalid", vec![human("approve", &[])]));
+    for label in [
+        "Kind=spikes",
+        "kind=",
+        "kind=a\nb",
+        "kind",
+        "bad_key=x",
+        "=x",
+        "1kind=x",
+        "kind=a\rb",
+    ] {
+        let key = label.split('=').next().unwrap();
+        let expected = if key.is_empty() {
+            "invalid label key ''"
+        } else {
+            key
+        };
+        world
+            .run(&["start", &project, "--attach", "--label", label])
+            .exited(REFUSED)
+            .err_has(expected);
+    }
+    world
+        .run(&[
+            "start", &project, "--label", "kind=one", "--label", "kind=two",
+        ])
+        .exited(REFUSED)
+        .err_has("kind");
+    assert!(!world.run_file("invalid", "launch.json").exists());
+    world
+        .run(&["start", &project, "--group", "unqualified"])
+        .exited(REFUSED)
+        .err_has("unqualified");
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let launch_bytes = std::fs::read(world.run_file("invalid", "launch.json")).unwrap();
+    let launch = world.run_json("invalid", "launch.json");
+    for (field, value, error) in [
+        ("labels", json!({"Kind":"main"}), "Kind"),
+        ("labels", json!({"kind":""}), "label value"),
+        ("group", json!("unqualified"), "unqualified"),
+        ("project_origin", json!("unqualified"), "unqualified"),
+    ] {
+        let mut corrupt = launch.clone();
+        corrupt[field] = value;
+        std::fs::write(
+            world.run_file("invalid", "launch.json"),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        world
+            .run(&["status", "invalid", "--json"])
+            .exited(REFUSED)
+            .err_has(error);
+    }
+    std::fs::write(world.run_file("invalid", "launch.json"), launch_bytes).unwrap();
+    for args in [
+        vec!["--label", "kind="],
+        vec!["--label", "kind=a", "--label", "kind=b"],
+        vec!["--unlabel", "Kind"],
+    ] {
+        let mut command = vec!["label", "invalid"];
+        command.extend(args);
+        world.run(&command).exited(REFUSED).err_has("ind");
+    }
+    assert!(!world.run_file("invalid", "labels.json").exists());
+    for label in [
+        format!("{}=x", "k".repeat(33)),
+        format!("kind={}", "x".repeat(65)),
+    ] {
+        world
+            .run(&["label", "invalid", "--label", &label])
+            .exited(REFUSED)
+            .err_has(label.split('=').next().unwrap());
+    }
+    world
+        .run(&["label", "invalid", "--group", "unqualified"])
+        .exited(REFUSED)
+        .err_has("unqualified");
+    world
+        .run(&[
+            "label",
+            "invalid",
+            "--group",
+            "authoring:example",
+            "--no-group",
+        ])
+        .exited(REFUSED)
+        .err_has("cannot be used");
+    let boundary_key = "k".repeat(32);
+    world
+        .run(&[
+            "label",
+            "invalid",
+            "--label",
+            &format!("{boundary_key}=valid"),
+        ])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"][&boundary_key],
+        "valid"
+    );
+    let unicode = "é".repeat(64);
+    world
+        .run(&["label", "invalid", "--label", &format!("kind={unicode}")])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"]["kind"],
+        unicode
+    );
+    let overlay = world.run_json("invalid", "labels.json");
+    for (field, value, error) in [
+        ("schema_version", json!(2), "schema_version 2"),
+        ("labels", json!({"Kind":"spikes"}), "Kind"),
+        ("labels", json!({"kind":""}), "label value"),
+        ("group", json!("unqualified"), "unqualified"),
+        ("set_at", json!("not-a-time"), "set_at"),
+        ("unknown", json!(true), "unknown field"),
+    ] {
+        let mut corrupt = overlay.clone();
+        corrupt[field] = value;
+        std::fs::write(
+            world.run_file("invalid", "labels.json"),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        world
+            .run(&["status", "invalid", "--json"])
+            .exited(REFUSED)
+            .err_has(error);
+    }
+    std::fs::write(world.run_file("invalid", "labels.json"), "{").unwrap();
+    world
+        .run(&["status", "invalid", "--json"])
+        .exited(REFUSED)
+        .err_has("labels.json");
+    // Replacement is also recovery: the label verb does not depend on the old overlay reading.
+    world
+        .run(&["label", "invalid", "--label", "kind=recovered"])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", "invalid", "--json"]).json()["labels"]["kind"],
+        "recovered"
+    );
+}
+
+/// Real pre-label host records remain readable and the label verb never edits their history.
+#[test]
+fn run_labels_recorded_host_runs_and_force_authorization() {
+    use onepipeline::views::{Listing, Projects};
+    let world = World::new("recorded-labels");
+    let fixtures =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/recorded/run-root/run-labels");
+    for (fixture, run) in [
+        ("ended", "nx-heal-removal-revise"),
+        ("driven", "dag-ui-project-centric"),
+    ] {
+        let dir = world.runs.join(run);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["launch.json", "plan.json", "events.jsonl", "summary.json"] {
+            std::fs::copy(fixtures.join(fixture).join(file), dir.join(file)).unwrap();
+        }
+    }
+    let ended = "nx-heal-removal-revise";
+    let original = world.run_json(ended, "launch.json");
+    assert!(original.get("labels").is_none());
+    let listing = Listing::of(&world.runs);
+    let old = listing
+        .summaries
+        .iter()
+        .find(|row| row.run_id == ended)
+        .unwrap();
+    assert!(old.labels.is_empty());
+    assert_eq!(old.group.as_deref(), original["project"].as_str());
+    let launch = std::fs::read(world.run_file(ended, "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file(ended, "events.jsonl")).unwrap();
+    world
+        .run(&[
+            "label",
+            ended,
+            "--label",
+            "kind=spikes",
+            "--group",
+            "authoring:example",
+        ])
+        .exited(0);
+    world.run(&["runs"]).exited(0).out_has("authoring:example");
+    let status = world.run(&["status", ended, "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["labels"], json!({"kind":"spikes"}));
+    assert_eq!(status.json()["group"], "authoring:example");
+    let projects = Projects::of(&Listing::of(&world.runs));
+    let group = projects
+        .groups
+        .iter()
+        .find(|g| g.project.as_deref() == Some("authoring:example"))
+        .unwrap();
+    assert_eq!(group.runs[0].labels["kind"], "spikes");
+    world
+        .run(&["label", ended, "--unlabel", "kind", "--no-group"])
+        .exited(0);
+    let status = world.run(&["status", ended, "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["labels"], json!({}));
+    assert!(status.json()["group"].is_null());
+    assert_eq!(
+        std::fs::read(world.run_file(ended, "launch.json")).unwrap(),
+        launch
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(ended, "events.jsonl")).unwrap(),
+        journal
+    );
+
+    // Replay the captured active claim with a driver this test owns. No dependency on
+    // the original host process staying alive, and no signal ever reaches that process.
+    let meeting = world.rendezvous("build");
+    let project = world.plan("claim", &plan_of("claim", vec![agent("build", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let arrival = meeting.arrived();
+    let status = world.run(&["status", "claim", "--json"]);
+    status.exited(0);
+    assert_eq!(status.json()["driven"], true);
+    world
+        .run(&["label", "claim", "--label", "kind=owned"])
+        .exited(0);
+    let foreign = world.as_session("other-session");
+    foreign
+        .run(&["label", "claim", "--label", "kind=foreign"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    foreign
+        .run(&["label", "claim", "--label", "kind=forced", "--force"])
+        .exited(0);
+    assert_eq!(
+        world.run_json("claim", "labels.json")["set_by"]["session"],
+        "other-session"
+    );
+    assert_eq!(
+        world.run(&["status", "claim", "--json"]).json()["labels"]["kind"],
+        "forced"
+    );
+    let claim = world.run_json("claim", "launch.json");
+    let driven = "dag-ui-project-centric";
+    let mut recorded = world.run_json(driven, "launch.json");
+    // llmlint: ignore[tests_mirror_real_usage] this is a captured external launch record, whose original process claim cannot remain live on another host; only its kernel-specific pid/host/start are rebound to the real driver this test just started and holds. The replay neither touches the original host process nor executes the recorded graph, and the separate real-start ownership assertions above prove same-owner success, foreign refusal and forced success without editing any claim.
+    for key in ["pid", "host", "started"] {
+        recorded[key] = claim[key].clone();
+    }
+    // llmlint: ignore[tests_mirror_real_usage] this persists only the captured fixture's pid/host/start transplant above so its foreign ownership can be replayed against a real held driver on this host. The original host process and recorded graph are never run or touched; the preceding real-start journey separately proves ownership refusal and force authorization without rewriting a claim.
+    std::fs::write(
+        world.run_file(driven, "launch.json"),
+        serde_json::to_vec(&recorded).unwrap(),
+    )
+    .unwrap();
+    let before = std::fs::read(world.run_file(driven, "launch.json")).unwrap();
+    let journal = std::fs::read(world.run_file(driven, "events.jsonl")).unwrap();
+    world
+        .run(&["label", driven, "--label", "kind=main"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    assert!(!world.run_file(driven, "labels.json").exists());
+    world
+        .run(&["label", driven, "--label", "kind=main", "--force"])
+        .exited(0);
+    assert_eq!(
+        world.run(&["status", driven, "--json"]).json()["labels"],
+        json!({"kind":"main"})
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(driven, "launch.json")).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read(world.run_file(driven, "events.jsonl")).unwrap(),
+        journal
+    );
+    arrival.release();
+    world.until("the test's own driver to finish", |world| {
+        world.run_file("claim", "result.json").is_file()
+    });
+}
+
+/// Foreign-host exit evidence permits labelling only after the matching lock is released.
+#[test]
+fn run_labels_foreign_exit_requires_released_ownership() {
+    let world = World::new("labels-foreign-exit");
+    let run = "nx-heal-removal-revise";
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/recorded/run-root/run-labels/ended");
+    let dir = world.runs.join(run);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in ["launch.json", "plan.json", "events.jsonl", "summary.json"] {
+        std::fs::copy(fixture.join(file), dir.join(file)).unwrap();
+    }
+    let launch = world.run_json(run, "launch.json");
+    let foreign_host = format!("reader-{}", launch["host"].as_str().unwrap());
+    let on_foreign_host = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.env("HOSTNAME", &foreign_host);
+        world.run_on(command, &args.join(" "))
+    };
+    // llmlint: ignore-block[tests_mirror_real_usage] captured run directories may include an ownership lock. Replaying that external lock state proves that driver-exited alone cannot authorize a label while the same claim still owns the run; no recorded process is signalled or graph executed, and a separate real-start release-gate journey proves the live ordering.
+    std::fs::write(
+        dir.join("owner.lock"),
+        serde_json::to_vec(&json!({
+            "host": launch["host"], "pid": launch["pid"], "started": launch["started"],
+            "acquired_at": launch["started_at"], "verb": "drive-run"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let before_launch = std::fs::read(dir.join("launch.json")).unwrap();
+    let before_journal = std::fs::read(dir.join("events.jsonl")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+    assert!(!dir.join("labels.json").exists());
+    // llmlint: ignore[tests_mirror_real_usage] this releases only the replayed external lock above, never a live driver's lock. The recorded graph must not execute; the separate real-start release-gate journey proves that a real driver holds the same protection until its own release.
+    std::fs::remove_file(dir.join("owner.lock")).unwrap();
+    on_foreign_host(&["label", run, "--label", "kind=spikes"]).exited(0);
+    let reading = on_foreign_host(&["status", run, "--json"]);
+    reading.exited(0);
+    assert_eq!(reading.json()["labels"]["kind"], "spikes");
+    assert_eq!(
+        std::fs::read(dir.join("launch.json")).unwrap(),
+        before_launch
+    );
+    assert_eq!(
+        std::fs::read(dir.join("events.jsonl")).unwrap(),
+        before_journal
+    );
+}
