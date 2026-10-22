@@ -1952,6 +1952,150 @@ fn a_stop_that_refused_leaves_its_runs_observer_restarted() {
     world.run(&["stop", &run]).exited(0);
 }
 
+/// Make the run's observer restart lock a directory, which no process can open
+/// as the file it locks.
+fn the_restart_lock_cannot_be_opened(world: &World, run: &str) -> PathBuf {
+    let lock = world.run_file(run, "observer-restart.lock");
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command makes a run's lock
+    // unopenable; a filesystem fault is the failure these journeys must report, so only that
+    // premise is arranged directly, the way
+    // `a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved` arranges
+    // its own. The driver, the stop and every outcome asserted are the binary's.
+    std::fs::create_dir(&lock).expect("the restart lock is replaced by a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    lock
+}
+
+/// A stop that cannot hold its run's observer restarts signals nothing and
+/// refuses, naming the lock: going on unheld is the race the lock closes. The
+/// run is untouched, so the same stop works once the lock can be opened.
+#[test]
+fn a_stop_that_cannot_hold_its_runs_observer_restarts_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-restart-lock-unopenable");
+    world.script("build.wait", "hold");
+    let (run, driver) =
+        start_detached_announcing(&world, "lock-unopenable", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("observer-restart.lock")
+        .err_has("nothing was signalled");
+    assert!(
+        !process_ended(driver),
+        "a stop that held nothing signalled the driver anyway"
+    );
+    assert!(
+        world.events_of(&run, "run-stopped").is_empty(),
+        "a stop that signalled nothing recorded a stop"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.run(&["stop", &run]).exited(0);
+    world.until("the driver to be ended", |_| process_ended(driver));
+}
+
+/// A stop whose wait for a restart under way runs out refuses rather than
+/// stopping the driver unheld, and leaves it running: the restart is still
+/// the driver's, and a stop asked once it is recorded ends the run and the
+/// observer that restart started.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_outwaits_its_bound_for_a_restart_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-restart-outwaited");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "restart-outwaited", vec![agent("build", &[])]);
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
+    let observer = restart.pid;
+    // The bound is the graph's startup backstop and five seconds; one second of
+    // backstop is this stop's alone, so the driver's restart outlasts it.
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
+    let refused = world.run_on(stop, "stop with a one-second startup backstop");
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("observer restart still holds it after 6 seconds")
+        .err_has("nothing was signalled");
+    assert!(
+        !process_ended(driver),
+        "a stop that held nothing signalled the driver anyway"
+    );
+    assert!(world.events_of(&run, "run-stopped").is_empty());
+
+    restart.release();
+    world.until("the restart to be recorded", |world| {
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len)
+            == Some(2)
+    });
+    world.run(&["stop", &run]).exited(0);
+    world.until("the driver to be ended", |_| process_ended(driver));
+    world.until("the observer the restart started to be ended", |_| {
+        process_ended(observer)
+    });
+    drop(dispatch);
+}
+
+/// A driver that cannot take its run's restart lock restarts no observer —
+/// nothing then says a stop is not under way — says why once, and restarts it
+/// once the lock can be taken again.
+#[test]
+fn a_driver_that_cannot_take_its_restart_lock_restarts_no_observer_until_it_can() {
+    let world = World::new("driver-restart-lock-unopenable");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "restart-unopenable", vec![agent("build", &[])]);
+    world.until("the observer to watch", |world| {
+        !world.observer_saw().is_empty()
+    });
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(needle)
+            .count()
+    };
+
+    world.release("observer.go.1");
+    world.until("the driver to say it restarts nothing", |_| {
+        said("cannot be taken") > 0
+    });
+    // Long enough for the watch to look again many times over.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(said("cannot be taken"), 1, "the reason was not said once");
+    assert_eq!(
+        said("started another observer graph"),
+        0,
+        "the driver restarted its observer without its restart lock"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph") > 0
+    });
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "{}",
+        world.dump()
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
 #[test]
 fn a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved() {
     // llmlint: ignore-block[tests_mirror_real_usage] no CLI command occupies the
