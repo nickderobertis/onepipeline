@@ -63,6 +63,10 @@ fn same_as_open(view: &RunView) {
     let fresh = RunView::open(&view.paths).expect("fresh open");
     assert_eq!(document(&view.events), document(&fresh.events), "events");
     assert_eq!(document(&view.state), document(&fresh.state), "state");
+    assert_eq!(
+        view.state.cross_dag, fresh.state.cross_dag,
+        "cross-DAG resolution is not serialized in checkpoint state"
+    );
     assert_eq!(document(&view.launch), document(&fresh.launch), "launch");
     assert_eq!(reading(view), reading(&fresh), "run reading");
 }
@@ -899,4 +903,72 @@ fn refresh_does_not_reread_unchanged_upstreams_when_the_shared_cache_expires() {
         .iter()
         .all(|(path, _, _)| path.file_name().is_none_or(|name| name != "events.jsonl")));
     same_as_open(&view);
+}
+
+#[test]
+fn refresh_preserves_the_view_when_launch_reads_fail_and_recovers_after_restoration() {
+    for corrupt in [false, true] {
+        let mut run = Run::new(
+            if corrupt {
+                "corrupt-launch"
+            } else {
+                "missing-launch"
+            },
+            super::tests::plan(),
+        );
+        let mut view = run.open();
+        let launch = std::fs::read(run.paths.launch()).expect("original launch");
+        let first = view.events.len();
+        let events = document(&view.events);
+        let state = document(&view.state);
+        let attribution = document(&view.launch);
+        if corrupt {
+            std::fs::write(run.paths.launch(), b"not json").expect("corrupt launch");
+        } else {
+            std::fs::remove_file(run.paths.launch()).expect("remove launch");
+        }
+        run.settle("done");
+        assert!(
+            view.refresh().is_err(),
+            "an unreadable launch must be reported"
+        );
+        assert_eq!(document(&view.events), events);
+        assert_eq!(document(&view.state), state);
+        assert_eq!(document(&view.launch), attribution);
+        std::fs::write(run.paths.launch(), launch).expect("restore launch");
+        assert_eq!(
+            view.refresh().expect("recovery reads retained suffix"),
+            Refreshed::Appended { first }
+        );
+        same_as_open(&view);
+    }
+}
+
+#[test]
+fn refresh_rereads_launch_attribution_changes_with_and_without_growth() {
+    for append in [false, true] {
+        let mut run = Run::new(
+            if append {
+                "launch-append"
+            } else {
+                "launch-attribution"
+            },
+            super::tests::plan(),
+        );
+        let mut view = run.open();
+        let mut launch: LaunchRecord = ledger::read_json(&run.paths.launch()).expect("launch");
+        launch.session = "adopting-session".into();
+        launch.adoptions += 1;
+        ledger::write_json(&run.paths.launch(), &launch).expect("new driver attribution");
+        if append {
+            run.settle("done");
+        }
+        assert_eq!(
+            view.refresh().expect("reread attribution"),
+            Refreshed::Reread
+        );
+        assert_eq!(view.launch.session, "adopting-session");
+        assert_eq!(view.launch.adoptions, 1);
+        same_as_open(&view);
+    }
 }
