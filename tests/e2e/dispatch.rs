@@ -4197,6 +4197,188 @@ fn two_concurrent_judged_codex_turns_share_one_app_server() {
     );
 }
 
+/// A completed or refused controlled turn leaves neither the shared server nor
+/// its sweeper alive after the last lease's linger. The sibling's mock stays
+/// listening until the pool stops it, unlike our short-lived Codex double.
+#[cfg(unix)]
+#[test]
+fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
+    use crate::harness::process_ended;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Re-enter the test executable as an embedding host, without parsing the
+    // CLI: LocalExecutor then runs the graph in process. A CLI dispatch retains
+    // a child that exits on settlement before the graph's final reap, masking
+    // the sweeper's inherited-stamp regression.
+    if let Some(graph) = std::env::var_os("ONEPIPELINE_TEST_POOL_GRAPH") {
+        use oneagentgraph::config::ConfigRef;
+        use onepipeline::controls::NodeControls;
+        use onepipeline::event::Labels;
+        use onepipeline::executor::{
+            CancellationToken, DispatchRequest, Executor, LocalExecutor, WorkspaceSpec,
+        };
+        let mut handle = LocalExecutor
+            .dispatch(DispatchRequest {
+                graph: ConfigRef(graph.to_string_lossy().into_owned()),
+                task: "Complete the controlled turn.".into(),
+                labels: Labels::default(),
+                controls: NodeControls::default(),
+                workspace: WorkspaceSpec::Path(
+                    std::env::current_dir().expect("the work directory exists"),
+                ),
+                cancel: CancellationToken::new(),
+                attempt: std::num::NonZeroU32::MIN,
+            })
+            .expect("the public executor starts the controlled turn");
+        for event in handle.events() {
+            event.expect("the engine relays the real graph events");
+        }
+        handle.wait().expect("the dispatch ends");
+        std::fs::write(
+            std::env::var_os("ONEPIPELINE_TEST_POOL_SETTLED").unwrap(),
+            "settled",
+        )
+        .expect("the dispatch ending is recorded");
+        // Keep the embedding host alive while the graph's final reap runs.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+
+    for (tag, fault) in [("complete", ""), ("refused", "refuse-thread-start")] {
+        let name = format!("codex-pool-retirement-{tag}");
+        let world = World::new(&name);
+        world.write_graphs();
+        world.write_supervised_node_graph();
+        std::fs::write(
+            world.graphs().join("oneharness.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"codex\"]\nserver_overloaded_max_retries = 0\n",
+        )
+        .expect("the controlled turn selects Codex");
+        let wrapper = world.root.join("mock-codex");
+        // exec preserves the PID the pool records. Only the harness process,
+        // never the real oneharness CLI driving it, enters mock mode.
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\nexport ONEHARNESS_INTERNAL_MOCK_HARNESS=1\nexec '{}' \"$@\"\n",
+                crate::harness::oneharness_binary()
+                    .to_string_lossy()
+                    .replace('\'', "'\"'\"'")
+            ),
+        )
+        .expect("the mock harness launcher is written");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("the mock harness launcher is executable");
+        let state = ShortDir::new(if fault.is_empty() { "op-rc" } else { "op-rf" });
+        let records = world.root.join("mock-server");
+        let release = world.root.join("complete-turn");
+        let settled = world.root.join("dispatch-settled");
+        // A concurrent build can replace this test image. Linux keeps the
+        // running image available here even when current_exe names a deleted file.
+        let executable = if cfg!(target_os = "linux") {
+            std::path::PathBuf::from("/proc/self/exe")
+        } else {
+            std::env::current_exe().expect("the embedding test executable exists")
+        };
+        let mut command = std::process::Command::new(executable);
+        command
+            .args([
+                "--exact",
+                "dispatch::a_judged_codex_dispatch_retires_its_shared_server_and_sweeper",
+                "--nocapture",
+            ])
+            .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            // Match World::agentgraph_cmd: an embedding host must not inherit
+            // the outer dispatch's harness or model selection.
+            .env_remove("ONEHARNESS_HARNESSES")
+            .env_remove("ONEHARNESS_MODEL")
+            .env_remove("ONEHARNESS_MODELS")
+            .env_remove("ONEHARNESS_MODE")
+            .env(
+                "ONEPIPELINE_TEST_POOL_GRAPH",
+                world.graphs().join("node-scope.yaml"),
+            )
+            .env("ONEPIPELINE_TEST_POOL_SETTLED", &settled)
+            .env("ONEAGENTGRAPH_STATE_DIR", world.graph_state());
+        command
+            .env(
+                "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                crate::harness::oneharness_binary(),
+            )
+            .env("ONEHARNESS_BIN_CODEX", &wrapper)
+            .env("CODEX_MOCK_DIR", &records)
+            .env("CODEX_MOCK_FAULT", fault)
+            .env("MOCK_CODEX_HOLD_UNTIL", &release)
+            .env(oneharness_core::io::app_server::LINGER_ENV, "2000")
+            .env(
+                oneharness_core::io::app_server::DAEMON_DIR_ENV,
+                world.root.join("daemon"),
+            )
+            .env(crate::harness::STATE_HOME_ENV, &state.0)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut launch = command.spawn().expect("the engine starts the dispatch");
+        let mut pids = Vec::new();
+        world.until("the pool to record its server and sweeper", |_| {
+            let Ok(entries) = std::fs::read_dir(state.0.join("oneharness/servers")) else {
+                return false;
+            };
+            for entry in entries.flatten() {
+                let read_pid = |file: &str| -> Option<u32> {
+                    let record: Value =
+                        serde_json::from_slice(&std::fs::read(entry.path().join(file)).ok()?)
+                            .ok()?;
+                    u32::try_from(record["pid"].as_u64()?).ok()
+                };
+                if let (Some(server), Some(sweeper)) =
+                    (read_pid("server.json"), read_pid("sweeper.json"))
+                {
+                    pids = vec![server, sweeper];
+                    return true;
+                }
+            }
+            false
+        });
+        assert!(pids.iter().all(|pid| !process_ended(*pid)), "{pids:?}");
+        std::fs::write(&release, "complete").expect("the controlled turn may finish");
+        world.until("the dispatch to settle", |_| settled.is_file());
+        assert!(std::fs::read_dir(&records)
+            .expect("the mock ran")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("server-")));
+        let frames = std::fs::read_dir(&records)
+            .expect("the mock recorded its connections")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("conn-"))
+            .map(|entry| std::fs::read_to_string(entry.path()).expect("the frames read back"))
+            .collect::<String>();
+        let expected = if fault.is_empty() {
+            "turn/completed"
+        } else {
+            "the mock refuses thread/start"
+        };
+        assert!(frames.contains(expected), "{tag}: no {expected}: {frames}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(17);
+        while pids.iter().any(|pid| !process_ended(*pid)) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let survivors: Vec<_> = pids
+            .into_iter()
+            .filter(|pid| !process_ended(*pid))
+            .collect();
+        // On a regression, clean up only the PIDs captured from this pool entry.
+        for pid in &survivors {
+            end_process(*pid);
+        }
+        launch.kill().expect("end the captured embedding host");
+        launch.wait().expect("reap the embedding host");
+        assert!(
+            survivors.is_empty(),
+            "{tag}: pool processes survived linger and stop deadline: {survivors:?}"
+        );
+    }
+}
+
 /// A directory directly under `/tmp`, removed when dropped: a world's root sits
 /// under the platform temp directory, which on macOS is long enough to put a
 /// socket the journey above needs past that platform's `sun_path` budget.
@@ -6260,6 +6442,315 @@ fn a_detached_runs_worker_turn_can_ask_its_manager() {
         "complete",
         "the run did not settle: {}",
         world.dump()
+    );
+}
+
+/// Stopping an attached engine reaps its observer's blocked command provider.
+/// The linked bus package has no binary target. This command reads one request,
+/// then uses the suite's real TERM-resistant process fixture to require the
+/// graph's final reaper, just as a blocked command provider does.
+#[cfg(unix)]
+#[test]
+fn stopping_a_run_ends_its_observers_command_judge() {
+    use crate::harness::process_ended;
+
+    let world = World::new("observer-command-stop");
+    world.write_graphs();
+    world.write_supervised_node_graph();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("judge.pid");
+    let script = world.root.join("judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "IFS= read -r request\nexec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display()
+        ),
+    )
+    .expect("the command provider is written");
+    std::fs::write(
+        world.graphs().join("dag-scope.yaml"),
+        format!(
+            "version: 1\nname: command-observer\nmembers:\n  monitor:\n    task: {}\n    kind: onejudge\n    base_config: ./onejudge.base.yaml\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      command: [sh, '{}']\n    mode: bypass\n",
+            serde_json::to_string(crate::harness::MONITOR_TASK).expect("the monitor task is quoted"),
+            script.display()
+        ),
+    )
+    .expect("the observer declares a command judge");
+    let path = world.plan(
+        "command-stop",
+        &plan_of("command-stop", vec![agent("work", &[])]),
+    );
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        pid_file.is_file()
+    });
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .expect("the provider recorded its PID")
+        .trim()
+        .parse()
+        .expect("the provider PID is numeric");
+    assert!(!process_ended(pid), "the provider must be live before stop");
+    // Capture only this engine's tree before stop can reparent its children.
+    let listing = std::process::Command::new("ps")
+        .args(["-e", "-o", "pid=,ppid=,comm="])
+        .output()
+        .expect("the host describes the controlled engine's children");
+    let table: Vec<(u32, u32, String)> = String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.split_whitespace();
+            Some((
+                columns.next()?.parse().ok()?,
+                columns.next()?.parse().ok()?,
+                columns.next()?.to_owned(),
+            ))
+        })
+        .collect();
+    let mut owned = vec![owner.id()];
+    loop {
+        let before = owned.len();
+        for (child, parent, _) in &table {
+            if owned.contains(parent) && !owned.contains(child) {
+                owned.push(*child);
+            }
+        }
+        if owned.len() == before {
+            break;
+        }
+    }
+    // stop confirms process absence; reap our direct child while it does so,
+    // rather than making stop wait for a zombie only this test can collect.
+    let reaped = std::thread::spawn(move || owner.wait());
+    let stopped = world.run_on_agentgraph(&["stop", "command-stop"]);
+    let surviving: Vec<_> = table
+        .iter()
+        .filter(|(child, _, _)| owned.contains(child) && !process_ended(*child))
+        .collect();
+    eprintln!(
+        "judge PID {pid} ended: {}; engine-tree survivors: {surviving:?}",
+        process_ended(pid)
+    );
+    if stopped.code != 0 {
+        for (child, _, _) in &surviving {
+            end_process(*child);
+        }
+    }
+    stopped.exited(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !process_ended(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let ended = process_ended(pid);
+    if !ended {
+        end_process(pid);
+    }
+    reaped
+        .join()
+        .expect("the engine reaper finishes")
+        .expect("the stopped engine exits");
+    assert!(
+        ended,
+        "observer command {pid} survived five seconds after stop"
+    );
+}
+
+/// A missing observer record cannot create a replacement graph directory or
+/// prevent the engine's existing process-tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_a_missing_observer_record_does_not_recreate_it() {
+    stop_with_observer_record_fault(true);
+}
+
+/// An unwritable signal directory is reported without preventing OS teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_observer_cancellation_error_reports_it_and_continues() {
+    stop_with_observer_record_fault(false);
+}
+
+#[cfg(unix)]
+fn stop_with_observer_record_fault(missing: bool) {
+    let world = World::new(if missing {
+        "stop-missing-observer-record"
+    } else {
+        "stop-observer-cancellation-error"
+    });
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("observer.wait", "hold");
+    let run = "missing-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer to take its turn", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("the observer run to be recorded", |world| {
+        world.run_json(run, "launch.json")["graph_run"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    });
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let record = root.join(oneagentgraph::run::RECORD_FILE);
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    if missing {
+        // llmlint: ignore[tests_mirror_real_usage] A lost persisted record is a host-filesystem failure, with no CLI verb that manufactures it. Remove the real file, then exercise only the public stop verb and assert that it leaves this unproven graph untouched.
+        std::fs::remove_file(&record).expect("the observer record is absent");
+    } else {
+        // llmlint: ignore-block[tests_mirror_real_usage] Force a real OS write refusal in this world's own graph store, not a mocked cancellation result. A public verb cannot manufacture a non-directory where the producer's signal directory belongs; stop must still report this filesystem failure and end its processes.
+        std::fs::remove_dir_all(&signals).expect("the world's signal directory is removed");
+        std::fs::write(&signals, "not a directory").expect("cancellation cannot create its signal");
+        // llmlint: ignore-end[tests_mirror_real_usage]
+    }
+    let reaped = std::thread::spawn(move || owner.wait());
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    stopped.exited(0);
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    if missing {
+        assert!(!record.exists(), "stop recreated the missing record");
+        assert!(
+            !signals.join("stop").exists(),
+            "stop wrote a signal into an unproven graph"
+        );
+    } else {
+        stopped
+            .err_has("cancel observer")
+            .err_has("continuing process-tree teardown");
+        assert_eq!(std::fs::read_to_string(signals).unwrap(), "not a directory");
+    }
+}
+
+/// A pre-turn command can be stuck before the member's cancellation loop is
+/// running. Stop must bound its cooperative wait and continue tree teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_unresponsive_observer_bounds_the_cooperative_wait() {
+    use crate::harness::process_ended;
+
+    let world = World::new("stop-unresponsive-observer");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    let pid_file = world.root.join("pre-turn.pid");
+    let script = world.root.join("pre-turn.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "exec '{}' outlive-the-graph '{}'\n",
+            crate::harness::double("fake-claude").display(),
+            pid_file.display(),
+        ),
+    )
+    .expect("the blocking pre-turn command is written");
+    let mut graph: Value = onepipeline_testfakes::yaml::from_str(
+        &std::fs::read_to_string(world.dag_graph()).expect("the observer graph exists"),
+    )
+    .expect("the observer graph parses");
+    graph["version"] = json!(oneagentgraph::config::SCHEMA_VERSION);
+    graph["members"]["monitor"]["pre_turn"] = json!([{
+        "command": ["sh", script.to_str().expect("the command path is text")],
+        "timeout": 120,
+    }]);
+    std::fs::write(
+        world.dag_graph(),
+        serde_json::to_string_pretty(&graph).unwrap(),
+    )
+    .expect("the observer declares its pre-turn command");
+    let run = "unresponsive-observer";
+    let path = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the pre-turn command to start", |_| pid_file.is_file());
+    let pid: u32 = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!process_ended(pid), "the pre-turn command is held");
+    let owner_pid = owner.id();
+    let reaped = std::thread::spawn(move || owner.wait());
+    let started = std::time::Instant::now();
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    let elapsed = started.elapsed();
+    let owner_ended = process_ended(owner_pid);
+    let provider_ended = process_ended(pid);
+    // The command resists TERM to prove the fallback's partial-stop verdict;
+    // clean up only the PID this command recorded before asserting the result.
+    if !provider_ended {
+        end_process(pid);
+    }
+    if !owner_ended {
+        end_process(owner_pid);
+    }
+    reaped
+        .join()
+        .expect("the reaper finishes")
+        .expect("the engine ends");
+    stopped.exited(REFUSED).err_has("partly stopped");
+    assert!(
+        owner_ended,
+        "the engine was not ended after the cooperative bound"
+    );
+    assert!(
+        !provider_ended,
+        "the pre-turn command did not hold past cancellation"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "stop waited past its bounded fallback: {elapsed:?}"
+    );
+    let graph = world.run_json(run, "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    assert!(
+        world
+            .graph_state()
+            .join(graph)
+            .join(oneagentgraph::run::SIGNAL_DIR)
+            .join("stop")
+            .is_file(),
+        "stop never requested cooperative cancellation"
     );
 }
 

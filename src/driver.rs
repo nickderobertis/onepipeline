@@ -3379,11 +3379,29 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined` drives for a teardown whose
 // signal reached nothing.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+    let mut aim = roots_to_stop(paths, record)?;
+    if let Aim::Here { roots, .. } = &aim {
+        if !roots.is_empty() {
+            // An attached observer runs on threads in its host. Let its graph
+            // reap providers before signalling the host that owns those threads.
+            match agentgraph::stop_observer(&record.graph_run, &paths.run, TEARDOWN_PATIENCE) {
+                Ok(true) => {
+                    // Cancellation can take time, and can end a root. Re-read
+                    // ownership before signalling any PID that might be reused.
+                    aim = roots_to_stop(paths, record)?;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("onepipeline: {error}; continuing process-tree teardown");
+                }
+            }
+        }
+    }
     let Aim::Here {
         roots,
         unproven,
         declined,
-    } = roots_to_stop(paths, record)?
+    } = aim
     else {
         return Ok(None);
     };
