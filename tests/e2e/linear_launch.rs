@@ -150,6 +150,8 @@ fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::Co
     let report = linked_store(world, launch, |engine| async move {
         engine
             .copy(&onetaskgraph_core::CopyRequest {
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
                 scope,
                 destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)

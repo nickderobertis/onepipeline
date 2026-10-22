@@ -681,10 +681,16 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::StaleOrigin { .. } => decided("stale-origin"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
         EngineError::StaleLink { .. } => decided("stale-link"),
-        // llmlint: ignore[changed_behavior_has_e2e] only members-only copies raise this refusal; this worker uses whole-project copies. The exhaustive store-word test below checks the classification for the linked release.
         EngineError::NoProjectCounterpart { .. } => decided("no-project-counterpart"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] write-back never sets target_task; these public engine refusals cannot be raised by its requests. The exhaustive store-word test holds each classification against the linked engine.
+        EngineError::TargetTaskWith { .. } => decided("target-task-with"),
+        EngineError::TargetTaskNeedsOne => decided("target-task-needs-one"),
+        EngineError::TargetTaskSource { .. } => decided("target-task-source"),
+        EngineError::TargetTaskMissing { .. } => decided("target-task-missing"),
+        EngineError::TargetTaskOrigin { .. } => decided("target-task-origin"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never sets `create`; `writeback::tests` holds the word.
         EngineError::CreateWith { .. } => decided("create-with"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, as above.
@@ -3253,7 +3259,7 @@ fn any_failed(delivered: &[Delivered]) -> bool {
 }
 
 /// Create the lineages the board holds no item for: one member copy naming exactly them, over
-/// a shadow store holding their documents alone and the project's, restated from its one read.
+/// a shadow store holding their documents and a project origin used only to find its counterpart.
 /// The baseline records where each landed.
 fn create(
     attempt: &Attempt,
@@ -3264,12 +3270,12 @@ fn create(
     ends: &mut BTreeMap<String, GlobalId>,
     carrying: &mut Carrying,
 ) -> Result<(), Failed> {
-    let destination_project =
-        destination_project(attempt, snapshot).map_err(|failed| carrying.failed(failed))?;
     // A shadow store this worker cannot write is its own failure, classed by nobody and so
     // retried: `store::an_unwritable_shadow_store_is_reported_retried_and_recovered`.
-    write_shadow(snapshot, created, ends, &destination_project)
-        .map_err(|why| carrying.failed(why.into()))?;
+    write_shadow(snapshot, created, ends).map_err(|why| carrying.failed(why.into()))?;
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE") {
+        eprintln!("{error}");
+    }
     write_shadow_assets(attempt, snapshot, created).map_err(|failed| carrying.failed(failed))?;
     let members = CopyItems::new(
         created
@@ -3278,10 +3284,12 @@ fn create(
             .collect(),
     )
     .expect("a creation names at least one lineage");
-    let request = CopyRequest {
+    let mut request = CopyRequest {
+        status_policy: onetaskgraph_core::StatusPolicy::Source,
+        target_task: None,
         items: CopyItems::new(vec![shadow_id(&project_file(&snapshot.project))])
             .expect("one item is not none"),
-        scope: CopyScope::Members(members),
+        scope: CopyScope::MembersOnly(members.clone()),
         destination: snapshot.project.global().source,
         match_by: None,
         recreate: false,
@@ -3299,14 +3307,37 @@ fn create(
         per_item,
         items: created.len(),
     };
-    let report = attempt
+    let copied = attempt
         .call(
             StoreCall::ProjectCopy,
             deadline,
             attempt.engine.copy(&request),
         )
-        .map_err(|failed| carrying.failed(failed))?
-        .map_err(|error| carrying.failed(Failed::engine(PROJECT_COPY, &error)))?;
+        .map_err(|failed| carrying.failed(failed))?;
+    let copied = match copied {
+        // A routed destination with no member project is its initial creation. The store
+        // refuses MembersOnly before writing anything, so only this typed refusal permits
+        // the full copy that creates the project. Every other error propagates unchanged.
+        Err(EngineError::NoProjectCounterpart { missing, .. })
+            // llmlint: ignore[changed_behavior_has_e2e] the home is always the shadow's explicit origin, so a normal request cannot lack its home counterpart; the guard keeps such a malformed request from falling back. The routed missing-counterpart path is driven in multi_source's live-add journey.
+            if missing != request.destination =>
+        {
+            let project =
+                destination_project(attempt, snapshot).map_err(|failed| carrying.failed(failed))?;
+            restate_shadow_project(snapshot, &project)
+                .map_err(|why| carrying.failed(why.into()))?;
+            request.scope = CopyScope::Members(members);
+            attempt
+                .call(
+                    StoreCall::ProjectCopy,
+                    deadline,
+                    attempt.engine.copy(&request),
+                )
+                .map_err(|failed| carrying.failed(failed))?
+        }
+        answer => answer,
+    };
+    let report = copied.map_err(|error| carrying.failed(Failed::engine(PROJECT_COPY, &error)))?;
     // The items are on the board and the baseline does not say so yet: the window a stop
     // waits out through [`hold_landing`].
     if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_PROJECTION_LANDED_GATE") {
@@ -4228,7 +4259,7 @@ fn destination_project(attempt: &Attempt, snapshot: &Snapshot) -> Result<Project
 }
 
 /// Build the shadow project the copy creating `created` projects onto the destination: the
-/// project's document, restating the destination's own exactly so the copy lands it unchanged,
+/// project's origin, so MembersOnly finds its counterpart without reading or writing it,
 /// and one task document per lineage created — and no other. Every edge onto a lineage whose
 /// item exists names that item, so the copy resolves it without the far end's document.
 ///
@@ -4239,7 +4270,6 @@ fn write_shadow(
     snapshot: &Snapshot,
     created: &BTreeSet<String>,
     ends: &BTreeMap<String, GlobalId>,
-    destination_project: &Project,
 ) -> Result<(), String> {
     let projects = snapshot.dir.join("projects");
     let tasks = snapshot
@@ -4248,23 +4278,13 @@ fn write_shadow(
         .join(project_file(&snapshot.project));
     std::fs::create_dir_all(&projects).map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&tasks).map_err(|e| e.to_string())?;
-    let mut project_metadata = destination_project.metadata.clone();
-    project_metadata.insert(
-        GlobalId::ORIGIN_KEY.into(),
-        json!(snapshot.project.as_str()),
-    );
-    let mut front = json!({
-        "title": destination_project.title,
-        "labels": destination_project.labels,
-        "metadata": project_metadata
-    });
-    if !destination_project.repositories.is_empty() {
-        front["repositories"] = json!(destination_project.repositories);
-    }
     document(
         &projects.join(format!("{}.md", project_file(&snapshot.project))),
-        &front,
-        destination_project.content.as_deref().unwrap_or_default(),
+        &json!({
+            "title": snapshot.project.native(),
+            "metadata": {GlobalId::ORIGIN_KEY: snapshot.project.as_str()}
+        }),
+        "",
     )?;
     let lineages = snapshot.lineages();
     let mut written: BTreeSet<PathBuf> = BTreeSet::new();
@@ -4285,6 +4305,31 @@ fn write_shadow(
         }
     }
     Ok(())
+}
+
+/// Preserve the existing home while a full copy creates its first routed member project.
+fn restate_shadow_project(snapshot: &Snapshot, project: &Project) -> Result<(), String> {
+    let mut metadata = project.metadata.clone();
+    metadata.insert(
+        GlobalId::ORIGIN_KEY.into(),
+        json!(snapshot.project.as_str()),
+    );
+    let mut front = json!({
+        "title": project.title,
+        "labels": project.labels,
+        "metadata": metadata
+    });
+    if !project.repositories.is_empty() {
+        front["repositories"] = json!(project.repositories);
+    }
+    document(
+        &snapshot
+            .dir
+            .join("projects")
+            .join(format!("{}.md", project_file(&snapshot.project))),
+        &front,
+        project.content.as_deref().unwrap_or_default(),
+    )
 }
 
 /// Carry held images through the source APIs, before the creating copy reads the shadow.
@@ -5641,7 +5686,7 @@ mod tests {
     use crate::projection::RunState;
     use onetaskgraph_core::{EngineError, GlobalId};
     use onetaskgraph_plugin_api::{Project, SourceError, StatusCategory};
-    use serde_json::{json, Map, Value};
+    use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::num::NonZeroU64;
     use std::path::{Path, PathBuf};
@@ -6396,6 +6441,19 @@ mod tests {
             },
             // The copy refusals 0.2.57 added: `--create` beside a lookup or onto a carrier, and a
             // routed item whose counterpart sits in a source it no longer routes to.
+            EngineError::TargetTaskWith {
+                flag: onetaskgraph_core::CopyLookup::Recreate,
+            },
+            EngineError::TargetTaskNeedsOne,
+            EngineError::TargetTaskSource {
+                target: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("plans").unwrap(),
+            },
+            EngineError::TargetTaskMissing { target: id() },
+            EngineError::TargetTaskOrigin {
+                target: id(),
+                item: id(),
+            },
             EngineError::CreateWith {
                 flag: onetaskgraph_core::CopyLookup::Recreate,
             },
@@ -7124,54 +7182,6 @@ mod tests {
         );
     }
 
-    /// The reserved keys this worker owns and overwrites on a projected item.
-    ///
-    /// Everything else on a destination item is the complement — what the
-    /// projection has to carry through unchanged — and [`preserved`] is that
-    /// complement read off either side of the write.
-    fn owned(key: &str) -> bool {
-        key.starts_with("onepipeline.") || key.starts_with("onetaskgraph.")
-    }
-
-    /// Everything on a projected document that the writer does **not** own.
-    ///
-    /// The complement of what it declares, taken as one value rather than field
-    /// by field: "did the new thing arrive?" and "did anything else leave?" are
-    /// different questions, and only an assertion shaped like this one can fail
-    /// on the second.
-    fn preserved(front: &Value, body: &str) -> Value {
-        let metadata: Map<String, Value> = front["metadata"]
-            .as_object()
-            .expect("a projected document carries metadata")
-            .iter()
-            .filter(|(key, _)| !owned(key))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        json!({
-            "title": front["title"],
-            "labels": front["labels"],
-            "metadata": metadata,
-            "body": body,
-        })
-    }
-
-    /// The same complement, read off the destination the projection was written
-    /// against.
-    fn preserved_of(destination: &Project) -> Value {
-        let metadata: Map<String, Value> = destination
-            .metadata
-            .iter()
-            .filter(|(key, _)| !owned(key))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        json!({
-            "title": destination.title,
-            "labels": destination.labels,
-            "metadata": metadata,
-            "body": destination.content.clone().unwrap_or_default(),
-        })
-    }
-
     fn written(path: &Path) -> (Value, String) {
         let document = std::fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("{} was not written: {error}", path.display()));
@@ -7279,7 +7289,7 @@ mod tests {
             {
                 panic!("{missing}");
             }
-            write_shadow(&self.snapshot, created, &self.ends, &self.destination)
+            write_shadow(&self.snapshot, created, &self.ends)
                 .expect("the shadow project is written");
         }
 
@@ -7365,13 +7375,15 @@ mod tests {
     }
 
     /// The shadow store's project and task documents, written by the real write-back from
-    /// [`yaml_sensitive`], read back by the linked `local-md` source to the values the base's
-    /// write-back produced, and edited in place by it — a task's status and metadata, the
+    /// [`yaml_sensitive`], including the home restatement for a routed project's initial
+    /// creation, read back by the linked `local-md` source and edited in place — a task's status and metadata, the
     /// project's metadata — leaving every other value as it read.
     #[test]
     fn the_shadow_documents_read_back_and_edit_in_place_as_the_base_wrote_them() {
         let fixture = yaml_sensitive();
         fixture.project();
+        super::restate_shadow_project(&fixture.snapshot, &fixture.destination)
+            .expect("the fallback restates the existing home");
         let store = crate::taskgraph::Store::at(fixture.dir.to_path_buf());
         let attempt = super::Attempt::open(&store, &fixture.snapshot)
             .unwrap_or_else(|failed| panic!("{}", failed.reason));
@@ -7547,13 +7559,7 @@ mod tests {
                 ..Default::default()
             });
             let created = std::collections::BTreeSet::from(["design".to_owned()]);
-            write_shadow(
-                &fixture.snapshot,
-                &created,
-                &fixture.ends,
-                &fixture.destination,
-            )
-            .unwrap();
+            write_shadow(&fixture.snapshot, &created, &fixture.ends).unwrap();
             let attempt = super::Attempt::open(
                 &crate::taskgraph::Store::isolated(fixture.dir.to_path_buf()),
                 &fixture.snapshot,
@@ -7566,6 +7572,8 @@ mod tests {
                 .runtime
                 .block_on(
                     attempt.engine.copy(&onetaskgraph_core::CopyRequest {
+                        status_policy: onetaskgraph_core::StatusPolicy::Source,
+                        target_task: None,
                         items: onetaskgraph_core::CopyItems::new(vec![super::shadow_id(
                             &super::project_file(&fixture.snapshot.project),
                         )])
@@ -7923,51 +7931,20 @@ mod tests {
         }
     }
 
-    /// The rule's second, third and fourth consequences at once, as one
-    /// complement: the projection is a total replacement of the destination
-    /// item, so everything it does not own has to come back unchanged.
-    ///
-    /// Asserted as the whole complement rather than field by field, and held
-    /// against a destination missing one of those fields: an assertion that
-    /// could not fail on a deletion is the defect this replaces.
+    /// The project shadow carries only the identity MembersOnly resolves.
     #[test]
-    fn a_projection_carries_through_everything_the_plan_does_not_declare() {
-        let fixture = Fixture::new("preserved");
+    fn a_creation_shadow_names_the_project_without_restatements() {
+        let fixture = Fixture::new("project-origin");
         fixture.project();
-
         let (front, body) = fixture.project_document();
         assert_eq!(
-            preserved(&front, &body),
-            preserved_of(&fixture.destination),
-            "the projection changed something the plan does not declare"
+            front,
+            json!({
+                "title": fixture.snapshot.project.native(),
+                "metadata": {"onetaskgraph.origin": fixture.snapshot.project.as_str()}
+            })
         );
-        assert_ne!(
-            front["title"],
-            json!(fixture.snapshot.project.native()),
-            "the projection wrote the project's native identifier as its title"
-        );
-        assert_eq!(
-            front["metadata"]["onetaskgraph.origin"],
-            json!(fixture.snapshot.project.as_str()),
-            "the projection lost the destination project it writes onto"
-        );
-
-        // The same assertion, against a destination one unowned field lighter.
-        // It has to fail, or it was never asking whether anything left.
-        let mut deleted = destination("A person's own board", &["planning", "q3"]);
-        deleted.metadata.remove("authored.note");
-        assert_ne!(
-            preserved(&front, &body),
-            preserved_of(&deleted),
-            "the complement assertion cannot fail on a deleted field, so it proves nothing"
-        );
-        let mut unlabelled = destination("A person's own board", &["planning"]);
-        unlabelled.metadata = fixture.destination.metadata.clone();
-        assert_ne!(
-            preserved(&front, &body),
-            preserved_of(&unlabelled),
-            "the complement assertion cannot fail on a dropped label, so it proves nothing"
-        );
+        assert!(body.is_empty());
     }
 
     /// A created item invents no labels and claims no destination item of its own, and an edge

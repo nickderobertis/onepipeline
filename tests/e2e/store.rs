@@ -1264,6 +1264,8 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
         |engine| async move {
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     items: onetaskgraph_core::CopyItems::new(vec![crate::harness::global(
                         "a-projection:board",
                     )])
@@ -1715,13 +1717,6 @@ fn source_refused() -> Value {
     json!({"kind": "refused", "message": "status unknown is disabled for source plans"})
 }
 
-/// A source whose configuration it will not run on: what `local-md` answers for a root that
-/// has gone.
-fn source_misconfigured() -> Value {
-    json!({"kind": "config", "message": "source plans: cannot canonicalize root plan-store: \
-           No such file or directory (os error 2)"})
-}
-
 /// A source that rate-limited the request, in GitHub's own words, naming no wait: GitHub's
 /// secondary limiter is reported by nothing a caller can poll, so the schedule decides.
 fn rate_limited() -> Value {
@@ -1935,8 +1930,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
 
 /// An attempt is refused whichever of the calls it makes the store refuses: the targeted update
 /// of an item that exists — refused, or answered with nothing because the item is gone — and,
-/// for an attempt creating an added node, the copy, or the project read answered as a partial
-/// response every source of which refused. Each is reported once under the store's own kind,
+/// for an attempt creating an added node, the copy. Each is reported once under the store's own kind,
 /// and none is asked again on a timer. No projection reads a page of the project's tasks.
 #[test]
 fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
@@ -1962,13 +1956,6 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             "write_task",
             Some(source_refused()),
             "class: refused, kind: refused",
-            true,
-        ),
-        (
-            "partial",
-            "get_project",
-            Some(source_misconfigured()),
-            "class: refused, kind: config",
             true,
         ),
     ] {
@@ -2852,6 +2839,126 @@ fn assert_diagram(world: &World, project: &str, node: &str) {
         .contains_key("onepipeline.assets_from"));
 }
 
+/// Adding a member never reads or writes the destination project a person edited.
+#[test]
+fn a_live_add_leaves_the_edited_board_project_untouched() {
+    let run = "member-only";
+    let world = World::new(run).through_scripted_source();
+    world.script("work.wait", "hold");
+    let author = world.root.join("author");
+    world.plan_in(&author, run, &plan_of(run, vec![agent("work", &[])]));
+    std::fs::create_dir_all(world.store()).unwrap();
+    let root = author.to_string_lossy().into_owned();
+    let report = world.store_call_with(
+        &[
+            ("ONETASKGRAPH_SOURCES__AUTHOR__PLUGIN", "local-md"),
+            ("ONETASKGRAPH_SOURCES__AUTHOR__CONFIG__ROOT", &root),
+        ],
+        |engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    items: onetaskgraph_core::CopyItems::new(vec![crate::harness::global(
+                        &format!("author:{}", project_id(run)),
+                    )])
+                    .unwrap(),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new(
+                        crate::harness::STORE_SOURCE,
+                    )
+                    .unwrap(),
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .unwrap()
+        },
+    );
+    let project = report.items[0].action.destination().unwrap().to_string();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running state to land", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["status"]["category"] == "in-progress")
+    });
+    world.until("the initial projection to complete", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
+    let path = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", crate::harness::global(&project).native));
+    amend(&path, |front| {
+        front.insert("title".into(), json!("A person's edited board"));
+        front.insert("labels".into(), json!(["reviewed"]));
+        front["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .insert("authored.note".into(), json!("keep me"));
+    });
+    let text = std::fs::read_to_string(&path).unwrap();
+    let (front, _) = text
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("---\n")
+        .unwrap();
+    std::fs::write(&path, format!("---\n{front}---\nA person's edited body.\n")).unwrap();
+    let edited = std::fs::read(&path).unwrap();
+    let before = world.store_calls().len();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("extra", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until_store("the new member to land", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+    });
+    world.until("the member copy to complete", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
+    let calls = world.store_calls();
+    for call in &calls[before..] {
+        assert!(
+            ![
+                "get_project",
+                "write_project",
+                "update_project",
+                "set_project_metadata",
+                "set_project_status"
+            ]
+            .contains(&call[0].as_str()),
+            "member creation touched the project: {call:?}"
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), edited);
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
 /// Live adds and retry replacements carry author images through the channel and shadow copy.
 #[test]
 fn live_added_and_retried_tasks_carry_their_authoring_images() {
@@ -3149,17 +3256,16 @@ fn an_assetless_destination_refuses_image_creation_and_reports_the_store_kind() 
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
 }
 
-/// Hold the real creating write-back at its destination project read, after edit
-/// compilation and before it reads the authoring task's assets.
+/// Hold the real creating write-back after edit compilation and before its author read.
 fn a_creation_paused_before_reading_its_author(
     world: &World,
     run: &str,
     author: &str,
     image: bool,
+    gate: &crate::harness::Rendezvous,
 ) -> (crate::harness::Arrival, std::process::Child) {
     use std::io::Write;
     use std::process::Stdio;
-    let project_read = world.store_holds("get_project");
     let mut node = agent("drawn", &["work"]);
     node["assets_from"] = json!(author);
     if image {
@@ -3185,8 +3291,7 @@ fn a_creation_paused_before_reading_its_author(
                 .as_bytes(),
         )
         .unwrap();
-    let held = project_read.arrived();
-    world.store_stops_holding("get_project");
+    let held = gate.arrived();
     assert_eq!(world.events_of(run, "edit-committed").len(), 1);
     (held, reply)
 }
@@ -3195,7 +3300,10 @@ fn a_creation_paused_before_reading_its_author(
 fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() {
     let run = "assets-author-repair";
     let (world, author) = image_author(World::new(run));
-    let world = world.through_scripted_source();
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = world
+        .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address());
     world.script("work.wait", "hold");
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -3204,7 +3312,9 @@ fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() 
             .get("work")
             .is_some_and(|word| word == "in progress")
     });
-    let (held, reply) = a_creation_paused_before_reading_its_author(&world, run, &author, true);
+    let (held, reply) =
+        a_creation_paused_before_reading_its_author(&world, run, &author, true, &gate);
+    drop(gate);
     let path = world
         .store_apart("images")
         .join("tasks/author-board/000-author.md");
@@ -3256,8 +3366,10 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         &plan_of("author", vec![agent("author", &[])]),
     );
     let fakes = world.fakes.display().to_string();
+    let gate = crate::harness::Rendezvous::failpoint();
     let world = world
         .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address())
         .with_env(RENDEZVOUS_SECONDS_ENV, "600")
         .with_env("ONETASKGRAPH_SOURCES__IMAGES__PLUGIN", "subprocess")
         .with_env(
@@ -3293,7 +3405,9 @@ fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
         run,
         "images:author-board/000-author",
         false,
+        &gate,
     );
+    drop(gate);
     let reading = world.rendezvous("images.get_task.first");
     let began = Instant::now();
     held.release();

@@ -1160,9 +1160,12 @@ onevcs-testing = "0.19.13"
 # store's own word.
 # **0.10.0 is the floor** for the public held-task-image read that creating write-backs
 # use to carry authoring images through the shadow store.
-onetaskgraph-core = "=0.10.0"
-onetaskgraph-plugin-api = "=0.10.0"
-onetaskgraph-local-md = "=0.10.0"
+# **0.11.0 carries the copy chain** (`otg-member-copy`, `otg-preserve-status`,
+# `otg-target-task`): https://github.com/nickderobertis/onetaskgraph/releases/tag/v0.11.0
+# Created members use MembersOnly; settlement still writes the source status.
+onetaskgraph-core = "=0.11.0"
+onetaskgraph-plugin-api = "=0.11.0"
+onetaskgraph-local-md = "=0.11.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

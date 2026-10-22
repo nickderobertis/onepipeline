@@ -87,6 +87,8 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
     let report = world.store_call(|engine| async move {
         engine
             .copy(&onetaskgraph_core::CopyRequest {
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
                 scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
@@ -485,6 +487,104 @@ fn a_settlement_wait_outlasts_one_step_while_each_dispatch_on_a_cross_source_cha
             .map(|node| ((*node).to_owned(), "done".to_owned()))
             .collect()
     );
+}
+
+/// A refused home read during routed initial creation is reported once and recovers on edit.
+#[test]
+fn a_routed_first_add_reports_a_refused_home_read_without_retrying_it() {
+    let name = "routed-read-refused";
+    let world = a_routed_world(name).through_scripted_source();
+    let _service = world.repository("local-direct", &[]);
+    let _engine = world.extra_repository("engine");
+    world.script("core.work", "core wrote this\n");
+    world.script("extra.work", "extra wrote this\n");
+    world.script("core.wait", "hold");
+    let home = filed(&world, name, &plan_of(name, vec![on(HOME, "core", &[])]));
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until_store("the initial projection", |world| {
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("core").map(String::as_str) == Some("in progress"))
+    });
+    // Running status precedes session-opened. Wait for the dispatch metadata too, so
+    // the core's later session projection cannot be mistaken for a retry of the add.
+    world.until_store("the core dispatch to reach the board", |world| {
+        read_plan_tasks(world, &home).is_ok_and(|tasks| {
+            tasks["core"]["item"]["metadata"]["onepipeline.dispatch"]["branch"]
+                == format!("{name}/core")
+        })
+    });
+    world.until("the initial command to end", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
+    let reads = world.store_asked("get_project");
+    let writes = world.store_asked("write_project");
+    world.store_refuses(
+        "get_project",
+        &json!({"kind": "refused", "message": "home read denied"}),
+    );
+    // One parked add has one stable graph state: no dispatch or dependency transition.
+    let mut extra = on(ROUTED, "extra", &[]);
+    extra["parked"] = json!(true);
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": extra}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    let paths = onepipeline::views::RunPaths::under(&world.runs, name);
+    world.until("the added node's stable parked state", |_| {
+        onepipeline::views::RunView::open(&paths)
+            .unwrap()
+            .state
+            .statuses()
+            .get("extra")
+            .map(|status| status.as_str())
+            == Some("parked")
+    });
+    world.until("the stable graph's failed projection", |world| {
+        crate::linear_writeback::projection_records(world, name)
+            .iter()
+            .any(|record| record["outcome"] == "failed" && record["calls"]["project-show"] == 1)
+    });
+    world.until_run_file_holds(name, "driver.log", "the store refused it");
+    let log = std::fs::read_to_string(world.run_file(name, "driver.log")).unwrap();
+    assert!(
+        log.contains("home read denied") && log.contains("class: refused, kind: refused"),
+        "{log}"
+    );
+    std::thread::sleep(std::time::Duration::from_secs(8));
+    assert_eq!(world.store_asked("get_project"), reads + 1);
+    assert_eq!(world.store_asked("write_project"), writes);
+    assert!(!landed_words(&world, &home).unwrap().contains_key("extra"));
+    world.store_stops_refusing("get_project");
+    world.run_with_stdin(&["reply", name], &json!({"version": 3, "commands": [
+        {"op": "note", "id": "extra", "addressee": "worker", "text": "the home is readable again", "deliver": "next"}
+    ]}).to_string()).exited(0);
+    world.until_store("the routed creation to recover", |world| {
+        landed_words(world, &home)
+            .is_some_and(|board| board.get("extra").map(String::as_str) == Some("parked"))
+    });
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3, "commands": [
+                {"op": "requeue", "id": "extra"}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.release("core.go");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
 }
 
 /// A live `add` whose node names a repository the home's source routes elsewhere lands in that
@@ -1087,6 +1187,8 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
     let (report, landed) = world.store_call(|engine| async move {
         let report = engine
             .copy(&onetaskgraph_core::CopyRequest {
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
                 scope: onetaskgraph_core::CopyScope::Documents,
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
@@ -1207,6 +1309,8 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
         world.store_call(|engine| async move {
             let report = engine
                 .copy(&onetaskgraph_core::CopyRequest {
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
                     scope: onetaskgraph_core::CopyScope::Documents,
                     destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)

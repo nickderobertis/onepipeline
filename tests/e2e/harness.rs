@@ -1368,6 +1368,8 @@ impl World {
         let report = self.store_call(|engine| async move {
             engine
                 .copy(&onetaskgraph_core::CopyRequest {
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
                     scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination,
