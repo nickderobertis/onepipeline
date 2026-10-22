@@ -6566,7 +6566,23 @@ fn stopping_a_run_ends_its_observers_command_judge() {
 #[cfg(unix)]
 #[test]
 fn stopping_with_a_missing_observer_record_does_not_recreate_it() {
-    let world = World::new("stop-missing-observer-record");
+    stop_with_observer_record_fault(true);
+}
+
+/// An unwritable signal directory is reported without preventing OS teardown.
+#[cfg(unix)]
+#[test]
+fn stopping_with_an_observer_cancellation_error_reports_it_and_continues() {
+    stop_with_observer_record_fault(false);
+}
+
+#[cfg(unix)]
+fn stop_with_observer_record_fault(missing: bool) {
+    let world = World::new(if missing {
+        "stop-missing-observer-record"
+    } else {
+        "stop-observer-cancellation-error"
+    });
     world.write_graphs();
     world.script("turn.hold", "hold");
     world.script("observer.wait", "hold");
@@ -6598,21 +6614,32 @@ fn stopping_with_a_missing_observer_record_does_not_recreate_it() {
         .to_owned();
     let root = world.graph_state().join(graph);
     let record = root.join(oneagentgraph::run::RECORD_FILE);
-    std::fs::remove_file(&record).expect("the observer record is absent");
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    if missing {
+        std::fs::remove_file(&record).expect("the observer record is absent");
+    } else {
+        std::fs::remove_dir_all(&signals).expect("the world's signal directory is removed");
+        std::fs::write(&signals, "not a directory").expect("cancellation cannot create its signal");
+    }
     let reaped = std::thread::spawn(move || owner.wait());
-    world.run_on_agentgraph(&["stop", run]).exited(0);
+    let stopped = world.run_on_agentgraph(&["stop", run]);
+    stopped.exited(0);
     reaped
         .join()
         .expect("the reaper finishes")
         .expect("the engine ends");
-    assert!(!record.exists(), "stop recreated the missing record");
-    assert!(
-        !root
-            .join(oneagentgraph::run::SIGNAL_DIR)
-            .join("stop")
-            .exists(),
-        "stop wrote a signal into an unproven graph"
-    );
+    if missing {
+        assert!(!record.exists(), "stop recreated the missing record");
+        assert!(
+            !signals.join("stop").exists(),
+            "stop wrote a signal into an unproven graph"
+        );
+    } else {
+        stopped
+            .err_has("cancel observer")
+            .err_has("continuing process-tree teardown");
+        assert_eq!(std::fs::read_to_string(signals).unwrap(), "not a directory");
+    }
 }
 
 /// A pre-turn command can be stuck before the member's cancellation loop is
