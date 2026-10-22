@@ -508,13 +508,42 @@ pub(super) fn before_appended_read() {
 
 #[test]
 fn refresh_recovers_when_receipt_publication_fails_after_a_successful_append() {
+    const CHILD: &str = "ONEPIPELINE_REFRESH_RECEIPT_FAILURE_CHILD";
+    const TEST: &str = "views::refresh_tests::refresh_recovers_when_receipt_publication_fails_after_a_successful_append";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let paths = RunPaths::under(Path::new(&root), "demo");
+        Journal::open(&paths)
+            .emit(
+                PipelineKind::NodeSettled,
+                journal::labels("demo", Some("build")),
+                journal::payload(&[("status", json!("failed"))]),
+            )
+            .expect("append succeeds despite receipt failure");
+        return;
+    }
     let mut run = Run::new("receipt-publication", super::tests::plan());
     let mut view = run.open();
     let first = view.events.len();
     let receipt = run.paths.journal().with_extension("append.json");
     std::fs::remove_file(&receipt).expect("remove receipt");
     std::fs::create_dir(&receipt).expect("a directory obstructs publication");
-    run.settle("failed");
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD, &run.root)
+        .output()
+        .expect("writer child runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("onepipeline: append receipt:"), "{stderr}");
+    assert!(stderr.contains("events.append.json"), "{stderr}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("onepipeline: append receipt:"),
+        "diagnostic belongs on stderr"
+    );
     assert_eq!(view.refresh().expect("safe reread"), Refreshed::Reread);
     assert_eq!(view.events.len(), first + 1, "the journal append succeeded");
     same_as_open(&view);
@@ -772,5 +801,102 @@ fn refresh_rereads_after_a_failed_append_rolls_back_and_then_recovers() {
         view.refresh().expect("recovered suffix processing"),
         Refreshed::Appended { first }
     );
+    same_as_open(&view);
+}
+
+#[test]
+fn refresh_rereads_when_the_upstream_answer_open_reused_expires_or_changes() {
+    for expire in [true, false] {
+        let mut plan = super::tests::plan();
+        plan.tasks[0].deps = vec!["run:upstream#build".into()];
+        let run = Run::new(
+            if expire {
+                "stale-expired"
+            } else {
+                "stale-refreshed"
+            },
+            plan,
+        );
+        let upstream = RunPaths::under(&run.root, "upstream");
+        upstream.create().expect("upstream directory");
+        ledger::write_json(&upstream.launch(), &super::tests::launch(0)).expect("upstream launch");
+        let mut writer = Journal::open(&upstream);
+        let primed = run.open();
+        assert_eq!(
+            primed.state.cross_dag["run:upstream#build"],
+            NodeStatus::Blocked
+        );
+        writer
+            .emit(
+                PipelineKind::NodeSettled,
+                journal::labels("upstream", Some("build")),
+                journal::payload(&[("status", json!("done"))]),
+            )
+            .expect("upstream settles before retained open");
+        let mut view = run.open();
+        assert_eq!(
+            view.state.cross_dag["run:upstream#build"],
+            NodeStatus::Blocked,
+            "this journey must exercise open reusing an older cached answer"
+        );
+        if expire {
+            // Exercise the real cache's lifetime, not a simulated clock or answer.
+            std::thread::sleep(
+                2 * crate::engine::UPSTREAM_EVERY + std::time::Duration::from_millis(20),
+            );
+        } else {
+            crate::crossdag::resolve_for_refresh(&run.root, &view.state.graph);
+        }
+        assert_eq!(
+            view.refresh()
+                .expect("cache no longer matches retained answer"),
+            Refreshed::Reread
+        );
+        assert_eq!(view.state.cross_dag["run:upstream#build"], NodeStatus::Done);
+        same_as_open(&view);
+        crate::readprobe::start();
+        assert_eq!(view.refresh().expect("now unchanged"), Refreshed::Unchanged);
+        let observed = crate::readprobe::finish();
+        assert!(observed.parsed.is_empty());
+        assert!(observed.folded.is_empty());
+        assert!(observed
+            .reads
+            .iter()
+            .all(|(path, _, _)| path.file_name().is_none_or(|name| name != "events.jsonl")));
+    }
+}
+
+#[test]
+fn refresh_does_not_reread_unchanged_upstreams_when_the_shared_cache_expires() {
+    let mut plan = super::tests::plan();
+    plan.tasks[0].deps = vec!["run:upstream#build".into()];
+    let run = Run::new("unchanged-expired", plan);
+    let upstream = RunPaths::under(&run.root, "upstream");
+    upstream.create().expect("upstream directory");
+    ledger::write_json(&upstream.launch(), &super::tests::launch(0)).expect("launch");
+    Journal::open(&upstream)
+        .emit(
+            PipelineKind::NodeSettled,
+            journal::labels("upstream", Some("build")),
+            journal::payload(&[("status", json!("done"))]),
+        )
+        .expect("settlement");
+    let initial = run.open();
+    crate::crossdag::resolve_for_refresh(&run.root, &initial.state.graph);
+    let mut view = run.open();
+    assert_eq!(view.state.cross_dag["run:upstream#build"], NodeStatus::Done);
+    std::thread::sleep(2 * crate::engine::UPSTREAM_EVERY + std::time::Duration::from_millis(20));
+    crate::readprobe::start();
+    assert_eq!(
+        view.refresh().expect("unchanged after cache expiration"),
+        Refreshed::Unchanged
+    );
+    let observed = crate::readprobe::finish();
+    assert!(observed.parsed.is_empty());
+    assert!(observed.folded.is_empty());
+    assert!(observed
+        .reads
+        .iter()
+        .all(|(path, _, _)| path.file_name().is_none_or(|name| name != "events.jsonl")));
     same_as_open(&view);
 }

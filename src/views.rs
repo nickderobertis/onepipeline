@@ -1477,7 +1477,7 @@ struct RefreshCursor {
     receipt: Option<crate::appendstamp::Receipt>,
     coverage: crate::checkpoint::Coverage,
     result: Option<serde_json::Value>,
-    upstreams: BTreeMap<PathBuf, Option<crate::appendstamp::Stamp>>,
+    upstreams: Option<BTreeMap<PathBuf, Option<crate::appendstamp::Stamp>>>,
 }
 
 fn upstream_stamps(
@@ -1546,7 +1546,14 @@ impl RunView {
             receipt,
             coverage,
             result: ledger::read_json_opt(&paths.result()),
-            upstreams: upstream_stamps(paths, &state),
+            upstreams: crate::crossdag::resolution_stamps(
+                &paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+                &state.cross_dag,
+            ),
         };
         Ok(Self {
             paths: paths.clone(),
@@ -1560,8 +1567,7 @@ impl RunView {
     /// Bring this view up to date, preserving its event prefix on an append.
     ///
     /// See [`RunView`] and [`Refreshed`] for the outcomes and equality guarantee.
-    /// Errors are the same as [`open`](Self::open); an unsuccessful refresh
-    /// leaves the previous view intact.
+    /// An unsuccessful refresh leaves the previous view intact.
     pub fn refresh(&mut self) -> crate::Result<Refreshed> {
         let journal = self.paths.journal();
         let stamp = crate::appendstamp::Stamp::read(&journal);
@@ -1569,7 +1575,7 @@ impl RunView {
         (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
         let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
         let upstreams = upstream_stamps(&self.paths, &self.state);
-        if upstreams != self.refresh.upstreams {
+        if self.refresh.upstreams.as_ref() != Some(&upstreams) {
             crate::crossdag::resolve_for_refresh(
                 &self
                     .paths
