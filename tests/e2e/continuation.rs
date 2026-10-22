@@ -486,6 +486,16 @@ fn a_failed_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
 /// shows it `parked`: a cold host continues it pinned to that branch, and its draft adopted.
 #[test]
 fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
+    cancelled_node_continuation(false);
+}
+
+/// A person closing a task after the engine parked it withdraws it from the next graph.
+#[test]
+fn a_persons_close_after_a_real_engine_park_withdraws_the_task() {
+    cancelled_node_continuation(true);
+}
+
+fn cancelled_node_continuation(withdrawn: bool) {
     let run = "cancelled";
     let world = team_world("continue-cancelled")
         .with_env("ONEPIPELINE_PUBLICATION_ATTEMPTS", "2")
@@ -529,6 +539,13 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         .find(|task| task["item"]["metadata"]["onepipeline.id"] == "b")
         .expect("b's item");
     assert_eq!(item["item"]["status"]["name"], "parked", "{item}");
+    assert_eq!(
+        item["item"]["metadata"]["onepipeline.projected_status"], "parked",
+        "{item}"
+    );
+    if withdrawn {
+        crate::withdrawn::withdraw(&world, &project, "b");
+    }
     world.unscript("b.rendezvous");
 
     // The park is the manager's, and the board carries it: a host continuing the project
@@ -553,6 +570,20 @@ fn a_cancelled_node_is_continued_pinned_to_its_branch_and_adopts_its_draft() {
         "a parked node was dispatched"
     );
     assert_eq!(settled(&cold, run, "a")["continued"]["source"], "store");
+    if withdrawn {
+        let result = cold.run_json(run, "result.json");
+        assert_eq!(
+            result["nodes"].as_array().expect("nodes").len(),
+            1,
+            "{result}"
+        );
+        assert_eq!(result["nodes"][0]["id"], "a", "{result}");
+        assert_eq!(
+            crate::withdrawn::stored_status(&cold, &project, "b")["category"],
+            "cancelled"
+        );
+        return;
+    }
     cold.run_with_stdin(
         &["reply", run],
         &json!({"version": 2, "commands": [{"op": "requeue", "id": "b"}]}).to_string(),

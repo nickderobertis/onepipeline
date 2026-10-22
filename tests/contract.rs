@@ -1848,9 +1848,17 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         .map(ToOwned::to_owned)
         .chain(history["label_prefix"].as_str().map(ToOwned::to_owned))
         .collect();
+    // Settlement provenance is engine output on the board, not authorable plan
+    // input. The taskgraph and writeback tests exercise these private keys; keep
+    // their documented classification explicit without adding public fields.
+    let projection_keys = ["onepipeline.settlement", "onepipeline.projected_status"];
+    for key in projection_keys {
+        assert!(CONTRACT.contains(&format!("`{key}`")));
+    }
+    assert!(CONTRACT.contains("projection-only"));
     let named: BTreeSet<String> = backticked()
         .iter()
-        .filter(|token| !stamped.contains(*token))
+        .filter(|token| !stamped.contains(*token) && !projection_keys.contains(&token.as_str()))
         .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
         .filter(|field| field != "<field>")
         .collect();
@@ -7856,6 +7864,7 @@ const RULINGS: &[(&str, &str)] = &[
         "135.",
         "`public_id` is what the run is named by wherever the destination is not private",
     ),
+    ("137.", "onepipeline.projected_status"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

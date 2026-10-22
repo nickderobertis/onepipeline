@@ -515,6 +515,15 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
     }))
 }
 
+/// Whether the stored settlement on a task says the engine itself settled it `cancelled`:
+/// a park, a stopped dispatch or a superseded attempt, each of which a continuing launch
+/// resumes. `false` where the task carries none, and a refusal where it carries anything that
+/// is not a settlement.
+pub(crate) fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>) -> Result<bool> {
+    Ok(settlement_of(task, Some(metadata))?
+        .is_some_and(|settlement| settlement.status == crate::payload::Status::Cancelled))
+}
+
 /// A stored settlement as the boundary read it: its status, typed, and every field it
 /// carries, verbatim, for a continuation to journal whole.
 #[derive(Debug)]

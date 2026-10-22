@@ -45,7 +45,7 @@ use onetaskgraph_core::{
 };
 use onetaskgraph_plugin_api::{
     Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
-    SourceName, Task,
+    SourceName, StatusCategory, Task,
 };
 use serde_json::{Map, Value};
 
@@ -82,6 +82,12 @@ const ID_KEY: &str = "onepipeline.id";
 /// It shares the consumer's reserved namespace but is not a plan field: relaunching a
 /// project that a previous run updated must read the same node definition it launched.
 pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
+
+/// Projection-only metadata naming the word the engine last projected onto a settled task's
+/// status, beside [`SETTLEMENT_KEY`]: the one record of whether the engine closed the task, a
+/// park's `parked` and a stop's `cancelled` both settling `cancelled`. Entry 137 of
+/// `docs/contract-divergences.md` names it.
+pub(crate) const PROJECTED_STATUS_KEY: &str = "onepipeline.projected_status";
 
 /// Projection-only metadata naming the lineage head a destination item carries — the
 /// attempt whose fields it renders — beside [`SUPERSEDES_KEY`]; entry 80 of
@@ -135,6 +141,7 @@ pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
 /// entry 119, every project a published node had closed on, naming `landing`.
 const PROJECTION_ONLY: &[&str] = &[
     SETTLEMENT_KEY,
+    PROJECTED_STATUS_KEY,
     NODE_KEY,
     SUPERSEDES_KEY,
     REWORK_KEY,
@@ -493,7 +500,10 @@ impl Store {
             let Some(task) = task_of(node) else {
                 continue;
             };
-            let (deps, unanswered) = reader.deps(&task, &ids).map_err(Error::from)?;
+            // The graph is the launched one: what it withdrew was settled at its read.
+            let (deps, unanswered) = reader
+                .deps(&task, &ids, &Withdrawn::new())
+                .map_err(Error::from)?;
             read.insert(node.id.clone(), Reread { deps, unanswered });
         }
         Ok(read)
@@ -592,7 +602,7 @@ impl Reader {
                 tool: STORE,
                 message: why,
             })?;
-        let tasks = self.tasks(project, &members)?;
+        let (tasks, withdrawn) = partition(self.tasks(project, &members)?)?;
 
         let mut document = Map::new();
         for (key, value) in &held.item.metadata {
@@ -643,7 +653,8 @@ impl Reader {
         let mut nodes = Vec::with_capacity(tasks.len());
         let mut unanswered: BTreeMap<String, Vec<Unanswered>> = BTreeMap::new();
         for task in &tasks {
-            let (node, unasked) = self.node(task, project, held.item.classification, &ids)?;
+            let (node, unasked) =
+                self.node(task, project, held.item.classification, &ids, &withdrawn)?;
             if !unasked.is_empty() {
                 unanswered.insert(ids[&task.id.to_string()].clone(), unasked);
             }
@@ -773,6 +784,7 @@ impl Reader {
         home: &QualifiedId,
         project_classification: Classification,
         ids: &Ids,
+        withdrawn: &Withdrawn,
     ) -> std::result::Result<(Value, Vec<Unanswered>), Load> {
         let whole = task.id.to_string();
         let mut node = Map::new();
@@ -892,7 +904,7 @@ impl Reader {
             (None, _) => {}
         }
 
-        let (mut deps, unanswered) = self.deps(&task.id, ids)?;
+        let (mut deps, unanswered) = self.deps(&task.id, ids, withdrawn)?;
         // A cross-DAG reference names another run's DAG, which is an item of no
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
@@ -934,6 +946,7 @@ impl Reader {
         &self,
         task: &GlobalId,
         ids: &Ids,
+        withdrawn: &Withdrawn,
     ) -> std::result::Result<(Vec<String>, Vec<Unanswered>), Load> {
         let whole = task.to_string();
         let mut deps = Vec::new();
@@ -981,6 +994,20 @@ impl Reader {
                     format!(
                         "{both}, which is a {} and not a node of a plan",
                         kind(far.kind)
+                    ),
+                )
+                .field("deps")
+                .into());
+            }
+            // A withdrawn prerequisite is refused rather than released: dropping the edge
+            // would start this task without the work it was written to wait for.
+            if let Some(status) = withdrawn.get(&far.id.to_string()) {
+                return Err(refused(
+                    &whole,
+                    format!(
+                        "{both}, which is withdrawn — the store reports it cancelled, as \
+                         '{status}' — so no node is made of it; withdraw '{task}' too, or \
+                         remove the dependency"
                     ),
                 )
                 .field("deps")
@@ -1271,6 +1298,50 @@ fn kind(kind: ItemKind) -> &'static str {
 /// have to establish separately that the source agreed, and the pair of checks
 /// is one thing said twice — with only one of them in the type.
 type Ids = BTreeMap<String, String>;
+
+/// The tasks of one project a person withdrew, by the **whole** qualified id of each, with
+/// the status name the store reports its cancellation under.
+type Withdrawn = BTreeMap<String, String>;
+
+/// Split a project's tasks into the ones that become nodes and the ones a person withdrew.
+///
+/// Partition before claiming IDs or reading edges: excluded items must never enter the
+/// write-back baseline. Entry 137 of `docs/contract-divergences.md` defines membership.
+fn partition(
+    tasks: Vec<Qualified<Task>>,
+) -> std::result::Result<(Vec<Qualified<Task>>, Withdrawn), Load> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    let mut withdrawn = Withdrawn::new();
+    for task in tasks {
+        if task.item.status.category != StatusCategory::Cancelled {
+            kept.push(task);
+            continue;
+        }
+        let whole = task.id.to_string();
+        let metadata: Map<String, Value> = task.item.metadata.clone().into_iter().collect();
+        let projected = match metadata.get(PROJECTED_STATUS_KEY) {
+            None => None,
+            Some(value) => Some(
+                serde_json::from_value::<crate::writeback::ProjectedStatus>(value.clone())
+                    .map_err(|why| {
+                        refused(
+                            &whole,
+                            format!("`{PROJECTED_STATUS_KEY}` is not a projected status: {why}"),
+                        )
+                    })?,
+            ),
+        };
+        let closed_by_the_engine = projected
+            .is_none_or(|word| word == crate::writeback::ProjectedStatus::Cancelled)
+            && crate::continuation::cancelled_by_the_engine(&whole, &metadata)?;
+        if closed_by_the_engine {
+            kept.push(task);
+        } else {
+            withdrawn.insert(whole, task.item.status.name.clone());
+        }
+    }
+    Ok((kept, withdrawn))
+}
 
 /// The reserved id one task carries, or why it has none.
 ///
@@ -1725,6 +1796,87 @@ mod tests {
             Err(Load::Unreadable(error)) => panic!("the project was unreadable: {error}"),
             Ok(read) => panic!("the project was read: {:?}", read.plan.tasks),
         }
+    }
+
+    /// A status a person closes a task with, under the name the store gives it.
+    fn not_planned() -> Value {
+        json!({"category": "cancelled", "name": "Not planned"})
+    }
+
+    /// A cancelled task the engine closed — settled `cancelled` and projected `cancelled`, as a
+    /// stopped dispatch is — is a node still, and so is one settled `cancelled` before the
+    /// projected word was recorded. One a person closed is left out: carrying no settlement,
+    /// one the engine never projects as cancelled, or the `parked` a park projected, which the
+    /// person's close came after. A task in any other status is a node whatever it carries.
+    #[test]
+    fn a_project_read_leaves_out_every_task_a_person_withdrew() {
+        let settled = |id: &str, status: &str, projected: Option<&str>, category: Value| {
+            let mut metadata = node(id);
+            metadata[SETTLEMENT_KEY] = json!({"status": status, "branch": "me/b"});
+            if let Some(word) = projected {
+                metadata[PROJECTED_STATUS_KEY] = json!(word);
+            }
+            task(&format!("t-{id}"), metadata, json!({"status": category}))
+        };
+        let read = load(store(
+            json!({}),
+            vec![
+                task("t-build", node("build"), json!({})),
+                // Withdrawn before it ever ran, and carrying no node id: it claims none.
+                task(
+                    "t-withdrawn",
+                    json!({"onepipeline.persona": "engineer"}),
+                    json!({"status": not_planned()}),
+                ),
+                settled("stopped", "cancelled", Some("cancelled"), not_planned()),
+                settled("older", "cancelled", None, not_planned()),
+                settled("parked-closed", "cancelled", Some("parked"), not_planned()),
+                settled("failed-closed", "failed", Some("failed"), not_planned()),
+                settled(
+                    "parked",
+                    "cancelled",
+                    Some("parked"),
+                    json!({"category": "unknown", "name": "parked"}),
+                ),
+            ],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        let kept = ["build", "stopped", "older", "parked"];
+        let ids: BTreeSet<&str> = read
+            .plan
+            .tasks
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, BTreeSet::from(kept));
+        assert_eq!(
+            read.tasks
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(kept),
+            "a withdrawn task is in the write-back's baseline"
+        );
+    }
+
+    /// A task depending on a withdrawn one refuses the read, naming both tasks and the
+    /// status the store reports the cancellation under, rather than releasing it.
+    #[test]
+    fn a_task_depending_on_a_withdrawn_task_refuses_the_read() {
+        let message = refusal(load(store(
+            json!({}),
+            vec![
+                task("t-design", node("design"), json!({"status": not_planned()})),
+                task("t-build", node("build"), json!({})),
+            ],
+            vec![json!({"from": "t-build", "to": "t-design", "kind": "blocks"})],
+        )));
+        assert!(
+            message.contains("'plans:t-build' depends on 'plans:t-design', which is withdrawn"),
+            "{message}"
+        );
+        assert!(message.contains("'Not planned'"), "{message}");
     }
 
     /// Project = plan, task = node, dependency edge = dependency: the mapping read off the
