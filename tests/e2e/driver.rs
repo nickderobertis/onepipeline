@@ -1500,6 +1500,12 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
         .exited(REFUSED)
         .err_has("still being driven");
 
+    let foreign = world.as_session("foreign-label-session");
+    foreign
+        .run(&["label", run, "--label", "kind=spikes"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+
     // Released, it is let go of — while the driver is still running, on its way out.
     held.release();
     world.until("the driver to release the run", |world| {
@@ -1509,6 +1515,9 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
         .run(&["status", run, "--json"])
         .exited(0)
         .out_has("\"driven\":false");
+    foreign
+        .run(&["label", run, "--label", "kind=spikes"])
+        .exited(0);
 }
 
 /// The run a refused or dead adoption leaves: the record still names the driver

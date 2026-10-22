@@ -15867,6 +15867,9 @@ mod tests {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: root.to_path_buf(),
             graph: String::new(),
             graph_run: String::new(),

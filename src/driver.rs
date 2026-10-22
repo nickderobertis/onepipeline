@@ -95,6 +95,34 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Label(args) => {
+            let labels = crate::labels::parse(&args.labels)?;
+            let unlabel = args
+                .unlabel
+                .into_iter()
+                .map(verbs::LabelKey::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::Refused)?;
+            let group = if args.no_group {
+                verbs::LabelGroup::Clear
+            } else {
+                crate::labels::group(args.group.as_deref())?
+                    .map_or(verbs::LabelGroup::Keep, verbs::LabelGroup::Set)
+            };
+            let overlay = verbs::label(
+                &resolve(&args.run)?,
+                verbs::LabelRequest {
+                    labels: &labels,
+                    unlabel: &unlabel,
+                    group,
+                    force: args.force,
+                    launcher: &sys::launcher(),
+                    session: &sys::launching_session(),
+                },
+            )?;
+            println!("{}", verbs::render_labelled(&overlay));
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Scratch(crate::cli::ScratchCommand::Discard { run }) => {
             let discarded = verbs::scratch_discard(&ledger::runs_root(), &run)?;
             print!("{}", verbs::render_scratch_discard(&discarded));
@@ -1215,6 +1243,8 @@ fn read_rendering(named: &str) -> Result<String> {
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
+    let labels = crate::labels::parse(&args.labels)?;
+    let group = crate::labels::group(args.group.as_deref())?;
     // The store first: a plan that cannot be read is a launch that never starts,
     // and a store this build cannot read a project out of is named here rather
     // than by a node that fails on its first dispatch. Nothing is dispatched and
@@ -1227,6 +1257,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     // check below reads each task's own record, and the write-back's landed baseline is seeded
     // from this one read, so its first projection reads nothing the launch has just read.
     let mut read = store.read_plan(&project).map_err(Error::from)?;
+    let mut project_origin = crate::labels::origin(&read.project_metadata)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
@@ -1552,6 +1583,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             &crate::boundary::of_run(&plan).scope,
         )?;
         read = store.read_plan(&project).map_err(Error::from)?;
+        project_origin = crate::labels::origin(&read.project_metadata)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;
         if !args.fresh {
@@ -1641,6 +1673,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut record = LaunchRecord {
         run_id: run.clone(),
         project: args.project.clone(),
+        labels: crate::labels::raw(&labels),
+        group: group.map(|group| group.as_str().to_owned()),
+        project_origin,
         // Absolute, once, here: this is the only process that knows where the
         // operator launched from, and every later driver — including the one a
         // fresh `adopt` starts from some other directory — replays this value
@@ -4868,6 +4903,9 @@ mod tests {
         LaunchRecord {
             run_id: "stopped".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),

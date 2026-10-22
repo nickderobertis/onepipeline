@@ -60,6 +60,7 @@
 // decided, and `unknown` is never anybody's.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -688,6 +689,27 @@ pub struct LaunchRecord {
     /// build launched is still a run this one can read, adopt, and report on.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// Opaque labels recorded at launch.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::labels::launch_labels"
+    )]
+    pub labels: BTreeMap<String, String>,
+    /// Explicit qualified project group, or none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::labels::launch_group"
+    )]
+    pub group: Option<String>,
+    /// The launched project's recorded copy origin, or none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::labels::launch_group"
+    )]
+    pub project_origin: Option<String>,
     /// The directory every member of this run works in.
     ///
     /// The launch directory, made absolute once — at `start`, by the process
@@ -3660,6 +3682,9 @@ mod tests {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -4605,6 +4630,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -4652,6 +4680,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),

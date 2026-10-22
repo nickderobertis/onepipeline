@@ -1374,6 +1374,34 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let x = world.rendezvous("x");
     let run = "idle";
     let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
+    let authoring = world.store_apart("authoring");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__AUTHORING__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__AUTHORING__CONFIG__ROOT",
+            authoring.to_str().unwrap(),
+        );
+    let origin = |name: &str| {
+        let mut plan = world.store_project(&project)["items"][0]["item"].clone();
+        // Use the launched plan's current metadata so copying the replacement origin
+        // preserves its active claim and the driver's projection.
+        let file = authoring.join("projects").join(format!("{name}.md"));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        plan["title"] = json!("idle");
+        std::fs::write(
+            &file,
+            format!(
+                "---\n{}---\n",
+                serde_saphyr::to_string(&json!({
+                    "title": plan["title"], "metadata": plan["metadata"]
+                }))
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        world.copy_project_metadata(&format!("authoring:{name}"), crate::harness::STORE_SOURCE);
+    };
+    origin("before");
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
@@ -1401,6 +1429,8 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
     let taking = take_over_in_background(&successor, &project);
     let claim = until_claimed_on(&world, &project, "host-b");
     let landed = std::time::Instant::now();
+    // The successor has read the old origin and written its claim, but cannot yet launch.
+    origin("after");
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run before the driver it displaced had let go"
@@ -1413,6 +1443,19 @@ fn a_takeover_of_an_idle_driver_starts_on_its_acknowledgement_within_the_interva
         landed.elapsed()
     );
     assert!(said.contains("acknowledged the takeover"), "{said}");
+    assert_eq!(
+        world.run_json(run, "launch.json")["project_origin"],
+        "authoring:before"
+    );
+    assert_eq!(
+        successor.run_json(run, "launch.json")["project_origin"],
+        "authoring:after"
+    );
+    assert_eq!(
+        successor.run(&["status", run, "--json"]).json()["group"],
+        "authoring:after"
+    );
+
     superseded_by(&world, run, &claim);
     world.until_run_file_holds(
         run,

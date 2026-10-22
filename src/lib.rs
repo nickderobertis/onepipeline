@@ -97,6 +97,7 @@ mod hooks;
 mod hostphases;
 mod hostview;
 mod journal;
+mod labels;
 mod land;
 mod ledger;
 mod lifecycle;

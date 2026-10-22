@@ -113,6 +113,8 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         .map(String::as_str)
         .collect();
     let mut expected_fields = vec![
+        "labels",
+        "group",
         "schema_version",
         "run_id",
         "public_id",
@@ -126,7 +128,16 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         expected_fields.push("claim");
     }
     assert_eq!(fields, expected_fields);
-    assert_eq!(reading["schema_version"], 1);
+    assert_eq!(reading["schema_version"], 2);
+    assert_eq!(reading["labels"], json!({}));
+    assert_eq!(
+        reading["group"],
+        format!(
+            "{}:{}",
+            crate::harness::STORE_SOURCE,
+            crate::harness::project_id(run)
+        )
+    );
     assert_eq!(reading["run_id"], run);
     assert_eq!(reading["word"], word, "{reading}");
     let liveness = reading["liveness"].as_str().expect("a liveness word");
