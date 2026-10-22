@@ -4697,7 +4697,8 @@ present and two are present only when the envelope carried the half they name:
   "reply": {"present": "always", "values": "a whole number"},
   "state": {"present": "always", "values": ["delivered", "applied", "queued"]},
   "verdict": {"present": "with a verdict half", "values": ["delivered"]},
-  "commands": {"present": "with commands", "values": ["applied", "queued"]}
+  "commands": {"present": "with commands", "values": ["applied", "queued"]},
+  "notes": {"present": "with a note, once applied", "each": ["queued", "applied"]}
 }
 ```
 
@@ -4732,6 +4733,22 @@ reads **this entry** — every key, the words each may answer, and which half ea
 one's presence depends on — and drives an envelope of each shape through the
 verb, so a key, a word, or a presence rule that moves on either side fails there
 rather than drifting.
+
+**Amended: `notes`, ruled.** The manager ruled on the plan node `op-envelope-outcome`, as
+rule 6 of the amendment entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled)
+states, that the receipt gains one optional key and nothing else. `notes` is an object from
+each node a note in the envelope named to that note's result: `queued` while it waits in
+its receiver's inbox for that receiver's turn, which is what a run's live driver answers
+for every live note it hands off, and `applied` for a note this process applied itself
+with nothing driving the run, or one `deliver: next` carried to its node's next dispatch.
+Of several notes to one node, one waiting makes that node's word `queued`. The key is
+absent when the envelope carries no note, and when its commands are not answered yet —
+`state` `queued`, which says nothing about any note. A submitter can tell from the receipt
+alone that a note waits, without reading the channel. Older readers ignore the key, which
+`a_reader_of_the_older_receipt_still_reads_every_answer` holds. It is declared once, as
+`verbs::Receipt::notes`, whose values are the channel layout's own `CommandVerdict`, and
+the block above states it; the journeys read `each` as the words each node's value may
+take.
 
 ## 65. One journal kind means both "a command was accepted" and "the graph changed" — OPEN
 
@@ -9036,8 +9053,9 @@ managers took a slow worker for a lost message and reached for destructive lever
    reading's `schema_version` stays `1`. `schemas/run-reading.schema.json` is regenerated
    from the type, and a test holds the sidecar's type to it.
 
-**What this build does.** `tests/note/main.rs` drives each rule through the binary, with
-each worker's turn held on its own gates (`turn.gates` in the doubled harness):
+**What this build did, until the hand-off amendment below.** `tests/note/main.rs` drove
+each rule through the binary, with each worker's turn held on its own gates (`turn.gates`
+in the doubled harness):
 
 - `a_note_to_each_of_two_receivers_is_recorded_as_each_answers` and
   `each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers` cover fan-out.
@@ -9064,6 +9082,117 @@ each worker's turn held on its own gates (`turn.gates` in the doubled harness):
 - `src/channel/deliveries.rs`'s
   `the_sidecar_entry_is_the_delivery_the_run_reading_schema_states` reconciles the
   sidecar's type with the schema.
+
+### Answered at hand-off — ruled
+
+**Ruling: the manager ruled the rule below on the plan node `op-envelope-outcome`, as an
+amendment of rule 5 of the per-receiver ruling above, and rule 6 as an amendment of entry
+64's receipt.** It replaces that rule 5, and wherever the per-receiver ruling's other rules
+say when an envelope is answered or what holds a later one, this is what they now say. The
+cancel exception below keeps its first point and loses what it said of held envelopes,
+since none is held. Entry 136 records the bundle versions it raised.
+
+**What was wrong.** Under the per-receiver ruling an envelope carrying a live note committed
+its other commands as it was handed, but its one `CommandOutcome` was written only once
+every receiver had answered, and a receiver answers only when its running turn ends. A later
+envelope naming that node was held behind the note. So `[amend X, note X]`, and a later
+`[amend X]`, to a node whose worker was in a turn of hours went unanswered for hours, which
+a manager cannot tell from a lost message: in one recorded run two such envelopes waited
+more than four hours behind one turn. Separately, the reconciler claimed every fresh
+envelope up front, and an error processing one aborted the pass and left the rest claimed
+in memory until a later driver's recovery.
+
+**The rule this build applies.**
+
+1. **An envelope's `CommandOutcome` is written when its notes are handed to their
+   receivers' inboxes, on the pass that hands them off.** A note waiting for its
+   receiver's turn has the per-command result `queued`, a new `CommandVerdict` variant
+   (`"queued"` on the wire). Every other command's result is what it was. The envelope is
+   `applied` when nothing refused. A note a committed `withdraw-note` took back before it
+   was handed is still refused there, and such an envelope is answered applied in part.
+2. **The receiver's later take or refusal is that note's own record, and the outcome is
+   never rewritten.** A note a turn takes, or a delivery carries, is journalled as its
+   `edit-committed` `note-delivered` operation, naming its envelope and index, as before.
+   A note its receiver refuses is journalled as its own `edit-rejected`, naming its
+   envelope and the note's `index` (a key that record gains, optional, so a record
+   written before it reads unchanged), and is surfaced as any refusal is. A note never
+   offered because an earlier note of its envelope to the same receiver refused is
+   journalled refused the same way, since its envelope's answer said `queued`. `status`
+   shows each. The `turn` entry 133 puts on a delivered note's result is then on that
+   note's `note-delivered` record alone, since the result it would sit on is `queued`. A `withdraw-note` of a queued note is still answered as entry 133 states: it
+   answers its envelope again with that note refused, since withdrawing is a later
+   command and not the receiver's answer.
+3. **Only a later note to the same receiver keeps order behind an outstanding note.** It
+   is judged and answered on the pass that claims it, its note `queued` too, and waits
+   in the driver, unoffered, until the earlier note to that receiver is answered, so a
+   receiver takes its notes in the order they were sent. A later non-note command naming
+   that node commits at once, and nothing else waits behind a note. A `cancel` of the node
+   answers, in its conversation's place, each note to it outstanding — offered or still
+   waiting behind another — `refused` and naming the cancel, as the exception below
+   states; those notes' envelopes keep the outcome they were given.
+4. **A live driver answers every envelope it claims.** An envelope whose processing fails
+   is answered `applied: false`, its reason naming the failure, unless it was answered
+   before it failed, and every envelope claimed with it is still processed and answered on
+   that pass. Only a failure to write that answer ends the pass, and the answer and the
+   envelopes the pass had not reached are kept for the same driver's next pass, which
+   writes the answer first. An undecodable record whose refusal cannot be answered is kept
+   the same way.
+5. **`channel/deliveries.json` and `status` keep telling which notes wait in which inbox**,
+   with `queued` in place of a held envelope where that is now the state. The sidecar's
+   `Delivery` gains `{state: "queued", node, since, deadline?}`, which this build writes
+   for every note it has handed off and not recorded an answer for. `delivering` and
+   `held` stay in the type, read from a driver built before this, and this build writes
+   neither. `status --json` carries the queued notes additively, as an `inbox` array of
+   `{envelope, delivery}` on `RunReading`, omitted when empty, so the reading's
+   `schema_version` stays `1`. The human `status` prints an `inbox:` line for each, and a
+   `note:` line with what became of each of the latest five notes answered `queued` that
+   have left their inbox. A driver that dies with notes queued leaves what it wrote down
+   for their envelope, and the next driver journals a refusal of each that has no record
+   of its own, as it did for a note it was still delivering, without writing the outcome
+   again.
+6. **The `reply` receipt gains one optional key, `notes`**, as entry 64 now states.
+
+**What this build does.** `tests/note/main.rs` drives each rule through the binary:
+
+- `an_envelope_is_answered_as_its_note_is_queued_and_the_receiver_takes_its_notes_in_order`
+  holds a worker's turn, sends `[amend X, note X]` through `reply`, and reads the outcome,
+  the receipt, the journal, `status`, `status --json` and the sidecar while the turn is
+  held. It then sends `[amend X]` and `[note X]`, and once the turn ends reads both notes
+  journalled in the order sent with no outcome rewritten.
+- `a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`
+  covers rule 2's refusal.
+- `an_envelope_whose_processing_fails_is_answered_refused_beside_those_claimed_with_it`
+  covers rule 4 with a failpoint, the driver still running.
+- `a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next` covers the
+  successor's refusal of a queued note.
+- `notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_claimed`
+  covers rule 3's order with three envelopes to one receiver, and
+  `a_cancel_refuses_the_note_offered_to_its_node_and_the_one_queued_behind_it` covers a
+  cancel refusing a note still waiting behind another.
+- `status_names_each_receivers_inbox_and_drops_each_as_it_answers` and
+  `status_shows_a_pending_notes_deadline_beside_its_delivering_state` cover rule 5's
+  readings.
+
+The other journeys the two sections above name are updated to these rules, and those named
+for a hold that no longer exists are renamed for what they now prove:
+`nothing_but_a_later_note_to_its_node_waits_behind_a_waiting_note`,
+`a_note_waiting_on_a_receiver_holds_back_no_edit_to_any_node`,
+`a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`,
+`a_cancel_waits_on_no_other_nodes_note_in_an_envelope_that_amended_its_node` and the cancel
+journey above. `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held`
+and `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` are replaced
+by the first journey listed here, which reads the same sidecar and `status` lines and the
+same unreadable sidecars.
+
+`src/engine.rs`'s
+`a_cancel_preempts_the_notes_queued_for_its_node_and_nothing_waits_behind_them`,
+`nothing_waits_behind_an_outstanding_note_and_the_sidecar_names_each_queued` and
+`a_receivers_waiting_notes_are_offered_once_the_earlier_note_is_answered` drive the real
+reconciler with deliveries outstanding, and
+`answers_a_pass_could_not_write_are_kept_with_what_it_had_not_reached` drives it over a real
+queue whose outcome log refuses a write and then takes one. `src/views.rs`'s
+`status_names_the_latest_queued_notes_results_and_counts_the_rest` holds the bound on the
+`note:` lines.
 
 ### A `cancel` preempts the note its node never answers — proposal, open
 
@@ -12289,7 +12418,87 @@ stream this build writes is one an earlier reader reads, less the new kind.
 }
 ```
 
-## 135. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
+## 135. A run named after a private repository named it on every public tracker and branch it wrote to — RESOLVED
+
+**Ruling: every run has a public id — decided by the planner who owns the contract in
+ai-orchestrator's node `op-link-linear-store`, whose follow-up flow (`aio-adopt-linear-road`)
+reads it.** `docs/contract.md`'s run-reading paragraph and its example now carry `public_id`;
+the field name, its derivation and `schemas/run-reading.schema.json`, which declares it
+required, are fixed by that ruling.
+
+**What was wrong.** A run id is minted from its plan's name, so a plan titled after a private
+repository minted an id carrying that repository's name, and the run wrote it into the driver
+claim and publication fence of every plan store it projected onto, the plan's name beside them,
+and into the branches it cut — on a public tracker and a public repository as on a private
+one. A store whose boundary is switched on refused those writes, so such a run could not report
+its work in public at all.
+
+**The rule.** `public_id` is the run id itself where the linked `onevcs`'s public-output check
+(`check_public_output`) passes the id as metadata bound for a public destination with the term
+scope left out — every private identity registered on the host — and otherwise `run-` followed
+by the first 12 lowercase hex digits of the SHA-256 of the run id's UTF-8 bytes. It is decided
+once, where the id is minted, and kept in the launch record as `public_id`, beside
+`name_withheld` — whether the plan's own name failed the same check — both omitted when empty,
+so every record an earlier build wrote reads unchanged. A record holding no public id reads the
+same derivation over its id, and the hashed form where the check cannot answer, because a read
+must answer and that form names nothing. A launch whose check cannot answer is not refused: its
+public id is the hashed form and the plan's name is withheld, neither carrying a word of the
+plan's title. The node's task first stated a refusal there; the planner who owns the contract
+ruled it out once this build showed it refused every launch on a host holding one private
+repository whose committed declaration cannot be read — including plans naming no private
+repository, which `publication_boundary` and `lifecycle` journeys run on such a host — and the
+hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`,
+which the planner who owns the contract ruled when this build proposed `2`. The run-reading
+contract is frozen for this run, the field is additive, and the schema closes no object, so a
+reader of version 1 keeps reading it, and a bump would break every reader pinned to `1` for no
+gain. A consumer that needs `public_id` checks that the field is present rather than branching on
+the version.
+
+**Where it is written.** On a plan store whose project's source is not declared
+`visibility: private` — the store's own declaration — `onepipeline.driver.run` and
+`onepipeline.publishing.run` carry the public id, and `onepipeline.name` carries it where the
+plan's name is withheld; the driver reads its own claim and fence back by that name, and a
+takeover finds a claimed run of this host by it. A branch rendered for a node whose repository
+the linked `onevcs` reports public renders `plan.name` as the public id where the plan's name is
+withheld. Every other write is unchanged, and a run whose id and name pass writes exactly what
+it wrote before.
+
+**What this build does.** `src/publicid.rs` decides and derives it; `tests/e2e/public_id.rs`
+drives every rule above through the compiled binary.
+
+## 136. An envelope carrying a live note went unanswered for as long as its receiver's turn ran — OPEN
+
+**Proposal, for the planner who owns the contract: the Channel paragraph's sentence on what
+holds an envelope behind a live note, and the outcome vocabulary it implies, take the rule
+entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled) states.** The manager
+ruled that rule on the plan node `op-envelope-outcome`, and this build implements it;
+`docs/contract.md`'s own wording is unchanged until the planner rules on it. The rule is
+stated where it amends what it amends: entry 108 for the reconciler, the sidecar and
+`status`, and entry 64 for the receipt's `notes` key. This entry records what it raised in
+the published bundles.
+
+`CommandVerdict` is a public exhaustive enum of the crate and of the published channel
+layout, so its new `queued` word is one a reader of the layout before it cannot read: the
+planner-channel document's major is raised. The `edit-rejected` record's optional `index`
+is additive, so the events bundle's minor is raised.
+
+**Four Rust source-compatibility breaks, ruled.** The public exhaustive enums gain
+`CommandVerdict::Queued` and `Delivery::Queued` (`Delivery` is re-exported by `views`).
+The public structs gain `Receipt::notes` and `RunReading::inbox`, which also change
+struct literals and exhaustive destructuring. The manager accepted all four in this
+same breaking change under correlation `c-f1a4f2c43bc78b8cb14a6a962a0b97f3`.
+**Additive means wire-additive:** changed wire and disk shapes only add optional fields
+or values; the new receipt and inbox fields are omitted when empty. Every other
+public-type change is a new type.
+
+```json
+{
+  "command_verdict": ["applied", "validated", "delivered", "refused", "queued"],
+  "bundle_versions": {"events": "1.10.0", "planner_channel": "2.0.0"}
+}
+```
+
+## 137. A driver ended its own healthy dispatches when it could not confirm its claim in time — OPEN
 
 **Proposal, approved by the manager for this build: amendment of #965's ruling (entry 128).
 An unconfirmed claim keeps the work in flight; only another driver's claim ends it.** Entry 128
@@ -12426,50 +12635,3 @@ Entry 128's `a_publication_whose_fence_the_board_refuses_starts_once_a_later_wri
 refuses the fence a dispatch needs, as
 `a_dispatch_whose_fence_the_board_refuses_starts_once_a_later_write_lands`. The two closeout-release journeys make the store slow only once the
 dispatch is under way.
-## 136. A run named after a private repository named it on every public tracker and branch it wrote to — RESOLVED
-
-**Ruling: every run has a public id — decided by the planner who owns the contract in
-ai-orchestrator's node `op-link-linear-store`, whose follow-up flow (`aio-adopt-linear-road`)
-reads it.** `docs/contract.md`'s run-reading paragraph and its example now carry `public_id`;
-the field name, its derivation and `schemas/run-reading.schema.json`, which declares it
-required, are fixed by that ruling.
-
-**What was wrong.** A run id is minted from its plan's name, so a plan titled after a private
-repository minted an id carrying that repository's name, and the run wrote it into the driver
-claim and publication fence of every plan store it projected onto, the plan's name beside them,
-and into the branches it cut — on a public tracker and a public repository as on a private
-one. A store whose boundary is switched on refused those writes, so such a run could not report
-its work in public at all.
-
-**The rule.** `public_id` is the run id itself where the linked `onevcs`'s public-output check
-(`check_public_output`) passes the id as metadata bound for a public destination with the term
-scope left out — every private identity registered on the host — and otherwise `run-` followed
-by the first 12 lowercase hex digits of the SHA-256 of the run id's UTF-8 bytes. It is decided
-once, where the id is minted, and kept in the launch record as `public_id`, beside
-`name_withheld` — whether the plan's own name failed the same check — both omitted when empty,
-so every record an earlier build wrote reads unchanged. A record holding no public id reads the
-same derivation over its id, and the hashed form where the check cannot answer, because a read
-must answer and that form names nothing. A launch whose check cannot answer is not refused: its
-public id is the hashed form and the plan's name is withheld, neither carrying a word of the
-plan's title. The node's task first stated a refusal there; the planner who owns the contract
-ruled it out once this build showed it refused every launch on a host holding one private
-repository whose committed declaration cannot be read — including plans naming no private
-repository, which `publication_boundary` and `lifecycle` journeys run on such a host — and the
-hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`,
-which the planner who owns the contract ruled when this build proposed `2`. The run-reading
-contract is frozen for this run, the field is additive, and the schema closes no object, so a
-reader of version 1 keeps reading it, and a bump would break every reader pinned to `1` for no
-gain. A consumer that needs `public_id` checks that the field is present rather than branching on
-the version.
-
-**Where it is written.** On a plan store whose project's source is not declared
-`visibility: private` — the store's own declaration — `onepipeline.driver.run` and
-`onepipeline.publishing.run` carry the public id, and `onepipeline.name` carries it where the
-plan's name is withheld; the driver reads its own claim and fence back by that name, and a
-takeover finds a claimed run of this host by it. A branch rendered for a node whose repository
-the linked `onevcs` reports public renders `plan.name` as the public id where the plan's name is
-withheld. Every other write is unchanged, and a run whose id and name pass writes exactly what
-it wrote before.
-
-**What this build does.** `src/publicid.rs` decides and derives it; `tests/e2e/public_id.rs`
-drives every rule above through the compiled binary.

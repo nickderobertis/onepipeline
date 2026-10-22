@@ -2172,7 +2172,8 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
         let answered = world.run_with_stdin(&["reply", &run], &envelope.to_string());
         answered.exited(0);
         let receipt = answered.json();
-        stated_by_entry_64(&receipt, shape, verdict, commands);
+        // Every commands shape here carries a note, so `notes` rides with them.
+        stated_by_entry_64(&receipt, shape, verdict, commands, commands);
         // And each half's word is its own, so an envelope that did both is not
         // read off one of them: the note landed, and the ruling did too.
         if commands {
@@ -2193,11 +2194,12 @@ fn the_reply_receipt_names_each_half_the_envelope_carried() {
 
 /// Hold one receipt to entry 64 of `docs/contract-divergences.md`: every key it
 /// answers is one the record names, every key that record names is present
-/// exactly when the half it depends on was carried, and every word is one that
-/// key may answer.
+/// exactly when the half it depends on was carried — `notes` when an applied
+/// envelope carried a note — and every word is one that key may answer, or, for
+/// a key whose words are stated as `each`, one each of its values may answer.
 ///
 /// `live_edit.rs`'s `from_entry_57` reads its entry the same way.
-fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: bool) {
+fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: bool, note: bool) {
     let record = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract-divergences.md"),
     )
@@ -2232,6 +2234,7 @@ fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: boo
             "always" => true,
             "with a verdict half" => verdict,
             "with commands" => commands,
+            "with a note, once applied" => note && receipt["state"] == "applied",
             other => panic!("entry 64 states a presence rule this journey cannot drive: {other}"),
         };
         let answer = receipt.get(key);
@@ -2242,7 +2245,22 @@ fn stated_by_entry_64(receipt: &Value, shape: &str, verdict: bool, commands: boo
              {receipt}"
         );
         let Some(answer) = answer else { continue };
-        if let Some(words) = rule["values"].as_array() {
+        if let Some(words) = rule["each"].as_array() {
+            let each = answer
+                .as_object()
+                .unwrap_or_else(|| panic!("{shape}: '{key}' answered {answer}, not an object"));
+            assert!(
+                !each.is_empty(),
+                "{shape}: '{key}' answered an empty object"
+            );
+            for (node, word) in each {
+                assert!(
+                    words.contains(word),
+                    "{shape}: '{key}' answered {word} for {node}, which entry 64 does not \
+                     state: {words:?}"
+                );
+            }
+        } else if let Some(words) = rule["values"].as_array() {
             assert!(
                 words.contains(answer),
                 "{shape}: '{key}' answered {answer}, which entry 64 does not state: {words:?}"
@@ -3765,7 +3783,7 @@ fn a_verdict_beside_edits_that_are_still_queued_is_delivered_anyway() {
     // Held to entry 64 here rather than only in the receipt journey, because this
     // is the one shape that reaches the record's `queued` words.
     let receipt = submitted.json();
-    stated_by_entry_64(&receipt, "a verdict beside queued edits", true, true);
+    stated_by_entry_64(&receipt, "a verdict beside queued edits", true, true, true);
     assert_eq!(receipt["state"], "queued");
     assert_eq!(receipt["verdict"], "delivered");
     assert_eq!(receipt["commands"], "queued");
