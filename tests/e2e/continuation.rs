@@ -1967,6 +1967,97 @@ fn a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement() 
     drop(successor);
 }
 
+/// A live displaced driver that has not read the takeover by the time its wait has passed
+/// may still start a dispatch after the adopter has begun — no dispatch reads the claim —
+/// but that dispatch publishes nothing: the read before its publication finds the adopter's
+/// claim, so the driver withholds it with its branch kept, stops, and acknowledges. The
+/// adopter's publication of that node is the only change request opened.
+#[test]
+fn a_displaced_driver_that_has_not_read_the_takeover_publishes_nothing_it_starts_after_it() {
+    let world = takeover_world("takeover-unread", 5);
+    world.script("y.work", "y's change\n");
+    let x = world.rendezvous("x");
+    let y = world.rendezvous("y");
+    let run = "unread";
+    let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let theirs_x = x.arrived();
+    until_claimed_by(&world, &project, run);
+    let successor = world.on_host("host-b");
+    let taking = take_over_in_background(&successor, &project);
+    let claim = until_claimed_on(&world, &project, "host-b");
+    // Nothing of the displaced driver's is fenced, so the adopter starts once its wait has
+    // passed, while the displaced driver's x still runs.
+    let said = launched_over(taking);
+    assert!(
+        said.contains(&format!(
+            "has not acknowledged in {}s, and none of its publications is under way",
+            takeover_wait(1).as_secs()
+        )),
+        "{said}"
+    );
+    let adopters_x = x.arrived();
+    let began = successor
+        .events_of(run, "node-dispatched")
+        .first()
+        .map(|event| event["ts"].as_str().expect("a record's time").to_owned())
+        .expect("the adopter dispatched x");
+
+    // The displaced driver goes on: x finishes, and it starts y after the adopter began.
+    theirs_x.release();
+    let theirs_y = y.arrived();
+    let started = world
+        .events_of(run, "node-dispatched")
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "y")
+        .map(|event| event["ts"].as_str().expect("a record's time").to_owned())
+        .expect("the displaced driver dispatched y");
+    assert!(
+        started >= began,
+        "the displaced driver dispatched y at {started}, before the adopter began at {began}"
+    );
+    theirs_y.release();
+    world.until("the displaced driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    // By then the adopter's driver has written its own claim over the takeover's.
+    let read = world.events_of(run, "driver-superseded");
+    assert_eq!(read.len(), 1, "{read:?}");
+    let by = &read[0]["payload"]["by"];
+    assert_eq!(
+        (&by["run"], &by["host"]),
+        (&claim["run"], &claim["host"]),
+        "{by}"
+    );
+    let withheld = settled(&world, run, "y");
+    assert_eq!(withheld["status"], "cancelled", "{withheld}");
+    assert!(
+        withheld["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("not published")),
+        "{withheld}"
+    );
+    assert!(
+        created_from(&world).is_empty(),
+        "the displaced driver opened a change request"
+    );
+
+    adopters_x.release();
+    y.arrived().release();
+    successor.until("the adopter to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        settled(&successor, run, "y")["outcome"],
+        "change-review-draft"
+    );
+    one_change_request_per_branch(&world);
+    assert_eq!(created_from(&world).len(), 1);
+    drop(successor);
+}
+
 /// A displaced driver that died without acknowledging — a shutdown ended it mid-dispatch,
 /// leaving its claim — holds the adopter only until the takeover's wait has passed with no
 /// publication of it under way; the adopter then continues the node on the branch its
@@ -2238,7 +2329,7 @@ enum ClaimAnswer {
 /// A claim read that fails ends no dispatch: with `x` in flight for longer than the lapse the
 /// claim's old lease had — two of the intervals the setting still names and a read's deadline
 /// — `x` finishes, the next dispatch starts, and only its publication waits, until a read
-/// answers.
+/// answers; while it waits, another dispatch starts and settles.
 #[test]
 fn a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication() {
     a_claim_read_answering("claim-read-fails", ClaimAnswer::Fails);
@@ -2263,8 +2354,9 @@ fn a_claim_read_finding_no_claim_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-no-claim", ClaimAnswer::NoClaim);
 }
 
-/// Drive `answer` on a run of `x`, then `y` — one dispatch at a time, `y` publishing — from
-/// the moment `x` is in flight.
+/// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
+/// the moment `x` is in flight: `w` is held until `y`'s publication is waiting, so `z` starts
+/// while it waits.
 fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     use std::time::Duration;
     // The interval the claim's old lease ran on: it lapsed at two of them and a read's
@@ -2274,12 +2366,24 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     let world = takeover_world(name, interval).through_scripted_source();
     world.script("y.work", "y's change\n");
     let x = world.rendezvous("x");
+    let w = world.rendezvous("w");
     let run = "answered";
-    let project = author(&world, run, vec![agent("x", &[]), lifecycle("y", &["x"])]);
+    let mut plan = plan_of(
+        run,
+        vec![
+            agent("x", &[]),
+            lifecycle("y", &["x"]),
+            agent("w", &[]),
+            agent("z", &["w"]),
+        ],
+    );
+    plan["concurrency"] = json!(3);
+    let project = world.plan(run, &plan);
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
     let in_flight = x.arrived();
+    let beside = w.arrived();
     until_claimed_by(&world, &project, run);
     let held = match answer {
         ClaimAnswer::Fails => {
@@ -2319,9 +2423,8 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     in_flight.release();
     world.until("x to settle", ended);
     assert_eq!(settled(&world, run, "x")["status"], "done", "{answer:?}");
-    // The next dispatch starts.
     world.until("y to be dispatched", |world| {
-        dispatched(world, run).len() == 2
+        dispatched(world, run).contains(&"y".to_owned())
     });
     let published = |world: &World| {
         world
@@ -2329,11 +2432,23 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             .iter()
             .any(|event| event["kind"] == "change-opened")
     };
+    // While y's publication waits, w finishes and z starts and settles beside it.
+    let z_settled = |world: &World| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "z")
+    };
     match (answer, held) {
-        (ClaimAnswer::NoClaim, _) => {}
+        (ClaimAnswer::NoClaim, _) => {
+            beside.release();
+            world.until("z to settle", z_settled);
+        }
         (ClaimAnswer::TimesOut, Some(held)) => {
             // y's publication waits on the read that does not answer, and on no other.
             let read = held.arrived();
+            beside.release();
+            world.until("z to settle", z_settled);
             world.until_run_file_holds(run, "driver.log", "did not answer within 20 seconds");
             assert!(
                 !published(&world),
@@ -2344,7 +2459,8 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
         }
         (_, _) => {
             world.until_run_file_holds(run, "driver.log", "before it publishes");
-            std::thread::sleep(Duration::from_secs(6));
+            beside.release();
+            world.until("z to settle", z_settled);
             assert!(
                 !published(&world),
                 "{answer:?}: y published on a read that did not answer"
@@ -2356,11 +2472,10 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
         world.run_file(run, "result.json").is_file()
     });
     assert!(published(&world), "{answer:?}");
-    assert_eq!(
-        dispatched(&world, run),
-        vec!["x".to_owned(), "y".to_owned()],
-        "{answer:?}"
-    );
+    let mut started = dispatched(&world, run);
+    started.sort();
+    assert_eq!(started, ["w", "x", "y", "z"], "{answer:?}");
+    assert_eq!(settled(&world, run, "z")["status"], "done", "{answer:?}");
     assert_eq!(
         settled(&world, run, "y")["outcome"],
         "change-review-draft",

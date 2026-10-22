@@ -744,7 +744,7 @@ pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
 /// Nothing more is started. A dispatch in progress settles unpublished, and a publication
 /// already under way finishes.
 ///
-/// `owed` is whether this driver owes the run that took over an acknowledgement: it does
+/// `drove` says whether this driver owes the run that took over an acknowledgement: it does
 /// wherever it started anything, so that run may be waiting on it — an adoption whose first
 /// read found the takeover started nothing, and owes none. A driver that owes one goes on
 /// projecting what it settles until it acknowledges; one that does not hands the board over
@@ -754,14 +754,14 @@ fn supersede(
     journal: &mut Journal,
     writeback: Option<&crate::writeback::Writeback>,
     by: &crate::payload::DriverClaim,
-    owed: bool,
+    drove: Drove,
     fenced: bool,
 ) -> Result<()> {
     if let Some(writeback) = writeback {
         // A publication this driver fenced holds the run that took over until its settlement
         // is on the store, so that run is writing nothing yet: the settlement is projected
         // even by a driver that owes no acknowledgement.
-        if fenced || owed {
+        if fenced || drove == Drove::Started {
             writeback.hand_over();
         } else {
             writeback.retire(by);
@@ -806,6 +806,16 @@ struct Superseded {
     owed: bool,
     /// Whether this driver has spent its one bounded wait for what it settled to land.
     waited: bool,
+}
+
+/// Whether a driver has started anything, and so owes a run that takes its project over an
+/// acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drove {
+    /// It has started something: a launch has, and an adoption once it dispatches.
+    Started,
+    /// An adoption that has started nothing yet.
+    Nothing,
 }
 
 /// The kind of the non-blocking surface a superseded driver raises.
@@ -1540,9 +1550,11 @@ fn converge(
     // The claim that took the project over from this driver, once one has: from then on it
     // dispatches and publishes nothing more, and ends once what it had in flight settles.
     let mut superseded_by: Option<Superseded> = None;
-    // Whether this driver has started anything, and so owes a run that takes the project
-    // over an acknowledgement: a launch has, and an adoption once it dispatches.
-    let mut drove = launch.adoptions == 0;
+    let mut drove = if launch.adoptions == 0 {
+        Drove::Started
+    } else {
+        Drove::Nothing
+    };
     let mut publications: Vec<PublicationDue> = Vec::new();
     // The nodes whose publication this driver cleared and which have not settled: a
     // publication under way is finished, so a takeover does not end it.
@@ -1844,7 +1856,7 @@ fn converge(
                 supersede(paths, journal, writeback.as_ref(), &by, drove, fenced)?;
                 superseded_by = Some(Superseded {
                     by,
-                    owed: drove,
+                    owed: drove == Drove::Started,
                     waited: false,
                 });
             }
@@ -1880,7 +1892,7 @@ fn converge(
             supersede(paths, journal, writeback.as_ref(), &by, drove, fenced)?;
             superseded_by = Some(Superseded {
                 by,
-                owed: drove,
+                owed: drove == Drove::Started,
                 waited: false,
             });
             for due in starting.drain(..) {
@@ -2041,7 +2053,7 @@ fn converge(
             started || restacked || readjusted
         };
         if started_here {
-            drove = true;
+            drove = Drove::Started;
             derived = None;
             unpublished = true;
             moved = true;

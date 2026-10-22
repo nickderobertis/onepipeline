@@ -11657,8 +11657,9 @@ seam shared by every host, with two real drivers on two hosts:
   `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them` holds that a
   dispatch reads nothing;
 - the four answers, each on a run with a dispatch in flight for longer than the old lapse,
-  each showing the dispatch is not ended, a later dispatch still starts, and its
-  publication goes ahead once a read answers:
+  each showing the dispatch is not ended, a later dispatch still starts, another starts
+  and settles while that one's publication waits, and the publication goes ahead once a read
+  answers:
   `a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication`,
   `a_claim_read_that_times_out_ends_no_dispatch_and_holds_only_its_publication`,
   `a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication` and
@@ -11668,6 +11669,9 @@ seam shared by every host, with two real drivers on two hosts:
   the displaced driver withholding at its publication's read, starting nothing after it,
   and acknowledging, and the adopter starting on that and continuing the node on its
   branch, with one change request per branch;
+- the gap: `a_displaced_driver_that_has_not_read_the_takeover_publishes_nothing_it_starts_after_it`
+  has the adopter start once its wait has passed while the displaced driver still runs, and
+  shows the dispatch that driver starts after it withheld at its publication's read;
 - a dead driver: `a_takeover_whose_displaced_driver_died_proceeds_once_its_wait_has_passed`,
   and `an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over`;
 - the fence: `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`

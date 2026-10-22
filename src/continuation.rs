@@ -702,9 +702,8 @@ pub(crate) struct ClaimWatch {
     /// The claim this run's launch knowingly took over: still on the store until this
     /// driver's first projection replaces it, and no sign that anybody else drives.
     displaced: Option<DriverClaim>,
-    /// An adoption whose first read is still to be made: made on its first pass the store
-    /// has not asked to be left alone over.
-    adopting: bool,
+    /// Where this driver stands with its claim.
+    standing: Standing,
     /// The nodes the project's [`PUBLISHING_KEY`] names as this driver's publications under
     /// way, as far as this driver knows: `None` where it cannot say — an adoption before its
     /// first read, or after a write the store refused.
@@ -714,12 +713,22 @@ pub(crate) struct ClaimWatch {
     /// When the read before a publication last went unanswered, so the loop wakes to read
     /// again.
     read_unanswered: Option<Instant>,
-    /// A read found another run's claim: the fence this driver clears may since be that
-    /// run's, so it reads before it clears.
-    superseded: bool,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
+}
+
+/// Where a driver stands with its project's claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// An adoption whose first read is still to be made: made on its first pass the store
+    /// has not asked to be left alone over.
+    AdoptionReadDue,
+    /// Driving, on the read its launch made or on its adoption's.
+    Driving,
+    /// A read found another run's claim: the fence this driver clears may since be that
+    /// run's, so it reads before it clears.
+    Superseded,
 }
 
 /// What the read immediately before a publication lets the driver do.
@@ -757,12 +766,15 @@ impl ClaimWatch {
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
             displaced: taken_over(paths),
-            adopting: !launched,
+            standing: if launched {
+                Standing::Driving
+            } else {
+                Standing::AdoptionReadDue
+            },
             // A launch minted its run, so nothing on the store names its publications yet.
             fenced: launched.then(std::collections::BTreeSet::new),
             fence_refused: None,
             read_unanswered: None,
-            superseded: false,
             term_scope,
         })
     }
@@ -784,7 +796,7 @@ impl ClaimWatch {
     /// How long until the adoption's first read is due: now, where it is still to be made
     /// and the store has asked for no wait, and `Duration::MAX` once it has been made.
     pub(crate) fn until_adoption_read(&self) -> Duration {
-        if !self.adopting {
+        if self.standing != Standing::AdoptionReadDue {
             return Duration::MAX;
         }
         crate::writeback::store_wait_left(&self.run_dir).unwrap_or(Duration::ZERO)
@@ -797,7 +809,7 @@ impl ClaimWatch {
     /// A read the store fails is said on standard error and answers nothing: a claim is best
     /// effort, and a store that cannot be read has not said anybody else drives.
     pub(crate) fn adoption_read(&mut self) -> Option<DriverClaim> {
-        if !self.adopting {
+        if self.standing != Standing::AdoptionReadDue {
             return None;
         }
         // A store that asked to be left alone is asked nothing inside the wait: every further
@@ -812,10 +824,10 @@ impl ClaimWatch {
             return None;
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        self.adopting = false;
+        self.standing = Standing::Driving;
         match self.read() {
             Ok(Some(claim)) if self.supersedes(&claim) => {
-                self.superseded = true;
+                self.standing = Standing::Superseded;
                 Some(claim)
             }
             Ok(_) => None,
@@ -860,7 +872,7 @@ impl ClaimWatch {
         match self.read() {
             Ok(Some(claim)) if self.supersedes(&claim) => {
                 self.read_unanswered = None;
-                self.superseded = true;
+                self.standing = Standing::Superseded;
                 BeforePublishing::Superseded(claim)
             }
             Ok(_) => {
@@ -945,7 +957,7 @@ impl ClaimWatch {
         if self.fence_refused.is_some() && !self.until_fence_retry().is_zero() {
             return false;
         }
-        if nodes.is_empty() && self.superseded {
+        if nodes.is_empty() && self.standing == Standing::Superseded {
             match self
                 .store
                 .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
