@@ -6501,11 +6501,11 @@ fn judges_started(judges: &std::path::Path) -> Vec<u32> {
         .collect()
 }
 
-/// Every judge under `judges` still running five seconds after a stop answered,
-/// each ended here once it is found — so a journey that fails on one leaves
-/// nothing behind it.
+/// End every judge under `judges` still running five seconds after a stop
+/// answered, and answer which those were — so a journey that fails on one
+/// leaves nothing behind it.
 #[cfg(unix)]
-fn judges_surviving_the_stop(judges: &std::path::Path) -> Vec<u32> {
+fn end_judges_surviving_the_stop(judges: &std::path::Path) -> Vec<u32> {
     use crate::harness::process_ended;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -6597,7 +6597,7 @@ fn stopping_a_run_ends_its_observers_command_judge() {
             end_process(*child);
         }
     }
-    let judges_left = judges_surviving_the_stop(&judges);
+    let judges_left = end_judges_surviving_the_stop(&judges);
     stopped.exited(0);
     reaped
         .join()
@@ -6699,7 +6699,7 @@ fn a_stop_ends_an_observer_restart_asked(asked: RestartAsked) {
         stopping.join().expect("the stop returns")
     });
     let started = judges_started(&judges);
-    let judges_left = judges_surviving_the_stop(&judges);
+    let judges_left = end_judges_surviving_the_stop(&judges);
     reaped
         .join()
         .expect("the engine reaper finishes")
