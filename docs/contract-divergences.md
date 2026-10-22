@@ -3414,8 +3414,9 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   driver tier leaves room to say so.
 
   *Implementation behaviour, not a contract divergence:* that restart is held
-  still by `stop`. A stop holds the run's observer restarts — the run
-  directory's `observer-restart.lock` — for its whole teardown, from before it
+  still by `stop`. A stop of a run launched with an observer graph holds the
+  run's observer restarts — the run directory's `observer-restart.lock`, which
+  the driver makes as it starts watching — for its whole teardown, from before it
   cancels the recorded observer until it has answered, waiting out a restart
   already under way so the observer it cancels is the one now watching. While
   the hold is held the driver restarts nothing and says so on its log, so no

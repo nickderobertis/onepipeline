@@ -1961,6 +1961,8 @@ fn the_restart_lock_cannot_be_opened(world: &World, run: &str) -> PathBuf {
     // premise is arranged directly, the way
     // `a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved` arranges
     // its own. The driver, the stop and every outcome asserted are the binary's.
+    // The driver made the lock as it opened its watch.
+    std::fs::remove_file(&lock).expect("the driver made its restart lock");
     std::fs::create_dir(&lock).expect("the restart lock is replaced by a directory");
     // llmlint: ignore-end[tests_mirror_real_usage]
     lock
@@ -1972,12 +1974,19 @@ fn the_restart_lock_cannot_be_opened(world: &World, run: &str) -> PathBuf {
 #[test]
 fn a_stop_that_cannot_hold_its_runs_observer_restarts_refuses_and_signals_nothing() {
     let world = World::new("driver-stop-restart-lock-unopenable");
+    world.script("observer.wait", "hold");
     world.script("build.wait", "hold");
-    let (run, driver) =
-        start_detached_announcing(&world, "lock-unopenable", vec![agent("build", &[])]);
-    world.until("a node to be in flight", |world| {
-        !world.events_of(&run, "node-dispatched").is_empty()
-    });
+    let run = start_detached_observed(&world, "lock-unopenable", vec![agent("build", &[])]);
+    world.until(
+        "the observer to watch and a node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty() && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    let driver = world.run_json(&run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the record names no driver:\n{}", world.dump()));
     let lock = the_restart_lock_cannot_be_opened(&world, &run);
 
     let refused = world.run(&["stop", &run]);

@@ -87,12 +87,27 @@ const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_C
 /// How often a stop looks again at a restart lock a restart in flight holds.
 const RESTART_LOCK_POLL: Duration = Duration::from_millis(20);
 
+/// Open the run's observer restart lock, making it where it is not there yet.
+///
+/// An existing lock is opened for reading, which is all a lock needs, so a run
+/// directory that has since gone read-only still has one to take: the driver
+/// makes it when it opens its watch — see [`ObserverWatch::of`] — and a run
+/// whose launch record can no longer be written is still a run to keep watched.
+/// Anything at the path that is not a file is refused rather than locked.
 fn observer_restart_lock(paths: &RunPaths) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(paths.dir.join(OBSERVER_RESTART_LOCK_FILE))
+    let path = paths.dir.join(OBSERVER_RESTART_LOCK_FILE);
+    let file = match std::fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?,
+        opened => opened?,
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("it is not a file"));
+    }
+    Ok(file)
 }
 
 /// Hold the run's observer restarts still for a teardown: wait out a restart in
@@ -2517,6 +2532,16 @@ impl<'a> ObserverWatch<'a> {
         goal: Option<String>,
         output: agentgraph::GraphOutput<'a>,
     ) -> Self {
+        // Made now, while the run's directory is surely writable, so a restart
+        // has a lock to take after it no longer is. One that cannot be made is
+        // said now and again by the first restart it holds back.
+        if let Err(error) = observer_restart_lock(paths) {
+            eprintln!(
+                "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} cannot be made ({error}); \
+                 no observer is restarted until it can",
+                paths.run
+            );
+        }
         Self {
             paths,
             record,
@@ -3545,7 +3570,11 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
     let mut _restarts = None;
     if let Aim::Here { roots, .. } = &aim {
         if !roots.is_empty() {
-            _restarts = Some(hold_observer_restarts(paths)?);
+            // A run launched with no observer graph has none to restart, so
+            // it has no hold to take either.
+            if record.observer_graph().is_some() {
+                _restarts = Some(hold_observer_restarts(paths)?);
+            }
             // Read again under the lock: a restart that finished while it was
             // waited for recorded the graph run now watching, and that is the
             // one to cancel.
