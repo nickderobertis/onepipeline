@@ -2270,8 +2270,6 @@ fn converge(
                     CloseoutClaim {
                         statuses: &statuses,
                         watch: claims.as_mut(),
-                        publishing: &publishing,
-                        unlanded: &unlanded,
                     },
                 )? {
                     LastClaim::FoundNothing => break,
@@ -2405,8 +2403,6 @@ fn converge(
                 CloseoutClaim {
                     statuses: &statuses,
                     watch: claims.as_mut(),
-                    publishing: &publishing,
-                    unlanded: &unlanded,
                 },
             )? {
                 LastClaim::FoundNothing => break,
@@ -2837,13 +2833,10 @@ enum LastClaim {
     MovedTheRun,
 }
 
-/// The terminal statuses and the claim fence that must reflect their landed settlements
-/// before the run marks its home complete.
+/// Terminal statuses and the claim watch paused while closeout projects its release.
 struct CloseoutClaim<'a> {
     statuses: &'a BTreeMap<String, NodeStatus>,
     watch: Option<&'a mut crate::continuation::ClaimWatch>,
-    publishing: &'a BTreeSet<String>,
-    unlanded: &'a BTreeSet<String>,
 }
 
 /// Close the run out and take the command queue's **last claim**.
@@ -2877,8 +2870,6 @@ fn close_out_and_drain(
     let CloseoutClaim {
         statuses: final_statuses,
         watch,
-        publishing,
-        unlanded,
     } = claim;
     // llmlint: ignore-block[changed_behavior_has_e2e] the real-store journey drives the
     // terminal projection failing and the surface reaching the planner before the run
@@ -2888,6 +2879,9 @@ fn close_out_and_drain(
     // itself is the best-effort boundary the contract already fixes — a store that has not
     // answered has said nothing to report.
     crate::loopstats::flush(paths)?;
+    if let Some(watch) = watch.as_ref() {
+        watch.pause_fence(true);
+    }
     if let Some(writeback) = writeback {
         // A node that never started is released at closeout, so another reader may take up
         // what this run claimed and did not begin. A driver that goes on driving after an
@@ -2903,16 +2897,6 @@ fn close_out_and_drain(
                     launch,
                     &crate::boundary::of_run(&crate::boundary::plan_now(state)).scope,
                 );
-            }
-            if let Some(watch) = watch {
-                let mut nodes = publishing.clone();
-                nodes.extend(
-                    unlanded
-                        .iter()
-                        .filter(|node| !writeback.has_landed_settlement(node))
-                        .cloned(),
-                );
-                watch.fence(&nodes);
             }
         });
         // The last thing this loop does, and the reason it is here rather than
@@ -2957,6 +2941,9 @@ fn close_out_and_drain(
         // holds it at the layer that owns the schedule.
         writeback.driving_again();
         // llmlint: ignore-end[changed_behavior_has_e2e]
+    }
+    if let Some(watch) = watch {
+        watch.pause_fence(false);
     }
     Ok(LastClaim::MovedTheRun)
 }

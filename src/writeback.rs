@@ -333,6 +333,8 @@ enum DriverWrite {
     Release { run: String, host: String },
     /// Touch no claim: a driver that has none to write.
     Leave,
+    /// Release only this run's best-effort fence after retirement, touching no task or claim.
+    ReleaseFence { run: String, host: String },
 }
 
 /// What a node the run has not started says about the work it names.
@@ -1501,8 +1503,26 @@ impl Writeback {
             // while the hard call limit preserves write-back's latency boundary.
             self.closing_out_until(deadline, Pending::unlanded);
         }
-        // Queue the best-effort fence projection for the settlements this closeout landed.
-        // Its independent worker does not delay marking the home complete.
+        if retired {
+            if let Some(mut snapshot) = snapshot_of(
+                paths,
+                launch,
+                state,
+                statuses,
+                Claim::Released,
+                DriverWrite::ReleaseFence {
+                    run: crate::publicid::on_store(launch),
+                    host: crate::sys::hostname(),
+                },
+            ) {
+                snapshot.nodes.clear();
+                snapshot.project_metadata.clear();
+                self.queue(snapshot);
+                self.closing_out_until(deadline, Pending::unlanded);
+            }
+        }
+        // Final fence release shares the existing projection window. Neither a failed
+        // release nor one that outlasts that window changes the journalled settlement.
         before_home();
         if !retired {
             // The run's home, marked `done` once the run has reached the success ending and
@@ -2744,7 +2764,8 @@ enum Scope {
 /// holds is its own, so no attempt reads the project's page of tasks, nor any item it holds. A
 /// lineage it does not hold — a run an older build started, whose directory holds no baseline —
 /// is read once by its own id and compared against that read. The project is read by an
-/// attempt creating an item, and by no other: see [`carry_the_difference`].
+/// attempt creating an item and by terminal claim/fence release: see
+/// [`carry_the_difference`].
 fn project(
     store: &Store,
     retained: &mut Option<Attempt>,
@@ -2895,7 +2916,7 @@ fn project(
 /// Creation is the one thing a copy is used for, and the one attempt that reads the project:
 /// a member copy lands the project item beside the member it creates, so the shadow project
 /// restates the destination's own exactly — read once, for that — and the copy writes nothing
-/// to it. Every other attempt reads no project at all.
+/// to it. Terminal fence release also reads the project to preserve a successor's fence.
 fn carry_the_difference(
     attempt: &Attempt,
     per_item: NonZeroU64,
@@ -2905,6 +2926,15 @@ fn carry_the_difference(
     items: &mut Vec<String>,
 ) -> Result<Landed, Failed> {
     let scope = decided.scope;
+    if let DriverWrite::ReleaseFence { run, host } = &snapshot.driver {
+        clear_terminal_fence(attempt, snapshot, run, host)?;
+        items.clear();
+        return Ok(Landed {
+            actions: None,
+            spent: None,
+            delivered: Vec::new(),
+        });
+    }
     // A run letting go of a project another run has since claimed writes nothing to it: the
     // board is that run's, and a release written over it would hand back the tickets that
     // run is working. So the store's claim is read first, once, wherever this run's own is
@@ -2960,6 +2990,7 @@ fn carry_the_difference(
                     .insert(DRIVER_KEY.into(), stored);
                 baseline.save();
                 if successor {
+                    clear_terminal_fence(attempt, snapshot, run, host)?;
                     items.clear();
                     return Ok(Landed {
                         actions: None,
@@ -3137,7 +3168,7 @@ fn carry_the_difference(
         DriverWrite::Release { run, host } => {
             baseline.holds_claim_of(run, host).then_some(Value::Null)
         }
-        DriverWrite::Leave => None,
+        DriverWrite::Leave | DriverWrite::ReleaseFence { .. } => None,
     };
     if let Some(value) = claimed {
         let named = MetadataKey::new(DRIVER_KEY.to_owned())
@@ -3158,7 +3189,38 @@ fn carry_the_difference(
             .insert(DRIVER_KEY.into(), value);
         baseline.save();
     }
+    if let DriverWrite::Release { run, host } = &snapshot.driver {
+        clear_terminal_fence(attempt, snapshot, run, host)
+            .map_err(|failed| carrying.failed(failed))?;
+    }
     carrying.finish()
+}
+
+/// Clear only the retiring run's fence, in the same bounded projection as its closeout.
+fn clear_terminal_fence(
+    attempt: &Attempt,
+    snapshot: &Snapshot,
+    run: &str,
+    host: &str,
+) -> Result<(), Failed> {
+    let metadata = destination_project(attempt, snapshot)?.metadata;
+    let fenced = crate::continuation::publishing_of(snapshot.project.as_str(), &metadata)
+        .map_err(|why| Failed::from(why.to_string()))?;
+    if !fenced.is_some_and(|fence| fence.run == run && fence.host == host) {
+        return Ok(());
+    }
+    let named = MetadataKey::new(crate::taskgraph::PUBLISHING_KEY.to_owned())
+        .map_err(|why| Failed::from(why.to_string()))?;
+    attempt
+        .call(
+            StoreCall::ProjectMetadataSet,
+            Deadline::Floor,
+            attempt
+                .engine
+                .set_project_metadata(&snapshot.project.global(), &named, &Value::Null),
+        )?
+        .map(|_| ())
+        .map_err(|error| Failed::engine(PROJECT_METADATA_SET, &error))
 }
 
 /// The engine-owned project keys the snapshot restates with another value than the one last
@@ -3892,8 +3954,8 @@ impl Baseline {
         }) || self.driver_differs(&snapshot.driver)
     }
 
-    /// Whether the projection's driver claim asks the store anything: a claim to hold that is
-    /// not what landed, or a release of a claim that landed naming this run.
+    /// Whether this driver operation asks the store anything: a changed claim, release of
+    /// a claim that landed naming this run, or the terminal fence read after retirement.
     fn driver_differs(&self, driver: &DriverWrite) -> bool {
         match driver {
             DriverWrite::Hold(claim) => {
@@ -3902,6 +3964,7 @@ impl Baseline {
             }
             DriverWrite::Release { run, host } => self.holds_claim_of(run, host),
             DriverWrite::Leave => false,
+            DriverWrite::ReleaseFence { .. } => true,
         }
     }
 

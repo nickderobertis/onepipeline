@@ -12538,6 +12538,11 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    shape. Its writes run on a worker, are reported and retried when refused, and never
    gate dispatch or settlement. A missing, unreachable or rate-limited plan store does
    not prevent a run from making progress while its claim remains confirmed.
+   At closeout, terminal fence release shares the existing bounded writeback attempt,
+   including after retirement; it clears only a fence still naming this run and host.
+   The background fence worker is paused during that attempt and resumes only if an edit
+   reopens the run. Failure is reported as a failed projection, the existing closeout
+   bound is unchanged, and the journalled settlement stands whatever the store answers.
    On this host, a successor must also establish that the predecessor has let go of
    its local ownership; an empty store fence and an elapsed takeover timer do not
    establish that a live local predecessor stopped. The successor keeps waiting for

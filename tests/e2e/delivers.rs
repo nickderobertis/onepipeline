@@ -1168,23 +1168,17 @@ fn a_ticket_rate_limited_with_a_wait_holds_every_call_and_the_retry_carries_its_
             failed_at.elapsed(),
             &store_calls(&world)[asked..]
         );
-        assert_eq!(
-            dispatches(&world, name),
-            0,
-            "a dispatch started before its fence could land after the store's wait"
-        );
         std::thread::sleep(Duration::from_millis(50));
     }
     world.until("the deliverer to be carried again", |world| {
         records(world).len() >= 2
     });
     let retried = records(&world)[1].clone();
-    // `work` changed nowhere and is carried for its ticket; `aside`, whose claim landed,
-    // is not. `gate` may dispatch before or after the retry takes its snapshot,
-    // so that snapshot may carry its changed state too.
-    assert!(
-        retried["items"] == json!(["work"])
-            || (retried["items"] == json!(["gate", "work"]) && dispatches(&world, name) == 1),
+    // `gate` was dispatched meanwhile; `work` changed nowhere, and is carried for its ticket;
+    // `aside`, whose claim landed, is not.
+    assert_eq!(
+        retried["items"],
+        json!(["gate", "work"]),
         "the retry did not carry the deliverer whose ticket fell behind, or carried what \
          landed: {retried}"
     );

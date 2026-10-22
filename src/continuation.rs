@@ -715,6 +715,7 @@ pub(crate) struct ClaimWatch {
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     /// Best-effort fence snapshots, consumed independently of the reconcile loop.
     fence_tx: std::sync::mpsc::Sender<std::collections::BTreeSet<String>>,
+    fence_paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
@@ -785,6 +786,7 @@ impl ClaimWatch {
             .spawn(move || reader.run());
         // llmlint: ignore-end[changed_behavior_has_e2e]
         let (fence_tx, fence_rx) = std::sync::mpsc::channel();
+        let fence_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let writer = FenceWriter {
             store: Store::at(&launch.dir),
             project: project.clone(),
@@ -794,6 +796,7 @@ impl ClaimWatch {
             seen: std::sync::Arc::clone(&seen),
             lease: lease.clone(),
             fence_refused: None,
+            paused: std::sync::Arc::clone(&fence_paused),
             term_scope: term_scope.clone(),
         };
         // llmlint: ignore-block[changed_behavior_has_e2e] refusing this one OS thread is
@@ -819,6 +822,7 @@ impl ClaimWatch {
             lease,
             seen,
             fence_tx,
+            fence_paused,
             term_scope,
         })
     }
@@ -862,6 +866,12 @@ impl ClaimWatch {
     /// The lease the claim thread's reads keep.
     pub(crate) fn lease(&self) -> &Lease {
         &self.lease
+    }
+
+    /// Closeout owns the terminal projection; resume this worker only if an edit reopens work.
+    pub(crate) fn pause_fence(&self, paused: bool) {
+        self.fence_paused
+            .store(paused, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Queue the best-effort store fence without waiting for the store.
@@ -941,6 +951,7 @@ struct FenceWriter {
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     lease: Lease,
     fence_refused: Option<Instant>,
+    paused: std::sync::Arc<std::sync::atomic::AtomicBool>,
     term_scope: Vec<String>,
 }
 
@@ -956,6 +967,9 @@ impl FenceWriter {
             // Coalesce queued snapshots: only the newest projection is useful.
             while let Ok(nodes) = receiver.try_recv() {
                 desired = Some(nodes);
+            }
+            if self.paused.load(std::sync::atomic::Ordering::SeqCst) {
+                continue;
             }
             if let Some(nodes) = &desired {
                 let refused = self.fence_refused;
@@ -1423,6 +1437,9 @@ impl Lease {
                     at_ms: began_at,
                 },
             };
+            // Renew the next-read deadline under this same lock. Otherwise the watchdog
+            // can observe a confirmed claim with the previous, already overdue read slot.
+            state.next_read = Some(newest.at + self.inner.interval);
             let was = std::mem::replace(&mut state.standing, Standing::Confirmed(newest));
             !matches!(was, Standing::Confirmed(_))
         });
@@ -2247,6 +2264,11 @@ mod tests {
         assert_eq!(lease.until_surface(), Duration::MAX);
         let again = Instant::now();
         lease.confirm(again, 1_760_000_100_000);
+        assert_eq!(
+            lease.inner.state.lock().unwrap().next_read,
+            Some(again + interval),
+            "a confirming read left the expired watchdog deadline standing"
+        );
         lease.next_read_at(again + 10 * interval);
         assert_eq!(
             ClaimFile::read(&dir).map(|file| file.reading),
