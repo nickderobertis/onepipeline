@@ -653,6 +653,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CommentsNotDocuments => decided("comments-not-documents"),
         EngineError::StatusesNotTasks => decided("statuses-not-tasks"),
         EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
+        EngineError::VersionMoved { .. } => decided("version-moved"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
@@ -681,6 +682,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: the only link a copy here records is on a shadow task, and `write_shadow` rewrites those before every copy; `writeback::tests` holds the word.
         EngineError::StaleLink { .. } => decided("stale-link"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never asks for a members-only scope; `writeback::tests` holds the word.
+        EngineError::NoProjectCounterpart { .. } => decided("no-project-counterpart"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never sets `create`; `writeback::tests` holds the word.
         EngineError::CreateWith { .. } => decided("create-with"),
@@ -6129,6 +6132,18 @@ mod tests {
             EngineError::QueryNotTasks,
             EngineError::CommentsNotDocuments,
             EngineError::ChangedWhileCopied { item: id() },
+            EngineError::VersionMoved {
+                id: "plans:a".into(),
+                expected: "v1".into(),
+                found: "v2".into(),
+            },
+            EngineError::NoProjectCounterpart {
+                project: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("private")
+                    .expect("a source name"),
+                missing: onetaskgraph_plugin_api::SourceName::new("private")
+                    .expect("a source name"),
+            },
             EngineError::StoredContentDiverged {
                 item: id(),
                 line: 1,
