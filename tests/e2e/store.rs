@@ -2289,7 +2289,7 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
     });
     world.until("the landing attempt to end its command", |world| {
         world
-            .store_calls()
+            .store_calls_beside_the_fence()
             .last()
             .is_some_and(|call| call[0] == "end_command")
     });
@@ -2887,7 +2887,7 @@ fn a_run_whose_destination_can_start_refusing(world: &str, run: &str) -> (World,
     // counts attempts from here waits for that end first.
     world.until("the landing attempt to end its command", |world| {
         world
-            .store_calls()
+            .store_calls_beside_the_fence()
             .last()
             .is_some_and(|call| call[0] == "end_command")
     });

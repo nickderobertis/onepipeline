@@ -87,7 +87,8 @@ fn native(id: &str) -> &str {
 /// and the last call being a command's end detects one whose write has landed but whose command
 /// has not ended yet.
 fn every_attempt_landed(world: &World, run: &str) -> bool {
-    let calls = store_calls(world);
+    // The claim fence's own stores end no command, so its writes are not the write-back's.
+    let calls = world.store_calls_beside_the_fence();
     let ended = calls
         .iter()
         .filter(|call| is_call(call, "end_command"))

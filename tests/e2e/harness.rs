@@ -3079,6 +3079,42 @@ impl World {
             .collect()
     }
 
+    /// The store's calls, in order, but those on the claim fence's own connections.
+    ///
+    /// The driver writes the nodes it has under way to the project's
+    /// `onepipeline.publishing` on a store of its own, off the reconcile loop, whenever that
+    /// set changes (`docs/contract-divergences.md` entry 138): a connection whose every call
+    /// is its handshake or that write. It belongs to no write-back attempt and ends no
+    /// command, so a journey waiting for the write-back's last command to have ended reads
+    /// it here, where a fence write landing after that command cannot stand last.
+    pub fn store_calls_beside_the_fence(&self) -> Vec<Vec<String>> {
+        let calls: Vec<Value> = self
+            .invocations()
+            .into_iter()
+            .filter(|call| call["tool"] == SCRIPTED_KEY)
+            .collect();
+        let mut fencing: std::collections::BTreeMap<u64, (bool, bool)> =
+            std::collections::BTreeMap::new();
+        for call in &calls {
+            let write = call["args"][0] == "set_project_metadata"
+                && call["key"] == "onepipeline.publishing";
+            let (only, wrote) = fencing
+                .entry(call["connection"].as_u64().expect("a call's connection"))
+                .or_insert((true, false));
+            *only &= write || call["args"][0] == "initialize";
+            *wrote |= write;
+        }
+        calls
+            .into_iter()
+            .filter(|call| {
+                fencing[&call["connection"].as_u64().expect("a call's connection")] != (true, true)
+            })
+            .map(|call| {
+                serde_json::from_value(call["args"].clone()).expect("a recorded call's arguments")
+            })
+            .collect()
+    }
+
     pub fn store_asked(&self, method: &str) -> usize {
         self.store_calls()
             .iter()
