@@ -6100,7 +6100,7 @@ fn a_live_note_to_a_turn_that_cannot_be_interrupted_is_carried_or_refused_at_its
 /// --json` carries the same instant on its `inbox` reading's `delivery`; a pending
 /// note with no deadline shows none.
 #[test]
-fn status_shows_a_pending_notes_deadline_beside_its_delivering_state() {
+fn status_shows_a_pending_notes_deadline_beside_its_queued_inbox_state() {
     let world = World::new("note-status-deadline");
     let run = "statusdeadline";
     held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
