@@ -24,6 +24,9 @@
 //! `get_project`, `query_tasks`, `get_task`, `task_dependencies`, `write_project`,
 //! `write_task`, `set_task_status`, `update_task`, `set_project_metadata`:
 //!
+//! * `<key>.assets-unsupported` — declare no image-asset support in the handshake,
+//!   as a destination plugin without asset storage would; ordinary reads and writes still
+//!   reach the real local-md source.
 //! * `<key>.<method>.refuse` — every call of that method is answered with the source error
 //!   the file holds, in the store's own shape (`{"kind": "rate-limited", ...}`), for as long
 //!   as the file is there. Refused **by name** when it does not read as one: a fixture that
@@ -245,6 +248,14 @@ fn main() -> ExitCode {
         Ok(metered) => metered.is_some(),
         Err(why) => return stop(&why),
     };
+    let assetless = match present(
+        &settings
+            .script
+            .join(format!("{}.assets-unsupported", settings.key.0)),
+    ) {
+        Ok(value) => value,
+        Err(why) => return stop(&why),
+    };
     match host.initialize(
         handshake.id,
         handshake.params.protocol_version,
@@ -259,6 +270,20 @@ fn main() -> ExitCode {
                 if let Some(result) = answered.get_mut("result").and_then(Value::as_object_mut) {
                     result.insert("meters".to_owned(), Value::Bool(true));
                 }
+            }
+            if assetless {
+                let Some(capabilities) = answered
+                    .get_mut("result")
+                    .and_then(|result| result.get_mut("capabilities"))
+                    .and_then(Value::as_object_mut)
+                else {
+                    return stop("the hosted plugin did not answer capabilities");
+                };
+                capabilities.insert(
+                    "assets".to_owned(),
+                    serde_json::to_value(onetaskgraph_plugin_api::Support::Unsupported)
+                        .expect("a support value serializes"),
+                );
             }
             println!("{answered}");
         }

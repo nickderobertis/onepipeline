@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.84.1"
+version = "0.85.0"
 dependencies = [
  "async-trait",
  "clap",
@@ -1592,6 +1592,7 @@ dependencies = [
  "onemessagebus",
  "onepipeline-testfakes",
  "onetaskgraph-core",
+ "onetaskgraph-local-md",
  "onetaskgraph-plugin-api",
  "onevcs",
  "onevcs-testing",

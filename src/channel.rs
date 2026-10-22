@@ -2576,6 +2576,13 @@ mod tests {
                     "the wait it was on can never clear, and nothing published",
                     None,
                 ),
+                Command::Add {
+                    node: serde_json::from_value(serde_json::json!({
+                        "id": "drawn", "task": "![flow](./diagram.png)",
+                        "assets_from": "plans:authoring/task"
+                    }))
+                    .expect("an image-bearing added node"),
+                },
             ],
             ..Reply::default()
         }
@@ -2754,6 +2761,26 @@ mod tests {
             bare,
             "an envelope written before the landing existed did not round-trip unchanged"
         );
+    }
+
+    #[test]
+    fn assets_from_round_trips_and_old_added_nodes_still_omit_it() {
+        let golden: Reply = serde_json::from_str(ENVELOPE_GOLDEN).expect("the golden reads");
+        let wire = serde_json::to_value(&golden).expect("the envelope writes");
+        assert_eq!(
+            wire["commands"][3]["node"]["assets_from"],
+            "plans:authoring/task"
+        );
+        let read: Reply = serde_json::from_value(wire).expect("the envelope reads again");
+        assert_eq!(read, golden);
+        let old = json!({"version": 3, "commands": [{"op": "add", "node": {"id": "plain", "task": "prose"}}]});
+        let read: Reply = serde_json::from_value(old.clone()).expect("the old envelope reads");
+        assert_eq!(
+            serde_json::to_value(read).expect("the old envelope writes"),
+            old
+        );
+        let bad = json!({"version": 3, "commands": [{"op": "add", "node": {"id": "bad", "assets_from": "unqualified"}}]});
+        assert!(serde_json::from_value::<Reply>(bad).is_err());
     }
 
     /// A question's token is the prefix and the rest of the first line carrying

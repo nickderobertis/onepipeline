@@ -478,6 +478,19 @@ waiting for something to drive the run, and never an instruction to send again,
 which the reply says in words on stderr — and `2` when it was refused. A
 non-zero status from this verb is a rejection to correct.
 
+An `add` node or a `retry` replacement may state `"assets_from":
+"plans:authoring-board/task"`, a qualified onetaskgraph task id. Before accepting
+that edit, the compiler asks the store to read the task's held images; an unreadable
+task refuses the edit with its id and the store's reason, before anything is journalled.
+When the write-back creates the lineage, it reads those images through the store's
+public API and writes them alongside the shadow task through local-md's write API,
+so the creating copy carries each image under its reference name. A stored root
+supplies its own held images through its task record without a field. A reference
+neither source holds still refuses `asset-not-held`. Omit `assets_from` for the
+existing behavior; it is absent by default. It is an edit-only field:
+`onepipeline.assets_from` on a task loaded from a plan is refused as not a node
+field, and `requeue` cannot amend it.
+
 A verdict answers one question: `reply --correlation C` names it, and one naming
 none binds first to the question whose `ask-manager-token:` its `message` echoes.
 The whole binding order is the channel section of
