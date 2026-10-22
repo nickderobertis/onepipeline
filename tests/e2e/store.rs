@@ -5395,6 +5395,19 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         world.until("the launch projection record", |world| {
             projection_completed_after(world, run, 0, "anchor")
         });
+        // The claim fence projects the dispatch off the loop, racing the launch projection; its
+        // one write lands before any settlement's requests are counted, and is counted in the
+        // total like every other request.
+        world.until("the dispatch's claim fence", |_| {
+            served.state()["issues"]["plan"]["body"]
+                .as_str()
+                .and_then(|body| body.rsplit_once("<!-- onetaskgraph.metadata\n"))
+                .and_then(|(_, slot)| slot.rsplit_once("\n-->"))
+                .and_then(|(metadata, _)| serde_json::from_str::<Value>(metadata).ok())
+                .is_some_and(|metadata| {
+                    metadata["onepipeline.publishing"]["nodes"] == json!(["anchor"])
+                })
+        });
         let mut costs = Vec::new();
         for (ordinal, (id, status, evidence, projected)) in [
             ("work", "failed", "failed cache journey", "Needs Attention"),
