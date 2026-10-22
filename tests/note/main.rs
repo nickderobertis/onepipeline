@@ -7343,15 +7343,17 @@ fn a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch
     world.until("build to settle cancelled", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
+    // Requeue only after the departing driver releases the run: otherwise it can
+    // dispatch the node again itself, leaving the held turn running indefinitely.
+    world.until("the driver to let go", |world| {
+        world.run(&["status", run, "--json"]).json()["driven"] == false
+    });
     world
         .run_with_stdin_on(
             world.agentgraph_cmd(&["reply", run]),
             &envelope(json!({"op": "requeue", "id": "build"})),
         )
         .exited(0);
-    world.until("the driver to exit", |world| {
-        !world.events_of(run, "driver-exited").is_empty()
-    });
     world
         .run_on(
             world.agentgraph_cmd(&["adopt", run, "--detach"]),
