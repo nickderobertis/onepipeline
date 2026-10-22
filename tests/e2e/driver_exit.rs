@@ -434,8 +434,11 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
         vec![agent("build", &[]), agent("ship", &[])],
         &[],
     );
-    world.until("both held nodes to be dispatched", |world| {
-        world.events_of(run, "node-dispatched").len() >= 2
+    world.until("both held dispatches to be recorded", |world| {
+        // The journal announces dispatch intent before the executor records its
+        // process. Kill only after both launches finish registering, so adoption
+        // recovers two running dispatches rather than racing an unfinished launch.
+        world.events_of(run, "node-dispatched").len() >= 2 && world.dispatch_records(run).len() == 2
     });
     end_process(killed);
 
