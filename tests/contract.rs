@@ -10387,6 +10387,16 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
         serde_json::to_string_pretty(&generated).expect("a schema renders")
     );
 
+    assert!(generated["properties"].get("claim").is_some());
+    assert!(
+        !generated["required"]
+            .as_array()
+            .expect("the reading states its required fields")
+            .iter()
+            .any(|field| field == "claim"),
+        "the claim is a wire-additive, optional reading"
+    );
+
     // The contract's example has exactly the type's fields, and every word it
     // uses is one the schema allows.
     let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"liveness\""))

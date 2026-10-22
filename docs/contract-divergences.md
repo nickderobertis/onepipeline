@@ -12561,7 +12561,7 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    driver state, not journal-derived. No journal record is written per claim read. It is
    declared once, as `views::ClaimFile`, whose `ClaimReading` is also the run reading's
    `claim`. Its absence means nothing is known, which is how a run of an older engine reads.
-7. **The state is visible.** `status --json` gains, additively, `claim`, a `ClaimReading`
+7. **The state is visible.** `status --json` gains the wire-additive, optional `claim`, a `ClaimReading`
    omitted where nothing is known or no driver is live, and `schemas/run-reading.schema.json`
    is regenerated from the type. Adding the field to `RunReading`, which is not
    `#[non_exhaustive]`, breaks a Rust struct literal of it, as `unanswered` did. The manager

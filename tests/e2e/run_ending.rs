@@ -68,7 +68,8 @@ fn start(world: &World, run: &str, nodes: Vec<Value>, mode: &str) -> crate::harn
 /// One run, read the three ways a reader asks for it, each held to `word`.
 ///
 /// Returns the `--json` document, after holding it to the contract's shape: one
-/// line, the seven fields, `driven` the negation of an undriven liveness, never an
+/// line, the complete field list (including the live driver’s optional claim),
+/// `driven` the negation of an undriven liveness, never an
 /// ending and a pause at once, and neither while the run is driven.
 fn read_as(world: &World, run: &str, word: &str) -> Value {
     let status = world.run(&["status", run]);
@@ -111,19 +112,20 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        fields,
-        [
-            "schema_version",
-            "run_id",
-            "public_id",
-            "word",
-            "liveness",
-            "driven",
-            "ending",
-            "paused"
-        ]
-    );
+    let mut expected_fields = vec![
+        "schema_version",
+        "run_id",
+        "public_id",
+        "word",
+        "liveness",
+        "driven",
+        "ending",
+        "paused",
+    ];
+    if word == "ACTIVE" {
+        expected_fields.push("claim");
+    }
+    assert_eq!(fields, expected_fields);
     assert_eq!(reading["schema_version"], 1);
     assert_eq!(reading["run_id"], run);
     assert_eq!(reading["word"], word, "{reading}");
@@ -538,10 +540,17 @@ fn a_driven_run_reads_driven_and_one_whose_driver_died_with_work_ready_reads_dri
     let reading = read_as(&world, run, "ACTIVE");
     assert_eq!(reading["driven"], true);
     assert_eq!(reading["liveness"], "ACTIVE");
+    let claim: onepipeline::views::ClaimReading =
+        serde_json::from_value(reading["claim"].clone()).expect("the live driver's claim");
+    assert_eq!(claim.state, onepipeline::views::ClaimState::Confirmed);
 
     crate::harness::end_process(driver);
     let reading = read_as(&world, run, "DRIVER DEAD");
     assert_eq!(reading["driven"], false);
+    assert!(
+        reading.get("claim").is_none(),
+        "a dead driver has no live claim"
+    );
     assert_eq!(reading["ending"], Value::Null);
     assert_eq!(reading["paused"], Value::Null);
     world
