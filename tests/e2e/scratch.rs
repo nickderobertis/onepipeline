@@ -342,21 +342,25 @@ fn read_views(world: &World, run: &str) -> (String, String) {
         .map(String::as_str)
         .collect();
     fields.sort();
-    assert_eq!(
-        fields,
-        [
-            "driven",
-            "ending",
-            "group",
-            "labels",
-            "liveness",
-            "paused",
-            "public_id",
-            "run_id",
-            "schema_version",
-            "word"
-        ]
-    );
+    let mut expected_fields = vec![
+        "driven",
+        "ending",
+        "group",
+        "labels",
+        "liveness",
+        "paused",
+        "public_id",
+        "run_id",
+        "schema_version",
+        "word",
+    ];
+    // Adoption restores a live driver and its optional claim reading; ended
+    // runs omit that reading even though their claim sidecar remains on disk.
+    if document["driven"] == true {
+        expected_fields.push("claim");
+    }
+    expected_fields.sort();
+    assert_eq!(fields, expected_fields);
     (status.stdout, results.stdout)
 }
 

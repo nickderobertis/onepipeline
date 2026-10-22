@@ -191,7 +191,7 @@ impl ClaimReading {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[non_exhaustive]
 pub struct ClaimFile {
-    /// [`CLAIM_SCHEMA_VERSION`].
+    /// The version of this sidecar's schema.
     pub schema_version: u32,
     /// Where the claim stands.
     #[serde(flatten)]
