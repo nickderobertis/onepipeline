@@ -872,6 +872,29 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         "{}",
         rule_read_report(&world, &spans, &said.borrow())
     );
+    let sessions: Vec<_> = std::fs::read_dir(world.onevcs_home().join("sessions"))
+        .expect("the round opened sessions")
+        .map(|entry| entry.expect("a session entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            let record: Value = serde_json::from_slice(
+                &std::fs::read(&path).expect("the session record is readable"),
+            )
+            .expect("the session record is JSON");
+            (path, record)
+        })
+        .collect();
+    assert!(!sessions.is_empty(), "the round opened no sessions");
+    assert!(
+        sessions
+            .iter()
+            .all(|(_, record)| record["state"] == "closed"),
+        "the round left sessions open: {sessions:?}\n{}",
+        rule_read_report(&world, &spans, &said.borrow())
+    );
     let replies: usize = record["phases"]
         .as_array()
         .unwrap()

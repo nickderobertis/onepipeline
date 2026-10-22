@@ -726,10 +726,9 @@ resolver = "2"
 # `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
 # no 0.56.x.
 #
-# `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
-# release that carries every one of the test-support implementations this
-# crate's journeys double the host with — requires exactly `=0.56.3`, so the
-# pair moves as one.
+# `onevcs` 0.56.5 is the floor because landing-status readers finish before
+# session close checks the clone for running processes. This prevents an engine
+# read from refusing its own stack-base cleanup during a busy review round.
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
@@ -823,7 +822,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.7.0"
-onevcs = "0.56.3"
+onevcs = "0.56.5"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is

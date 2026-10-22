@@ -1857,7 +1857,7 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
     assert_eq!(
         linear.state_of(&only),
         "Done",
-        "requests: {:#?}\nprojections: {}\njournal: {:#?}",
+        "Linear::state_of observed the unexpected issue status below; projection writes come from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
         linear.log(),
         std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
             .unwrap_or_default(),
