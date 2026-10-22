@@ -4556,6 +4556,18 @@ fn task_document(
     let id = head.as_str();
     if let Some(settlement) = snapshot.settlements.get(id) {
         metadata.insert(crate::taskgraph::SETTLEMENT_KEY.into(), settlement.clone());
+        // Beside it, the word it is projected as: a park and a stop both settle `cancelled`,
+        // and a launch reads this to tell the engine's close of a task from a person's.
+        // llmlint: ignore-block[changed_behavior_has_e2e] This private projection has no CLI
+        // path that writes a current cancelled board word: stop ends the driver without
+        // projecting, channel cancel parks, and retry replaces the lineage head. The manager
+        // approved the stored cancellation fixture in withdrawn.rs; real park/person-close
+        // and retry cleanup journeys exercise this projection through the binary.
+        metadata.insert(
+            crate::taskgraph::PROJECTED_STATUS_KEY.into(),
+            json!(snapshot.word_of(id).word()),
+        );
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
     // Written while the head's session is open and gone once it settles, so a host holding
     // none of this run's state pins the node to the branch it was working on.
@@ -4705,7 +4717,7 @@ pub(crate) enum ProjectedStatus {
 
 impl ProjectedStatus {
     /// The word itself, as the record and the board spell it.
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         match self {
             Self::InProgress => "in progress",
             Self::Done => "done",
@@ -9074,9 +9086,34 @@ mod tests {
                 .keys()
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
-            keys(&[crate::taskgraph::SETTLEMENT_KEY, LANDING_KEY])
+            keys(&[
+                crate::taskgraph::SETTLEMENT_KEY,
+                crate::taskgraph::PROJECTED_STATUS_KEY,
+                LANDING_KEY
+            ])
+        );
+        assert_eq!(
+            update.metadata_set
+                [&MetadataKey::new(crate::taskgraph::PROJECTED_STATUS_KEY).expect("a key")],
+            json!("failed"),
+            "the word a settlement is projected as is not recorded beside it"
         );
         assert!(update.metadata_remove.is_empty() && update.title.is_none());
+
+        // A park settles nothing new: the word moves, and the record of it moves with it.
+        let mut parked = settled.clone();
+        parked
+            .statuses
+            .insert("build".to_owned(), NodeStatus::Parked);
+        let update = update_of(&settled, &parked, "build");
+        assert_eq!(
+            update
+                .metadata_set
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect::<Vec<_>>(),
+            vec![(crate::taskgraph::PROJECTED_STATUS_KEY, json!("parked"))]
+        );
         assert!(update.content.is_none() && update.depends_on.is_none());
 
         let mut fixture = Fixture::new("difference-retry");
@@ -9103,7 +9140,10 @@ mod tests {
         );
         assert_eq!(
             update.metadata_remove,
-            keys(&[crate::taskgraph::SETTLEMENT_KEY]),
+            keys(&[
+                crate::taskgraph::SETTLEMENT_KEY,
+                crate::taskgraph::PROJECTED_STATUS_KEY
+            ]),
             "the old head's settlement was not removed from the root's item"
         );
         assert_eq!(update.title.as_deref(), Some("feat: build-2 it again"));
