@@ -972,3 +972,68 @@ fn refresh_rereads_launch_attribution_changes_with_and_without_growth() {
         same_as_open(&view);
     }
 }
+
+#[test]
+fn refresh_rereads_dependency_edits_within_the_same_upstream_journal() {
+    let mut plan = super::tests::plan();
+    plan.tasks[0].deps = vec!["run:upstream#build".into()];
+    let mut run = Run::new("same-upstream-edits", plan);
+    let upstream = RunPaths::under(&run.root, "upstream");
+    upstream.create().expect("upstream directory");
+    ledger::write_json(&upstream.launch(), &super::tests::launch(0)).expect("launch");
+    let mut writer = Journal::open(&upstream);
+    for (node, status) in [("build", "done"), ("ship", "failed")] {
+        writer
+            .emit(
+                PipelineKind::NodeSettled,
+                journal::labels("upstream", Some(node)),
+                journal::payload(&[("status", json!(status))]),
+            )
+            .expect("upstream settlement");
+    }
+    let initial = run.open();
+    crate::crossdag::resolve_for_refresh(&run.root, &initial.state.graph);
+    let mut view = run.open();
+    assert_eq!(view.state.cross_dag["run:upstream#build"], NodeStatus::Done);
+    let operations = [
+        crate::edits::Operation::EdgeAdded {
+            from: "run:upstream#ship".into(),
+            to: "build".into(),
+            target: None,
+        },
+        crate::edits::Operation::EdgeRemoved {
+            from: "run:upstream#build".into(),
+            to: "build".into(),
+        },
+        crate::edits::Operation::Reparent {
+            node: "build".into(),
+            from: vec!["run:upstream#ship".into()],
+            to: vec!["run:upstream#release".into()],
+        },
+    ];
+    for operation in operations {
+        run.writer
+            .emit(
+                PipelineKind::EditCommitted,
+                journal::labels("demo", None),
+                journal::payload(&[("operations", json!([operation]))]),
+            )
+            .expect("committed edit within one upstream run");
+        assert_eq!(
+            view.refresh().expect("reread changed node references"),
+            Refreshed::Reread
+        );
+        same_as_open(&view);
+    }
+    assert_eq!(
+        view.state.cross_dag,
+        BTreeMap::from([("run:upstream#release".into(), NodeStatus::Blocked)])
+    );
+    let first = view.events.len();
+    run.settle("done");
+    assert_eq!(
+        view.refresh().expect("append after dependency edits"),
+        Refreshed::Appended { first }
+    );
+    same_as_open(&view);
+}

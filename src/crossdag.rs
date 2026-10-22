@@ -416,7 +416,7 @@ pub(crate) fn resolution_stamps(
     root: &Path,
     graph: &Graph,
     held: &BTreeMap<String, NodeStatus>,
-) -> Option<BTreeMap<PathBuf, JournalStamp>> {
+) -> Option<BTreeMap<String, JournalStamp>> {
     let answered = answers();
     let mut stamps = BTreeMap::new();
     for dependency in edges(graph).into_keys() {
@@ -428,13 +428,7 @@ pub(crate) fn resolution_stamps(
             return None;
         }
         let stamp = stamp.as_ref()?;
-        let journal = RunPaths::under(root, &reference.run).journal();
-        if stamps
-            .insert(journal, stamp.clone())
-            .is_some_and(|previous| previous != *stamp)
-        {
-            return None;
-        }
+        stamps.insert(dependency, stamp.clone());
     }
     Some(stamps)
 }

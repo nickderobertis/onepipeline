@@ -1477,13 +1477,13 @@ struct RefreshCursor {
     receipt: Option<crate::appendstamp::Receipt>,
     coverage: crate::checkpoint::Coverage,
     result: Option<serde_json::Value>,
-    upstreams: Option<BTreeMap<PathBuf, Option<crate::appendstamp::Stamp>>>,
+    upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
 }
 
 fn upstream_stamps(
     paths: &RunPaths,
     state: &RunState,
-) -> BTreeMap<PathBuf, Option<crate::appendstamp::Stamp>> {
+) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
     let root = paths
         .dir
         .parent()
@@ -1494,7 +1494,7 @@ fn upstream_stamps(
             let reference = crate::crossdag::parse(edge)?;
             let journal = RunPaths::under(&root, &reference.run).journal();
             let stamp = crate::appendstamp::Stamp::read(&journal);
-            Some((journal, stamp))
+            Some((edge.clone(), stamp))
         })
         .collect()
 }
