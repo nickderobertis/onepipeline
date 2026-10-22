@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.83.0](https://github.com/nickderobertis/onepipeline/compare/v0.82.1...v0.83.0) - 2026-10-22
+
+### Fixed
+
+- *(channel)* [**breaking**] answer an envelope as soon as its notes are queued for their receivers ([#1094](https://github.com/nickderobertis/onepipeline/pull/1094))
+
 ## [0.82.1](https://github.com/nickderobertis/onepipeline/compare/v0.82.0...v0.82.1) - 2026-10-21
 
 ### Fixed
