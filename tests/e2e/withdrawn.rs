@@ -1,6 +1,6 @@
 //! A task a person withdrew from a board-backed plan — closed on the store as cancelled — is
 //! no node of the graph a launch executes, and a task still depending on it refuses the
-//! launch rather than being released. Entry 136 of `docs/contract-divergences.md`.
+//! launch rather than being released. Entry 137 of `docs/contract-divergences.md`.
 //!
 //! Each journey drives the compiled binary over a real `local-md` store, and closes the
 //! task through the store's own targeted update, as a person closing it with `onetaskgraph`
@@ -169,10 +169,7 @@ fn engine_cancelled_continuation(legacy: bool) {
     let task = withdraw(&world, &project, "build");
     let id = crate::harness::global(&task);
     let key = |name| onetaskgraph_plugin_api::MetadataKey::new(name).expect("a metadata key");
-    // Stored input in the shape engine::drain produces via Settlement::plain(Cancelled),
-    // projected by writeback::task_document beside Snapshot::word_of's cancelled board word.
-    // Those functions are private to the binary. The legacy input omits the additive key,
-    // since a current engine cannot generate that older record.
+    // The legacy input omits the additive key a current engine would record.
     // llmlint: ignore-block[tests_mirror_real_usage] The projection is private and no CLI
     // path writes this current cancelled board word: stop ends the driver without projecting,
     // channel cancel parks, and retry replaces the lineage head. The manager approved this

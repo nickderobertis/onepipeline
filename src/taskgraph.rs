@@ -85,7 +85,7 @@ pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
 
 /// Projection-only metadata naming the word the engine last projected onto a settled task's
 /// status, beside [`SETTLEMENT_KEY`]: the one record of whether the engine closed the task, a
-/// park's `parked` and a stop's `cancelled` both settling `cancelled`. Entry 136 of
+/// park's `parked` and a stop's `cancelled` both settling `cancelled`. Entry 137 of
 /// `docs/contract-divergences.md` names it.
 pub(crate) const PROJECTED_STATUS_KEY: &str = "onepipeline.projected_status";
 
@@ -1306,7 +1306,7 @@ type Withdrawn = BTreeMap<String, String>;
 /// Split a project's tasks into the ones that become nodes and the ones a person withdrew.
 ///
 /// Partition before claiming IDs or reading edges: excluded items must never enter the
-/// write-back baseline. Entry 136 of `docs/contract-divergences.md` defines membership.
+/// write-back baseline. Entry 137 of `docs/contract-divergences.md` defines membership.
 fn partition(
     tasks: Vec<Qualified<Task>>,
 ) -> std::result::Result<(Vec<Qualified<Task>>, Withdrawn), Load> {
