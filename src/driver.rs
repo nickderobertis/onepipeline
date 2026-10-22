@@ -95,6 +95,65 @@ fn observer_restart_lock(paths: &RunPaths) -> std::io::Result<std::fs::File> {
         .open(paths.dir.join(OBSERVER_RESTART_LOCK_FILE))
 }
 
+/// Hold the run's observer restarts still for a teardown: wait out a restart in
+/// flight, so it is recorded before the teardown reads which observer to cancel,
+/// and keep the next from starting for as long as the answer is held.
+///
+/// The wait is bounded by what one restart is allowed — the graph's startup
+/// backstop, and the record write after it — and said on standard error while it
+/// lasts. Past it, or where the lock cannot be taken at all, the teardown goes on
+/// unheld, as every teardown did before the lock existed, and says so. `None` is
+/// that: nothing is held.
+fn hold_observer_restarts(paths: &RunPaths) -> Option<std::fs::File> {
+    let file = match observer_restart_lock(paths) {
+        Ok(file) => file,
+        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
+        // cannot open a file in is one whose `run-stopped` it cannot journal either, so the stop
+        // fails a moment later whatever this arm does; no journey arranges it.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} cannot be opened ({error}); \
+                 the driver is stopped without holding its observer restarts",
+                paths.run
+            );
+            return None;
+        } // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    let mut until = None;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Some(file),
+            Err(std::fs::TryLockError::WouldBlock)
+                if until.is_none_or(|until| Instant::now() < until) =>
+            {
+                if until.is_none() {
+                    let bound = agentgraph::startup_timeout() + TEARDOWN_PATIENCE;
+                    eprintln!(
+                        "onepipeline: run '{}': waiting up to {} seconds for the observer its \
+                         driver is restarting before the driver is stopped",
+                        paths.run,
+                        bound.as_secs()
+                    );
+                    until = Some(Instant::now() + bound);
+                }
+                std::thread::sleep(RESTART_LOCK_POLL);
+            }
+            // llmlint: ignore-block[changed_behavior_has_e2e] a restart is bounded by the same
+            // startup backstop this wait is, so outliving it needs a driver wedged inside a
+            // launch, and a lock call that fails outright is a host fault; no journey stages
+            // either, and both keep the teardown every build before the lock made.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} was not taken ({error}); \
+                     the driver is stopped without holding its observer restarts",
+                    paths.run
+                );
+                return None;
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+}
+
 /// How many of a failed driver's last lines a refusal repeats.
 ///
 /// Enough for the sibling's own refusal and the sentence around it, and few
@@ -3480,7 +3539,10 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // over one listing. A root recorded as ended is one the signal was delivered to: a root that
 // went before its ask is not, and what that leaves, a reissued pid declined, is the refusal
 // `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined` drives for a teardown whose
-// signal reached nothing.
+// signal reached nothing. The observer restarts held across the teardown, and the observer read
+// again under that hold, are driven in `tests/e2e/dispatch.rs`, by
+// `a_stop_ends_an_observer_restart_asked_between_its_cancel_and_its_signal` and
+// `a_stop_ends_an_observer_restart_asked_after_its_signals_listing`.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
     let mut aim = roots_to_stop(paths, record)?;
     // Held until this teardown has answered, so the driver it ends starts no
@@ -3576,65 +3638,6 @@ pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Optio
         #[cfg(unix)]
         sys::Teardown::Refused => sys::Teardown::Refused,
     }))
-}
-
-/// Hold the run's observer restarts still for a teardown: wait out a restart in
-/// flight, so it is recorded before the teardown reads which observer to cancel,
-/// and keep the next from starting for as long as the answer is held.
-///
-/// The wait is bounded by what one restart is allowed — the graph's startup
-/// backstop, and the record write after it — and said on standard error while it
-/// lasts. Past it, or where the lock cannot be taken at all, the teardown goes on
-/// unheld, as every teardown did before the lock existed, and says so. `None` is
-/// that: nothing is held.
-fn hold_observer_restarts(paths: &RunPaths) -> Option<std::fs::File> {
-    let file = match observer_restart_lock(paths) {
-        Ok(file) => file,
-        // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the stopping process
-        // cannot open a file in is one whose `run-stopped` it cannot journal either, so the stop
-        // fails a moment later whatever this arm does; no journey arranges it.
-        Err(error) => {
-            eprintln!(
-                "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} cannot be opened ({error}); \
-                 the driver is stopped without holding its observer restarts",
-                paths.run
-            );
-            return None;
-        } // llmlint: ignore-end[changed_behavior_has_e2e]
-    };
-    let mut until = None;
-    loop {
-        match file.try_lock() {
-            Ok(()) => return Some(file),
-            Err(std::fs::TryLockError::WouldBlock)
-                if until.is_none_or(|until| Instant::now() < until) =>
-            {
-                if until.is_none() {
-                    let bound = agentgraph::startup_timeout() + TEARDOWN_PATIENCE;
-                    eprintln!(
-                        "onepipeline: run '{}': waiting up to {} seconds for the observer its \
-                         driver is restarting before the driver is stopped",
-                        paths.run,
-                        bound.as_secs()
-                    );
-                    until = Some(Instant::now() + bound);
-                }
-                std::thread::sleep(RESTART_LOCK_POLL);
-            }
-            // llmlint: ignore-block[changed_behavior_has_e2e] a restart is bounded by the same
-            // startup backstop this wait is, so outliving it needs a driver wedged inside a
-            // launch, and a lock call that fails outright is a host fault; no journey stages
-            // either, and both keep the teardown every build before the lock made.
-            Err(error) => {
-                eprintln!(
-                    "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} was not taken ({error}); \
-                     the driver is stopped without holding its observer restarts",
-                    paths.run
-                );
-                return None;
-            } // llmlint: ignore-end[changed_behavior_has_e2e]
-        }
-    }
 }
 
 /// What a stop of this run may aim at on this host.
