@@ -515,6 +515,136 @@ fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what:
     );
 }
 
+/// A command's own exit is the completion signal. File captures keep a blocked child
+/// from filling a pipe and let a deadline report bytes the child has already written.
+/// The same single-step backstop as the other journeys fires before nextest can erase
+/// the round's evidence with its bare 540-second timeout.
+fn round_command(
+    world: &World,
+    mut command: std::process::Command,
+    input: Option<&str>,
+    clock: &dyn crate::harness::Clock,
+) -> crate::harness::Run {
+    use std::fs::File;
+    use std::process::Stdio;
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            // This is the child this invocation started, including on an assertion panic.
+            if self.0.try_wait().is_ok_and(|status| status.is_none()) {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stdout = world.root.join("round-command.stdout");
+    let stderr = world.root.join("round-command.stderr");
+    command
+        .stdout(File::create(&stdout).expect("the stdout capture opens"))
+        .stderr(File::create(&stderr).expect("the stderr capture opens"));
+    if let Some(input) = input {
+        let path = world.root.join("round-command.stdin");
+        std::fs::write(&path, input).expect("the command's input is written");
+        command.stdin(Stdio::from(File::open(path).expect("the input opens")));
+    }
+    eprintln!("busy round: starting {args}");
+    let mut child = Child(command.spawn().expect("the round's command starts"));
+    let deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("the command can be observed") {
+            break status;
+        }
+        assert!(
+            clock.elapsed() < deadline,
+            "busy round: waiting for `{args}` (pid {}) to exit; stdout:\n{}\nstderr:\n{}\nlast invocations:\n{:#?}\nthe runs root held:\n{}",
+            child.0.id(),
+            std::fs::read_to_string(&stdout).expect("the stdout capture is readable"),
+            std::fs::read_to_string(&stderr).expect("the stderr capture is readable"),
+            world.invocations().into_iter().rev().take(20).collect::<Vec<_>>(),
+            world.dump(),
+        );
+        clock.pause(std::time::Duration::from_millis(20));
+    };
+    eprintln!("busy round: finished {args}: {status}");
+    crate::harness::Run {
+        code: status.code().unwrap_or(-1),
+        stdout: std::fs::read_to_string(stdout).expect("the stdout capture is readable"),
+        stderr: std::fs::read_to_string(stderr).expect("the stderr capture is readable"),
+        args,
+        world: world.dump(),
+    }
+}
+
+/// A store that has accepted a call and has not answered keeps the real CLI live.
+/// Move only the diagnostic clock after that handshake, so this exercises the blocked
+/// ordering without needing a slow host or spending the wall-clock backstop.
+#[test]
+fn a_blocked_round_command_names_its_wait_and_last_observation() {
+    let world = World::new("round-command-wait").through_scripted_source();
+    let project = world.plan(
+        "blocked-round",
+        &plan_of("blocked-round", vec![crate::harness::agent("n1", &[])]),
+    );
+    let gate = world.store_holds("get_project");
+    let clock = crate::harness::ManualClock::default();
+    let message = std::thread::scope(|scope| {
+        let _expires = clock.expiring();
+        let waiting = scope.spawn(|| {
+            round_command(
+                &world,
+                world.cmd(&["start", &project, "--attach"]),
+                None,
+                &clock,
+            )
+        });
+        world.until("the store to receive the command's project read", |world| {
+            world.store_asked("get_project") > 0
+        });
+        let held = gate.arrived();
+        world.until("the command's deadline to be established", |_| {
+            clock.read_again()
+        });
+        clock.advance(crate::harness::ONE_STEP);
+        let panic = match waiting.join() {
+            Ok(_) => panic!("the held command returned without a diagnostic"),
+            Err(panic) => panic,
+        };
+        held.release();
+        *panic.downcast::<String>().expect("the diagnostic is text")
+    });
+    assert!(
+        message.contains(&format!("waiting for `start {project} --attach`")),
+        "{message}"
+    );
+    for evidence in [
+        "to exit; stdout:",
+        "stderr:",
+        "last invocations:",
+        "get_project",
+        "the runs root held:",
+    ] {
+        assert!(
+            message.contains(evidence),
+            "missing {evidence:?}: {message}"
+        );
+    }
+    world.store_stops_holding("get_project");
+    round_command(
+        &world,
+        world.cmd(&["start", &project, "--attach"]),
+        None,
+        &crate::harness::RealClock::started(),
+    )
+    .exited(0);
+}
+
 /// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
 ///
 /// Not `Command::new("bash")`, which on Windows finds the WSL launcher first — the reason
@@ -585,16 +715,23 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     // settlement, so nothing needs the host to number them in plan order.
     let plan = plan_of(run, nodes);
     let project = world.plan(run, &plan);
-    let launched = world.run_from(
-        &world.project,
-        &[
-            "start",
-            &project,
-            "--attach",
-            "--review-reply-graph",
-            &graph,
-        ],
-    );
+    let command = |command, input: Option<String>| {
+        round_command(
+            &world,
+            command,
+            input.as_deref(),
+            &crate::harness::RealClock::started(),
+        )
+    };
+    let mut launch = world.cmd(&[
+        "start",
+        &project,
+        "--attach",
+        "--review-reply-graph",
+        &graph,
+    ]);
+    launch.current_dir(&world.project);
+    let launched = command(launch, None);
     passed(&launched, "the stack settles");
     let host = seeded(&world, run);
     world.script("gh.standings-own", "");
@@ -632,15 +769,17 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let round_from = projection_lines(&world, run).len();
     let mut reworked = Vec::new();
     spans.push(timed(&world, &host, run, "pass-1", &mut phases, || {
-        ran(world.run(&["review", run]), "the first pass");
+        ran(command(world.cmd(&["review", run]), None), "the first pass");
     }));
     spans.push(timed(&world, &host, run, "decline", &mut phases, || {
         ran(
-            world.run_with_stdin(
-                &["reply", run],
-                &json!({"version": 3, "commands": [{"op": "decline", "id": "n1",
+            command(
+                world.cmd(&["reply", run]),
+                Some(
+                    json!({"version": 3, "commands": [{"op": "decline", "id": "n1",
                     "comments": [named(&left)], "reason": "Out of scope for this stack."}]})
-                .to_string(),
+                    .to_string(),
+                ),
             ),
             "the decline",
         );
@@ -657,16 +796,16 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         let from = projection_lines(&world, run).len();
         spans.push(timed(&world, &host, run, name, &mut phases, || {
             ran(
-                world.run_with_stdin(
-                    &["reply", run],
-                    &json!({"version": 3, "commands": [{"op": "rework", "id": node,
+                command(
+                    world.cmd(&["reply", run]),
+                    Some(json!({"version": 3, "commands": [{"op": "rework", "id": node,
                         "reason": "the review asked for it", "instruction": "Change what the comments name",
                         "comments": comments.iter().map(named).collect::<Vec<_>>()}]})
-                    .to_string(),
+                    .to_string()),
                 ),
                 name,
             );
-            ran(world.run(&["adopt", run]), name);
+            ran(command(world.cmd(&["adopt", run]), None), name);
         }));
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
@@ -689,10 +828,16 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         String::from_utf8_lossy(&person.stderr)
     );
     spans.push(timed(&world, &host, run, "readjust", &mut phases, || {
-        ran(world.run(&["readjust", run]), "the readjustment");
+        ran(
+            command(world.cmd(&["readjust", run]), None),
+            "the readjustment",
+        );
     }));
     spans.push(timed(&world, &host, run, "pass-2", &mut phases, || {
-        ran(world.run(&["review", run]), "the second pass");
+        ran(
+            command(world.cmd(&["review", run]), None),
+            "the second pass",
+        );
     }));
     #[cfg(unix)]
     the_round_started_few_enough_gits(&world);
