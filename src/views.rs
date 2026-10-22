@@ -1605,6 +1605,8 @@ impl RunView {
         {
             return self.reread();
         }
+        #[cfg(test)]
+        refresh_tests::before_appended_read();
         let (mut grown, offset) = crate::journal::appended_range(
             &journal,
             self.refresh.coverage.bytes,

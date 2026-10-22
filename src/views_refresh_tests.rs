@@ -489,3 +489,197 @@ fn refresh_syscalls_read_only_the_appended_journal_range() {
         "journal I/O exceeded appended range: {trace}"
     );
 }
+
+thread_local! {
+    // Schedule a real external file mutation at the read boundary. No read,
+    // parse, fold or result is substituted by this interleaving control.
+    static BEFORE_APPENDED_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn before_appended_read() {
+    if let Some(change) = BEFORE_APPENDED_READ.with_borrow_mut(Option::take) {
+        change();
+    }
+}
+
+#[test]
+fn refresh_recovers_when_receipt_publication_fails_after_a_successful_append() {
+    let mut run = Run::new("receipt-publication", super::tests::plan());
+    let mut view = run.open();
+    let first = view.events.len();
+    let receipt = run.paths.journal().with_extension("append.json");
+    std::fs::remove_file(&receipt).expect("remove receipt");
+    std::fs::create_dir(&receipt).expect("a directory obstructs publication");
+    run.settle("failed");
+    assert_eq!(view.refresh().expect("safe reread"), Refreshed::Reread);
+    assert_eq!(view.events.len(), first + 1, "the journal append succeeded");
+    same_as_open(&view);
+    std::fs::remove_dir(&receipt).expect("remove obstruction");
+    run.settle("done");
+    assert_eq!(view.refresh().expect("new epoch"), Refreshed::Reread);
+    same_as_open(&view);
+    let first = view.events.len();
+    run.settle("failed");
+    assert_eq!(
+        view.refresh().expect("recovered append"),
+        Refreshed::Appended { first }
+    );
+    same_as_open(&view);
+}
+
+#[test]
+fn refresh_recovers_from_incomplete_failed_and_changing_range_reads() {
+    use std::io::{Seek, SeekFrom, Write};
+    for change in ["incomplete", "shortened", "grew"] {
+        let mut run = Run::new(change, super::tests::plan());
+        let mut view = run.open();
+        let from = std::fs::metadata(run.paths.journal())
+            .expect("journal")
+            .len();
+        run.settle("failed");
+        let paths = run.paths.clone();
+        BEFORE_APPENDED_READ.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || match change {
+                "incomplete" => {
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(paths.journal())
+                        .expect("journal");
+                    file.seek(SeekFrom::End(-1)).expect("terminator");
+                    file.write_all(b" ").expect("torn suffix");
+                }
+                "shortened" => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(paths.journal())
+                    .expect("journal")
+                    .set_len(from)
+                    .expect("shortened range"),
+                "grew" => Journal::open(&paths)
+                    .emit(
+                        PipelineKind::NodeSettled,
+                        journal::labels("demo", Some("build")),
+                        journal::payload(&[("status", json!("done"))]),
+                    )
+                    .expect("concurrent append"),
+                _ => unreachable!(),
+            }));
+        });
+        assert_eq!(
+            view.refresh().expect("reread"),
+            Refreshed::Reread,
+            "{change}"
+        );
+        same_as_open(&view);
+        run.writer = Journal::open(&run.paths);
+        run.settle("done");
+        view.refresh().expect("first recovery read");
+        same_as_open(&view);
+        let first = view.events.len();
+        run.settle("failed");
+        assert_eq!(
+            view.refresh().expect("append after recovery"),
+            Refreshed::Appended { first }
+        );
+        same_as_open(&view);
+    }
+}
+
+#[test]
+fn refresh_rereads_when_edits_introduce_or_remove_an_upstream() {
+    let mut run = Run::new("edited-upstream", super::tests::plan());
+    let mut view = run.open();
+    for operation in [
+        crate::edits::Operation::EdgeAdded {
+            from: "run:upstream#build".into(),
+            to: "build".into(),
+            target: None,
+        },
+        crate::edits::Operation::EdgeRemoved {
+            from: "run:upstream#build".into(),
+            to: "build".into(),
+        },
+    ] {
+        run.writer
+            .emit(
+                PipelineKind::EditCommitted,
+                journal::labels("demo", None),
+                journal::payload(&[("operations", json!([operation]))]),
+            )
+            .expect("committed graph edit");
+        assert_eq!(
+            view.refresh().expect("reread edited dependencies"),
+            Refreshed::Reread
+        );
+        same_as_open(&view);
+    }
+    assert!(view.state.cross_dag.is_empty());
+    let first = view.events.len();
+    run.settle("done");
+    assert_eq!(
+        view.refresh().expect("append after graph edits"),
+        Refreshed::Appended { first }
+    );
+    same_as_open(&view);
+}
+
+#[test]
+fn refresh_replaces_the_view_when_its_public_paths_select_another_run() {
+    let run = Run::new("old-directory", super::tests::plan());
+    let mut other = Run::new("new-directory", super::tests::plan());
+    other.settle("done");
+    let mut view = run.open();
+    view.paths = other.paths.clone();
+    assert_eq!(view.refresh().expect("new directory"), Refreshed::Reread);
+    assert_eq!(view.events.len(), 2);
+    same_as_open(&view);
+    let first = view.events.len();
+    other.settle("failed");
+    assert_eq!(
+        view.refresh().expect("append on new run"),
+        Refreshed::Appended { first }
+    );
+    same_as_open(&view);
+}
+
+#[test]
+fn refresh_decodes_malformed_glued_and_unsupported_suffix_records_as_open_does() {
+    let mut run = Run::new("damaged-suffix", super::tests::plan());
+    let mut view = run.open();
+    let first = view.events.len();
+    ledger::append_line(&run.paths.journal(), "not json").expect("old malformed record");
+    assert_eq!(
+        view.refresh().expect("account for unreadable suffix"),
+        Refreshed::Appended { first }
+    );
+    assert_eq!(view.events.len(), first);
+    same_as_open(&view);
+    let mut event = view.events[0].clone();
+    event.kind = PipelineKind::NodeSettled.into();
+    event.labels.node = Some("build".into());
+    event.seq += 1;
+    event.payload = journal::payload(&[("status", json!("done"))]);
+    let glued = format!(
+        "fragment{}",
+        serde_json::to_string(&event).expect("envelope")
+    );
+    ledger::append_line(&run.paths.journal(), &glued).expect("old glued record");
+    assert_eq!(
+        view.refresh().expect("recover glued envelope"),
+        Refreshed::Appended { first }
+    );
+    assert_eq!(view.events.len(), first + 1);
+    same_as_open(&view);
+    let first = view.events.len();
+    event.v += 1;
+    event.seq += 1;
+    run.writer.relay(&event).expect("newer producer's envelope");
+    assert_eq!(
+        view.refresh().expect("unsupported suffix"),
+        Refreshed::Appended { first }
+    );
+    assert!(
+        !view.state.strict,
+        "unknown pipeline schema cannot prove a strict fold"
+    );
+    same_as_open(&view);
+}
