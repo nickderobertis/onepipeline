@@ -175,7 +175,7 @@ const PUBLISHING: &str = "onepipeline.publishing";
 /// The claim fence's writes, told from every other call the store was handed by the
 /// connection each came on.
 ///
-/// The fence is the driver's best-effort projection of what it has under way, written off
+/// The fence names what the driver has under way before it starts it, and is written off
 /// the reconcile loop on a store of its own whenever that changes (`docs/contract-divergences.md`
 /// entry 139). Its requests are the run's like any other, and the figures count them: this is
 /// only how a journey knows they have finished. A fence connection is one whose every call is
@@ -310,7 +310,7 @@ fn under_way(journal: &[Value]) -> BTreeSet<String> {
 /// admission, which queues the fence with its node before it dispatches, and a write-back
 /// attempt landing a settlement, after which the driver's next pass lets the node go. The
 /// journey holds each before it can make one — an admission at the driver's begin failpoint,
-/// an attempt at its first targeted update — until the fence's previous write has finished.
+/// an attempt at its first targeted update — until no fence write is in flight.
 /// So every run makes the same fence writes, and the figures count every one of them.
 struct Pacer {
     /// The admissions the step under way makes beside a settlement, each as the node and how
@@ -326,23 +326,15 @@ impl Pacer {
         let admits: Arc<Mutex<Vec<(String, usize)>>> = Arc::default();
         let fakes = world.fakes.clone();
         let events = world.run_file(RUN, "events.jsonl");
-        // An admission goes once the fence is idle and, after a driver's first, once the
-        // write its previous admission queued has been made: idle, that write is finished.
+        // An admission goes once the fence is idle. A node's dispatch waits for the write
+        // naming it, so its first admission queues that write and dispatches nothing, and
+        // the one after it has landed dispatches the node and queues nothing new: each
+        // write carries one admission's snapshot.
         let at = fakes.clone();
-        std::thread::spawn(move || {
-            let mut released: BTreeMap<u32, usize> = BTreeMap::new();
-            loop {
-                let arrival = begin.arrived();
-                let written = paced(|| {
-                    let fence = fence_of(&at);
-                    let after = released
-                        .get(&arrival.pid)
-                        .is_none_or(|before| fence.writes.len() > *before);
-                    (after && fence.idle(&at)).then_some(fence.writes.len())
-                });
-                released.insert(arrival.pid, written);
-                arrival.release();
-            }
+        std::thread::spawn(move || loop {
+            let arrival = begin.arrived();
+            paced(|| fence_of(&at).idle(&at).then_some(()));
+            arrival.release();
         });
         // An attempt goes once the fence is idle and its latest write names every admission
         // the step makes, so no landing races an admission's write.
@@ -492,11 +484,20 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
             && landed(world)["items"]["d"]["metadata"]["onepipeline.node"] == "d-2"
     });
     // A retry is a targeted update of the root's item: the head's word and lineage keys, the
-    // old head's settlement taken off, and the body the replacement restates.
-    let retry = the_update_of(&world, mark, "d");
+    // old head's settlement taken off, and the body the replacement restates. The
+    // replacement's dispatch waits for the fence naming it, so its word follows in a second
+    // targeted update of its own.
+    let updates = the_updates_of(&world, mark, "d");
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    let retry = &updates[0];
     for field in ["content", "metadata", "status"] {
         assert!(retry["updated_fields"].get(field).is_some(), "{retry}");
     }
+    assert!(
+        updates[1]["updated_fields"].get("status").is_some(),
+        "{}",
+        updates[1]
+    );
     let root = board_item(&world, &project, "d");
     assert_eq!(
         root["item"]["metadata"]["onepipeline.node"], "d-2",
@@ -732,16 +733,23 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
 
 /// The one landed attempt since `mark` that carried `root` alone, as a targeted update.
 fn the_update_of(world: &World, mark: usize, root: &str) -> Value {
+    let carried = the_updates_of(world, mark, root);
+    assert_eq!(carried.len(), 1, "{root}: {carried:?}");
+    carried[0].clone()
+}
+
+/// Every landed attempt since `mark` that carried `root` alone, each a targeted update.
+fn the_updates_of(world: &World, mark: usize, root: &str) -> Vec<Value> {
     let carried: Vec<Value> = records(world)[mark..]
         .iter()
         .filter(|record| record["items"] == json!([root]) && record["outcome"] == "projected")
         .cloned()
         .collect();
-    assert_eq!(carried.len(), 1, "{root}: {carried:?}");
-    let update = carried[0].clone();
-    assert_eq!(update["calls"]["task-update"], 1, "{update}");
-    assert!(update["calls"].get("project-copy").is_none(), "{update}");
-    update
+    for update in &carried {
+        assert_eq!(update["calls"]["task-update"], 1, "{update}");
+        assert!(update["calls"].get("project-copy").is_none(), "{update}");
+    }
+    carried
 }
 
 /// The board's item for one lineage, as the real store answers it.

@@ -3786,19 +3786,20 @@ fn the_adoption_mode_resolves_through_exactly_four_rungs() {
 
     // The floor let a node go that the global rung above it would have held, and
     // the node's own field held one the floor would have let go.
-    assert!(
-        dispatched(&world, &run, "floor"),
-        "rung 4 did not decide a node with no repository and no field of its own"
+    // A dispatch starts once the store's fence names it, so the floor's may follow the
+    // answers by that write.
+    world.until(
+        "rung 4 to let a node with no repository and no field of its own go",
+        |world| dispatched(world, &run, "floor"),
     );
     assert!(
         !dispatched(&world, &run, "stated"),
         "rung 1 did not win over the floor beneath it"
     );
     // The repository rung let a node go that the global rung would have held.
-    assert!(
-        dispatched(&world, &run, "by-repository"),
-        "rung 2 did not win over rung 3"
-    );
+    world.until("rung 2 to win over rung 3", |world| {
+        dispatched(world, &run, "by-repository")
+    });
     assert!(
         !dispatched(&world, &run, "by-global"),
         "rung 3 did not decide a node no rule names"

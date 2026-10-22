@@ -12606,30 +12606,45 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    supersedes as entry 128 and entry 129 say, with one change. It lets go once its
    acknowledgement or its cleared fence has landed, either of which its adopter starts
    on. Where neither lands, it tries both again when the fence's five-second retry is due.
-4. **Store fences are best-effort projections.** The project's
-   `onepipeline.publishing` names dispatches and publications, retaining its existing
-   shape. Its writes run on a worker, are reported and retried when refused, and never
-   gate dispatch or settlement. Snapshots that arrive while a write is in flight are
-   coalesced into the newest, so at most one write is pending and none carries a state
-   older than one already written. A missing, unreachable or rate-limited plan store does
-   not prevent a run from making progress while its claim remains confirmed.
-   At closeout, terminal fence release shares the existing bounded writeback attempt,
-   including after retirement; it clears only a fence still naming this run and host.
-   The background fence worker is paused during that attempt and resumes only if an edit
-   reopens the run. Failure is reported as a failed projection, the existing closeout
-   bound is unchanged, and the journalled settlement stands whatever the store answers.
-   On this host, a successor must also establish that the predecessor has let go of
-   its local ownership; an empty store fence and an elapsed takeover timer do not
-   establish that a live local predecessor stopped. The successor keeps waiting for
-   local evidence or acknowledgement before dispatching the predecessor's work.
-   Cross-host takeover retains the existing timer plus empty-fence rule. Its protection
-   remains best-effort while the store is unreachable: a fence the predecessor could not
-   write is invisible to a successor on another host. This amendment adds no cross-host
-   acknowledgement requirement or stopped-evidence record.
-   The pre-existing empty-claim simultaneous-launch residual remains on this host too:
-   if every store write failed since the first launch, a second launch can find no stored
-   identity to resolve against local ownership. Store-independent discovery is outside this
-   amendment. Same-host protection here applies to takeover of a known recorded driver.
+4. **A dispatch starts only once the store's fence names it, and a takeover starts on that
+   fence, never on a timer.** The project's `onepipeline.publishing` names the dispatches
+   and publications a driver has under way, in its existing shape. A driver writes it on a
+   worker of its own, and a dispatch or a publication starts only once the store holds the
+   write naming it, with the claim asked again after that. So a node whose fence write did not
+   land is not dispatched until one does. A refused write is reported and retried every five
+   seconds, and it is made inside a wait the store asked for too. Snapshots that arrive while
+   a write is in flight are coalesced into the newest, so at most one write is pending and
+   none carries a state older than one already written. Settlement never waits on the fence.
+   This is a change for a run whose store is unreachable or refuses the fence: work already
+   dispatched runs on and settles, and the run completes once the store returns, but nothing
+   new starts while it is gone. Before, such a run went on dispatching. At closeout the
+   terminal fence release shares the existing bounded writeback attempt, and clears only a
+   fence still naming this run and host.
+   A driver can start nothing once no read of its claim began within one interval and the
+   read deadline. Every start is named on the fence first. Together these mean that, once an
+   adopter's own claim has landed and the displaced driver's terms (two intervals, the read
+   deadline, the cancel grace and the slack) have passed, that driver's fence names
+   everything it may still run. So an adopter on any host starts only when one of these
+   holds: the displaced driver acknowledged; it is provably gone under item 5; or its fence,
+   read after that point, names none of its work. While the fence names a node of the
+   displaced driver, or cannot be read, the adopter waits, however long that takes, and
+   dispatches none of that driver's nodes. A driver of an older engine does not fence its
+   dispatches, but it ends them itself when its lease lapses, and the adopter's wait
+   outlasts that lapse. On this host a successor also needs this host's records or an
+   acknowledgement: an empty fence does not establish that a live local predecessor
+   stopped.
+   The wait runs in `start --take-over` before the adopter's run is minted, so that what the
+   displaced driver settles meanwhile is continued rather than dispatched again. It has no
+   run to raise a planner surface on (the manager's ruling). It says what it waits on (the
+   nodes the fence names, or why the fence cannot be read) and how to release it, on its
+   standard error and on the all-runs `status` view. The view reads that from
+   `takeover-wait-<pid>.json` in the runs root, a file that exists only while the wait
+   does; one left by a process that has gone is removed rather than shown. If a displaced
+   driver on another host is gone, a person releases its nodes by clearing the project's
+   `onepipeline.publishing` key on the store. The engine adds no verb for that.
+   The pre-existing empty-claim simultaneous-launch residual remains: if every store write
+   failed since the first launch, a second launch finds no stored identity to resolve
+   against. Store-independent discovery is outside this amendment.
 5. **A displaced driver that is provably gone makes nobody wait.** On the same host that is
    its run's ownership lock found free, as before, or, for a run this runs root does not
    hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
@@ -12716,9 +12731,19 @@ publication asked for while the claim was unconfirmed.
 `a_displaced_driver_resuming_after_its_adopter_finished_starts_nothing` resumes already
 superseded, its claim thread having read the takeover during the hold.
 Entry 128's refusal journey is replaced by
-`a_dispatch_whose_fence_the_board_refuses_runs_and_settles_without_it`: refusing every fence
-write leaves both dispatch and settlement free to proceed, and the worker retries the
-projection independently. `fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest`
-holds the coalescing against a slow store that answers every write, and
+`a_node_whose_fence_write_fails_is_not_dispatched_until_one_lands`: while every fence write is
+refused, a ready node is not dispatched and the write is retried, and once a write lands the
+node is dispatched and the run settles.
+`a_takeover_from_another_host_dispatches_nothing_a_driver_unable_to_write_its_fence_runs`
+takes over from another host while the displaced driver is alive and can neither read its
+claim nor write its fence. It holds the adopter past every wait the claim's terms give,
+dispatching nothing, while the all-runs `status` names the fenced node and the release; that
+line is gone once the takeover starts. `fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest`
+holds the coalescing, and each dispatch waiting for its write, against a slow store that
+answers every write. Because a store outage now holds new dispatches, the two store journeys
+that remove the store mid-run, `a_projection_that_fails_raises_a_planner_surface_and_settles_the_run_unchanged`
+and `an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while_the_run_completes_unaffected`,
+remove it once every node they run is dispatched, and the first runs its two nodes without
+an edge so that one failed terminal projection names both. Their assertions are unchanged.
 `tests/e2e/writeback_cost.rs` counts every fence request in the comparable plan's record. The two closeout-release journeys make the store slow only once
 the dispatch is under way.
