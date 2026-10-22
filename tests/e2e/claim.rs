@@ -770,8 +770,7 @@ fn a_held_pass_delays_no_claim_read_and_a_confirming_read_journals_nothing() {
             .last_confirmed_at;
         read.release();
         world.until("the read to be written down", |world| {
-            claim_file(world, run)
-                .is_some_and(|file| file.reading.last_confirmed_at > previous)
+            claim_file(world, run).is_some_and(|file| file.reading.last_confirmed_at > previous)
         });
         let file = claim_file(&world, run).expect("claim.json");
         assert_eq!(
