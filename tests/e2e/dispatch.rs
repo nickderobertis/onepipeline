@@ -4288,6 +4288,12 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
                 "--nocapture",
             ])
             .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
+            // Match World::agentgraph_cmd: an embedding host must not inherit
+            // the outer dispatch's harness or model selection.
+            .env_remove("ONEHARNESS_HARNESSES")
+            .env_remove("ONEHARNESS_MODEL")
+            .env_remove("ONEHARNESS_MODELS")
+            .env_remove("ONEHARNESS_MODE")
             .env(
                 "ONEPIPELINE_TEST_POOL_GRAPH",
                 world.graphs().join("node-scope.yaml"),
@@ -6616,10 +6622,13 @@ fn stop_with_observer_record_fault(missing: bool) {
     let record = root.join(oneagentgraph::run::RECORD_FILE);
     let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
     if missing {
+        // llmlint: ignore[tests_mirror_real_usage] A lost persisted record is a host-filesystem failure, with no CLI verb that manufactures it. Remove the real file, then exercise only the public stop verb and assert that it leaves this unproven graph untouched.
         std::fs::remove_file(&record).expect("the observer record is absent");
     } else {
+        // llmlint: ignore-block[tests_mirror_real_usage] Force a real OS write refusal in this world's own graph store, not a mocked cancellation result. A public verb cannot manufacture a non-directory where the producer's signal directory belongs; stop must still report this filesystem failure and end its processes.
         std::fs::remove_dir_all(&signals).expect("the world's signal directory is removed");
         std::fs::write(&signals, "not a directory").expect("cancellation cannot create its signal");
+        // llmlint: ignore-end[tests_mirror_real_usage]
     }
     let reaped = std::thread::spawn(move || owner.wait());
     let stopped = world.run_on_agentgraph(&["stop", run]);
