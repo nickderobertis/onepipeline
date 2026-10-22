@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.84.1](https://github.com/nickderobertis/onepipeline/compare/v0.84.0...v0.84.1) - 2026-10-22
+
+### Fixed
+
+- *(deps)* link the oneharness core that stops a pooled server after its last lease ([#1107](https://github.com/nickderobertis/onepipeline/pull/1107))
+- *(launch)* leave a board plan's withdrawn tasks out of the executable graph ([#1101](https://github.com/nickderobertis/onepipeline/pull/1101))
+
 ## [0.84.0](https://github.com/nickderobertis/onepipeline/compare/v0.83.0...v0.84.0) - 2026-10-22
 
 ### Added
