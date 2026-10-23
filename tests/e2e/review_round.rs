@@ -1325,6 +1325,181 @@ fn a_failed_round_command_names_its_node_detail_and_event_order() {
     passed_in_round(&world, run, &status, "reading the failed run");
 }
 
+/// One session's clone, and real `onevcs` commands against it with `held-git` first on
+/// their `PATH`: what the two journeys below hold `onevcs` reads inside.
+struct CloneReads {
+    world: World,
+    checkout: PathBuf,
+    path: std::ffi::OsString,
+    real: PathBuf,
+    token: String,
+    worktree: PathBuf,
+    clone: PathBuf,
+}
+
+/// A child this journey started, ended on an assertion panic too.
+struct Started(std::process::Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl CloneReads {
+    fn opened(name: &str) -> Self {
+        let world = World::new(name);
+        let checkout = world.repository("local-direct", &[]).checkout;
+        let real = World::resolved_on(&std::process::Command::new("git"), "git")
+            .expect("the host has a git");
+        let bin = world.root.join("held-git-bin");
+        std::fs::create_dir_all(&bin).expect("a directory for the held git");
+        std::fs::copy(
+            crate::harness::double("held-git"),
+            bin.join(format!("git{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .expect("the held git is placed");
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("a PATH this host can spell");
+        let mut reads = Self {
+            world,
+            checkout,
+            path,
+            real,
+            token: String::new(),
+            worktree: PathBuf::new(),
+            clone: PathBuf::new(),
+        };
+        let opened = reads
+            .onevcs(
+                &["session", "open", "service", "--branch", "feature/reader"],
+                "open",
+            )
+            .status()
+            .expect("onevcs runs");
+        assert!(
+            opened.success(),
+            "the session did not open: {:?}",
+            reads.said("open")
+        );
+        let session: Value = serde_json::from_str(reads.said("open")[0].trim())
+            .expect("`session open` prints a session");
+        reads.token = session["token"].as_str().expect("a token").to_owned();
+        reads.worktree = PathBuf::from(session["worktree"].as_str().expect("a worktree"));
+        reads.clone = reads
+            .worktree
+            .parent()
+            .expect("a session's worktree is in its run root")
+            .join("clone");
+        reads
+    }
+
+    /// A real `onevcs` command whose output is kept under `log`.
+    fn onevcs(&self, args: &[&str], log: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(crate::harness::onevcs_binary());
+        command
+            .args(args)
+            .current_dir(&self.checkout)
+            .env("ONEVCS_HOME", self.world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", self.world.gitconfig())
+            .env("GIT_AUTHOR_NAME", crate::harness::GIT_WHO)
+            .env("GIT_AUTHOR_EMAIL", crate::harness::GIT_EMAIL)
+            .env("GIT_COMMITTER_NAME", crate::harness::GIT_WHO)
+            .env("GIT_COMMITTER_EMAIL", crate::harness::GIT_EMAIL)
+            .env("PATH", &self.path)
+            .env("HELD_GIT_REAL", &self.real)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(self.world.root.join(format!("{log}.stdout"))).unwrap())
+            .stderr(std::fs::File::create(self.world.root.join(format!("{log}.stderr"))).unwrap());
+        command
+    }
+
+    /// What the command logged under `log` printed, as `[stdout, stderr]`.
+    fn said(&self, log: &str) -> [String; 2] {
+        ["stdout", "stderr"].map(|stream| {
+            std::fs::read_to_string(self.world.root.join(format!("{log}.{stream}")))
+                .unwrap_or_default()
+        })
+    }
+
+    /// The pause `held-git` keeps for the read logged as `log`.
+    fn control(&self, log: &str) -> PathBuf {
+        let control = self.world.root.join(format!("held-{log}"));
+        std::fs::create_dir_all(&control).expect("a directory for the read's pause");
+        control
+    }
+
+    /// `onevcs status` of the session's branch, held at its first `git` in the clone.
+    fn held_read(&self, log: &str, extra: &[(&str, &str)]) -> Started {
+        let mut read = self.onevcs(&["status", "feature/reader", "--json"], log);
+        read.env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &self.clone)
+            .env("HELD_GIT_DIR", self.control(log));
+        for (key, value) in extra {
+            read.env(key, value);
+        }
+        Started(read.spawn().expect("the read starts"))
+    }
+
+    /// Whether the read logged as `log` has its `git` held inside the clone.
+    fn inside(&self, log: &str) -> bool {
+        std::fs::read_to_string(self.control(log).join("inside")).is_ok_and(|pid| !pid.is_empty())
+    }
+
+    fn release(&self, log: &str) {
+        std::fs::write(self.control(log).join("release"), "go").expect("the read is released");
+    }
+
+    /// Wait for `child` to exit, under the suite's one-step backstop.
+    fn ended(&self, child: &mut Started, what: &str) -> std::process::ExitStatus {
+        let mut status = None;
+        self.world.until(&format!("the {what} to finish"), |_| {
+            status = child.0.try_wait().expect("the command can be observed");
+            status.is_some()
+        });
+        status.expect("the wait ends on an exit")
+    }
+
+    fn running(child: &mut Started) -> bool {
+        child
+            .0
+            .try_wait()
+            .expect("the command can be observed")
+            .is_none()
+    }
+
+    fn record(&self) -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                self.world
+                    .onevcs_home()
+                    .join("sessions")
+                    .join(format!("{}.json", self.token)),
+            )
+            .expect("the session record is readable"),
+        )
+        .expect("the session record is JSON")
+    }
+
+    /// Hold the read logged as `log` at its `git` inside the clone.
+    fn held_inside(&self, log: &str) -> Started {
+        let mut read = self.held_read(log, &[]);
+        self.world
+            .until("the read's git to start inside the session's clone", |_| {
+                self.inside(log) || !Self::running(&mut read)
+            });
+        assert!(
+            Self::running(&mut read),
+            "the read finished without a git inside the session's clone: {:?}",
+            self.said(log)
+        );
+        read
+    }
+}
+
 /// On macOS the busy round's stack-base close was refused for a process working inside
 /// that session's clone: a `git` an `onevcs` landing-status read had started there. This
 /// is that ordering on any platform, against the `onevcs` this crate links: a real
@@ -1339,133 +1514,26 @@ fn a_failed_round_command_names_its_node_detail_and_event_order() {
 /// A second close after the release must then close the session.
 #[test]
 fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
-    use std::process::{Command, Stdio};
-
-    let world = World::new("close-beside-a-read");
-    let repo = world.repository("local-direct", &[]);
-    let real = World::resolved_on(&Command::new("git"), "git").expect("the host has a git");
-    let held = world.root.join("held-git");
-    let bin = world.root.join("held-git-bin");
-    for dir in [&held, &bin] {
-        std::fs::create_dir_all(dir).expect("a directory for the held git");
-    }
-    std::fs::copy(
-        crate::harness::double("held-git"),
-        bin.join(format!("git{}", std::env::consts::EXE_SUFFIX)),
-    )
-    .expect("the held git is placed");
-    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    )))
-    .expect("a PATH this host can spell");
-    let onevcs = |args: &[&str], log: &str| {
-        let mut command = Command::new(crate::harness::onevcs_binary());
-        command
-            .args(args)
-            .current_dir(&repo.checkout)
-            .env("ONEVCS_HOME", world.onevcs_home())
-            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-            .env("GIT_AUTHOR_NAME", crate::harness::GIT_WHO)
-            .env("GIT_AUTHOR_EMAIL", crate::harness::GIT_EMAIL)
-            .env("GIT_COMMITTER_NAME", crate::harness::GIT_WHO)
-            .env("GIT_COMMITTER_EMAIL", crate::harness::GIT_EMAIL)
-            .env("PATH", &path)
-            .env("HELD_GIT_REAL", &real)
-            .env("HELD_GIT_DIR", &held)
-            .stdin(Stdio::null())
-            .stdout(std::fs::File::create(world.root.join(format!("{log}.stdout"))).unwrap())
-            .stderr(std::fs::File::create(world.root.join(format!("{log}.stderr"))).unwrap());
-        command
-    };
-    let said = |log: &str| {
-        ["stdout", "stderr"].map(|stream| {
-            std::fs::read_to_string(world.root.join(format!("{log}.{stream}"))).unwrap_or_default()
-        })
-    };
-    let opened = onevcs(
-        &["session", "open", "service", "--branch", "feature/reader"],
-        "open",
-    )
-    .status()
-    .expect("onevcs runs");
-    assert!(
-        opened.success(),
-        "the session did not open: {:?}",
-        said("open")
-    );
-    let session: Value =
-        serde_json::from_str(said("open")[0].trim()).expect("`session open` prints a session");
-    let token = session["token"].as_str().expect("a token").to_owned();
-    let worktree = PathBuf::from(session["worktree"].as_str().expect("a worktree"));
-    let clone = worktree
-        .parent()
-        .expect("a session's worktree is in its run root")
-        .join("clone");
-
-    struct Child(std::process::Child);
-    impl Drop for Child {
-        fn drop(&mut self) {
-            // Children this journey started, ended on an assertion panic too.
-            let _ = self.0.kill();
-            let _ = self.0.wait();
-        }
-    }
-    let mut read = onevcs(&["status", "feature/reader", "--json"], "read");
-    read.env("HELD_GIT_HOLD", "1").env("HELD_GIT_CLONE", &clone);
-    let mut read = Child(read.spawn().expect("the read starts"));
-    world.until("the read's git to start inside the session's clone", |_| {
-        std::fs::read_to_string(held.join("inside")).is_ok_and(|pid| !pid.is_empty())
-            || read.0.try_wait().is_ok_and(|ended| ended.is_some())
-    });
-    assert!(
-        read.0
-            .try_wait()
-            .expect("the read can be observed")
-            .is_none(),
-        "the read finished without a git inside the session's clone: {:?}",
-        said("read")
-    );
-    let ended = |child: &mut Child, what: &str| {
-        let mut status = None;
-        world.until(&format!("the {what} to finish"), |_| {
-            status = child.0.try_wait().expect("the command can be observed");
-            status.is_some()
-        });
-        status.expect("the wait ends on an exit")
-    };
-    let record = || -> Value {
-        serde_json::from_slice(
-            &std::fs::read(
-                world
-                    .onevcs_home()
-                    .join("sessions")
-                    .join(format!("{token}.json")),
-            )
-            .expect("the session record is readable"),
-        )
-        .expect("the session record is JSON")
-    };
-    let mut beside = onevcs(&["session", "close", &token], "close-beside");
+    let reads = CloneReads::opened("close-beside-a-read");
+    let mut read = reads.held_inside("read");
+    let mut beside = reads.onevcs(&["session", "close", &reads.token], "close-beside");
     beside.env(
         "ONEVCS_LOCK_TIMEOUT_SECONDS",
         CLOSE_LOCK_WAIT.as_secs().to_string(),
     );
-    let mut beside = Child(beside.spawn().expect("the close starts"));
-    let met = ended(&mut beside, "close beside the held read");
-    let [_, met_said] = said("close-beside");
+    let mut beside = Started(beside.spawn().expect("the close starts"));
+    let met = reads.ended(&mut beside, "close beside the held read");
+    let [_, met_said] = reads.said("close-beside");
     eprintln!("close beside the held read: {}", met_said.trim());
     assert!(
-        read.0
-            .try_wait()
-            .expect("the read can be observed")
-            .is_none(),
+        CloneReads::running(&mut read),
         "the read was let go before the close beside it decided: {:?}",
-        said("read")
+        reads.said("read")
     );
     assert!(
         !met.success()
             && met_said.contains("timed out after")
-            && (met_said.contains(&format!("onevcs-closing-runs-{token}.lock"))
+            && (met_said.contains(&format!("onevcs-closing-runs-{}.lock", reads.token))
                 || met_said.contains("onevcs-reads.lock")),
         "the close did not stop at the held read's lock (exit {:?}); a close that \
          refuses over the read's git, or removes the clone under it, has not waited \
@@ -1473,32 +1541,100 @@ fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
         met.code()
     );
     assert_eq!(
-        record()["state"],
+        reads.record()["state"],
         "open",
         "a close that waited closed nothing"
     );
     assert!(
-        worktree.exists(),
+        reads.worktree.exists(),
         "a close that waited removed the worktree"
     );
 
-    std::fs::write(held.join("release"), "go").expect("the read is released");
-    let read_status = ended(&mut read, "read");
-    assert!(read_status.success(), "the read failed: {:?}", said("read"));
-    let mut close = Child(
-        onevcs(&["session", "close", &token], "close")
+    reads.release("read");
+    let read_status = reads.ended(&mut read, "read");
+    assert!(
+        read_status.success(),
+        "the read failed: {:?}",
+        reads.said("read")
+    );
+    let mut close = Started(
+        reads
+            .onevcs(&["session", "close", &reads.token], "close")
             .spawn()
             .expect("the close starts"),
     );
-    let closed = ended(&mut close, "close");
-    assert!(closed.success(), "the close failed: {:?}", said("close"));
-    assert_eq!(record()["state"], "closed", "{}", record());
-    assert!(!worktree.exists(), "the close left the session's worktree");
+    let closed = reads.ended(&mut close, "close");
+    assert!(
+        closed.success(),
+        "the close failed: {:?}",
+        reads.said("close")
+    );
+    assert_eq!(reads.record()["state"], "closed", "{}", reads.record());
+    assert!(
+        !reads.worktree.exists(),
+        "the close left the session's worktree"
+    );
 }
 
 /// How long the close beside the held read waits for any lock before saying where it
 /// waited: what ends that close, so the journey reads which decision it reached.
 const CLOSE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The busy round's four drivers and its commands read one identity at once: each
+/// view render and reconcile asks `onevcs` for landings (`vcs::landing_now`,
+/// `vcs::landings_now`), each driver asks it for session holders, and every one of those
+/// reads runs `git` inside the identity's checkouts. Reads that each took the identity
+/// alone would queue every one of them behind whichever is running its `git`, which is
+/// where the round's time goes on a host whose `git` starts are dear.
+///
+/// So a second real `onevcs status` of the identity must reach its own `git` inside the
+/// clone while a first is held at its `git` there. It is given [`READ_LOCK_WAIT`] for
+/// any lock, so a read that queues behind the first says which lock it waited on and
+/// exits; either its held `git` or that refusal ends the wait, never time alone.
+#[test]
+fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
+    let reads = CloneReads::opened("reads-beside-a-read");
+    let mut first = reads.held_inside("first");
+    let wait = READ_LOCK_WAIT.as_secs().to_string();
+    let mut second = reads.held_read("second", &[("ONEVCS_LOCK_TIMEOUT_SECONDS", &wait)]);
+    reads.world.until(
+        "the second read to reach its git or to stop at a lock",
+        |_| reads.inside("second") || !CloneReads::running(&mut second),
+    );
+    let [_, second_said] = reads.said("second");
+    let beside = reads.inside("second");
+    eprintln!(
+        "second read: {}",
+        if beside {
+            "its git is inside the clone".to_owned()
+        } else {
+            second_said.trim().to_owned()
+        }
+    );
+    assert!(
+        CloneReads::running(&mut first),
+        "the first read was let go before the second decided: {:?}",
+        reads.said("first")
+    );
+    assert!(
+        beside,
+        "a second read of the identity queued behind one held inside its clone instead \
+         of reading beside it: {second_said}"
+    );
+    reads.release("first");
+    reads.release("second");
+    for (child, log) in [(&mut first, "first"), (&mut second, "second")] {
+        let status = reads.ended(child, &format!("{log} read"));
+        assert!(
+            status.success(),
+            "the {log} read failed: {:?}",
+            reads.said(log)
+        );
+    }
+}
+
+/// How long the second read waits for any lock before saying which one it waited on.
+const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.
