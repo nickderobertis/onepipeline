@@ -818,6 +818,48 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     assert_eq!(message["payload"]["truncated"], Value::Null, "{message}");
 }
 
+/// A text past the bound **beside a transcript reference** reaches the store
+/// unchanged and unflagged.
+///
+/// The bound above is for a record still carrying a content copy; a sibling's
+/// turn record carrying a reference carries none, so the relay keeps it exactly
+/// as its producer wrote it. The producer is the `oneagentgraph` double again —
+/// the one place a text past the bound can be made to arrive — publishing a tool
+/// call through the sibling's own type with a reference and a name past the
+/// bound, and the journey asserts the journalled payload *is* that payload.
+#[test]
+fn a_text_past_the_bound_beside_a_transcript_reference_reaches_the_store_unchanged() {
+    let world = World::new("relay-referenced");
+    world.script(
+        &format!("{NODE}.referenced-name-bytes"),
+        &(MAX_PAYLOAD_TEXT_BYTES * 2).to_string(),
+    );
+    let path = world.plan("referenced", &plan_of("referenced", vec![agent(NODE, &[])]));
+    world.run(&["start", &path, "--attach"]).exited(0);
+
+    let activity = relayed(&world, "referenced", EventKind::TurnActivity);
+    let [act] = &activity[..] else {
+        panic!("the turn relayed {} activities, not one", activity.len());
+    };
+    // Through the producer's own type, which denies unknown fields: a relay
+    // that stamped its own `truncated` onto the payload fails here.
+    let call: TurnActivity = payload(act, EventKind::TurnActivity);
+    let name = format!("mcp__{}", "x".repeat(MAX_PAYLOAD_TEXT_BYTES * 2));
+    assert_eq!(
+        call.name.as_deref(),
+        Some(name.as_str()),
+        "a text beside a reference was cut on the way in: {act}"
+    );
+    assert!(!call.truncated, "{act}");
+    assert!(
+        call.transcript.is_some(),
+        "the reference did not survive the relay: {act}"
+    );
+    // And the whole payload is the producer's, value for value.
+    let produced = serde_json::to_value(&call).expect("the sibling's payload serialises");
+    assert_eq!(act["payload"], produced, "{act}");
+}
+
 /// Task prose whose 4096th byte is in the middle of a character.
 ///
 /// The node's own task, padded with one-byte characters to one byte short of the
