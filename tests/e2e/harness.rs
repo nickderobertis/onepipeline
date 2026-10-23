@@ -3656,6 +3656,7 @@ impl Rendezvous {
         self.listener
             .set_nonblocking(true)
             .expect("the listener can be polled");
+        let deadline = std::time::Instant::now() + ONE_STEP;
         let mut connected = None;
         let arrived = waited(|| match self.listener.accept() {
             Ok((stream, _)) => {
@@ -3671,26 +3672,47 @@ impl Rendezvous {
         let Some(stream) = connected.filter(|_| arrived) else {
             panic!("timed out waiting for {what}; {}", seen());
         };
-        // Windows hands an accepted socket the listener's mode; the handshake reads blocking.
+        // Windows hands an accepted socket the listener's mode; the handshake reads blocking,
+        // and within what is left of the step, so a peer that connects and never announces
+        // itself fails here too.
         stream
             .set_nonblocking(false)
             .expect("the connection blocks");
-        Arrival::of(stream)
+        let left = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .max(std::time::Duration::from_millis(1));
+        stream
+            .set_read_timeout(Some(left))
+            .expect("the handshake can be bounded");
+        let arrival = Arrival::announced(stream).unwrap_or_else(|error| {
+            panic!(
+                "waiting for {what}, the arrival did not announce itself: {error}; {}",
+                seen()
+            )
+        });
+        arrival
+            .stream
+            .set_read_timeout(None)
+            .expect("the held connection blocks again");
+        arrival
     }
 }
 
 impl Arrival {
     fn of(stream: std::net::TcpStream) -> Self {
+        Self::announced(stream).expect("the dispatch announces itself")
+    }
+
+    /// The arrival on `stream` once it has announced its pid, or the read that failed.
+    fn announced(stream: std::net::TcpStream) -> std::io::Result<Self> {
         use std::io::BufRead;
         let mut announced = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
-            .read_line(&mut announced)
-            .expect("the dispatch announces itself");
+        std::io::BufReader::new(stream.try_clone()?).read_line(&mut announced)?;
         let pid = announced
             .trim()
             .parse::<u32>()
             .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
-        Arrival { pid, stream }
+        Ok(Arrival { pid, stream })
     }
 }
 
