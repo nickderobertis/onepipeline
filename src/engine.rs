@@ -2953,10 +2953,8 @@ fn statuses_of(
 ///
 /// # What it takes, and what it leaves the loop
 ///
-/// Only an envelope **no dispatch of this loop is part of**: every command one
-/// this module judges without a running conversation — `settle`, `amend`, `add`,
-/// `drop`, `reparent`, `requeue`, `retry`, a node's own sets — naming no node in
-/// flight. The first claimed envelope that is anything else is handed back, with
+/// Only an envelope **no dispatch of this loop is part of**: every command a
+/// `settle` naming no node in flight. The first claimed envelope that is anything else is handed back, with
 /// everything claimed after it, and the loop judges them at its next claim in the
 /// order they were claimed, ahead of anything it claims itself. So an envelope
 /// answered here is one the loop's own claim would have answered the same way, a
@@ -3222,24 +3220,11 @@ fn answerable_beside_a_pass(commands: &[Command]) -> Option<BTreeSet<String>> {
     let mut named = BTreeSet::new();
     for command in commands {
         match command {
-            Command::Settle { id, .. }
-            | Command::Amend { id, .. }
-            | Command::Drop { id, .. }
-            | Command::Requeue { id, .. }
-            | Command::SetNodeSets { id, .. } => {
+            // A settlement by hand is the envelope a held pass kept from its
+            // answer longest, and the one this answers; anything else waits for
+            // the loop's own claim.
+            Command::Settle { id, .. } => {
                 named.insert(id.clone());
-            }
-            Command::Reparent { id, deps } => {
-                named.insert(id.clone());
-                named.extend(deps.iter().cloned());
-            }
-            Command::Retry { id, node } => {
-                named.insert(id.clone());
-                named.insert(node.id.clone());
-            }
-            Command::Add { node } => {
-                named.insert(node.id.clone());
-                named.extend(node.deps.iter().cloned());
             }
             _ => return None,
         }

@@ -1700,17 +1700,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **A covered record rewritten in place keeps the checkpoint's account of it.**
-    ///
-    /// The journal is append-only, and what the marker covers is history no reader
-    /// goes back over: the document planted here says something the journal does
-    /// not, and a reader that resumed from it — rather than re-reading the prefix
-    /// to check it — is the one that reports what the document says. A whole-store
-    /// fold, with no document to resume from, reads the rewritten bytes and reports
-    /// what they say instead.
     /// A rebuild folded a window at a time — windows far smaller than a record
     /// included, which it widens until one fits — lands on the state one read of
     /// the whole store folds to, and covers every record but the last instant.
+    // llmlint: ignore[changed_behavior_has_e2e] a journey crossing a window needs a journal past sixteen megabytes per run of the suite; this drives the real reader and fold over a real run store at windows down to one byte, and the journeys drive the rebuild a deleted and an earlier build's checkpoint take.
     #[test]
     fn a_rebuild_in_windows_lands_on_the_whole_stores_fold() {
         let root = scratch("windows");
@@ -1730,6 +1723,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **A covered record rewritten in place keeps the checkpoint's account of it.**
+    ///
+    /// The journal is append-only, and what the marker covers is history no reader
+    /// goes back over: the document planted here says something the journal does
+    /// not, and a reader that resumed from it — rather than re-reading the prefix
+    /// to check it — is the one that reports what the document says. A whole-store
+    /// fold, with no document to resume from, reads the rewritten bytes and reports
+    /// what they say instead.
     #[test]
     fn a_covered_record_changed_in_place_is_never_read_again() {
         let root = scratch("prefix-changed");

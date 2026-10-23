@@ -806,7 +806,11 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
                     &released,
                     std::time::Duration::from_millis(every),
                     &mut || {
-                        println!(
+                        use std::io::Write;
+                        // A driver that stopped reading closes the pipe, and a beat
+                        // nobody reads is no failure of this double's.
+                        let _ = writeln!(
+                            std::io::stdout(),
                             "{}",
                             serde_json::json!({
                                 "v": 1,

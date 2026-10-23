@@ -726,6 +726,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     let (nodes, evidence) = read(&world);
     assert!(evidence.contains("tick 1"), "no tool call in:\n{evidence}");
 
+    // llmlint: ignore[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
     let checkpoint = world.run_file(run, "checkpoint.json");
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted");
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
@@ -742,6 +743,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     );
 
     // And the driver rebuilds where it must, and drives what is left.
+    // llmlint: ignore[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted again");
     world.run(&["adopt", run, "--detach"]).exited(0);
     world.release("last.go");
@@ -944,6 +946,7 @@ fn journalled_heartbeats_with_no_liveness_file_read_as_they_did() {
 
     // A liveness file this build cannot read says nothing, and the journal's
     // beats are read as before.
+    // llmlint: ignore[tests_mirror_real_usage] an unreadable liveness file is one a later build would leave, which no verb of this one writes; the criterion is that a reader falls back to the journal.
     std::fs::write(
         world.run_file(run, "liveness.json"),
         json!({"schema_version": 2, "members": []}).to_string(),
@@ -1074,6 +1077,7 @@ fn what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_
         .filter(|line| !line.trim().is_empty())
         .count() as u64;
     // The failing seam names the envelope the claimer answers.
+    // llmlint: ignore[tests_mirror_real_usage] the failing seam is the debug build's own, as `tests/note`'s journeys arm it; no verb makes an envelope's processing fail.
     std::fs::write(seam.join(format!("fail-envelope-{next}")), "").expect("the seam is armed");
     let failed = world.run_with_stdin(
         &["reply", run],
