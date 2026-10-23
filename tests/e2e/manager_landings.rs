@@ -4072,3 +4072,23 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
         }
     }
 }
+
+#[test]
+fn zz_probe_after_a_death() {
+    let (world, repository, held) = held_world("ml-probe", "local-direct");
+    for branch in TRAIN {
+        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
+    }
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let ma = world.as_session("manager-a");
+    let mc = world.as_session("manager-c");
+    let mut a = Started::spawn(&ma, None, &["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
+    world.until("a held", |_| held.holding());
+    a.kill();
+    let mut train = vec!["integrate"];
+    train.extend(TRAIN);
+    train.push("--push");
+    let c = Started::spawn(&mc, Some(&repository.checkout), &train);
+    let (code, out, err) = c.ended();
+    panic!("c ended {code}\nOUT:{out}\nERR:{err}");
+}
