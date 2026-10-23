@@ -455,6 +455,9 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
             |world| !world.dispatch_records(run).is_empty(),
         );
         at_the_listing.release();
+        // Only the first listing is held: any later one the shutdown makes finds
+        // nothing listening and goes straight on.
+        drop(listed);
         shutting.join().expect("the shutdown returns")
     });
     // llmlint: ignore-end[tests_mirror_real_usage]
