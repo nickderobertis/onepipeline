@@ -267,9 +267,24 @@ mod unix {
                 "transport",
             ),
             (
-                "unrecognised",
+                "bad-gateway",
                 1,
                 "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+                "GitHub failed answering it",
+            ),
+            (
+                // GitHub's own wording, as `gh pr close` met it in CI run 39891240262.
+                "graphql-went-wrong",
+                1,
+                "API call failed: GraphQL: Something went wrong while executing your query on \
+                 2026-10-23T02:50:52Z. Please include `A848:1A14FE:7A60E:D5869:6ADACB8C` when \
+                 reporting this issue.",
+                "GitHub failed answering it",
+            ),
+            (
+                "unrecognised",
+                1,
+                "HTTP 422: Validation Failed (https://api.github.com/graphql)",
                 "does not recognise",
             ),
         ] {
@@ -358,6 +373,57 @@ mod unix {
                 "a missing `gh` fails carrying {carried:?}: {refusal}"
             );
         }
+    }
+
+    /// A read is asked again while GitHub fails answering it, and only then: a read that
+    /// meets GitHub's own failure twice returns what the third asking got, one that meets
+    /// nothing else ends after [`repo::READ_ATTEMPTS`] askings carrying the last failure, and
+    /// any refusal that is an answer — here a not-found — ends it at the first. That is
+    /// what lets the smoke's cleanup read back what a close GitHub failed to answer did.
+    ///
+    /// Its own test, and so its own process under nextest: `PATH` is process-global.
+    #[test]
+    fn a_read_is_asked_again_only_while_github_fails_answering_it() {
+        let scratch = scratch();
+        let read = [
+            "api",
+            "repos/nobody/onepipeline-throwaway-smoke/git/ref/heads/b",
+        ];
+        let went_wrong = "API call failed: GraphQL: Something went wrong while executing your \
+                          query on 2026-10-23T02:50:52Z.";
+        let api_calls = |record: &Path| {
+            recorded(record)
+                .iter()
+                .filter(|call| call[0] == "api")
+                .count()
+        };
+
+        let record = stand_in_answering(&scratch.0, "recovers", (0, ""), (2, 1, went_wrong));
+        assert!(
+            repo::gh_read(&read).is_ok(),
+            "a read answered on its third asking is answered"
+        );
+        assert_eq!(
+            api_calls(&record),
+            3,
+            "asked until it was answered, then no more"
+        );
+
+        let record = stand_in_answering(&scratch.0, "never", (0, ""), (99, 1, went_wrong));
+        let refusal = repo::gh_read(&read).expect_err("a read GitHub never answers fails");
+        assert_eq!(refusal.cause, repo::Cause::Upstream, "{refusal}");
+        assert!(refusal.to_string().contains(went_wrong), "{refusal}");
+        assert_eq!(
+            api_calls(&record),
+            repo::READ_ATTEMPTS as usize,
+            "asked a bounded number of times"
+        );
+
+        let not_found = "gh: Not Found (HTTP 404)";
+        let record = stand_in_answering(&scratch.0, "answered", (0, ""), (99, 1, not_found));
+        let refusal = repo::gh_read(&read).expect_err("a not-found is an answer");
+        assert_eq!(refusal.cause, repo::Cause::NotFound, "{refusal}");
+        assert_eq!(api_calls(&record), 1, "an answer is never asked again");
     }
 
     /// A synthetic scratch identity, owned by nobody: every `gh` it reaches is

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::harness::{agent, plan_of, World};
-use crate::repo::{ensure_repo, gh, gh_try, missing, Cause};
+use crate::repo::{ensure_repo, gh, gh_read, gh_try, missing, Cause};
 use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 
 /// The alias every host registers its clone of the scratch repository under, and so the
@@ -210,7 +210,9 @@ impl Tracked {
 /// [`Created::clean`] is the journey's own last step: it closes every pull request the hosts
 /// recorded opening and every open one whose title carries this run's stamp, deletes every
 /// branch under the run's prefix, and then reads each one back from GitHub to show it closed
-/// or gone — answering every failure it met rather than counting it as done. Its `Drop` runs
+/// or gone — answering every failure it met rather than counting it as done. A close or delete
+/// GitHub failed to answer is left to that read-back, which is what says whether it happened,
+/// and every read asks again across such a failure before taking it as one. Its `Drop` runs
 /// the same sweep, best-effort, for a journey that failed before that step: declared before
 /// every world, it drops after them, once each has stopped the drivers it started, which
 /// would otherwise go on publishing after it was cleaned. A failure there is printed, since
@@ -262,6 +264,9 @@ impl Created {
             if state == "OPEN" {
                 match gh_try(&["pr", "close", &number.to_string(), "--repo", &self.slug]) {
                     Ok(_) => cleanup.observed.push(format!("closed #{number}")),
+                    Err(refusal) if refusal.cause.transient() => cleanup.observed.push(format!(
+                        "closing #{number}, left to the read-back: {refusal}"
+                    )),
                     Err(refusal) => cleanup.failed(format!("closing #{number}: {refusal}")),
                 }
             } else {
@@ -291,6 +296,9 @@ impl Created {
                     &format!("repos/{}/git/refs/heads/{branch}", self.slug),
                 ]) {
                     Ok(_) => cleanup.observed.push(format!("deleted {branch}")),
+                    Err(refusal) if refusal.cause.transient() => cleanup.observed.push(format!(
+                        "deleting {branch}, left to the read-back: {refusal}"
+                    )),
                     Err(refusal) => cleanup.failed(format!("deleting {branch}: {refusal}")),
                 },
                 Some(false) => cleanup.observed.push(format!("{branch} was already gone")),
@@ -336,7 +344,7 @@ impl Created {
 
     /// The open pull requests on the scratch repository whose title carries the stamp.
     fn stamped_open(&self, cleanup: &mut Cleanup) -> BTreeSet<u64> {
-        let listed = match gh_try(&[
+        let listed = match gh_read(&[
             "pr",
             "list",
             "--repo",
@@ -374,7 +382,7 @@ impl Created {
 
     /// Pull request `number`'s state and head branch, or the failure that kept them.
     fn pull(&self, number: u64, cleanup: &mut Cleanup) -> Option<(String, String)> {
-        let read = gh_try(&[
+        let read = gh_read(&[
             "pr",
             "view",
             &number.to_string(),
@@ -408,7 +416,7 @@ impl Created {
 
     /// Whether `branch` is on the remote: `None` where GitHub's answer said neither.
     fn branch_exists(&self, branch: &str, cleanup: &mut Cleanup) -> Option<bool> {
-        match gh_try(&[
+        match gh_read(&[
             "api",
             &format!("repos/{}/git/ref/heads/{branch}", self.slug),
         ]) {
@@ -425,7 +433,7 @@ impl Created {
     fn remote_branches(&self, cleanup: &mut Cleanup) -> BTreeSet<String> {
         let mut branches = BTreeSet::new();
         for prefix in &self.prefixes {
-            let listed = match gh_try(&[
+            let listed = match gh_read(&[
                 "api",
                 &format!("repos/{}/git/matching-refs/heads/{prefix}", self.slug),
             ]) {
