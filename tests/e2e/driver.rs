@@ -4263,13 +4263,14 @@ fn a_stop_ends_what_a_member_starts_after_its_parent_exits_mid_stop() {
 }
 
 /// A stop whose host stops listing once it has frozen the tree still ends that
-/// tree, and leaves none of it frozen.
+/// tree and leaves none of it frozen — and refuses to call that a clean stop.
 ///
 /// The teardown freezes what its first listing found before it lists again,
 /// so a listing refused after that is met with a frozen tree in hand: it is
 /// signalled and let go as it stands. A teardown that gave up there would leave
 /// every process of the run stopped, which reads as running to every view and
-/// ends nothing.
+/// ends nothing. What it cannot say is that the tree it signalled was all of
+/// the run, so the answer is the partial one.
 #[cfg(unix)]
 #[test]
 fn a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it() {
@@ -4297,12 +4298,108 @@ fn a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it() {
     for pid in &left {
         end_process(*pid);
     }
-    stopped.exited(0);
+    stopped.exited(REFUSED).err_has("only partly stopped");
     assert!(
         left.is_empty(),
         "pids {left:?} of the run's tree {tree:?} were still there once the stop answered"
     );
     world.release("build.go");
+}
+
+/// A stop whose host refuses the listing that would have found a process the
+/// run's dispatch started after the first one never reports success while that
+/// process is running — and leaves the run beside it running.
+///
+/// The two faults together: the stop's first listing is read, the dispatch
+/// starts a child after it, and every listing after that is refused. What the
+/// stop found is signalled and gone within its patience, so a confirmation that
+/// watched only that would call the stop clean beside a child nobody found.
+/// Held at the stop's listing, so the child falls after it on any host.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_relisting_fails_never_reports_success_beside_a_child_it_missed() {
+    let world = World::new("driver-stop-relist-late-child");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    let (run, beside) = ("relistlate", "besiderelist");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // dispatch starts its process on is the property, and no user-facing input can place
+    // it. The failpoint only orders the real binaries; the launch, the stop, the dispatch
+    // and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    // Ahead of the `PATH` the stop is otherwise given, so only `ps` is replaced.
+    let inherited = stop
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(world.path_whose_ps_fails_after_its_first_listing())
+            .chain(std::env::split_paths(&inherited)),
+    )
+    .expect("a PATH");
+    stop.env("PATH", path)
+        .env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop relistlate"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.go");
+        world.until("the dispatch to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up, by the
+    // pid the child recorded itself.
+    let survived = !process_ended(child);
+    if survived {
+        end_process(child);
+    }
+    assert!(
+        !(stopped.code == 0 && survived),
+        "the stop reported success while pid {child}, started by the run's dispatch after the \
+         stop listed the tree, was still running:\n{}",
+        stopped.stdout
+    );
+    stopped.exited(REFUSED).err_has("only partly stopped");
+    let recorded = world.events_of(run, "run-stopped");
+    assert_eq!(
+        recorded
+            .last()
+            .map(|stopped| stopped["payload"]["teardown"].clone()),
+        Some(json!("partly-signalled")),
+        "{recorded:?}"
+    );
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
 }
 
 /// A stop run from **inside** the run it ends — an agent of the run stopping
