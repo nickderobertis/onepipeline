@@ -9440,6 +9440,12 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
 
     let in_source = verb_functions_in_source();
     let mut in_contract = verb_functions_in_contract();
+    let adoption_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("71.")["sdk_verbs"].clone())
+            .expect("entry 71 names its SDK verbs");
+    in_contract.extend(adoption_verbs);
+    let _: fn(&RunPaths, Adopt, Option<u64>) -> Result<Adopted> =
+        verbs::adopt_with_writeback_item_budget;
     let review_verbs: Vec<String> =
         serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
             .expect("entry 122 names its SDK verbs");

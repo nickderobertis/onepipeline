@@ -5798,7 +5798,10 @@ then the shipped default. It is resolved at launch and retained in the launch
 record beside the pacemaker interval. `adopt --writeback-item-budget SECONDS`
 replaces it under the ownership lock before the new driver projects anything,
 including before a detached driver is spawned. An adoption naming no budget
-keeps the recorded value and ignores the environment. A record written before
+keeps the recorded value and ignores the environment. The additive SDK entry point
+`verbs::adopt_with_writeback_item_budget(paths, how, budget)` accepts an optional
+whole-second budget; `verbs::adopt` and `verbs::Adopt` keep their existing shapes.
+A record written before
 the field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
 config key — by the spelling that carried it, because zero is no budget at all:
@@ -5833,6 +5836,7 @@ replays.
 
 ```json
 {
+  "sdk_verbs": ["adopt_with_writeback_item_budget"],
   "budget": {
     "flag": "--writeback-item-budget",
     "environment": "ONEPIPELINE_WRITEBACK_ITEM_BUDGET",
