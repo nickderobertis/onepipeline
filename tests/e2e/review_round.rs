@@ -1329,10 +1329,14 @@ fn a_failed_round_command_names_its_node_detail_and_event_order() {
 /// that session's clone: a `git` an `onevcs` landing-status read had started there. This
 /// is that ordering on any platform, against the `onevcs` this crate links: a real
 /// `onevcs status` is held with its `git` inside the clone while a real `onevcs session
-/// close` runs, and is let go only once the close has returned or been given
-/// [`CLOSE_BESIDE_A_READ`] to. The close must not return while the read is inside, and
-/// must then close the session; a release that refuses the close, or closes the clone
-/// out from under the read, fails here.
+/// close` runs, and the read is let go only after that close has exited.
+///
+/// The close's exit is the rendezvous. It is given [`CLOSE_LOCK_WAIT`] for any lock it
+/// waits on, so a close that waits for the read reaches the read's lock and says it timed
+/// out there, leaving the session open; one that does not wait reaches the occupancy
+/// decision and refuses over the held `git` instead. Whichever decision it reached, it
+/// reached it with the read still held, so how long it took to get there decides nothing.
+/// A second close after the release must then close the session.
 #[test]
 fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
     use std::process::{Command, Stdio};
@@ -1406,7 +1410,6 @@ fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
             let _ = self.0.wait();
         }
     }
-    let release = || std::fs::write(held.join("release"), "go").expect("the read is released");
     let mut read = onevcs(&["status", "feature/reader", "--json"], "read");
     read.env("HELD_GIT_HOLD", "1").env("HELD_GIT_CLONE", &clone);
     let mut read = Child(read.spawn().expect("the read starts"));
@@ -1422,27 +1425,6 @@ fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
         "the read finished without a git inside the session's clone: {:?}",
         said("read")
     );
-    let mut close = Child(
-        onevcs(&["session", "close", &token], "close")
-            .spawn()
-            .expect("the close starts"),
-    );
-    let began = std::time::Instant::now();
-    let returned_inside = loop {
-        if close
-            .0
-            .try_wait()
-            .expect("the close can be observed")
-            .is_some()
-        {
-            break true;
-        }
-        if began.elapsed() >= CLOSE_BESIDE_A_READ {
-            break false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    };
-    release();
     let ended = |child: &mut Child, what: &str| {
         let mut status = None;
         world.until(&format!("the {what} to finish"), |_| {
@@ -1451,35 +1433,72 @@ fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
         });
         status.expect("the wait ends on an exit")
     };
-    let closed = ended(&mut close, "close");
-    let read_status = ended(&mut read, "read");
-    assert!(
-        !returned_inside,
-        "the close returned while an onevcs read was working inside the session's clone \
-         (exit {:?}): {:?}",
-        closed.code(),
-        said("close")
-    );
-    assert!(closed.success(), "the close failed: {:?}", said("close"));
-    assert!(read_status.success(), "the read failed: {:?}", said("read"));
-    let record: Value = serde_json::from_slice(
-        &std::fs::read(
-            world
-                .onevcs_home()
-                .join("sessions")
-                .join(format!("{token}.json")),
+    let record = || -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                world
+                    .onevcs_home()
+                    .join("sessions")
+                    .join(format!("{token}.json")),
+            )
+            .expect("the session record is readable"),
         )
-        .expect("the session record is readable"),
-    )
-    .expect("the session record is JSON");
-    assert_eq!(record["state"], "closed", "{record}");
+        .expect("the session record is JSON")
+    };
+    let mut beside = onevcs(&["session", "close", &token], "close-beside");
+    beside.env(
+        "ONEVCS_LOCK_TIMEOUT_SECONDS",
+        CLOSE_LOCK_WAIT.as_secs().to_string(),
+    );
+    let mut beside = Child(beside.spawn().expect("the close starts"));
+    let met = ended(&mut beside, "close beside the held read");
+    let [_, met_said] = said("close-beside");
+    eprintln!("close beside the held read: {}", met_said.trim());
+    assert!(
+        read.0
+            .try_wait()
+            .expect("the read can be observed")
+            .is_none(),
+        "the read was let go before the close beside it decided: {:?}",
+        said("read")
+    );
+    assert!(
+        !met.success()
+            && met_said.contains("timed out after")
+            && (met_said.contains(&format!("onevcs-closing-runs-{token}.lock"))
+                || met_said.contains("onevcs-reads.lock")),
+        "the close did not stop at the held read's lock (exit {:?}); a close that \
+         refuses over the read's git, or removes the clone under it, has not waited \
+         for the read: {met_said}",
+        met.code()
+    );
+    assert_eq!(
+        record()["state"],
+        "open",
+        "a close that waited closed nothing"
+    );
+    assert!(
+        worktree.exists(),
+        "a close that waited removed the worktree"
+    );
+
+    std::fs::write(held.join("release"), "go").expect("the read is released");
+    let read_status = ended(&mut read, "read");
+    assert!(read_status.success(), "the read failed: {:?}", said("read"));
+    let mut close = Child(
+        onevcs(&["session", "close", &token], "close")
+            .spawn()
+            .expect("the close starts"),
+    );
+    let closed = ended(&mut close, "close");
+    assert!(closed.success(), "the close failed: {:?}", said("close"));
+    assert_eq!(record()["state"], "closed", "{}", record());
     assert!(!worktree.exists(), "the close left the session's worktree");
 }
 
-/// How long [`a_session_close_waits_for_an_onevcs_read_working_inside_its_clone`] gives a
-/// close to return while the read is held: a close that does not wait for the read
-/// answers in well under a second, and one that does never returns inside it.
-const CLOSE_BESIDE_A_READ: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long the close beside the held read waits for any lock before saying where it
+/// waited: what ends that close, so the journey reads which decision it reached.
+const CLOSE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.
