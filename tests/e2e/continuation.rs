@@ -2429,6 +2429,13 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             None
         }
         ClaimAnswer::NoClaim => {
+            // llmlint: ignore-block[tests_mirror_real_usage] a claim that never reached the
+            // board is the plan store's write screening refusing the update that carries it,
+            // a defect of the store and not reachable from this build. The scripted store
+            // refuses by method, and refusing `set_project_metadata` would refuse the
+            // publication's fence too, so no input leaves the claim absent while the fence
+            // lands except clearing the key; the run, its reads and every outcome asserted
+            // are the binary's own.
             let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
                 .expect("a key");
             let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
@@ -2437,6 +2444,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
                     engine.set_project_metadata(&id, &key, &Value::Null).await
                 })
                 .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
+            // llmlint: ignore-end[tests_mirror_real_usage]
             None
         }
     };
