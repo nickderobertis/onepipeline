@@ -21,6 +21,11 @@ use crate::sys;
 
 pub use crate::event::PipelineKind;
 
+/// The next sequence number this process's stream may claim on each run's journal,
+/// shared by every writer it opens there. See [`Journal::open`].
+static SEQUENCES: std::sync::Mutex<BTreeMap<std::path::PathBuf, u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
 /// The append-only writer for one run.
 ///
 /// It holds the next sequence number for this process's stream, which is taken
@@ -52,6 +57,17 @@ impl Journal {
         // history its next sequence number has to be above.
         let (summary, claimed) = crate::summary::Maintainer::opened_for(paths, &stream);
         let next_seq = claimed.map_or(0, |max| max + 1);
+        // Every writer this process opens on one run shares the stream, so they
+        // share its next number too: two writers each counting from what they read
+        // would claim one `seq` twice.
+        let next_seq = {
+            let mut claimed = SEQUENCES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let shared = claimed.entry(paths.journal()).or_insert(next_seq);
+            *shared = (*shared).max(next_seq);
+            *shared
+        };
         Self {
             summary,
             paths: paths.clone(),
@@ -76,9 +92,18 @@ impl Journal {
         kind: &str,
         body: &T,
     ) -> Result<crate::event::ArtifactRef> {
+        // Named for the number the next record of this process's stream takes,
+        // which another writer of this process may have moved past this one's.
+        let next = SEQUENCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.paths.journal())
+            .copied()
+            .unwrap_or(self.next_seq)
+            .max(self.next_seq);
         let path = self
             .paths
-            .report_for(&format!("{kind}-{}", self.stream), self.next_seq);
+            .report_for(&format!("{kind}-{}", self.stream), next);
         ledger::write_json(&path, body)?;
         let bytes = std::fs::metadata(&path)
             .map_err(|source| crate::error::Error::Ledger {
@@ -112,6 +137,19 @@ impl Journal {
         ) {
             panic!("an emitter wrote a {kind} record its own document refuses: {refusal}");
         }
+        // Taken and moved on under one lock: another writer of this process on
+        // this run may have moved past this writer's own count, and two taking
+        // the same number would be one `seq` claimed twice.
+        let seq = {
+            let mut claimed = SEQUENCES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let shared = claimed.entry(self.paths.journal()).or_insert(self.next_seq);
+            let seq = (*shared).max(self.next_seq);
+            *shared = seq + 1;
+            seq
+        };
+        self.next_seq = seq;
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),

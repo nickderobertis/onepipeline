@@ -788,10 +788,43 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
         // until it is released is also what makes every one of them a graph that
         // has announced itself before it goes, rather than one whose launcher
         // may have met its exit first.
-        wait_for_any(&[
+        let released = [
             dir.join("observer.go"),
             dir.join(format!("observer.go.{nth}")),
-        ]);
+        ];
+        // `observer.heartbeat` holds a number of milliseconds and makes the held
+        // observer's monitor member beat on that clock, as a real one does every
+        // fifteen seconds: a member of no dispatch, so its beats name no node.
+        match std::fs::read_to_string(dir.join("observer.heartbeat"))
+            .ok()
+            .and_then(|every| every.trim().parse::<u64>().ok())
+            .filter(|every| *every > 0)
+        {
+            Some(every) => {
+                let mut seq = 0u64;
+                wait_for_any_ticking(
+                    &released,
+                    std::time::Duration::from_millis(every),
+                    &mut || {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "v": 1,
+                                "ts": now(),
+                                "stream": format!("fake-observer-{}", std::process::id()),
+                                "seq": seq,
+                                "source": "agentgraph",
+                                "kind": "member-heartbeat",
+                                "labels": {"run_id": format!("fake-observer-{}", std::process::id()), "member": "monitor"},
+                                "payload": {},
+                            })
+                        );
+                        seq += 1;
+                    },
+                );
+            }
+            None => wait_for_any(&released),
+        }
     }
     // What a real monitor member reads once it is let go, where a journey asks
     // (`observer.monitor`): the run's whole merged stream, through the very
