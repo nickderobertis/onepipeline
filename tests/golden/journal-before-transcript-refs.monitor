@@ -1,0 +1,37 @@
+Concise graph events; ask the producing library for full detail by stream id.
+2026-10-10T13:15:47.956Z  graph:-                      run-started
+2026-10-10T13:15:48.135Z  graph:follow-ups             node-ready
+2026-10-10T13:15:48.419Z  graph:follow-ups             node-dispatched
+2026-10-10T13:15:48.640Z  agent:follow-up-1791638148640-261639 graph-started
+2026-10-10T13:15:48.641Z  agent:follow-up-1791638148640-261639 member-started
+2026-10-10T13:16:00.342Z  agent:follow-up-1791638148640-261639 turn-started
+2026-10-10T13:16:00.343Z  agent:follow-up-1791638148640-261639 turn-activity › I’ll read the named issue and its ticket, add the relationship supplied in the c
+2026-10-10T13:16:02.403Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:03.658Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:16:06.722Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:06.943Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:14.487Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:18.661Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:16:33.479Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:33.666Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:16:41.648Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:48.668Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:16:50.727Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:16:56.407Z  agent:follow-up-1791638148640-261639 turn-activity › The comment supplies a related fix, not a new occurrence of this root cause. I’v
+2026-10-10T13:17:03.674Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:17:04.701Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:17:14.604Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:17:18.680Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:17:26.096Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:17:33.686Z  agent:follow-up-1791638148640-261639 member-heartbeat
+2026-10-10T13:17:39.060Z  agent:follow-up-1791638148640-261639 turn-activity
+2026-10-10T13:17:44.762Z  agent:follow-up-1791638148640-261639 turn-activity › Answered [the comment](https://github.com/nickderobertis/llmlint/issues/188#issu
+2026-10-10T13:17:45.342Z  agent:follow-up-1791638148640-261639 turn-completed
+2026-10-10T13:17:45.342Z  agent:follow-up-1791638148640-261639 member-settled
+2026-10-10T13:17:45.352Z  agent:follow-up-1791638148640-261639 graph-settled
+2026-10-10T13:17:45.367Z  graph:follow-ups             node-settled done
+2026-10-10T13:17:45.557Z  graph:-                      driver-exited
+2026-10-10T13:54:56.392Z  graph:-                      planner-replied comment replies verified on the board by check-responses after the GraphQL limit
+2026-10-10T13:54:56.400Z  graph:-                      completion-requested comment replies verified on the board by check-responses after the GraphQL 
+-- before-transcript-refs  1/1 done  SETTLED  complete
+-- cursor 1:before-transcript-refs:71411
