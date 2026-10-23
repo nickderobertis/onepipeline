@@ -70,6 +70,29 @@ fn content(event: &Value) -> Resolved {
     }
 }
 
+/// The prompt the history file a turn opening references holds for its
+/// candidate: its `run-started` line's `prompt`, read straight off the file.
+fn opening_prompt_on_file(event: &Value) -> String {
+    let reference = &event["payload"]["transcript"];
+    let part = |key: &str| {
+        reference[key]
+            .as_str()
+            .expect("a reference field")
+            .to_string()
+    };
+    let path = std::path::PathBuf::from(part("history_dir"))
+        .join(part("history_project"))
+        .join(format!("{}.jsonl", part("history_session")));
+    let history_id = part("history_id");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("a history line parses"))
+        .find(|line| line["type"] == "run-started" && line["history_id"] == history_id.as_str())
+        .and_then(|line| line["prompt"].as_str().map(str::to_string))
+        .unwrap_or_else(|| panic!("{} holds no opening for {history_id}", path.display()))
+}
+
 /// The whole text one record resolves to, whatever kind of text it is.
 fn said(event: &Value) -> String {
     match content(event).text {
@@ -326,8 +349,8 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
         .collect();
     // The worker's openings resolve to exactly the prompt it was handed: the
     // node's task, then the supervisor's words. A supervisor's opening
-    // references the judge's own session, whose prompt is its whole brief with
-    // the agent's reply rendered into it, so that is what it is held to carry.
+    // references the judge's own session and resolves to exactly the prompt
+    // that session opened on — its whole brief, with the agent's reply in it.
     let instructions: Vec<(&str, String)> = openings
         .iter()
         .zip(&opened)
@@ -349,10 +372,18 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
         ],
         "the worker's turns did not open on what it was handed: {opened:?}"
     );
-    for (role, prompt) in [(supervised, judged), (again, judged_again)] {
+    for ((role, prompt), event) in [(supervised, judged), (again, judged_again)]
+        .into_iter()
+        .zip([&opened[1], &opened[3]])
+    {
         assert_eq!(*role, Party::User.as_str(), "{opened:?}");
+        assert_eq!(
+            prompt,
+            &opening_prompt_on_file(event),
+            "a supervisor turn did not resolve to the prompt its history holds"
+        );
         assert!(
-            prompt.contains(SUPERVISOR_BRIEF) && prompt.contains(ANSWERED),
+            prompt.starts_with(SUPERVISOR_BRIEF) && prompt.contains(ANSWERED),
             "a supervisor turn did not open on its brief over the agent's reply: {prompt}"
         );
     }
