@@ -11717,3 +11717,102 @@ fn retained_run_views_publish_the_contracts_refresh_outcomes() {
         ],
     );
 }
+
+/// The transcript resolver is the surface the contract states — its signature,
+/// its answers and their spelling, its bound — and the `watch` machine record's
+/// `transcript` object in both its forms is what those types render.
+#[test]
+fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_states() {
+    use onepipeline::views::transcript::{
+        self, Resolved, Text, TranscriptRef, Unresolved, Why, DESCRIPTION_MAX_CHARS,
+    };
+    let _: fn(&TranscriptRef) -> std::result::Result<Resolved, Unresolved> = transcript::resolve;
+    let _: fn(
+        &str,
+        &serde_json::Map<String, Value>,
+    ) -> Option<std::result::Result<TranscriptRef, Unresolved>> = TranscriptRef::of;
+    let _: fn(
+        &str,
+        &serde_json::Map<String, Value>,
+    ) -> Option<std::result::Result<Resolved, Unresolved>> = transcript::of_record;
+    assert_eq!(DESCRIPTION_MAX_CHARS, 120);
+    assert_contract_names(
+        "transcript resolver's",
+        &[
+            "`views::transcript::resolve(&TranscriptRef) -> Result<Resolved, Unresolved>`",
+            "`TranscriptRef::of(kind, payload)`",
+            "`views::transcript::of_record(kind, payload)`",
+            "`TranscriptRef::Instruction`",
+            "`TranscriptRef::Message`",
+            "`TranscriptRef::Activity`",
+            "`TranscriptRef::Copy { text, cut }`",
+            "`Text::Tool { kind, name, input, output }`",
+            "`DESCRIPTION_MAX_CHARS` (120)",
+            "`io::history::find_session_path`",
+            "`transcript unavailable: <path>: <why>`",
+            "`onepipeline scratch discard`",
+            "`started_at` and `completed_at`",
+        ],
+    );
+    for why in [Why::MissingFile, Why::MissingEntry, Why::Unreadable] {
+        assert_contract_names("transcript resolver's", &[&format!("`{}`", why.as_str())]);
+        assert_eq!(
+            serde_json::to_value(why).expect("a reason serializes"),
+            json!(why.as_str())
+        );
+    }
+    let copy = TranscriptRef::Copy {
+        text: Text::Instruction("## What".into()),
+        cut: true,
+    };
+    assert!(!copy.is_reference());
+
+    let blocks = fenced_blocks("json watch-transcript");
+    let [block] = &blocks[..] else {
+        panic!(
+            "expected exactly one ```json watch-transcript block, found {}",
+            blocks.len()
+        );
+    };
+    let records: Vec<Value> =
+        serde_json::from_str(block).expect("the watch-transcript example parses");
+    let (mut resolved, mut unavailable) = (0, 0);
+    for record in &records {
+        assert_eq!(record["watch"], "event", "{record}");
+        let object = record["transcript"]
+            .as_object()
+            .unwrap_or_else(|| panic!("the example carries no transcript object: {record}"));
+        if let Some(line) = object.get("unavailable") {
+            unavailable += 1;
+            let why: Why = serde_json::from_value(object["why"].clone())
+                .unwrap_or_else(|error| panic!("{error}: {record}"));
+            let rendered = Unresolved {
+                path: object["path"].as_str().expect("a path").into(),
+                why,
+            }
+            .to_string();
+            assert_eq!(line, &json!(rendered), "{record}");
+            assert_eq!(object.len(), 3, "{record}");
+        } else {
+            resolved += 1;
+            let description = object["description"].as_str().expect("a description");
+            assert!(
+                !description.contains('\n') && description.chars().count() <= DESCRIPTION_MAX_CHARS,
+                "{record}"
+            );
+            let texts: Vec<&str> = ["instruction", "message", "reasoning"]
+                .into_iter()
+                .filter(|key| object.contains_key(*key))
+                .collect();
+            let tool = object.contains_key("input") && object.contains_key("output");
+            assert!(
+                texts.len() + usize::from(tool) == 1 && object.len() == 2 + usize::from(tool),
+                "the example's text is not under exactly one field naming what it is: {record}"
+            );
+        }
+    }
+    assert!(
+        resolved >= 1 && unavailable >= 1,
+        "the example shows {resolved} resolved and {unavailable} unavailable forms, not both"
+    );
+}
