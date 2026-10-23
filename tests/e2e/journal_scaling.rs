@@ -106,7 +106,7 @@ fn a_members_worker_events_are_journalled_while_the_reconcile_pass_is_held() {
     world.release("build.go");
 }
 
-/// Envelope 204's cause: a `settle` of a node no dispatch is part of, queued while
+/// A `settle` of a node no dispatch is part of, queued while
 /// the driver's pass is held, is claimed, applied and answered before the pass is
 /// released — and the `reply` that queued it is answered.
 #[test]

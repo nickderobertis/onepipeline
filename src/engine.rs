@@ -2198,6 +2198,7 @@ fn converge(
                 // The claimer stands down before the run's last claim, and anything
                 // it applied or handed back while this pass ran is folded and judged
                 // by another pass rather than left behind the close-out.
+                // llmlint: ignore[changed_behavior_has_e2e] the refusal needs an envelope claimed beside the very pass that finds the run converged, a scheduling race no journey can place; what the claimer applies and hands back is driven by the `journal_scaling` claim journeys, and the close-out every run takes passes this arm's other side.
                 if !in_pass.stand_down() {
                     continue;
                 }
@@ -3118,6 +3119,7 @@ impl InPass {
             seen = now;
             let (journal, projected) =
                 held.get_or_insert_with(|| (Journal::open(paths), Projected::open(paths)));
+            // llmlint: ignore[changed_behavior_has_e2e] a claim that fails needs the run's channel to refuse a read mid-pass, which is host sabotage; what is not claimed here stays queued for the loop's own claim, the path every envelope took before this thread.
             if let Err(error) = self.claim(paths, launch, &channel, journal, projected) {
                 eprintln!(
                     "onepipeline: run '{}': claiming envelopes beside a pass failed, and the \
@@ -3152,6 +3154,7 @@ impl InPass {
         projected.refresh(paths);
         let mut handing = false;
         for record in claimed {
+            // llmlint: ignore[changed_behavior_has_e2e] an undecodable record is handed back exactly as an envelope naming a dispatch in flight is, which `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused` drives; the loop refuses it as it always has.
             let envelope = match record {
                 crate::channel::Claimed::Envelope(envelope) if !handing => envelope,
                 other => {
