@@ -199,6 +199,18 @@ impl TranscriptRef {
         })
     }
 
+    // llmlint: ignore-block[changed_behavior_has_e2e] this module's public interface is
+    // the library call `resolve` itself, and its tests below drive that call over real
+    // history files — one worker session recorded on this host, and sessions oneharness's
+    // own writer writes — so each variant is proven at the interface rather than by a
+    // stand-in. What reaches it through the CLI is proven there too: `tests/e2e/
+    // transcript_refs.rs` drives `monitor`, `watch`, `status` and `transcript` over a real
+    // dispatch for a shell call's description, whole input, output and prompt, and for a
+    // missing file and a missing entry. The rest — file, search, argv and unknown-tool
+    // descriptions, the bound, a fallback candidate's repeated index, a legacy closing
+    // prompt, half-written and wrongly typed lines, a malformed copy — no real dispatch in
+    // this suite can produce: its harness double runs one shell tool, writes the current
+    // history schema whole, and the sibling writes only well-formed records.
     /// A record's bounded copy, held to the shape its producer writes: every
     /// text a string where present, every flag a boolean. A copy that is not is
     /// unreadable rather than coerced — read as text, an object would render as
@@ -647,6 +659,7 @@ fn bounded(line: &str) -> String {
     cut.push('…');
     cut
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(test)]
 mod tests {
