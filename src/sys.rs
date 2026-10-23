@@ -1759,20 +1759,23 @@ fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Resul
 
 /// `WriteFile` given the offset `0xFFFFFFFF:0xFFFFFFFF` writes at the end of the
 /// file, as a handle opened for `FILE_APPEND_DATA` would; `seek_write` passes the
-/// offset in exactly those two halves.
+/// offset in exactly those two halves. Each write is one such call, and
+/// `write_all` is std's own, short writes and interruptions included.
 #[cfg(windows)]
-fn platform_append_all(file: &mut std::fs::File, mut bytes: &[u8]) -> std::io::Result<()> {
-    use std::os::windows::fs::FileExt;
+fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    struct AtEnd<'a>(&'a std::fs::File);
 
-    while !bytes.is_empty() {
-        match file.seek_write(bytes, u64::MAX) {
-            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Ok(written) => bytes = &bytes[written..],
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
+    impl std::io::Write for AtEnd<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::os::windows::fs::FileExt::seek_write(self.0, buf, u64::MAX)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
-    Ok(())
+
+    std::io::Write::write_all(&mut AtEnd(file), bytes)
 }
 
 // llmlint: ignore-block[changed_behavior_has_e2e] the contended answer of both arms is
