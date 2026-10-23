@@ -38,6 +38,19 @@ fn exchange(address: SocketAddr) -> std::io::Result<()> {
     stream.read_exact(&mut released)
 }
 
+static EDITS_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once per driver, by the first pass whose edits moved the run, as soon as it has
+/// taken them up and before it goes on: a journey holds the loop there, with the edit
+/// applied and answered, to order another thread against everything the rest of that pass
+/// does.
+pub(crate) fn edits_taken() -> Result<()> {
+    if !EDITS_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        meet("ONEPIPELINE_TEST_EDITS_TAKEN_GATE")?;
+    }
+    Ok(())
+}
+
 static TIMER_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

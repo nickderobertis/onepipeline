@@ -2299,6 +2299,75 @@ fn a_closing_driver_journals_the_cut_of_a_sweep_over_identities_that_declare_not
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// The failpoint a retirement pass meets at every identity, once it has asked the
+/// loop what the run names there and before it has the answer.
+const NAMES_GATE: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
+
+/// A driver closing while its sweep's retirement pass waits on it for what the run
+/// names cuts that pass at the identity it was asking about, and journals the cut:
+/// nothing retired, nothing failed, that identity in `cut_short`.
+///
+/// The sweep is held inside its one identity's maintenance until the driver,
+/// closing as its run settles, has raised the sweep's stop; the pass that follows
+/// asks a loop that has stopped reading its channel, on every host however fast
+/// either side runs. A pass that waited for an answer there would hold the closing
+/// driver for good; the run's result and the journal say the driver closed.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] This
+// src/maintenance.rs journey has no narrower Nx edge: noteJourneySource includes src/**/*.
+#[test]
+fn a_closing_driver_cuts_a_retirement_pass_waiting_on_what_the_run_names() {
+    // llmlint: ignore-block[tests_mirror_real_usage] the interleaving is the property: no
+    // user-facing input can place a driver's close between its sweep's maintenance and that
+    // sweep's retirement pass asking what the run names. The failpoints only order the real
+    // binary over the real linked sibling, and every outcome is asserted on the binary's own
+    // records.
+    let inside = crate::harness::Rendezvous::failpoint();
+    let stopping = crate::harness::Rendezvous::failpoint();
+    let asking = crate::harness::Rendezvous::failpoint();
+    let world = pooled_world("maintenance-names-cut", Some(FAST_PACE))
+        .with_env(IDENTITY_GATE, &inside.address())
+        .with_env(STOP_GATE, &stopping.address())
+        .with_env(NAMES_GATE, &asking.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let service = world.repository("local-direct", &[]);
+    sized_pools(&world, &[("service", 1, None)]);
+    cut_a_slot(&world, &service.checkout);
+
+    let every = schedule(&world, "named", "1s", "");
+    held_run(&world, "named", 2, &["--maintenance-config", &every]).exited(0);
+    let held = inside.arrived_in(&world, "the sweep to hold inside service's maintenance");
+    world.release("named-build.go");
+    let stop = stopping.arrived_in(&world, "the closing driver to raise its sweep's stop");
+    held.release();
+    asking
+        .arrived_in(
+            &world,
+            "the retirement pass to ask the closing driver what the run names",
+        )
+        .release();
+    stop.release();
+    world.until("the named run's result", |world| {
+        world.run_file("named", "result.json").is_file()
+    });
+
+    // The maintenance it was held inside finished uncut — a cut one writes its record
+    // regardless — and of an identity declaring nothing it records nothing: only the
+    // retirement pass was cut.
+    assert!(records(&world, "named").is_empty(), "{}", world.dump());
+    let retirement = world.events_of("named", "branches-retired");
+    assert_eq!(retirement.len(), 1, "{}", world.dump());
+    assert_eq!(
+        retirement[0]["payload"],
+        json!({
+            "retired": [],
+            "failed": [],
+            "cut_short": {"reason": "driver-closing", "unreached": [SERVICE_IDENTITY]},
+        })
+    );
+    assert!(!sweeping(&world, "named"), "the marker outlived the driver");
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// A sweep whose only activity is a declared command that succeeds and frees
 /// nothing journals one record carrying that `succeeded`, and `results` prints no
 /// summary line for it.

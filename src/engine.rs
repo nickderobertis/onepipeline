@@ -576,6 +576,10 @@ pub(crate) enum Message {
     /// That sweep's retirement pass has finished, which ends the sweep, and
     /// this is what it retired.
     Retired(Box<crate::maintenance::Retirements>),
+    /// That sweep's retirement pass has reached an identity, and asks what the run
+    /// names now, to leave alone there. Answered on the loop's thread, from the
+    /// state it applies every edit to before it answers the edit's envelope.
+    Naming(Sender<Vec<crate::maintenance::Named>>),
     /// One receiver's delivery thread's answer: what that receiver's
     /// conversation said of each note the envelope offered it. See
     /// [`NoteDeliveries`].
@@ -1692,6 +1696,7 @@ fn converge(
             derived = None;
             unpublished = true;
             moved = true;
+            crate::ordering::edits_taken()?;
         }
         deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an
@@ -2193,9 +2198,7 @@ fn converge(
             && !readied
             && in_flight.len() < state.graph.concurrency as usize
             && crate::maintenance::host_has_room();
-        maintenance.consider(idle, paths, &tx, || {
-            crate::maintenance::live_branches(state, &statuses)
-        });
+        maintenance.consider(idle, paths, &tx);
 
         // Nothing more to do until something happens — unless this pass is what
         // happened, in which case the next one is due now. The longest this loop
@@ -2545,6 +2548,11 @@ fn converge(
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
                 Message::Retired(retirements) => {
                     maintenance.retired(paths, journal, &retirements)?;
+                }
+                // A pass that has stopped waiting has nobody to answer.
+                Message::Naming(answer) => {
+                    let _ =
+                        answer.send(crate::maintenance::live_branches(state, &state.statuses()));
                 }
                 // A receiver's conversation answered, so its notes are journalled
                 // now — what they record is what an inline delivery would have —
