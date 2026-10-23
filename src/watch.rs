@@ -252,9 +252,15 @@ pub(crate) fn watch(
     sink: &mut dyn FnMut(Frame<'_>) -> Result<()>,
 ) -> Result<Outcome> {
     let cursored = request.cursor.is_some();
+    // A watch given no cursor starts where the run's checkpoint stops: the history
+    // in front of it is folded, and reading it again to print it was a read of the
+    // whole run per watch.
     let mut cursor = match request.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
-        None => Cursor::start(&paths.run),
+        None => Cursor {
+            run: paths.run.clone(),
+            at: crate::checkpoint::resume_point(paths),
+        },
     };
     let began = Instant::now();
     let deadline = deadline(request.timeout)?;
@@ -457,7 +463,9 @@ impl Wait {
                     waited_seconds: since.map(|since| now.saturating_sub(since) / 1_000),
                 })
                 .collect(),
-            last_progress_seconds: last_progress(&view.events)
+            last_progress_seconds: view
+                .state
+                .last_progress_at
                 .map(|at| now.saturating_sub(at) / 1_000),
             observer: views::observer_state(&view.launch),
             waited: self.began.elapsed(),
@@ -472,22 +480,6 @@ fn newest_surface(paths: &RunPaths) -> Option<u64> {
         .every_surface()
         .iter()
         .map(|surface| surface.id)
-        .max()
-}
-
-/// When a node last dispatched or settled on this run, as the record's own
-/// stamp says, or `None` for a run where neither has happened.
-fn last_progress(events: &[Envelope]) -> Option<u64> {
-    events
-        .iter()
-        .filter(|event| {
-            event.source == Source::Pipeline
-                && matches!(
-                    PipelineKind::from_wire(&event.kind),
-                    Some(PipelineKind::NodeDispatched | PipelineKind::NodeSettled)
-                )
-        })
-        .filter_map(|event| crate::projection::millis_of(&event.ts))
         .max()
 }
 
@@ -602,7 +594,10 @@ impl Summary {
 /// moved.
 fn read_run(paths: &RunPaths, cursor: &mut Cursor) -> Result<(RunView, Vec<Envelope>)> {
     let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Watch, &paths.run);
-    let view = RunView::open(paths)?;
+    // The run's state off its checkpoint and what was appended past it: what a
+    // watch prints is the records past its own cursor, and nothing it decides from
+    // is in the history in front of that.
+    let view = RunView::open_current(paths)?;
     // Test failpoints only, and nothing at all where their variables are unset: a
     // journey holds this read with the view read and the journal not yet tailed,
     // and again with the journal tailed and the cursor not yet handed back, to

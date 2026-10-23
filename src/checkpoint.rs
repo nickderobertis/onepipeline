@@ -654,6 +654,11 @@ impl Projected {
         &self.tally
     }
 
+    /// The byte the marker stops at: everything in front of it is covered.
+    pub(crate) fn covered_bytes(&self) -> u64 {
+        self.coverage.bytes
+    }
+
     /// The byte every record this fold has read ends at.
     pub(crate) fn read_through(&self) -> u64 {
         self.read_through
@@ -795,6 +800,16 @@ fn fold_in_merge_order(
 /// what this one just paid, which is the whole of what this module is for.
 pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
+}
+
+/// The byte a reader of what a run records **from now on** starts at: where the
+/// run's checkpoint stops, once it has been brought up to the journal as it stands.
+///
+/// What a watch given no cursor, and a driver's attached stream, start their reads
+/// at: everything in front of it is folded, so nothing they decide from is there,
+/// and printing it was a read of the whole history per call.
+pub(crate) fn resume_point(paths: &RunPaths) -> u64 {
+    Projected::open(paths).coverage.bytes
 }
 
 /// The fold of a run **proved ended**, with its

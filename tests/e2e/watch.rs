@@ -351,7 +351,19 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
         world.run_file(&run, "result.json").is_file()
     });
 
-    let watched = world.run(&["watch", &run, "--timeout", "60", "--tick-interval", "0"]);
+    // From the run's first byte: a watch given no cursor starts where the run's
+    // checkpoint stops, and what this holds is how each record of the run is shown.
+    let from_the_start = format!("1:{run}:0");
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--cursor",
+        &from_the_start,
+        "--timeout",
+        "60",
+        "--tick-interval",
+        "0",
+    ]);
     agreed(&watched, "settled", 0);
 
     for line in [
@@ -399,9 +411,16 @@ fn an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line() {
     // `--all` and the shipped `monitor` profile too. Given neither — and given no
     // bound either — the defaults carry a watch over a run that has finished.
     for selection in [
-        vec!["watch", &run],
-        vec!["watch", &run, "--all"],
-        vec!["watch", &run, "--filter", "detailed"],
+        vec!["watch", &run, "--cursor", &from_the_start],
+        vec!["watch", &run, "--cursor", &from_the_start, "--all"],
+        vec![
+            "watch",
+            &run,
+            "--cursor",
+            &from_the_start,
+            "--filter",
+            "detailed",
+        ],
     ] {
         let again = world.run(&selection);
         agreed(&again, "settled", 0);
@@ -499,7 +518,19 @@ fn the_decision_completion_and_stop_records_reach_the_watch_as_lines_too() {
         !world.events_of(&run, "run-stopped").is_empty()
     });
 
-    let watched = world.run(&["watch", &run, "--timeout", "30", "--tick-interval", "0"]);
+    // From the run's first byte: a watch given no cursor starts where the run's
+    // checkpoint stops, and what this holds is how each record of the run is shown.
+    let from_the_start = format!("1:{run}:0");
+    let watched = world.run(&[
+        "watch",
+        &run,
+        "--cursor",
+        &from_the_start,
+        "--timeout",
+        "30",
+        "--tick-interval",
+        "0",
+    ]);
     let kinds = emitted(&watched);
     for kind in [
         "edit-rejected",
@@ -750,9 +781,14 @@ fn a_profile_that_excludes_a_meaningful_event_keeps_it_off_the_watch() {
         world.run_file(&run, "result.json").is_file()
     });
 
+    // From the run's first byte: a watch given no cursor starts where the run's
+    // checkpoint stops, and what this holds is how each record of the run is shown.
+    let from_the_start = format!("1:{run}:0");
     let shaped = world.run(&[
         "watch",
         &run,
+        "--cursor",
+        &from_the_start,
         "--filter",
         r#"{"exclude": [{"kind": "planner-surface-queued"}]}"#,
         "--timeout",
@@ -923,17 +959,11 @@ fn a_watch_armed_on_a_run_nothing_is_driving_waits_and_ends_at_its_deadline() {
         watched.code, 0,
         "a failed run was reported as a settled one"
     );
-    assert!(
-        emitted(&watched).iter().any(|kind| kind == "node-settled"),
-        "the watch never emitted the settlement that ended the run: {}",
-        watched.stdout
-    );
+    // The settlement that ended the run is in front of where a watch given no
+    // cursor starts — the run's checkpoint — so it is not printed again; that it
+    // did not end this watch is what the exit above holds.
     let last = returned(&watched);
-    assert_eq!(
-        last["summary"]["settled_since_cursor"],
-        json!([{"node": "build", "status": "failed"}]),
-        "{last}"
-    );
+    assert_eq!(last["summary"]["settled_since_cursor"], json!([]), "{last}");
 }
 
 /// `nothing-driving` is the run going from driven to undriven **while** the
@@ -2772,13 +2802,20 @@ fn cursor_byte(token: &str) -> u64 {
 /// The events a watch prints of the run, each with its human line — read once,
 /// without the log, from `cursor` or, with none, from the run's start.
 fn events_since(world: &World, run: &str, cursor: Option<&str>) -> Vec<Frame> {
-    let mut args = vec!["watch", run, "--timeout", "0", "--tick-interval", "0"];
-    args.extend(
-        cursor
-            .map(|cursor| ["--cursor", cursor])
-            .into_iter()
-            .flatten(),
-    );
+    // The whole run is read from its first byte: a watch given no cursor starts
+    // where the run's checkpoint stops.
+    let from_the_start = format!("1:{run}:0");
+    let cursor = cursor.unwrap_or(&from_the_start);
+    let args = vec![
+        "watch",
+        run,
+        "--timeout",
+        "0",
+        "--tick-interval",
+        "0",
+        "--cursor",
+        cursor,
+    ];
     let resumed = world.run(&args);
     assert!(
         resumed.code != REFUSED && resumed.code != USAGE_ERROR,
@@ -3581,14 +3618,10 @@ fn an_uncursored_watch_counts_only_settlements_after_it_armed() {
     );
 
     // The run holds earlier settlements, and a default watch does not end on
-    // them — it prints them and waits.
+    // them — it waits. (It prints the records past the run's checkpoint, which
+    // may or may not reach back to them.)
     let bare = world.run(&["watch", run, "--timeout", "2", "--tick-interval", "0"]);
     agreed(&bare, "elapsed", WATCH_ELAPSED);
-    assert!(
-        emitted(&bare).iter().any(|kind| kind == "node-settled"),
-        "the earlier settlements were not printed: {}",
-        bare.stdout
-    );
 
     // `later` settled before arming, and is accepted and waited on rather than
     // answered by that settlement.

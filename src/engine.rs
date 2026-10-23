@@ -546,6 +546,10 @@ impl Settlement {
 pub(crate) enum Message {
     /// One envelope, relayed from wherever the dispatch ran.
     Event(Box<Envelope>),
+    /// One envelope the relay has already put in the run's journal — or, for a
+    /// member's heartbeat, in its liveness file — before the loop saw it. See
+    /// [`journalling_relay`].
+    Journalled(Box<Envelope>),
     /// A dispatch that produced nothing is being started again.
     ///
     /// Recorded as another `node-dispatched`, because that is what it is: the
@@ -1572,7 +1576,13 @@ fn converge(
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
-    let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    let (to_loop, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // Every dispatch, delivery and probe sends through the relay, which journals a
+    // dispatch's envelopes as they arrive rather than when this loop next waits.
+    // A driver taking the run over has ended every dispatch the one before it
+    // left in flight, so the liveness that driver kept is dropped with them.
+    crate::heartbeat::clear(paths);
+    let tx = journalling_relay(paths, to_loop)?;
     // Where a note waits for its conversation, so this loop does not: see
     // [`NoteDeliveries`]. What it holds outstanding is shared with every
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
@@ -2335,8 +2345,12 @@ fn converge(
         let mut opened_a_session = false;
         for message in arrived {
             // llmlint: ignore-end[changed_behavior_has_e2e]
+            // What the relay already wrote is applied as it is applied here, and only
+            // the write is not made a second time. One it could not write reaches
+            // here unwritten, so this loop's own write reports why.
+            let journalled = matches!(message, Message::Journalled(_));
             match message {
-                Message::Event(envelope) => {
+                Message::Event(envelope) | Message::Journalled(envelope) => {
                     if envelope.kind == oneagentgraph::event::EventKind::MemberSettled {
                         if let Some(node) = envelope.labels.node.as_deref() {
                             crate::ordering::settlement_started(node)?;
@@ -2369,7 +2383,9 @@ fn converge(
                             opened_a_session = true;
                         }
                     }
-                    journal.relay(&envelope)?;
+                    if !journalled {
+                        journal.relay(&envelope)?;
+                    }
                     // A branch a node of this run pushed is a branch every draft
                     // stacked on it may now owe a restack against, and that is
                     // decided from the record — so the record is read again here,
@@ -2679,6 +2695,9 @@ fn converge(
                         )?;
                     }
                     settle(paths, journal, settlement)?;
+                    // Its members heartbeat no more: their liveness goes with the
+                    // dispatch.
+                    crate::heartbeat::settled(paths, &settlement.node);
                     // Only now may the dispatch thread let go of the registry
                     // entries its node's dispatches held: the settlement is on
                     // the record, so no reader finds a running node no process
@@ -2893,6 +2912,50 @@ fn statuses_of(
     cache.get_or_insert_with(|| state.statuses()).clone()
 }
 
+/// The relay between the run's dispatches and its reconcile loop: what a
+/// dispatch's members emit is put in the run's journal **as it arrives**, and then
+/// handed to the loop.
+///
+/// A pass of the loop can be long — a publication, a board, a slow host — and a
+/// record that waited for the loop to finish one before it reached the journal was
+/// a record every reader of the run was missing for as long. So this thread owns a
+/// journal writer of its own and nothing else: it writes each envelope, keeps a
+/// member's heartbeat in the run's liveness file instead ([`crate::heartbeat`]),
+/// and forwards every message in the order it arrived, so a settlement still
+/// reaches the loop after every record its dispatch sent before it.
+///
+/// It only ever relays — it never emits a record of this crate's own — so its
+/// writer claims no sequence number the loop's might also claim. An envelope it
+/// could not write goes on to the loop unwritten, whose own write then reports
+/// why, which is where a failed write has always ended a run.
+fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sender<Message>> {
+    let (tx, rx) = mpsc::channel::<Message>();
+    let paths = paths.clone();
+    std::thread::Builder::new()
+        .name("engine-journal".to_owned())
+        .spawn(move || {
+            let mut journal = Journal::open(&paths);
+            for message in rx {
+                let message = match message {
+                    Message::Event(envelope) if crate::heartbeat::is_heartbeat(&envelope) => {
+                        crate::heartbeat::beat(&paths, &envelope);
+                        Message::Journalled(envelope)
+                    }
+                    Message::Event(envelope) => match journal.relay(&envelope) {
+                        Ok(()) => Message::Journalled(envelope),
+                        Err(_) => Message::Event(envelope),
+                    },
+                    other => other,
+                };
+                if to_loop.send(message).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| Error::Invalid(format!("cannot start the journal relay: {e}")))?;
+    Ok(tx)
+}
+
 /// Wait until there is a reason to reconcile, and hand back what arrived.
 ///
 /// The four things that can be one: a dispatch thread said something, the
@@ -2973,7 +3036,7 @@ fn wait_for_work(
 /// see [`crate::ordering::push_received`] — so the drain after it starts again from the
 /// release rather than from before the hold.
 fn held_at_push(message: &Message) -> Result<bool> {
-    let Message::Event(envelope) = message else {
+    let (Message::Event(envelope) | Message::Journalled(envelope)) = message else {
         return Ok(false);
     };
     if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {

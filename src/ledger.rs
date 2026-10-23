@@ -265,6 +265,13 @@ impl RunPaths {
         self.dir.join("checkpoint.json")
     }
 
+    /// The run's **member liveness**: each in-flight dispatch member's latest
+    /// heartbeat, overwritten in place rather than journalled. See
+    /// [`crate::heartbeat`].
+    pub(crate) fn liveness(&self) -> PathBuf {
+        self.dir.join("liveness.json")
+    }
+
     /// The directory holding one record per live **watch** of this run.
     ///
     /// A directory of small records rather than one document, for the reason

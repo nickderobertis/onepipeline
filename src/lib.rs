@@ -92,6 +92,7 @@ mod flow;
 mod flowwatch;
 mod freespace;
 mod graph;
+mod heartbeat;
 mod home;
 mod hooks;
 mod hostphases;

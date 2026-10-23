@@ -418,17 +418,19 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Status(args) => {
-            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
-            // `--json` requires a run, which the parser enforces, so the status
-            // here is that run's folded detail.
-            if let (true, verbs::Status::Run(detail)) = (args.json, &status) {
+            // `--json` requires a run, which the parser enforces. Its reading is the
+            // run's state and nothing of its store, so it is read from the run's
+            // checkpoint and what was appended past it rather than from its history.
+            if let (true, Some(run)) = (args.json, args.run.as_deref()) {
+                let view = RunView::open_current(&verbs::resolved(&ledger::runs_root(), run)?)?;
                 let reading =
-                    serde_json::to_string(&crate::views::reading(&detail.view)).map_err(|e| {
+                    serde_json::to_string(&crate::views::reading(&view)).map_err(|e| {
                         Error::Invalid(format!("the run's reading could not be rendered: {e}"))
                     })?;
                 println!("{reading}");
                 return Ok(EXIT_SUCCESS);
             }
+            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
             if args.no_providers {
                 print!("{}", status.render_without_providers());
             } else {
@@ -2298,7 +2300,8 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     // won was still working.
     let lock = engine::claim(&paths)?;
     let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
-    let view = RunView::open(&paths)?;
+    // The run's state, for its goal and its adoption: nothing of its store.
+    let view = RunView::open_current(&paths)?;
     let log = paths.driver_log();
     if retained == Retained::Adopting {
         take_the_run_over(&paths, &mut record)?;
@@ -2945,6 +2948,22 @@ fn relay_observer(
         .map_err(|e| Error::Invalid(format!("cannot start the attach relay: {e}")))
 }
 
+/// Put one envelope the observer emitted in the run's journal — all but a
+/// heartbeat, which no reader asks of the journal any more: an observer member's
+/// beat is not a dispatch member's, and `liveness.json` keeps only those (see
+/// [`crate::heartbeat`]).
+fn relay_observed(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    envelope: &crate::event::Envelope,
+) -> Result<()> {
+    if crate::heartbeat::is_heartbeat(envelope) {
+        crate::heartbeat::beat(paths, envelope);
+        return Ok(());
+    }
+    journal.relay(envelope)
+}
+
 /// Run the engine loop in this process and stream the run until it settles.
 ///
 /// The loop runs on a thread of its own so this one can render. Reading it
@@ -2980,12 +2999,14 @@ fn attach(
     if let Some(run) = watched.as_deref_mut() {
         relay_observer(paths, run, tx)?;
     }
-    // Every event already printed, by the record it is, and whether the header has been. Not a
-    // count of lines: the merged order interleaves another stream's records by their own
-    // clock, so a record relayed late lands *among* lines already printed, and a count of them
-    // would print the line it displaced a second time and never print the one that arrived.
-    let mut printed: std::collections::HashSet<(String, u64, String, String)> =
-        std::collections::HashSet::new();
+    // The run's fold, kept current from what its journal appends, and the byte the
+    // stream has printed up to: each record is read once, as it arrives, and the
+    // history in front of the run's checkpoint — folded already, and on a long run
+    // most of the store — is never read for a line. A record relayed late is printed
+    // when it arrives, rather than among lines already printed.
+    let mut projected =
+        crate::checkpoint::Projected::open_with(paths, crate::checkpoint::Persist::No);
+    let mut printed_to = projected.covered_bytes();
     let mut headed = false;
     // How long the journal was when the run was last read, so it is read again
     // only once it has grown.
@@ -3019,7 +3040,7 @@ fn attach(
         // Everything the observer emits joins the merged store, so an attach and
         // a later replay see the same stream.
         while let Ok(envelope) = rx.try_recv() {
-            journal.relay(&envelope)?;
+            relay_observed(paths, &mut journal, &envelope)?;
             report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
         }
 
@@ -3066,7 +3087,7 @@ fn attach(
             while std::time::Instant::now() < deadline {
                 match rx.recv_timeout(ATTACH_POLL) {
                     Ok(envelope) => {
-                        journal.relay(&envelope)?;
+                        relay_observed(paths, &mut journal, &envelope)?;
                         report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -3088,7 +3109,15 @@ fn attach(
             continue;
         }
         read_at = Some(length);
-        let view = RunView::open(paths)?;
+        projected.refresh(paths);
+        let appended = journal::finished_records_from(&paths.journal(), printed_to);
+        printed_to += appended.iter().map(|(_, bytes)| bytes).sum::<u64>();
+        let mut arrived: Vec<crate::event::Envelope> = appended
+            .into_iter()
+            .filter_map(|(event, _)| event)
+            .collect();
+        journal::merge_order(&mut arrived);
+        let view = RunView::of_state(paths, (*projected).clone())?;
         // The stream is progress for a person; the settlement below is the one
         // record a caller parses. Keeping them on separate descriptors is what
         // lets a script read `stdout` as JSON while a terminal still follows
@@ -3097,18 +3126,9 @@ fn attach(
         // the person who started it, and a profile is what a *reader* of a run
         // chooses. There is nobody else here to have chosen one.
         let unfiltered = EventFilter::default();
-        let fresh: Vec<_> = view
-            .events
+        let fresh: Vec<_> = arrived
             .iter()
             .filter(|event| unfiltered.matches(event))
-            .filter(|event| {
-                printed.insert((
-                    event.stream.clone(),
-                    event.seq,
-                    event.ts.clone(),
-                    event.kind.0.clone(),
-                ))
-            })
             .collect();
         // See `StreamReads::before_render` for what the render about to be made of
         // these records carries from the last one.
@@ -3283,7 +3303,9 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
             owner: record.owner_label(&session),
         });
     }
-    let view = RunView::open(paths)?;
+    // The verdict and the adoption's record are read off the run's state alone, so
+    // it is resumed from the checkpoint rather than read from the run's history.
+    let view = RunView::open_current(paths)?;
     // A `PARKED` run is refused here with an `ACTIVE` one: its driver is alive and
     // only quiet, and taking the run over would end that live work.
     let liveness = view.liveness();
@@ -4255,7 +4277,10 @@ pub(crate) fn submit_envelope(
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
 ) -> Result<Submitted> {
-    let view = RunView::open(paths)?;
+    // The run's state, launch and channel, and nothing of its store: what this asks
+    // before it queues is answered by the fold, so it is read from the checkpoint
+    // and what was appended past it rather than from every record the run holds.
+    let view = RunView::open_current(paths)?;
     let channel = ChannelState::of_run(paths, &view.launch);
     channel.declares(&envelope.author)?;
     // The publication boundary, before anything is queued, applied or journalled: an
@@ -4466,7 +4491,7 @@ pub(crate) fn submit_envelope(
                         &mut projected,
                         crate::payload::ReadjustTrigger::Rework,
                     )?;
-                    readjusted = RunView::open(paths)?;
+                    readjusted = RunView::open_current(paths)?;
                     let frontier = Frontier {
                         node_validator: readjusted.launch.node_validator().map(str::to_owned),
                         graph_validation: Some(edits::GraphValidation {

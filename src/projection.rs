@@ -338,6 +338,19 @@ pub struct RunState {
     // named above; making it the fold's boundary instead would silently discard a
     // reason a newer driver wrote, which is the bug this field exists to avoid.
     pub holds: BTreeMap<String, Vec<Value>>,
+    /// When each node's open hold of each kind began, by the kind's word — and
+    /// [`RELEASE_AWAITED`] for a hold awaiting a release — as the run's own
+    /// `node-held` records date it: a hold of a kind starts at the first record
+    /// carrying it, and ends at one that does not, at `node-unheld`, or at the
+    /// node's dispatch. Folded so a reader dates a hold without reading the run's
+    /// history for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `holds` beside it is: by the graph-validated node id the record carries, and by the kind's own wire word.
+    pub(crate) held_since: BTreeMap<String, BTreeMap<String, u64>>,
+    /// The stamp of the latest node dispatch or settlement: what an elapsed watch
+    /// reports as the run's last progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_progress_at: Option<u64>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -1246,6 +1259,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         return;
     } // llmlint: ignore-end[changed_behavior_has_e2e]
     let payload = &event.payload;
+    fold_recall(state, event);
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
             if journal::owed_until_closed(payload) {
@@ -1913,6 +1927,71 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
 /// pin is honoured or refused, so a session that opened at all opened on the
 /// branch the node named, and a node that named none has the branch `onevcs`
 /// gave it. The session is asked either way — it is the one that knows.
+/// The hold kind [`RunState::held_since`] dates a release hold under: a reason
+/// awaiting a dependency's release.
+pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
+
+/// Fold what a reader dates a node's holds and a run's progress by, off one of
+/// this crate's own records: [`RunState::held_since`] and
+/// [`RunState::last_progress_at`].
+fn fold_recall(state: &mut RunState, event: &Envelope) {
+    let at = millis_of(&event.ts);
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeDispatched | journal::PipelineKind::NodeSettled) => {
+            if let Some(at) = at {
+                state.last_progress_at = Some(state.last_progress_at.map_or(at, |was| was.max(at)));
+            }
+            if journal::PipelineKind::from_wire(&event.kind)
+                == Some(journal::PipelineKind::NodeDispatched)
+            {
+                if let Some(node) = event.labels.node.as_ref() {
+                    state.held_since.remove(node);
+                }
+            }
+        }
+        Some(journal::PipelineKind::NodeUnheld) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.held_since.remove(node);
+            }
+        }
+        Some(journal::PipelineKind::NodeHeld) => {
+            let Some(node) = event.labels.node.as_ref() else {
+                return;
+            };
+            let reasons = event
+                .payload
+                .get("reasons")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut kinds: std::collections::BTreeSet<&str> = reasons
+                .iter()
+                .filter_map(crate::engine::hold_kind)
+                .map(crate::views::HoldKind::as_str)
+                .collect();
+            if reasons
+                .iter()
+                .any(|reason| crate::engine::release_awaited(reason).is_some())
+            {
+                kinds.insert(RELEASE_AWAITED);
+            }
+            let since = state.held_since.entry(node.clone()).or_default();
+            since.retain(|kind, _| kinds.contains(kind.as_str()));
+            for kind in kinds {
+                if !since.contains_key(kind) {
+                    if let Some(at) = at {
+                        since.insert(kind.to_string(), at);
+                    }
+                }
+            }
+            if since.is_empty() {
+                state.held_since.remove(node);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn abandon_the_dispatch_in_flight(state: &mut RunState) {
     // The same answer the adopting driver records in the journal, so what a
     // reader folds and what the run's own `driver-adopted` says are one

@@ -1065,6 +1065,9 @@ fn driver_liveness(
     // loop that would be writing is deliberately holding a subtree back until a
     // person answers, and a driver reported dead there sends an operator to
     // intervene in work that is doing exactly what it should.
+    // A dispatch member's heartbeat is activity a quiet run is judged by, as it was
+    // when every beat was journalled; it is kept beside the journal now.
+    let last_write_at = crate::heartbeat::last_write_with_beats(paths, last_write_at);
     if quiet_past_parked(last_write_at) && !(awaiting_human_action || blocking_surface(paths)) {
         return DriverLiveness::Parked;
     }
@@ -1799,6 +1802,7 @@ impl RunView {
         // [`crate::checkpoint`].
         let mut state = crate::checkpoint::fold_and_checkpoint(paths);
         landings_the_run_re_read(&mut state, paths);
+        crate::heartbeat::apply(paths, &mut state);
         // A view resolves cross-DAG edges the same way the loop does, so a
         // consumer this run is about to dispatch is not reported blocked to the
         // person deciding whether to intervene. Reading only: rendering a run
@@ -1839,6 +1843,57 @@ impl RunView {
             paths: paths.clone(),
             launch,
             events,
+            state,
+            refresh,
+        })
+    }
+
+    /// The run's state and launch record **without its merged store**: the fold
+    /// resumed from the run's checkpoint and the records appended past it, and no
+    /// event of its history read.
+    ///
+    /// For a reader that renders from the state alone — `status --json`, a watch,
+    /// `reply`'s check before it queues, a driver's own reading of its run — and
+    /// on a long run that is the difference between reading what was appended and
+    /// reading every byte the run has recorded. `events` is empty, so this is
+    /// never handed to a reader of the store: those open the run with
+    /// [`open`](Self::open). A [`refresh`](Self::refresh) of one re-reads the run
+    /// whole, as `open` does.
+    pub(crate) fn open_current(paths: &RunPaths) -> crate::Result<Self> {
+        if !paths.exists() {
+            return Err(crate::Error::NoSuchRun {
+                run: paths.run.clone(),
+                root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            });
+        }
+        Self::of_state(paths, crate::checkpoint::fold_and_checkpoint(paths))
+    }
+
+    /// A view of a run at `state`, a fold of its journal the caller already holds,
+    /// with no event of its store: what [`open_current`](Self::open_current) reads
+    /// the run as, for a caller keeping its own fold current.
+    pub(crate) fn of_state(paths: &RunPaths, mut state: RunState) -> crate::Result<Self> {
+        let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
+        landings_the_run_re_read(&mut state, paths);
+        crate::heartbeat::apply(paths, &mut state);
+        let root = paths
+            .dir
+            .parent()
+            .map_or_else(ledger::runs_root, Path::to_path_buf);
+        state.cross_dag = crate::crossdag::resolve_quietly(&root, &state.graph);
+        let refresh = RefreshCursor {
+            dir: paths.dir.clone(),
+            stamp: None,
+            receipt: None,
+            coverage: crate::checkpoint::Coverage::default(),
+            result: ledger::read_json_opt(&paths.result()),
+            upstreams: None,
+        };
+        Ok(Self {
+            paths: paths.clone(),
+            launch,
+            events: Vec::new(),
             state,
             refresh,
         })
@@ -1926,6 +1981,7 @@ impl RunView {
             return self.reread();
         }
         landings_the_run_re_read(&mut state, &self.paths);
+        crate::heartbeat::apply(&self.paths, &mut state);
         self.state = state;
         for event in &grown {
             self.refresh.coverage.absorb(Some(event), 0);
@@ -2477,7 +2533,10 @@ impl Standing {
             convergence: Convergence::of(graph.converged()),
             quiet: Quiet {
                 pid: row.summary.pid,
-                last_write_at: row.summary.last_write_at,
+                last_write_at: crate::heartbeat::last_write_with_beats(
+                    &row.paths,
+                    row.summary.last_write_at,
+                ),
             },
         }
     }
@@ -4165,12 +4224,18 @@ fn held_for_release(view: &RunView, id: &str) -> Option<String> {
     if awaited.is_empty() {
         return None;
     }
-    let waited = release_hold_since(&view.events, id).map_or_else(String::new, |since| {
-        format!(
-            ", waited {}",
-            crate::telemetry::duration(sys::now_millis().saturating_sub(since))
-        )
-    });
+    let waited = view
+        .state
+        .held_since
+        .get(id)
+        .and_then(|since| since.get(crate::projection::RELEASE_AWAITED))
+        .copied()
+        .map_or_else(String::new, |since| {
+            format!(
+                ", waited {}",
+                crate::telemetry::duration(sys::now_millis().saturating_sub(since))
+            )
+        });
     Some(format!(
         "held — awaiting the published release of {}{waited}",
         awaited.join(", ")
@@ -4289,9 +4354,12 @@ pub(crate) fn holds_of(view: &RunView) -> Vec<(String, HoldKind, Option<u64>)> {
             kinds.sort_unstable();
             kinds.dedup();
             kinds.into_iter().map(|kind| {
-                let since = hold_since(&view.events, node, |reason| {
-                    crate::engine::hold_kind(reason) == Some(kind)
-                });
+                let since = view
+                    .state
+                    .held_since
+                    .get(node)
+                    .and_then(|since| since.get(kind.as_str()))
+                    .copied();
                 (node.clone(), kind, since)
             })
         })
@@ -4307,50 +4375,6 @@ pub(crate) fn observer_state(launch: &LaunchRecord) -> ObserverState {
         ObserverLiveness::ObserverNotRestarted => ObserverState::NotRestarted,
         ObserverLiveness::Unobserved => ObserverState::None,
     }
-}
-
-/// When the release hold a node is under began: the first `node-held` naming a
-/// release since the node was last unheld, dispatched, or held for anything else.
-///
-/// A driver restates a hold as what it awaits shrinks, and an adopting driver
-/// restates the hold it inherits; neither is a new wait, so each keeps the time
-/// the first one opened.
-fn release_hold_since(events: &[Envelope], id: &str) -> Option<u64> {
-    hold_since(events, id, |reason| {
-        crate::engine::release_awaited(reason).is_some()
-    })
-}
-
-/// When the hold of one kind a node is under began, on [`release_hold_since`]'s
-/// terms, for the kind `is_kind` reads a reason as.
-fn hold_since(
-    events: &[Envelope],
-    id: &str,
-    is_kind: impl Fn(&serde_json::Value) -> bool,
-) -> Option<u64> {
-    let mut since = None;
-    for event in events
-        .iter()
-        .filter(|event| event.labels.node.as_deref() == Some(id))
-    {
-        match PipelineKind::from_wire(&event.kind) {
-            Some(PipelineKind::NodeHeld) => {
-                let of_the_kind = event
-                    .payload
-                    .get("reasons")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|reasons| reasons.iter().any(&is_kind));
-                if of_the_kind {
-                    since = since.or_else(|| crate::projection::millis_of(&event.ts));
-                } else {
-                    since = None;
-                }
-            }
-            Some(PipelineKind::NodeUnheld | PipelineKind::NodeDispatched) => since = None,
-            _ => {}
-        }
-    }
-    since
 }
 
 /// What a ready node is waiting on, as far as this host can tell.
@@ -6975,6 +6999,19 @@ mod tests {
     /// Stated over records rather than driven, because the restatement and the
     /// reset a journey would need are a driver's timing to produce and each would
     /// be the whole journey; `adoption.rs` drives the hold the status line reads.
+    /// When the release hold on `id` began, as the fold dates it over `records`.
+    fn release_hold_since(records: &[Envelope], id: &str) -> Option<u64> {
+        let mut state = RunState::default();
+        for record in records {
+            crate::projection::fold_one(&mut state, record);
+        }
+        state
+            .held_since
+            .get(id)
+            .and_then(|since| since.get(crate::projection::RELEASE_AWAITED))
+            .copied()
+    }
+
     #[test]
     fn a_release_hold_is_timed_from_the_record_that_opened_it() {
         use crate::journal::PipelineKind::{NodeDispatched, NodeHeld, NodeUnheld};
