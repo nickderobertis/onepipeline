@@ -402,6 +402,92 @@ fn nothing_new_starts_once_a_shutdown_has_begun() {
     );
 }
 
+/// A dispatch the driver starts while a shutdown is reading its run — after the
+/// registry read named none and after the teardown listed the tree it ends —
+/// does not outlive the shutdown: once the driver is gone it is ended too.
+///
+/// Held rather than raced: the driver at the moment it would start the node, and
+/// the shutdown once it has listed what it ends, so the dispatch's start falls
+/// between the two on any host. Left running, that dispatch is work nobody
+/// drives, and on Windows it holds the handle it inherited to the run's own
+/// driver log, so the run's directory can be neither moved nor removed.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
+    let world =
+        World::new("shutdown-started-meanwhile").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    held(&world, "work");
+    let run = "meanwhile";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the shutdown's listing the
+    // dispatch starts on is the property, and no user-facing input can place it. The failpoints
+    // only order the real binaries; the launch, the shutdown and every outcome asserted are the
+    // binaries' own.
+    let begins = crate::harness::Rendezvous::failpoint();
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start
+        .current_dir(&world.project)
+        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", begins.address())
+        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_NODE", "work");
+    world
+        .run_on_within(start, "start --detach", crate::harness::ONE_STEP)
+        .exited(0);
+    let admitting = begins.arrived_within("the driver to come to start 'work'", || world.dump());
+    let mut shutdown = world.cmd(&["shutdown", run, "--grace", "1"]);
+    shutdown.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let shut = std::thread::scope(|scope| {
+        let shutting =
+            scope.spawn(|| world.run_on_within(shutdown, "shutdown", crate::harness::ONE_STEP));
+        let at_the_listing = listed.arrived_within("the shutdown to list what it ends", || {
+            format!(
+                "the shutdown had {}returned; the runs root held:\n{}",
+                if shutting.is_finished() { "" } else { "not " },
+                world.dump()
+            )
+        });
+        admitting.release();
+        world.until(
+            "the dispatch the driver was admitting to be registered",
+            |world| !world.dispatch_records(run).is_empty(),
+        );
+        at_the_listing.release();
+        shutting.join().expect("the shutdown returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!([0, 2].contains(&shut.code), "{}", shut.stderr);
+    assert_eq!(
+        host_shutdown(&world, run)["dispatches"],
+        json!(0),
+        "the shutdown was to have read the run before its dispatch started"
+    );
+    let pids: Vec<u32> = world
+        .dispatch_records(run)
+        .iter()
+        .map(|record| {
+            let entry: Value = serde_json::from_str(
+                &std::fs::read_to_string(record).expect("a registry entry is read"),
+            )
+            .expect("a registry entry is JSON");
+            u32::try_from(entry["pid"].as_u64().expect("a registry entry names a pid"))
+                .expect("a pid fits")
+        })
+        .collect();
+    let outlived: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| !crate::harness::process_ended(*pid))
+        .collect();
+    // Let a survivor go before failing on it, so it holds nothing past the journey.
+    world.release("work.go");
+    assert!(
+        outlived.is_empty(),
+        "dispatch {outlived:?} of {pids:?} was still running after the shutdown returned:\n{}\n{}",
+        shut.stdout,
+        shut.stderr
+    );
+}
+
 /// After a shutdown the run is intact and adoptable, and `adopt` takes up the
 /// node that was in flight on the session and branch it was working in.
 ///
