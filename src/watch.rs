@@ -323,12 +323,9 @@ pub(crate) fn watch(
     loop {
         if moved {
             wait.read(&fresh);
-            for event in fresh
-                .iter()
-                .filter(|event| {
-                    (meaningful(event) || referenced(event)) && request.filter.matches(event)
-                })
-            {
+            for event in fresh.iter().filter(|event| {
+                (meaningful(event) || referenced(event)) && request.filter.matches(event)
+            }) {
                 sink(Frame::Event { view: &view, event })?;
                 quiet_since = Instant::now();
             }

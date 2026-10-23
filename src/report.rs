@@ -894,7 +894,10 @@ impl ActivityText {
     /// one carries, read exactly as [`of`](Self::of) reads it.
     pub(crate) fn relayed(payload: &serde_json::Map<String, Value>) -> Self {
         use crate::views::transcript::{of_record, Text};
-        let kind = payload.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let kind = payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !payload.contains_key("transcript") {
             return Self::of(kind, |key| payload.get(key));
         }

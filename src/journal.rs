@@ -194,9 +194,7 @@ impl Journal {
 /// file it names, read through [`crate::views::transcript`] — so it is kept
 /// exactly as its producer wrote it.
 fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
-    if envelope.payload.contains_key(TRANSCRIPT)
-        || !envelope.payload.values().any(over_the_bound)
-    {
+    if envelope.payload.contains_key(TRANSCRIPT) || !envelope.payload.values().any(over_the_bound) {
         return Cow::Borrowed(envelope);
     }
     let mut cut = envelope.clone();

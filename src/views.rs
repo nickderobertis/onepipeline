@@ -4123,13 +4123,14 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     // A reference is described now rather than when it was folded: the one
     // line its resolver gives, or the diagnostic naming the file it could not
     // read.
-    let referenced = activity
-        .transcript
-        .as_ref()
-        .map(|reference| match transcript::resolve(reference) {
-            Ok(resolved) => one_line(&resolved.description),
-            Err(unresolved) => one_line(&unresolved.to_string()),
-        });
+    let referenced =
+        activity
+            .transcript
+            .as_ref()
+            .map(|reference| match transcript::resolve(reference) {
+                Ok(resolved) => one_line(&resolved.description),
+                Err(unresolved) => one_line(&unresolved.to_string()),
+            });
     match referenced.as_ref().or(activity.doing.as_ref()) {
         Some(doing) => format!("now {doing} ({counted})"),
         // Absent rather than guessed: the dispatch has recorded something and

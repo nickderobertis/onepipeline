@@ -143,13 +143,26 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
     // `output`, and nothing that would read them as a tool — no name, no input
     // summary, no call identity.
     for (item, event, kind, text) in [
-        (thought, &activity[0], "reasoning", "The quickest proof is to run it."),
-        (spoke, &activity[3], "message", "Ran what the task asked for."),
+        (
+            thought,
+            &activity[0],
+            "reasoning",
+            "The quickest proof is to run it.",
+        ),
+        (
+            spoke,
+            &activity[3],
+            "message",
+            "Ran what the task asked for.",
+        ),
     ] {
         assert_eq!(item.kind, kind, "{activity:?}");
         assert_eq!(said(event), text, "{activity:?}");
         assert_eq!(item.name, None, "{activity:?}");
-        assert!(item.detail.as_deref().unwrap_or_default().is_empty(), "{activity:?}");
+        assert!(
+            item.detail.as_deref().unwrap_or_default().is_empty(),
+            "{activity:?}"
+        );
         assert_eq!(item.tool_call_id, None, "{activity:?}");
     }
     assert!(
@@ -330,14 +343,12 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
             && instructions
                 .iter()
                 .zip(answering)
-                .all(|((role, prompt), (party, answers))| *role == party
-                    && prompt.contains(answers)),
+                .all(
+                    |((role, prompt), (party, answers))| *role == party && prompt.contains(answers)
+                ),
         "the conversation's turns did not open on what each party was answering: {opened:?}"
     );
-    assert!(
-        opened.iter().all(|event| !content(event).cut),
-        "{opened:?}"
-    );
+    assert!(opened.iter().all(|event| !content(event).cut), "{opened:?}");
 
     // Every turn closed on its own account, on both sides. Asserted as the whole
     // sequence rather than one close at a time: a relay that published one
@@ -756,7 +767,11 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     };
     let said: TurnMessage = payload(message, EventKind::TurnMessage);
     assert!(
-        !said.truncated && said.text.as_deref().is_some_and(|text| text.len() < MAX_PAYLOAD_TEXT_BYTES),
+        !said.truncated
+            && said
+                .text
+                .as_deref()
+                .is_some_and(|text| text.len() < MAX_PAYLOAD_TEXT_BYTES),
         "an ordinary turn's words were cut: {message}"
     );
     // Absent rather than `false`: the producer omits its own flag when it did

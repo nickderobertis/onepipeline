@@ -1802,13 +1802,8 @@ fn judge_turn(
     let recorded = answer.and_then(|answer| {
         let mut report = report(&answer, None, Outcome::Answered, identity, mode);
         if let Some(history) = history {
-            report.history_file = Some(history.write(
-                &project,
-                prompt,
-                mode,
-                &report.results,
-                begun,
-            )?);
+            report.history_file =
+                Some(history.write(&project, prompt, mode, &report.results, begun)?);
         }
         // Streamed, the answer is the stream's terminal `result` line; buffered,
         // it is the one document.
