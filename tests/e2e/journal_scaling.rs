@@ -829,6 +829,7 @@ fn a_run_in_the_shape_an_older_build_left_is_adopted_with_its_history_intact() {
     }
     world.run(&["status", run, "--json"]).exited(0);
     as_schema_13(&world, run);
+    // llmlint: ignore[tests_mirror_real_usage] the shape v0.75.0 left has no liveness file, which no verb of this build removes; the criterion is that run's adoption.
     let _ = std::fs::remove_file(world.run_file(run, "liveness.json"));
     assert!(!world.events_of(run, "edit-committed").is_empty());
 
@@ -965,6 +966,23 @@ fn journalled_heartbeats_with_no_liveness_file_read_as_they_did() {
     world.until("the journalled beat to age past the threshold", |world| {
         liveness_word(world, run) == json!("PARKED")
     });
+
+    // Where both say something, the later wins: a liveness file older than the
+    // journal's beat leaves the run parked, and one newer takes it off.
+    let kept = |at: u64| {
+        // llmlint: ignore[tests_mirror_real_usage] the file a driver writes is planted beside a journal an older driver wrote, the combination an adoption of that run meets; no verb writes both.
+        std::fs::write(
+            world.run_file(run, "liveness.json"),
+            json!({"schema_version": 1, "members": [{"node": "quiet", "graph_run": "older-graph",
+                   "member": "worker", "last_heartbeat_at": format_ms(at)}]})
+            .to_string(),
+        )
+        .expect("a liveness file");
+    };
+    kept(now_millis() - 60_000);
+    assert_eq!(liveness_word(&world, run), json!("PARKED"));
+    kept(now_millis());
+    assert_ne!(liveness_word(&world, run), json!("PARKED"));
     world.release("quiet.go");
 }
 
