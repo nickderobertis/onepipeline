@@ -1035,6 +1035,13 @@ fn a_watch_and_an_attach_start_where_the_checkpoint_stops() {
             .is_some_and(|count| count >= 1),
         "{ended}"
     );
+    // It names the surface it returned on: the one left unread before it armed.
+    assert!(
+        ended["unread"]["kinds"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().any(|kind| kind["kind"] == "check-in")),
+        "the return does not name the waiting surface: {ended}"
+    );
     let printed: Vec<Value> = watched
         .stdout
         .lines()
