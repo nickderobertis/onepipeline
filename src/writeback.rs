@@ -4333,57 +4333,18 @@ fn restate_shadow_project(snapshot: &Snapshot, project: &Project) -> Result<(), 
 }
 
 /// Carry held images through the source APIs, before the creating copy reads the shadow.
-///
-/// The source rewrites a task's document as it installs the task's assets, and it rewrites
-/// it in place: truncated, then written. Done in the shadow, that leaves a document a reader
-/// listing the store can open empty or half-written. So the source writes into a staging
-/// root of this step's own beside the shadow, holding a copy of each document, and each
-/// result reaches the shadow by a rename — its asset directory first, then its document —
-/// so a reader opens the document [`write_shadow`] published or the one this step
-/// publishes, and never one being written.
 fn write_shadow_assets(
     attempt: &Attempt,
     snapshot: &Snapshot,
     created: &BTreeSet<String>,
 ) -> Result<(), Failed> {
-    let staging = snapshot.dir.with_extension("staging");
-    let carried = carry_shadow_assets(attempt, snapshot, created, &staging);
-    // Nothing reads the staging root, so one left by a step that failed is harmless and the
-    // next step clears it before writing there.
-    let _ = std::fs::remove_dir_all(&staging);
-    carried
-}
-
-/// [`write_shadow_assets`], its source writing under `staging` and publishing into the shadow.
-fn carry_shadow_assets(
-    attempt: &Attempt,
-    snapshot: &Snapshot,
-    created: &BTreeSet<String>,
-    staging: &Path,
-) -> Result<(), Failed> {
     use onetaskgraph_plugin_api::{AssetPayload, AssetWrite, ItemWrite, TaskSource};
 
-    let source = |root: &Path| {
-        let config = serde_json::from_value(json!({"root": root}))
-            .map_err(|why| Failed::from(format!("shadow configuration: {why}")))?;
-        Ok::<_, Failed>(
-            onetaskgraph_local_md::LocalMdSource::new(config)
-                .map_err(|why| Failed::from(why.to_string()))?
-                .named(SourceName::new(SHADOW_SOURCE).expect("the shadow source name")),
-        )
-    };
-    let tasks = Path::new("tasks").join(project_file(&snapshot.project));
-    let (published, staged) = (snapshot.dir.join(&tasks), staging.join(&tasks));
-    match std::fs::remove_dir_all(staging) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("clearing {}: {error}", staging.display()).into());
-        }
-        _ => {}
-    }
-    std::fs::create_dir_all(&staged)
-        .map_err(|error| Failed::from(format!("creating {}: {error}", staged.display())))?;
-    let shadow = source(&snapshot.dir)?;
-    let staging_source = source(staging)?;
+    let config = serde_json::from_value(json!({"root": snapshot.dir}))
+        .map_err(|why| Failed::from(format!("shadow configuration: {why}")))?;
+    let shadow = onetaskgraph_local_md::LocalMdSource::new(config)
+        .map_err(|why| Failed::from(why.to_string()))?
+        .named(SourceName::new(SHADOW_SOURCE).expect("the shadow source name"));
     let lineages = snapshot.lineages();
     for root in created {
         let chain = lineages
@@ -4429,9 +4390,6 @@ fn carry_shadow_assets(
             }
         }
         let target = member_id(snapshot, root).native;
-        let file = format!("{}.md", task_file(root));
-        std::fs::copy(published.join(&file), staged.join(&file))
-            .map_err(|error| Failed::from(format!("staging shadow task {file}: {error}")))?;
         attempt
             .runtime
             .block_on(async {
@@ -4460,7 +4418,7 @@ fn carry_shadow_assets(
                         None => break,
                     }
                 }
-                staging_source
+                shadow
                     .write_task_with_assets(
                         &ItemWrite {
                             target: Some(target),
@@ -4476,36 +4434,8 @@ fn carry_shadow_assets(
                     .await
             })
             .map_err(|why| Failed::from(why.to_string()))?;
-        publish_staged(&staged.join(&file), &published.join(&file))
-            .map_err(|why| Failed::from(format!("publishing shadow task {file}: {why}")))?;
     }
     Ok(())
-}
-
-/// Move the task document the source wrote at `staged`, and the asset directory beside it,
-/// over the shadow's at `published`: the directory first, so the document published names only
-/// assets already there, and the document by [`crate::ledger::write_atomic`]'s rename.
-///
-/// `local-md` keeps a record's assets in the directory named after its file with `.assets` in
-/// place of `.md`, and holds exactly the record's asset set there — none, for a record without
-/// any — so the shadow's directory is replaced by the staged one or removed with it.
-fn publish_staged(staged: &Path, published: &Path) -> Result<(), String> {
-    let (staged_assets, published_assets) = (
-        staged.with_extension("assets"),
-        published.with_extension("assets"),
-    );
-    match std::fs::remove_dir_all(&published_assets) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            return Err(format!("removing {}: {error}", published_assets.display()));
-        }
-        _ => {}
-    }
-    if staged_assets.is_dir() {
-        std::fs::rename(&staged_assets, &published_assets).map_err(|e| e.to_string())?;
-    }
-    let document = std::fs::read(staged).map_err(|e| e.to_string())?;
-    crate::ledger::write_atomic(published, &document, crate::ledger::Durability::Projection)
-        .map_err(|e| e.to_string())
 }
 
 /// What `onepipeline.rework` says on a rework's replacement: the node it replaces,
@@ -7750,12 +7680,12 @@ mod tests {
             .join(format!("{}.md", super::task_file(node)))
     }
 
-    /// The image-carrying step's every write stopped part-way, at each byte of the document it
-    /// rewrites: whichever write that stops — the store's rewrite of the document, which
-    /// truncates the file and writes it again, or the staging that keeps that rewrite out of
-    /// the shadow — a reader reading the shadow at that moment, with that write frozen
-    /// incomplete, reads the document `write_shadow` published, whole. The step says it failed
-    /// and leaves no staging root, and once the limit is lifted the next step lands.
+    /// The image-carrying step's rewrite of a created task's shadow document — `local-md`'s
+    /// `write_task_with_assets`, carrying no answers — stopped part-way at each byte of that
+    /// document: a reader reading the shadow at that moment, with the write frozen incomplete,
+    /// reads the document `write_shadow` published, whole, because the store writes the
+    /// replacement beside it and renames it into place. The step says it failed, and once the
+    /// limit is lifted the next step lands.
     #[cfg(unix)]
     #[test]
     fn a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands() {
@@ -7765,7 +7695,6 @@ mod tests {
         let attempt = super::Attempt::open(&store, &fixture.snapshot)
             .unwrap_or_else(|failed| panic!("{}", failed.reason));
         let path = shadow_task(&fixture, "design");
-        let staging = fixture.snapshot.dir.with_extension("staging");
         write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
         let whole = std::fs::read_to_string(&path).expect("the published document reads");
         for limit in 0..whole.len() {
@@ -7786,52 +7715,13 @@ mod tests {
                 "the step names the stopped write: {}",
                 failed.reason
             );
-            assert!(!staging.exists(), "a failed step left {}", staging.display());
         }
         super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
             .unwrap_or_else(|failed| panic!("{}", failed.reason));
-        assert!(!staging.exists(), "a landed step left {}", staging.display());
         let (front, content) = written(&path);
         assert_eq!(front["metadata"]["onepipeline.id"], "design");
         let published = whole.split_once("\n---\n").expect("a whole document").1;
         assert_eq!(content.trim_end(), published.trim_end());
-    }
-
-    /// A shadow the step cannot publish into — its task folder made unwritable after the
-    /// document was published there — fails the step naming the document, leaves the published
-    /// document and no staging root, and the step lands once the folder is writable again.
-    #[cfg(unix)]
-    #[test]
-    fn a_shadow_the_rewrite_cannot_be_published_into_fails_whole_and_recovers() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let fixture = Fixture::new("rewrite-unpublishable");
-        let created = std::collections::BTreeSet::from(["design".to_owned()]);
-        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
-        let attempt = super::Attempt::open(&store, &fixture.snapshot)
-            .unwrap_or_else(|failed| panic!("{}", failed.reason));
-        let path = shadow_task(&fixture, "design");
-        let staging = fixture.snapshot.dir.with_extension("staging");
-        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
-        let whole = std::fs::read_to_string(&path).expect("the published document reads");
-        let folder = path.parent().expect("a task folder").to_path_buf();
-        let mode = |bits| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(bits));
-        mode(0o555).expect("the task folder is made read-only");
-        let refused = super::write_shadow_assets(&attempt, &fixture.snapshot, &created);
-        mode(0o755).expect("the task folder is made writable again");
-        let failed = refused.expect_err("an unwritable shadow fails the step");
-        assert!(
-            failed.reason.contains("publishing shadow task")
-                && failed.reason.contains(&format!("{}.md", super::task_file("design"))),
-            "{}",
-            failed.reason
-        );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), whole);
-        assert!(!staging.exists(), "a failed step left {}", staging.display());
-        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
-            .unwrap_or_else(|failed| panic!("{}", failed.reason));
-        let (front, _) = written(&path);
-        assert_eq!(front["metadata"]["onepipeline.id"], "design");
-        assert!(!staging.exists(), "a landed step left {}", staging.display());
     }
 
     /// The same engine reads the stable local shadow again after each command ends.
