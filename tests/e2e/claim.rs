@@ -984,7 +984,10 @@ fn fence_snapshots_made_during_a_slow_write_are_coalesced_into_the_newest() {
     running.remove("w").expect("w runs").release();
     let slow = writes.recv().expect("a fence write");
     let before = fence_writes(&world);
-    assert_eq!(before.last(), Some(&vec!["x".to_owned(), "y".to_owned(), "z".to_owned()]));
+    assert_eq!(
+        before.last(),
+        Some(&vec!["x".to_owned(), "y".to_owned(), "z".to_owned()])
+    );
     // x and y settle while it is in flight, each making a snapshot of its own.
     for node in ["x", "y"] {
         running.remove(node).expect("it runs").release();
@@ -1372,15 +1375,17 @@ fn two_drivers(same_host: bool, fence_refused: bool) {
             reads.arrived().release();
         });
         world.until("the first driver to retry its handover", |world| {
-            std::fs::read_to_string(world.run_file(run, "driver.log")).is_ok_and(|log| {
-                log.matches("could not acknowledge run").count() >= 2
-            })
+            std::fs::read_to_string(world.run_file(run, "driver.log"))
+                .is_ok_and(|log| log.matches("could not acknowledge run").count() >= 2)
         });
         assert!(
             taking.try_wait().expect("the takeover is asked").is_none(),
             "the takeover started while the displaced driver could write nothing"
         );
-        assert!(successor.run_file(successor_run, "launch.json").metadata().is_err());
+        assert!(successor
+            .run_file(successor_run, "launch.json")
+            .metadata()
+            .is_err());
         world.store_stops_refusing("set_project_metadata");
     } else {
         // The first reads again, finds the takeover, and ends `x`; its settlement is on the

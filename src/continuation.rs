@@ -2048,7 +2048,9 @@ pub(crate) fn hand_over(
                      waiting",
                     project.as_str()
                 );
-                file.waits_on(format!("the project's claim and fence, which cannot be read: {why}"));
+                file.waits_on(format!(
+                    "the project's claim and fence, which cannot be read: {why}"
+                ));
                 continue;
             }
         };
@@ -2072,8 +2074,7 @@ pub(crate) fn hand_over(
                 // Only this host's records or an acknowledgement release a driver of this
                 // host: its fence is not all this host knows of it.
                 file.waits_on(
-                    "its acknowledgement, or this host's records showing its run let go"
-                        .to_owned(),
+                    "its acknowledgement, or this host's records showing its run let go".to_owned(),
                 );
             }
             None => {
@@ -3110,21 +3111,23 @@ mod tests {
     /// file a process that has gone left is removed rather than said.
     #[test]
     fn a_takeover_wait_is_said_only_while_its_process_waits() {
-        let root = std::env::temp_dir().join(format!(
-            "onepipeline-takeover-wait-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-takeover-wait-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("a runs root");
         let project: QualifiedId = "plans:p".parse().expect("a project");
         let mut file = TakeoverWaitFile::new(&root, &project, "adopter", "run 'r' on host 'h'");
-        assert!(takeover_waits(&root).is_empty(), "nothing is said before the wait says it");
+        assert!(
+            takeover_waits(&root).is_empty(),
+            "nothing is said before the wait says it"
+        );
         file.waits_on("its fence, which has named 'x' as under way".to_owned());
         let said = takeover_waits(&root);
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(
             said[0].starts_with("takeover of plans:p by run 'adopter' waiting since ")
-                && said[0]
-                    .ends_with("on run 'r' on host 'h': its fence, which has named 'x' as under way"),
+                && said[0].ends_with(
+                    "on run 'r' on host 'h': its fence, which has named 'x' as under way"
+                ),
             "{said:?}"
         );
         let stale = root.join(format!("{TAKEOVER_WAIT_PREFIX}1.json"));
@@ -3134,7 +3137,10 @@ mod tests {
         assert_eq!(takeover_waits(&root).len(), 1);
         assert!(!stale.exists(), "a dead process's wait was left standing");
         drop(file);
-        assert!(takeover_waits(&root).is_empty(), "the wait outlived its process's wait");
+        assert!(
+            takeover_waits(&root).is_empty(),
+            "the wait outlived its process's wait"
+        );
         std::fs::remove_dir_all(&root).expect("removed");
     }
 }
