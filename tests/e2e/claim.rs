@@ -1225,7 +1225,10 @@ fn a_waiting_takeover_starts_once_its_drivers_pid_dies_on_this_host() {
     assert!(said.contains("--take-over claimed"), "{said}");
     assert!(!said.contains("has not acknowledged"), "{said}");
     assert!(!said.contains("acknowledged the takeover"), "{said}");
-    assert!(takeover_waits(&elsewhere).is_empty(), "the wait outlived it");
+    assert!(
+        takeover_waits(&elsewhere).is_empty(),
+        "the wait outlived it"
+    );
     x.arrived().release();
     elsewhere.until("the takeover to settle", |world| {
         world.run_file(run, "result.json").is_file()
@@ -1267,7 +1270,11 @@ fn a_takeover_wait_whose_process_was_killed_is_removed_by_status_and_not_said() 
     taking.kill().expect("the takeover is killed");
     taking.wait().expect("the takeover is reaped");
     let left = takeover_waits(&successor);
-    assert_eq!(left.len(), 1, "a killed takeover removed its own file: {left:?}");
+    assert_eq!(
+        left.len(),
+        1,
+        "a killed takeover removed its own file: {left:?}"
+    );
     let after = successor.run(&["status"]);
     after.exited(0);
     assert!(
@@ -1275,7 +1282,10 @@ fn a_takeover_wait_whose_process_was_killed_is_removed_by_status_and_not_said() 
         "status said the wait of a process that is gone:\n{}",
         after.stdout
     );
-    assert!(!left[0].exists(), "status left a dead process's wait file standing");
+    assert!(
+        !left[0].exists(),
+        "status left a dead process's wait file standing"
+    );
     drop(mine);
 }
 

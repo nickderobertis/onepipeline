@@ -667,8 +667,10 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     // The dispatches that stopped are recorded stopped on the project's store too, so a run
     // taking the project over waits on none of them; one that would not go stays fenced. A
     // teardown this host watched end the run's whole tree, its driver with it, leaves none of
-    // its dispatches running: every node the journal holds in flight is let go too, a
-    // dispatch the driver had fenced and not yet started among them.
+    // its dispatches running: every node the journal holds not yet settled is let go too, a
+    // dispatch the driver had fenced and not yet started or not yet journalled among them.
+    // A node the journal holds settled stays fenced while its settlement may not be on the
+    // store, and so does a node of no plan of this run's.
     let tree_gone = matches!(
         teardown,
         crate::journal::StopTeardown::Signalled | crate::journal::StopTeardown::NothingToStop
@@ -683,7 +685,14 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
             view.state
                 .statuses()
                 .into_iter()
-                .filter(|(_, status)| *status == crate::graph::NodeStatus::Running)
+                .filter(|(_, status)| {
+                    matches!(
+                        status,
+                        crate::graph::NodeStatus::Pending
+                            | crate::graph::NodeStatus::Ready
+                            | crate::graph::NodeStatus::Running
+                    )
+                })
                 .map(|(node, _)| node),
         );
     }
