@@ -3106,6 +3106,18 @@ impl World {
         self.script(&format!("{SCRIPTED_KEY}.task.key"), key);
     }
 
+    /// The same, for every write of the project metadata `key` alone: writes of any other key
+    /// still reach the real store.
+    pub fn store_refuses_key(&self, key: &str, error: &Value) {
+        self.script(
+            &format!(
+                "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+                onepipeline_testfakes::segment(key)
+            ),
+            &error.to_string(),
+        );
+    }
+
     /// The same, for the next call of `method` alone.
     pub fn store_refuses_once(&self, method: &str, error: &Value) {
         self.script(

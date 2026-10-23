@@ -2408,12 +2408,31 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     );
     plan["concurrency"] = json!(3);
     let project = world.plan(run, &plan);
+    if matches!(answer, ClaimAnswer::NoClaim) {
+        // The board refuses every write of the claim, as the plan store's write screening
+        // refused the update carrying it, while the publication's fence still lands.
+        world.store_refuses_key(
+            "onepipeline.driver",
+            &json!({"kind": "refused",
+                    "message": "the update names a reference the screening cannot classify"}),
+        );
+    }
     world
         .run_from(&world.project, &["start", &project, "--detach"])
         .exited(0);
-    let in_flight = x.arrived();
-    let beside = w.arrived();
-    until_claimed_by(&world, &project, run);
+    let in_flight = x.arrived_within("x to be dispatched", || world.dump());
+    let beside = w.arrived_within("w to be dispatched", || world.dump());
+    if matches!(answer, ClaimAnswer::NoClaim) {
+        // The write carrying the claim was made and refused, so the board holds none.
+        world.until_run_file_holds(run, "driver.log", "the screening cannot classify");
+        assert_eq!(
+            stored_claim(&world, &project),
+            Value::Null,
+            "the claim landed"
+        );
+    } else {
+        until_claimed_by(&world, &project, run);
+    }
     let held = match answer {
         ClaimAnswer::Fails => {
             world.store_refuses("get_project", &board_down());
@@ -2428,25 +2447,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             );
             None
         }
-        ClaimAnswer::NoClaim => {
-            // llmlint: ignore-block[tests_mirror_real_usage] a claim that never reached the
-            // board is the plan store's write screening refusing the update that carries it,
-            // a defect of the store and not reachable from this build. The scripted store
-            // refuses by method, and refusing `set_project_metadata` would refuse the
-            // publication's fence too, so no input leaves the claim absent while the fence
-            // lands except clearing the key; the run, its reads and every outcome asserted
-            // are the binary's own.
-            let key = onetaskgraph_plugin_api::MetadataKey::new("onepipeline.driver".to_owned())
-                .expect("a key");
-            let id: onetaskgraph_core::GlobalId = project.parse().expect("a qualified project");
-            world
-                .store_call(|engine| async move {
-                    engine.set_project_metadata(&id, &key, &Value::Null).await
-                })
-                .unwrap_or_else(|why| panic!("the store refused the write: {why}"));
-            // llmlint: ignore-end[tests_mirror_real_usage]
-            None
-        }
+        ClaimAnswer::NoClaim => None,
     };
     // `x` runs well past the old lapse, and nothing ends it.
     std::thread::sleep(lapsed + Duration::from_secs(6));

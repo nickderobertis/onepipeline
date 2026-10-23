@@ -34,6 +34,10 @@
 //! * `<key>.<method>@<id>.refuse` — the same, for the calls that name one item alone, where
 //!   `<id>` is that item's native id as `fake::segment` spells a file name: one ticket of
 //!   several refused and the rest written.
+//! * `<key>.set_project_metadata#<metadata key>.refuse` — the same, for the writes of one
+//!   project metadata key alone, where `<metadata key>` is spelled as `fake::segment` spells
+//!   a file name: a board update carrying one key refused while writes of every other key
+//!   land.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
 //! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
 //!   source is handed in a command, which the real store answers; `end_command` starts the
@@ -378,6 +382,14 @@ impl Scripted {
             let one = self.scenario(&format!("{method}@{}.refuse", fake::segment(&item)));
             if let Some(error) = refusal(&one)? {
                 return Ok(json!({"id": request.id, "error": error}));
+            }
+        }
+        if method == "set_project_metadata" {
+            if let Some(Value::String(key)) = request.params.get("key") {
+                let one = self.scenario(&format!("{method}#{}.refuse", fake::segment(key)));
+                if let Some(error) = refusal(&one)? {
+                    return Ok(json!({"id": request.id, "error": error}));
+                }
             }
         }
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {
