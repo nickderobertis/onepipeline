@@ -4333,18 +4333,57 @@ fn restate_shadow_project(snapshot: &Snapshot, project: &Project) -> Result<(), 
 }
 
 /// Carry held images through the source APIs, before the creating copy reads the shadow.
+///
+/// The source rewrites a task's document as it installs the task's assets, and it rewrites
+/// it in place: truncated, then written. Done in the shadow, that leaves a document a reader
+/// listing the store can open empty or half-written. So the source writes into a staging
+/// root of this step's own beside the shadow, holding a copy of each document, and each
+/// result reaches the shadow by a rename — its asset directory first, then its document —
+/// so a reader opens the document [`write_shadow`] published or the one this step
+/// publishes, and never one being written.
 fn write_shadow_assets(
     attempt: &Attempt,
     snapshot: &Snapshot,
     created: &BTreeSet<String>,
 ) -> Result<(), Failed> {
+    let staging = snapshot.dir.with_extension("staging");
+    let carried = carry_shadow_assets(attempt, snapshot, created, &staging);
+    // Nothing reads the staging root, so one left by a step that failed is harmless and the
+    // next step clears it before writing there.
+    let _ = std::fs::remove_dir_all(&staging);
+    carried
+}
+
+/// [`write_shadow_assets`], its source writing under `staging` and publishing into the shadow.
+fn carry_shadow_assets(
+    attempt: &Attempt,
+    snapshot: &Snapshot,
+    created: &BTreeSet<String>,
+    staging: &Path,
+) -> Result<(), Failed> {
     use onetaskgraph_plugin_api::{AssetPayload, AssetWrite, ItemWrite, TaskSource};
 
-    let config = serde_json::from_value(json!({"root": snapshot.dir}))
-        .map_err(|why| Failed::from(format!("shadow configuration: {why}")))?;
-    let shadow = onetaskgraph_local_md::LocalMdSource::new(config)
-        .map_err(|why| Failed::from(why.to_string()))?
-        .named(SourceName::new(SHADOW_SOURCE).expect("the shadow source name"));
+    let source = |root: &Path| {
+        let config = serde_json::from_value(json!({"root": root}))
+            .map_err(|why| Failed::from(format!("shadow configuration: {why}")))?;
+        Ok::<_, Failed>(
+            onetaskgraph_local_md::LocalMdSource::new(config)
+                .map_err(|why| Failed::from(why.to_string()))?
+                .named(SourceName::new(SHADOW_SOURCE).expect("the shadow source name")),
+        )
+    };
+    let tasks = Path::new("tasks").join(project_file(&snapshot.project));
+    let (published, staged) = (snapshot.dir.join(&tasks), staging.join(&tasks));
+    match std::fs::remove_dir_all(staging) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("clearing {}: {error}", staging.display()).into());
+        }
+        _ => {}
+    }
+    std::fs::create_dir_all(&staged)
+        .map_err(|error| Failed::from(format!("creating {}: {error}", staged.display())))?;
+    let shadow = source(&snapshot.dir)?;
+    let staging_source = source(staging)?;
     let lineages = snapshot.lineages();
     for root in created {
         let chain = lineages
@@ -4390,6 +4429,9 @@ fn write_shadow_assets(
             }
         }
         let target = member_id(snapshot, root).native;
+        let file = format!("{}.md", task_file(root));
+        std::fs::copy(published.join(&file), staged.join(&file))
+            .map_err(|error| Failed::from(format!("staging shadow task {file}: {error}")))?;
         attempt
             .runtime
             .block_on(async {
@@ -4418,7 +4460,7 @@ fn write_shadow_assets(
                         None => break,
                     }
                 }
-                shadow
+                staging_source
                     .write_task_with_assets(
                         &ItemWrite {
                             target: Some(target),
@@ -4434,8 +4476,36 @@ fn write_shadow_assets(
                     .await
             })
             .map_err(|why| Failed::from(why.to_string()))?;
+        publish_staged(&staged.join(&file), &published.join(&file))
+            .map_err(|why| Failed::from(format!("publishing shadow task {file}: {why}")))?;
     }
     Ok(())
+}
+
+/// Move the task document the source wrote at `staged`, and the asset directory beside it,
+/// over the shadow's at `published`: the directory first, so the document published names only
+/// assets already there, and the document by [`crate::ledger::write_atomic`]'s rename.
+///
+/// `local-md` keeps a record's assets in the directory named after its file with `.assets` in
+/// place of `.md`, and holds exactly the record's asset set there — none, for a record without
+/// any — so the shadow's directory is replaced by the staged one or removed with it.
+fn publish_staged(staged: &Path, published: &Path) -> Result<(), String> {
+    let (staged_assets, published_assets) = (
+        staged.with_extension("assets"),
+        published.with_extension("assets"),
+    );
+    match std::fs::remove_dir_all(&published_assets) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("removing {}: {error}", published_assets.display()));
+        }
+        _ => {}
+    }
+    if staged_assets.is_dir() {
+        std::fs::rename(&staged_assets, &published_assets).map_err(|e| e.to_string())?;
+    }
+    let document = std::fs::read(staged).map_err(|e| e.to_string())?;
+    crate::ledger::write_atomic(published, &document, crate::ledger::Durability::Projection)
+        .map_err(|e| e.to_string())
 }
 
 /// What `onepipeline.rework` says on a rework's replacement: the node it replaces,
