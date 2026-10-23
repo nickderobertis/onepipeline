@@ -3522,7 +3522,6 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
     let claim = until_claimed_by(&world, &project, run);
     let mut shutdown = world.cmd(&["shutdown", run, "--grace", "1"]);
     shutdown.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
-    // llmlint: ignore-end[tests_mirror_real_usage]
     let shut = std::thread::scope(|scope| {
         let shutting =
             scope.spawn(|| world.run_on_within(shutdown, "shutdown", crate::harness::ONE_STEP));
@@ -3541,6 +3540,7 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
         at_the_listing.release();
         shutting.join().expect("the shutdown returns")
     });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert!([0, 2].contains(&shut.code), "{}", shut.stderr);
     let recorded = world.events_of(run, "host-shutdown");
     assert_eq!(
