@@ -141,8 +141,8 @@ const TAKEOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_READ_GATE";
 
 /// The test failpoint met at the moment a driver would start a dispatch of the node
 /// [`BEGIN_GATE_NODE_ENV`] names, so a journey can hold a dispatch being admitted.
-const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
-const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
+const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE";
+const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE";
 
 /// Met at the moment a dispatch of `node` would start: [`BEGIN_GATE_ENV`]'s failpoint, where
 /// [`BEGIN_GATE_NODE_ENV`] names `node`, and nothing otherwise.

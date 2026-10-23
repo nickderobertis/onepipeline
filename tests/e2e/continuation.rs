@@ -1244,8 +1244,8 @@ fn a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over() {
 const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The failpoint met at the moment a dispatch of the node [`BEGIN_NODE`] names would start.
-const BEGIN_GATE: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
-const BEGIN_NODE: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
+const BEGIN_GATE: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE";
+const BEGIN_NODE: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE";
 
 /// A team world whose every host has a takeover read the claim every tenth of `interval`
 /// seconds, at least one apart, and gives a cancelled dispatch one second, so a takeover
