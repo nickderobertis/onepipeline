@@ -2576,6 +2576,82 @@ impl World {
         Run::of(command.output().expect("the binary runs"), &[args], self)
     }
 
+    /// [`run_on`](World::run_on), within `patience`: a command that has not answered by
+    /// then — or that exited while something it started still holds its output open — is
+    /// ended, and fails naming `args` and what it had printed, rather than leaving the
+    /// journey blocked until the runner's timeout names only the test.
+    pub fn run_on_within(
+        &self,
+        command: Command,
+        args: &str,
+        patience: std::time::Duration,
+    ) -> Run {
+        use std::io::Read;
+        let mut command = command;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary runs");
+        let collect = |mut stream: Box<dyn Read + Send>| {
+            let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let into = std::sync::Arc::clone(&read);
+            let reading = std::thread::spawn(move || {
+                let mut chunk = [0_u8; 4096];
+                while let Ok(got @ 1..) = stream.read(&mut chunk) {
+                    into.lock()
+                        .expect("one reader")
+                        .extend_from_slice(&chunk[..got]);
+                }
+            });
+            (read, reading)
+        };
+        let (stdout, out_reading) =
+            collect(Box::new(child.stdout.take().expect("stdout is piped")));
+        let (stderr, err_reading) =
+            collect(Box::new(child.stderr.take().expect("stderr is piped")));
+        let deadline = std::time::Instant::now() + patience;
+        let mut status = None;
+        while std::time::Instant::now() < deadline {
+            status = child.try_wait().expect("the command can be waited on");
+            if status.is_some() && out_reading.is_finished() && err_reading.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let text = |held: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+            held.lock().expect("one reader").clone()
+        };
+        let finished = out_reading.is_finished() && err_reading.is_finished();
+        let Some(status) = status.filter(|_| finished) else {
+            // Ours, started above: ended so the journey's teardown has nothing of it to wait on.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`onepipeline {args}` had not answered {patience:?} after it started{}\n\
+                 stdout: {}\nstderr: {}\nthe runs root held:\n{}",
+                if status.is_some() {
+                    " (it exited, and something it started still held its output open)"
+                } else {
+                    ""
+                },
+                String::from_utf8_lossy(&text(&stdout)),
+                String::from_utf8_lossy(&text(&stderr)),
+                self.dump()
+            );
+        };
+        Run::of(
+            Output {
+                status,
+                stdout: text(&stdout),
+                stderr: text(&stderr),
+            },
+            &[args],
+            self,
+        )
+    }
+
     /// The host's own channel server over one run's channel: the generic
     /// `host-channel-server` double, which speaks the bus's serving contract and
     /// nothing of this crate's — a JSON frame on its stdin is a surface of
