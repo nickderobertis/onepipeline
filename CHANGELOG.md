@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.87.1](https://github.com/nickderobertis/onepipeline/compare/v0.87.0...v0.87.1) - 2026-10-23
+
+### Fixed
+
+- *(tests)* keep two of onepipeline's continuation tests reliable on Windows ([#1121](https://github.com/nickderobertis/onepipeline/pull/1121))
+
+## [0.87.0](https://github.com/nickderobertis/onepipeline/compare/v0.86.0...v0.87.0) - 2026-10-23
+
+### Performance
+
+- *(writeback)* [**breaking**] add a node to an existing board project without reading or rewriting it ([#1111](https://github.com/nickderobertis/onepipeline/pull/1111))
+
+## [0.86.0](https://github.com/nickderobertis/onepipeline/compare/v0.85.1...v0.86.0) - 2026-10-23
+
+### Performance
+
+- *(deps)* [**breaking**] link the plan store whose approval takes one request per call ([#1115](https://github.com/nickderobertis/onepipeline/pull/1115))
+
+## [0.85.1](https://github.com/nickderobertis/onepipeline/compare/v0.85.0...v0.85.1) - 2026-10-23
+
+### Fixed
+
+- *(driver)* end a run's observers for good when it is stopped ([#1112](https://github.com/nickderobertis/onepipeline/pull/1112))
+
 ## [0.85.0](https://github.com/nickderobertis/onepipeline/compare/v0.84.1...v0.85.0) - 2026-10-22
 
 ### Added

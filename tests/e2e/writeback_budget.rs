@@ -973,10 +973,9 @@ fn a_store_that_does_not_open_within_the_floor_is_refused_retried_and_recovers()
 // in less than one — and the edge it needs is the crate under test: it drives the compiled
 // `onepipeline` binary against its own write-back worker, as the journeys above do and for the
 // reason they record.
-/// The project read an attempt creating an item makes before its copy is held to the floor: a
-/// read held past it is cancelled and reported by the name and the seconds of the deadline it
-/// outlasted, retried on the schedule, and the projection recovers — the item created — once the
-/// store answers.
+/// The destination counterpart lookup inside a members-only copy can stall even though the
+/// project itself is never read. The copy deadline cancels that read after the floor plus
+/// one item's budget, retries it, and creates the item once the store answers.
 #[test]
 fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
     let floor = number("floor_seconds");
@@ -997,9 +996,8 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         std::fs::read_to_string(world.run_file(run, "driver.log")).unwrap_or_default()
     };
 
-    // Held from the next attempt on: its first call of the read, which is the read itself —
-    // made by the attempt that creates the added node, and by no other.
-    let (method, read) = ("get_project", "project-show");
+    // Hold the destination task lookup inside the members-only copy, before any write.
+    let (method, read) = ("query_tasks", "project-copy");
     let holding = world.store_holds(method);
     let recovered = log(&world).matches("write-back recovered").count();
     world
@@ -1012,7 +1010,8 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
         )
         .exited(0);
     let held = holding.arrived();
-    let expected = format!("{read} exceeded {floor} seconds");
+    let deadline = floor + number("default_seconds");
+    let expected = format!("{read} exceeded {deadline} seconds");
     world.until_run_file_holds(run, "driver.log", &expected);
     assert!(
         log(&world).lines().any(|line| {

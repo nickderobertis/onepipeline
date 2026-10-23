@@ -709,10 +709,8 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         "the write-back rewrote the project's title or a key it does not own:\n{board}"
     );
 
-    // An `add` is the one copy, and it lands the project item beside the node it creates: the
-    // project is read once for it, so the copy finds the project as the board holds it and
-    // writes nothing to it — title, description, labels, repositories and keys read back byte
-    // for byte.
+    // An `add` copies only the new member, without reading or writing the project:
+    // title, description, labels, repositories and keys read back byte for byte.
     let mark = records(&world, run).len();
     edit(
         &world,
@@ -734,9 +732,13 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         .collect();
     assert_eq!(created.len(), 1, "{created:?}");
     assert_eq!(created[0]["items"], json!(["extra"]), "{}", created[0]);
-    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert!(
+        created[0]["calls"].get("project-show").is_none(),
+        "{}",
+        created[0]
+    );
     assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
-    assert_eq!(created[0]["actions"]["unchanged"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["unchanged"], 0, "{}", created[0]);
     assert_eq!(
         landed(&world, run)["items"]["extra"]["destination"],
         board_task(&world.store_tasks(&project), "extra")["id"],
@@ -2005,7 +2007,19 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         ));
     }
     if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects")) {
-        if body != concurrent_project_body() {
+        // MembersOnly publishes just the project's identity. Accept its empty body
+        // only with that exact front matter; a truncated full project still fails.
+        let origin = parsed["metadata"]["onetaskgraph.origin"].as_str();
+        let identity = origin
+            .and_then(|origin| origin.parse::<onetaskgraph_core::GlobalId>().ok())
+            .is_some_and(|origin| {
+                parsed
+                    == json!({
+                        "title": origin.native,
+                        "metadata": {"onetaskgraph.origin": origin.to_string()}
+                    })
+            });
+        if !(body == concurrent_project_body() || (body.is_empty() && identity)) {
             return Err(format!(
                 "{} has a partial project body of {} bytes",
                 path.display(),
@@ -2073,7 +2087,7 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // conversational note journeys; moving this filesystem race there loses this module's
 // crateSource coverage when the projection code changes.
 /// Two runs each `add` nodes one at a time — every creation rewriting its run's shadow project
-/// document and writing the added node's, and taking the previous one out — while a reader lists
+/// identity document and writing the added node's, and taking the previous one out — while a reader lists
 /// and parses both shadow stores at rate, as the `local-md` source a copy reads them through
 /// does: no document it reads is ever torn.
 #[test]

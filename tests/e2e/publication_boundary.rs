@@ -3681,6 +3681,16 @@ fn a_private_node_written_back_is_private_on_the_store_s_own_field() {
         "classified",
         &plan_of("classified", vec![crate::harness::agent("keep", &[])]),
     );
+    // A private source can hold public projects too. Classify this board private
+    // explicitly: member copies preserve the destination project's classification.
+    let file = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", crate::harness::project_id("classified")));
+    let held = std::fs::read_to_string(&file).expect("the project document");
+    let classified = held.replacen("---\n", "---\nclassification: private\n", 1);
+    assert_ne!(held, classified, "the project document has no front matter");
+    std::fs::write(&file, classified).expect("the project is classified private");
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the keeper to be in flight", |world| {
         !world.events_of("classified", "node-dispatched").is_empty()
