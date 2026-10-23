@@ -416,7 +416,10 @@ fn nothing_new_starts_once_a_shutdown_has_begun() {
 fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
     let world =
         World::new("shutdown-started-meanwhile").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    held(&world, "work");
+    // A hold that writes nothing, so the dispatch has no reason of its own to end
+    // when its driver does: no turn is announced, and nothing is written to the
+    // pipe a driver that has gone no longer reads.
+    world.script("work.wait", "hold");
     let run = "meanwhile";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     // llmlint: ignore-block[tests_mirror_real_usage] which side of the shutdown's listing the
