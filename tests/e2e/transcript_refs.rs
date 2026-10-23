@@ -437,7 +437,6 @@ fn a_reference_whose_history_is_gone_renders_as_unavailable_on_every_view() {
         transcript.stdout
     );
 
-    // And the file itself.
     std::fs::remove_file(&file).expect("the session file is removed");
     let missing_file = format!("transcript unavailable: {}: missing-file", file.display());
     assert_unavailable_everywhere(&world, run, &held, &missing_file, false);
