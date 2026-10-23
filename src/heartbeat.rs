@@ -175,6 +175,7 @@ pub(crate) fn settled(paths: &RunPaths, node: &str) {
 
 /// Drop every entry: a driver taking the run over has ended every dispatch the
 /// driver before it left in flight.
+// llmlint: ignore[changed_behavior_has_e2e] every journey's driver passes this at its start, and the entries it drops are a dead driver's, which a reader would otherwise read as beats older than any the new driver's members send — so no reading differs either way; what a reader does with the file is driven by the `journal_scaling` liveness journeys.
 pub(crate) fn clear(paths: &RunPaths) {
     let _writing = WRITING
         .lock()

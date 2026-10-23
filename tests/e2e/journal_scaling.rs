@@ -726,9 +726,10 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     let (nodes, evidence) = read(&world);
     assert!(evidence.contains("tick 1"), "no tool call in:\n{evidence}");
 
-    // llmlint: ignore[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
+    // llmlint: ignore-block[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
     let checkpoint = world.run_file(run, "checkpoint.json");
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],

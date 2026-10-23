@@ -2342,6 +2342,7 @@ fn hold(
                     &stream(),
                     oneagentgraph::event::EventKind::TurnActivity,
                 ),
+                // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the sibling publishes this payload as an open map and owns no type for it; its reader here is `projection::fold_activity`, which this shape is read through end to end by the `journal_scaling` and `views` journeys, so a reading that moved would fail them.
                 "payload": {"kind": "tool_use", "name": "Bash", "detail": format!("tick {tick}")},
             }));
             seq += 1;

@@ -3172,6 +3172,7 @@ impl InPass {
             };
             {
                 let mut state = self.state();
+                // llmlint: ignore[changed_behavior_has_e2e] a settle of a node in flight is refused by the loop's own validation however it is claimed; handing it back keeps it in claim order behind whatever the loop holds, the order `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused` drives.
                 if named.iter().any(|node| state.in_flight.contains(node)) {
                     handing = true;
                     state
