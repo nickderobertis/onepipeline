@@ -331,6 +331,11 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     // every view, `status` among them, names the file and why rather than
     // going blank. Put back before the turn goes on, which appends to it.
     let file = referenced_file(&held);
+    // llmlint: ignore-block[tests_mirror_real_usage] the history file is the harness's
+    // store, not this engine's, and neither this build nor the harness has a verb that
+    // drops its entries or deletes it; what this stands in for is a history pruned, rotated
+    // or lost outside the run, which is the state `missing-entry` and `missing-file` exist
+    // to name. Everything asserted is read off the compiled binary's own streams.
     let whole = std::fs::read_to_string(&file).expect("the session file reads");
     let opening_only: String = whole
         .lines()
@@ -344,6 +349,7 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     let missing_file = format!("transcript unavailable: {}: missing-file", file.display());
     assert_unavailable_everywhere(&world, run, &held, &missing_file, true);
     std::fs::write(&file, whole).expect("the session file is put back");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     assert!(!ended(&world), "the turn ended while its history was gone");
 
     world.release("turn.settle");
@@ -421,6 +427,9 @@ fn a_reference_whose_history_is_gone_renders_as_unavailable_on_every_view() {
     );
 
     // The events lost, the opening kept: each activity names a missing entry.
+    // llmlint: ignore-block[tests_mirror_real_usage] as above: no verb of this build or
+    // the harness drops a history entry or removes the file, and a history lost outside the
+    // run is the state these diagnostics name. Everything asserted is the binary's output.
     let kept: String = std::fs::read_to_string(&file)
         .expect("the session file reads")
         .lines()
@@ -440,6 +449,7 @@ fn a_reference_whose_history_is_gone_renders_as_unavailable_on_every_view() {
     std::fs::remove_file(&file).expect("the session file is removed");
     let missing_file = format!("transcript unavailable: {}: missing-file", file.display());
     assert_unavailable_everywhere(&world, run, &held, &missing_file, false);
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// `monitor`, both forms of `watch` and `transcript` each render the held
