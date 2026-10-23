@@ -2883,10 +2883,9 @@ fn project(
 /// baseline by every write as it lands, so a failure part-way leaves only what did not land for
 /// the next attempt to carry.
 ///
-/// Creation is the one thing a copy is used for, and the one attempt that reads the project:
-/// a member copy lands the project item beside the member it creates, so the shadow project
-/// restates the destination's own exactly — read once, for that — and the copy writes nothing
-/// to it. Every other attempt reads no project at all.
+/// Creation uses a members-only copy, leaving existing destination projects unread and
+/// unwritten. Only a missing routed member project needs a full copy, with the home
+/// restated from its destination so that initial creation preserves the existing home.
 fn carry_the_difference(
     attempt: &Attempt,
     per_item: NonZeroU64,
