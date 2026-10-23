@@ -162,7 +162,8 @@ fn a_members_worker_events_are_journalled_while_the_reconcile_pass_is_held() {
 
 /// A `settle` of a node no dispatch is part of, queued while
 /// the driver's pass is held, is claimed, applied and answered before the pass is
-/// released — and the `reply` that queued it is answered.
+/// released — and the `reply` that queued it is answered. Released, the pass puts
+/// the settlement on the run's board.
 #[test]
 fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_released() {
     let (world, seam) = held_world("scaling-claim-held");
@@ -213,6 +214,10 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
     );
 
     release_the_pass(&seam);
+    world.until_store("the settlement to reach the board", |world| {
+        on_the_board(world, &path, "later")
+            .is_some_and(|item| item["onepipeline.settlement"]["status"] == "done")
+    });
     world.release("build.go");
 }
 
@@ -801,7 +806,9 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     // The reading lists what the run has not settled, each with its settlement,
     // once the driver that adopted it is stopped.
     // Unreported: what `stop` reads for a run's scratch and its run-end hook is the
-    // run's ending, once, and not a pass, an append, a view or a reply.
+    // run's ending, once, and not a pass, an append, a view or a reply — nor is what
+    // the stopped driver reads as it ends, so its reads are those it made before.
+    let driven = journal_reads(&world, run);
     unreported(&world, &["stop", run, "--force"]).exited(0);
     world.until("the adopted driver's stop to be recorded", |world| {
         !past(world, run, at, "run-stopped").is_empty()
@@ -831,7 +838,13 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     // Every read the binary reported making of the journal since the overwrite —
     // the adopting driver's passes, appends and attached render, every `reply`,
     // `status` and the `watch` — began at or past the byte the checkpoint covers.
-    let reads = journal_reads(&world, run);
+    let before: std::collections::BTreeSet<u64> = driven.iter().map(|read| read.pid).collect();
+    let mut reads = driven;
+    reads.extend(
+        journal_reads(&world, run)
+            .into_iter()
+            .filter(|read| !before.contains(&read.pid)),
+    );
     let readers: std::collections::BTreeSet<u64> = reads.iter().map(|read| read.pid).collect();
     assert!(
         readers.len() >= 5,

@@ -1698,9 +1698,11 @@ fn converge(
         crate::loopstats::pass();
         // What the claimer applied while the last pass ran, folded before this one
         // decides anything off the state.
+        // And a board the claimer's settle moved is owed the move.
         if in_pass.pass_begins(&in_flight, !deliveries.behind.is_empty()) {
             state.refresh(paths);
             derived = None;
+            unpublished = true;
         }
         state.readjust.read_this_pass = false;
         // A node that landed since the last pass — a settlement, a `settle`, a
