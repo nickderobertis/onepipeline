@@ -730,7 +730,6 @@ pub fn stop_own_run(record: &Path) {
     // late, because the stop ends this process.
     let script = "printf '%s\\n' \"$$\" >\"$2.partial\" && mv \"$2.partial\" \"$2\" \
         && exec \"$0\" stop \"$1\" --force >\"$3\" 2>&1";
-    // Never waited for: the stop ends this process.
     let started = std::process::Command::new("sh")
         .args(["-c", script])
         .arg(&cli)
