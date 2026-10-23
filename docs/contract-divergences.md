@@ -12014,7 +12014,7 @@ launch setting.
   "store_review_keys": [],
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
-  "checkpoint_schema_version": 14,
+  "checkpoint_schema_version": 15,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
@@ -12861,10 +12861,15 @@ rules on it.
 ```
 
 Behind the three, and inside the existing contract: every per-pass, per-append and
-per-call reader on the driver's path, `status --json`, `watch` and `reply`'s read before it
-queues resumes from `checkpoint.json` (schema 15, still the one journal-derived snapshot,
-still regenerable and safe to delete) and the bytes appended past it, never from byte 0; a
-record arriving past the checkpoint that the merge order would place in front of a covered
-one is folded after the covered history; and a checkpoint of another schema is rebuilt by
-one streaming read. `RunView::open` keeps its whole-store `events`, and its state is that
-same fold.
+per-call reader on the driver's path, `status <run>` and `status --json`, `watch` and
+`reply`'s read before it queues resumes from `checkpoint.json` (schema 15, still the one
+journal-derived snapshot, still regenerable and safe to delete) and the bytes appended past
+it, never from byte 0; a record arriving past the checkpoint that the merge order would
+place in front of a covered one is folded after the covered history; and a checkpoint of
+another schema is rebuilt by one streaming read. `RunView::open` keeps its whole-store
+`events`, and its state is that same fold. Entry 130's block names the checkpoint schema
+this build writes, so it reads 15 with it. The plan stated this snapshot's move as 13 to
+14; merging `main`, whose transcript references (entry 130's last paragraph) took 14 for
+a different document — its seal still over the covered bytes, with no tally — moved this
+one to 15 (ruled by the manager, correlation `c-d02b1d64475c6b7ed6664d80d23372a6`), so a version-14 document is one this build refuses and rebuilds like any
+other it does not write, rather than one number naming two shapes.

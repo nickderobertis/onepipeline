@@ -532,6 +532,22 @@ fn on_the_board(world: &World, project: &str, node: &str) -> Option<Value> {
         .map(|task| task["item"]["metadata"].clone())
 }
 
+/// Every task a dispatch of `node` handed its graph, as the graph double recorded it.
+fn tasks_handed(world: &World, node: &str) -> Vec<String> {
+    let mine = format!("## What\nDo {node}.");
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| call["tool"] == "oneagentgraph")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .filter(|task| task.starts_with(&mine))
+        .collect()
+}
+
 /// **No pass, append, view or reply reaches what a checkpoint covers.** Every byte in
 /// front of the marker is overwritten with bytes that are no record, and the tail
 /// carries relayed worker records stamped earlier than covered pipeline records: the
@@ -616,7 +632,11 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     // run's record of itself is incomplete.
     let text = world.run(&["status", run]);
     text.exited(0);
-    assert!(text.stdout.contains("  next: running for"), "{}", text.stdout);
+    assert!(
+        text.stdout.contains("  next: running for"),
+        "{}",
+        text.stdout
+    );
     assert!(
         !text.stdout.contains("record of itself is incomplete"),
         "{}",
@@ -659,18 +679,15 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
         ["node-settled", "settled"].contains(&ended["condition"].as_str().unwrap_or_default()),
         "{ended}"
     );
-    world.until("the noted node to be dispatched", |world| {
-        past(world, run, at, "node-dispatched")
-            .iter()
-            .any(|record| record["labels"]["node"] == "told")
+    // The carried note rides in as the task the noted node's dispatch hands its
+    // graph, composed at its dispatch, after the note was carried.
+    world.until("the noted node's graph to be handed its task", |world| {
+        !tasks_handed(world, "told").is_empty()
     });
-    let told = past(&world, run, at, "node-dispatched")
-        .into_iter()
-        .find(|record| record["labels"]["node"] == "told")
-        .expect("the noted node's dispatch");
+    let told = tasks_handed(&world, "told");
     assert!(
-        told["payload"].to_string().contains("the fixture moved"),
-        "the dispatch was not composed with the note carried to it: {told}"
+        told.iter().any(|task| task.contains("the fixture moved")),
+        "the dispatch was not composed with the note carried to it: {told:?}"
     );
 
     // The reading lists what the run has not settled, each with its settlement,

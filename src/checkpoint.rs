@@ -770,8 +770,7 @@ impl Projected {
         for line in covered {
             self.coverage.absorb(line.record.as_ref(), line.bytes);
         }
-        self.read_through =
-            self.coverage.bytes + ahead.iter().map(|line| line.bytes).sum::<u64>();
+        self.read_through = self.coverage.bytes + ahead.iter().map(|line| line.bytes).sum::<u64>();
         self.lines_through = self.coverage.records + ahead.len() as u64;
         self.claimed_past = BTreeMap::new();
         for event in ahead.iter().filter_map(|line| line.record.as_ref()) {
@@ -893,7 +892,8 @@ pub(crate) fn current(paths: &RunPaths) -> RunState {
 pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
     let projected = Projected::open_with(paths, Persist::No);
     let journal = paths.journal();
-    let mut integrity = journal::losses_from(&journal, projected.read_through, projected.lines_through);
+    let mut integrity =
+        journal::losses_from(&journal, projected.read_through, projected.lines_through);
     let mut read = journal::Integrity {
         healed: ledger::torn_tails(&journal),
         ..journal::Integrity::default()

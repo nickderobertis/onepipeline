@@ -2095,8 +2095,7 @@ fn fold_board_settlement(state: &mut RunState, event: &Envelope) {
             let placed = |settled: &serde_json::Map<String, Value>| {
                 settled.get("stack").map(|stack| {
                     let mut stack = stack.clone();
-                    if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut)
-                    {
+                    if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
                         for parent in parents {
                             // Where it stands is its branch: a parent's head moves
                             // with every push, and its node with every rework of
@@ -2150,7 +2149,9 @@ fn fold_recall(state: &mut RunState, event: &Envelope) {
             if let Some(node) = event.labels.node.as_ref() {
                 match event.payload.get("detail").and_then(Value::as_str) {
                     Some(detail) => {
-                        state.settled_details.insert(node.clone(), detail.to_owned());
+                        state
+                            .settled_details
+                            .insert(node.clone(), detail.to_owned());
                     }
                     None => {
                         state.settled_details.remove(node);

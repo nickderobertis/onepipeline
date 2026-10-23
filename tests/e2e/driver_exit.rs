@@ -1819,6 +1819,9 @@ fn a_run_journalled_before_records_named_their_envelope_reads_the_same() {
         })
         .collect();
     std::fs::write(&journal, unnamed).expect("the journal is rewritten");
+    // The checkpoint names offsets into the bytes the rewrite moved, which no run an
+    // earlier build wrote carries: it goes with them, as the derived state it is.
+    std::fs::remove_file(world.run_file(run, "checkpoint.json")).expect("the checkpoint goes");
     // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(carrying(&world.journal(run)), 0);
     assert_eq!(readings(&world, run), with);

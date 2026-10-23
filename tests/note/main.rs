@@ -587,8 +587,30 @@ const FINDING: &str = "the fixture this node reads moved";
 
 /// How long a held conversation's member lets its supervision go unconfirmed, in
 /// seconds: short, so it publishes `member-heartbeat` every couple of seconds and
-/// a journey can watch the run keep recording one while a note waits.
+/// a journey can watch the run keep recording its latest one while a note waits.
 const HEARTBEAT_BOUND_SECONDS: &str = "8";
+
+/// The latest heartbeat the run's `liveness.json` holds for any member, as written:
+/// where a driver records a dispatch member's beats, which never enter the journal.
+fn latest_beat(world: &World, run: &str) -> Option<String> {
+    std::fs::read(world.run_file(run, "liveness.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .and_then(|document| document["members"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|member| member["last_heartbeat_at"].as_str().map(str::to_owned))
+        .max()
+}
+
+/// Wait for the run to record two more of its members' heartbeats, each later than
+/// the last: the driver going on recording its dispatch across several passes.
+fn two_more_beats(world: &World, run: &str, what: &str) {
+    for _ in 0..2 {
+        let before = latest_beat(world, run);
+        world.until(what, |world| latest_beat(world, run) > before);
+    }
+}
 
 /// [`held_conversation`], with the member heartbeating on a clock a journey can
 /// watch.
@@ -936,7 +958,6 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
         "the edit naming the note's node was not applied while the note waited"
     );
     let activity = world.events_of(run, "turn-activity").len();
-    let beats = world.events_of(run, "member-heartbeat").len();
 
     // The held turn goes on working — it reports its next tool call and stays
     // open — and the member goes on heartbeating, while the note is still
@@ -945,10 +966,7 @@ fn a_note_waiting_on_a_held_turn_leaves_the_run_journalling_its_dispatch() {
     world.until("the turn's further work to reach the journal", |world| {
         world.events_of(run, "turn-activity").len() > activity
     });
-    world.until(
-        "the member's heartbeat to keep reaching the journal",
-        |world| world.events_of(run, "member-heartbeat").len() >= beats + 2,
-    );
+    two_more_beats(&world, run, "the member's heartbeat to keep being recorded");
     assert_eq!(
         awaiting_an_answer(&world, run),
         1,
@@ -1082,10 +1100,7 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
     let ids = [NOTE, PLANNER_CONTEXT, FINDING].map(|text| queued_id_of(&world, run, text));
     // A pass is the one step with nothing durable to watch for, so the journey
     // watches the run keep recording its dispatch across several of them.
-    let beats = world.events_of(run, "member-heartbeat").len();
-    world.until("the run to go on recording its dispatch", |world| {
-        world.events_of(run, "member-heartbeat").len() >= beats + 2
-    });
+    two_more_beats(&world, run, "the run to go on recording its dispatch");
     assert_eq!(
         awaiting_an_answer(&world, run),
         1,
@@ -1102,10 +1117,7 @@ fn notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_c
         "the second note to wait in the conversation's inbox",
         |world| awaiting_an_answer(world, run) == 1,
     );
-    let beats = world.events_of(run, "member-heartbeat").len();
-    world.until("the run to go on recording its dispatch", |world| {
-        world.events_of(run, "member-heartbeat").len() >= beats + 2
-    });
+    two_more_beats(&world, run, "the run to go on recording its dispatch");
     assert_eq!(
         awaiting_an_answer(&world, run),
         1,

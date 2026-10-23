@@ -14861,17 +14861,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// What a dispatch is composed with is read off the store only for a node
-    /// the projected state says a note can stand for, and the answer is the
-    /// fold's own where it is.
+    /// What a dispatch is composed with is answered off the projected state —
+    /// the records [`RunState::recalled`] keeps whole — and never off the store,
+    /// for a node nobody noted, a node a note was read or carried for, and a
+    /// replacement composed from the node it supersedes.
     ///
-    /// The bound is measured rather than inferred: a run of a hundred nodes
-    /// nobody noted was paying a whole-journal read per dispatch, and no view of
-    /// the run shows that. Driven over a real run directory, through the real
-    /// journal writer and the real fold, and read through the thread's own
-    /// account of the store's bytes.
+    /// The bound is measured rather than inferred: a run of a hundred nodes was
+    /// paying a whole-journal read per dispatch, and no view of the run shows
+    /// that. Driven over a real run directory, through the real journal writer and
+    /// the real fold, and read through the thread's own account of the store's
+    /// bytes.
     #[test]
-    fn a_dispatch_reads_the_store_for_its_notes_only_where_the_state_says_one_can_stand() {
+    fn a_dispatch_is_composed_with_its_notes_off_the_fold_without_reading_the_store() {
         let root = std::env::temp_dir().join(format!("onepipeline-notes-at-{}", sys::pid()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = RunPaths::under(&root, "demo");
@@ -14961,19 +14962,19 @@ mod tests {
             "a node nothing was recorded about had the store read for its notes"
         );
         let (bytes, spent, carried) = measured("owed");
-        assert!(bytes > 0, "a carried note was answered without the record");
+        assert_eq!(bytes, 0, "a carried note had the store read for it");
         assert_eq!(spent, Vec::<String>::new());
         assert_eq!(carried, vec!["stop re-running the judged tier".to_string()]);
         let (bytes, spent, carried) = measured("noted");
-        assert!(bytes > 0, "a read note was answered without the record");
+        assert_eq!(bytes, 0, "a read note had the store read for it");
         assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
         assert_eq!(carried, Vec::<String>::new());
         // The replacement was never dispatched and holds no note of its own; what
         // it spends is what stood for the node it supersedes.
         let (bytes, spent, carried) = measured("noted-2");
-        assert!(
-            bytes > 0,
-            "a replacement was composed without the superseded node's record"
+        assert_eq!(
+            bytes, 0,
+            "a replacement had the store read for the superseded node's notes"
         );
         assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
         assert_eq!(carried, Vec::<String>::new());
