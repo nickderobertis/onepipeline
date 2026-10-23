@@ -1041,10 +1041,6 @@ fn tear_the_run_down(paths: &RunPaths, view: &RunView) -> StopTeardown {
     }
 }
 
-/// How long a dispatch the driver started during this shutdown is given to go,
-/// once asked: the patience `stop`'s own teardown gives every process it asks.
-const STARTED_MEANWHILE_PATIENCE: Duration = Duration::from_secs(5);
-
 /// End every dispatch the driver started while this shutdown was reading the
 /// run, now that the driver is gone and nothing is left to start another.
 ///
@@ -1065,6 +1061,9 @@ fn end_what_it_started_meanwhile(
     acted_on: &[(Watched, String, String)],
     teardown: StopTeardown,
 ) -> StopTeardown {
+    // A registry this cannot read is one the teardown could not read either, and
+    // its answer already says so: `an_unreadable_registry_is_reported_and_the_rest_of_
+    // the_host_is_still_shut_down` holds that it stays `not-attempted` here.
     let Ok(live) = live_dispatches(paths) else {
         return teardown;
     };
@@ -1087,7 +1086,7 @@ fn end_what_it_started_meanwhile(
         );
     }
     let pids: Vec<u32> = started.iter().map(|record| record.pid).collect();
-    let (ended, _) = sys::stop_and_confirm(&pids, sys::Stop::Politely, STARTED_MEANWHILE_PATIENCE);
+    let (ended, _) = sys::stop_and_confirm(&pids, sys::Stop::Politely, driver::TEARDOWN_PATIENCE);
     match (teardown, driver::established(Some(ended))) {
         (
             StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere,

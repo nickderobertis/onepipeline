@@ -62,7 +62,7 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The file in the run's directory a `stop` holds locked for the whole of its
 /// teardown, and a driver's observer watch holds across each restart.

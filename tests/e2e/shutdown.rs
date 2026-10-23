@@ -402,25 +402,24 @@ fn nothing_new_starts_once_a_shutdown_has_begun() {
     );
 }
 
-/// A dispatch the driver starts while a shutdown is reading its run — after the
-/// registry read named none and after the teardown listed the tree it ends —
-/// does not outlive the shutdown: once the driver is gone it is ended too.
-///
-/// Held rather than raced: the driver at the moment it would start the node, and
-/// the shutdown once it has listed what it ends, so the dispatch's start falls
-/// between the two on any host. Left running, that dispatch is work nobody
-/// drives, and on Windows it holds the handle it inherited to the run's own
-/// driver log, so the run's directory can be neither moved nor removed.
+/// What a late dispatch's shutdown says of it on stderr.
 #[cfg(unix)]
-#[test]
-fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
-    let world =
-        World::new("shutdown-started-meanwhile").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    // A hold that writes nothing, so the dispatch has no reason of its own to end
-    // when its driver does: no turn is announced, and nothing is written to the
-    // pipe a driver that has gone no longer reads.
+const STARTED_MEANWHILE: &str =
+    "started while this shutdown was reading the run, so it is ended with its driver";
+
+/// Launch `run` with its one node `work` held, and shut it down while its driver is
+/// admitting that node: the dispatch starts after the shutdown read the registry and
+/// after its teardown listed the tree it ends. Answers the shutdown and the pids the
+/// run's registry names.
+///
+/// Held rather than raced: the driver at the moment it would start the node, and the
+/// shutdown once it has listed what it ends, so the dispatch's start falls between the
+/// two on any host. The hold writes nothing, so the dispatch has no reason of its own
+/// to end when its driver does: no turn is announced, and nothing is written to the
+/// pipe a driver that has gone no longer reads.
+#[cfg(unix)]
+fn shut_down_while_admitting(world: &World, run: &str) -> (crate::harness::Run, Vec<u32>) {
     world.script("work.wait", "hold");
-    let run = "meanwhile";
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     // llmlint: ignore-block[tests_mirror_real_usage] which side of the shutdown's listing the
     // dispatch starts on is the property, and no user-facing input can place it. The failpoints
@@ -461,9 +460,8 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
         shutting.join().expect("the shutdown returns")
     });
     // llmlint: ignore-end[tests_mirror_real_usage]
-    assert!([0, 2].contains(&shut.code), "{}", shut.stderr);
     assert_eq!(
-        host_shutdown(&world, run)["dispatches"],
+        host_shutdown(world, run)["dispatches"],
         json!(0),
         "the shutdown was to have read the run before its dispatch started"
     );
@@ -479,6 +477,24 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
                 .expect("a pid fits")
         })
         .collect();
+    (shut, pids)
+}
+
+/// A dispatch the driver starts while a shutdown is reading its run — after the
+/// registry read named none and after the teardown listed the tree it ends —
+/// does not outlive the shutdown: once the driver is gone it is ended too, the
+/// shutdown says so, and the run is reported cleanly stopped.
+///
+/// Left running, that dispatch is work nobody drives, and on Windows it holds the
+/// handle it inherited to the run's own driver log, so the run's directory can be
+/// neither moved nor removed.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
+    let world =
+        World::new("shutdown-started-meanwhile").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    let run = "meanwhile";
+    let (shut, pids) = shut_down_while_admitting(&world, run);
     let outlived: Vec<u32> = pids
         .iter()
         .copied()
@@ -492,6 +508,49 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
         shut.stdout,
         shut.stderr
     );
+    for pid in &pids {
+        shut.err_has(&format!("'work' (pid {pid}) {STARTED_MEANWHILE}"));
+    }
+    shut.exited(0);
+    assert_eq!(host_shutdown(&world, run)["teardown"], "signalled");
+}
+
+/// A dispatch started while a shutdown read its run that keeps working through the
+/// ask is not reported as ended: the run's teardown is partly stopped, on the report
+/// and on the record, and the shutdown exits refused — as `stop` reports a tree that
+/// would not go.
+#[cfg(unix)]
+#[test]
+fn a_dispatch_started_while_the_shutdown_reads_its_run_that_will_not_go_is_reported() {
+    let world =
+        World::new("shutdown-started-stays").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("work.ignores-the-ask", "yes");
+    let run = "stays";
+    let (shut, pids) = shut_down_while_admitting(&world, run);
+    let standing: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| !crate::harness::process_ended(*pid))
+        .collect();
+    // The one process this journey's run left that no `World` takes with it.
+    for pid in &standing {
+        end_process(*pid);
+    }
+    world.release("work.go");
+    assert_eq!(
+        standing, pids,
+        "the dispatch that ignores the ask did not outlive it, so this journey proves nothing"
+    );
+    for pid in &pids {
+        shut.err_has(&format!("'work' (pid {pid}) {STARTED_MEANWHILE}"));
+    }
+    assert!(
+        shut.stdout.contains("partly stopped"),
+        "the teardown was not reported in stop's own words:\n{}",
+        shut.stdout
+    );
+    assert_eq!(host_shutdown(&world, run)["teardown"], "partly-signalled");
+    shut.exited(REFUSED);
 }
 
 /// After a shutdown the run is intact and adoptable, and `adopt` takes up the
