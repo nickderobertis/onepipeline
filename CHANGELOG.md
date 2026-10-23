@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.87.0](https://github.com/nickderobertis/onepipeline/compare/v0.86.0...v0.87.0) - 2026-10-23
+
+### Performance
+
+- *(writeback)* [**breaking**] add a node to an existing board project without reading or rewriting it ([#1111](https://github.com/nickderobertis/onepipeline/pull/1111))
+
 ## [0.86.0](https://github.com/nickderobertis/onepipeline/compare/v0.85.1...v0.86.0) - 2026-10-23
 
 ### Performance
