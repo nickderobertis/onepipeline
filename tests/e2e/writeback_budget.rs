@@ -1110,6 +1110,14 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
             .stderr(log)
             .spawn()
             .expect("adoption starts");
+        // A detached launcher returns only after its retained driver claims the
+        // run. The budget is persisted earlier, before that driver is spawned.
+        if mode == "--detach" {
+            assert!(adoption
+                .wait()
+                .expect("the detached adoption exits")
+                .success());
+        }
         world.until("the replacement budget to persist", |world| {
             recorded_budget(world, run) == 30
         });
