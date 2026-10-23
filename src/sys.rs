@@ -1930,8 +1930,6 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
 #[cfg(windows)]
 const APPENDER_LOCK_BYTE: u64 = i64::MAX as u64 - 1;
 
-/// Open `path` for the appender: reading, writing, created when missing, and
-/// shared for reading and writing with every other handle.
 #[cfg(windows)]
 fn open_shared_for_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
