@@ -3691,8 +3691,9 @@ fn report_holds(
 /// driver that meets one reports rather than quietly executing a graph it knows
 /// is incomplete. It still drives: refusing would leave the run with nothing
 /// driving it, which is strictly worse than driving it with the operator told.
-fn report_unreadable_records(paths: &RunPaths, state: &RunState) {
-    if state.strict && !journal::has_unreadable_lines(&paths.journal()) {
+fn report_unreadable_records(paths: &RunPaths, state: &Projected) {
+    // Counted by the fold as it read, rather than by reading the whole store again.
+    if state.strict && state.tally().unreadable == 0 {
         return;
     }
     eprintln!(

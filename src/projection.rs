@@ -351,6 +351,13 @@ pub struct RunState {
     /// reports as the run's last progress.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_progress_at: Option<u64>,
+    /// Every record of the few rare kinds a driver reads back whole when it starts
+    /// — a release a node adopted or that arrived for it, and the attempts a
+    /// landing superseded — kept as written and in the order folded, so their
+    /// readers decide from them exactly as they did from the journal without
+    /// reading the run's history for them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recalled: Vec<Envelope>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -1936,6 +1943,16 @@ pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
 /// [`RunState::last_progress_at`].
 fn fold_recall(state: &mut RunState, event: &Envelope) {
     let at = millis_of(&event.ts);
+    if matches!(
+        journal::PipelineKind::from_wire(&event.kind),
+        Some(
+            journal::PipelineKind::ReleaseAdopted
+                | journal::PipelineKind::ReleaseArrived
+                | journal::PipelineKind::BranchesSuperseded
+        )
+    ) {
+        state.recalled.push(event.clone());
+    }
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::NodeDispatched | journal::PipelineKind::NodeSettled) => {
             if let Some(at) = at {

@@ -718,7 +718,9 @@ impl Watch {
     pub(crate) fn of_run(paths: &RunPaths) -> Self {
         let mut adopted = BTreeSet::new();
         let mut arrived = BTreeSet::new();
-        for event in journal::read(&paths.journal()) {
+        // Off the run's checkpoint rather than its history: the fold keeps every
+        // record of these two kinds as written. See `RunState::recalled`.
+        for event in crate::checkpoint::recalled(paths) {
             let Some(node) = event.labels.node.clone().and_then(|node| renderable(&node)) else {
                 continue;
             };
@@ -1160,7 +1162,10 @@ impl Watch {
             return Ok(met_landings);
         }
         self.relayed = Some(Instant::now());
-        let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
+        // How far each stream has been relayed, off the run's checkpoint and what
+        // was appended past it rather than off a read of its whole history.
+        let mut relayed =
+            crate::vcs::Watermarks::of_streams(crate::checkpoint::streams_reached(paths));
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that
             // session as it is written, and two readers of one stream deciding

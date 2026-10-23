@@ -2161,13 +2161,21 @@ impl Watermarks {
     /// The marks a run's own store already stands at.
     ///
     /// Folded from what was relayed rather than tracked beside it, so what stops
-    /// a record being relayed twice is the record.
+    /// a record being relayed twice is the record. A driver reads the same marks
+    /// off its run's checkpoint ([`of_streams`](Self::of_streams)); this is the
+    /// fold that reading is held equal to.
+    #[cfg(test)]
     pub fn of_relayed(envelopes: &[Envelope]) -> Self {
         let mut marks = Self::default();
         for envelope in envelopes {
             marks.reached(envelope);
         }
         marks
+    }
+
+    /// The marks each stream stands at, as already counted.
+    pub(crate) fn of_streams(reached: BTreeMap<String, u64>) -> Self {
+        Self { reached }
     }
 
     /// Record that one envelope was relayed.

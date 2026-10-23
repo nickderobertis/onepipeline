@@ -114,6 +114,7 @@
     "last_event_kind": "node-settled",
     "judged": [
       "build"
-    ]
+    ],
+    "unreadable": 1
   }
 }

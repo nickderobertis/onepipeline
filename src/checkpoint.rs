@@ -451,6 +451,14 @@ pub(crate) struct Tally {
     /// one, so the set only grows.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub(crate) judged: std::collections::BTreeSet<String>,
+    /// How many lines read were no record this build can read: a driver that meets
+    /// one reports that the graph it drives may be missing an edit.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) unreadable: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 impl Tally {
@@ -785,11 +793,31 @@ fn fold_in_merge_order(
         .iter()
         .filter_map(|(event, _)| event.clone())
         .collect();
+    tally.unreadable += (records.len() - ordered.len()) as u64;
     journal::merge_order(&mut ordered);
     for event in &ordered {
         projection::fold_one(state, event);
         tally.take(paths, event);
     }
+}
+
+/// The records of the rare kinds [`RunState::recalled`] keeps, off the run's
+/// checkpoint and what was appended past it — what a driver starting on a run
+/// reads them back from instead of its whole history.
+pub(crate) fn recalled(paths: &RunPaths) -> Vec<Envelope> {
+    Projected::open_with(paths, Persist::No).state.recalled
+}
+
+/// The greatest `seq` each stream reached across the whole store, off the run's
+/// checkpoint and what was appended past it.
+pub(crate) fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
+    let projected = Projected::open_with(paths, Persist::No);
+    let mut reached = projected.coverage.streams.clone();
+    for (stream, seq) in &projected.claimed_past {
+        let held = reached.entry(stream.clone()).or_default();
+        *held = (*held).max(*seq);
+    }
+    reached
 }
 
 /// Fold a run from its checkpoint, and leave the checkpoint where this fold
@@ -1801,6 +1829,7 @@ mod tests {
             events: 42,
             last_event_kind: Some("node-settled".into()),
             judged: std::collections::BTreeSet::from(["build".to_string()]),
+            unreadable: 1,
         };
         coverage.digest = coverage.sealed_with(&state, &tally);
         Checkpoint {

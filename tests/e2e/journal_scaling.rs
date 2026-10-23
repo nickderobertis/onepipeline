@@ -397,3 +397,639 @@ fn a_heartbeat_does_not_wake_a_watch_and_a_settlement_does() {
     assert_eq!(ended["node"], "build", "{ended}");
     world.release("keep.go");
 }
+
+/// Append one relayed record straight to a run's journal, as a driver's relay
+/// would have: a sibling's own stream and stamp.
+fn relayed(world: &World, run: &str, kind: &str, node: &str, seq: u64, ts: &str) {
+    let record = json!({
+        "v": 2,
+        "ts": ts,
+        "stream": "older-graph-1",
+        "seq": seq,
+        "source": "agentgraph",
+        "kind": kind,
+        "labels": {"run_id": "older-graph", "node": node, "member": "worker"},
+        "payload": {"kind": "tool_use", "name": "Bash", "detail": format!("relayed late {seq}")},
+        "artifacts": [],
+    });
+    let mut line = record.to_string();
+    line.push('\n');
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "events.jsonl"))
+        .and_then(|mut journal| journal.write_all(line.as_bytes()))
+        .expect("appended to the journal");
+}
+
+/// The records of `kind` the journal holds past byte `from`, read leniently: what
+/// is in front of `from` is overwritten in the journeys that ask, and no reader
+/// here may read it.
+fn past(world: &World, run: &str, from: usize, kind: &str) -> Vec<Value> {
+    let store = std::fs::read(world.run_file(run, "events.jsonl")).expect("the journal");
+    String::from_utf8_lossy(&store[from..])
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["kind"] == kind)
+        .collect()
+}
+
+/// The byte the run's checkpoint covers the journal to.
+fn covered(world: &World, run: &str) -> usize {
+    usize::try_from(
+        world.run_json(run, "checkpoint.json")["coverage"]["bytes"]
+            .as_u64()
+            .expect("a coverage"),
+    )
+    .expect("a length")
+}
+
+/// Overwrite everything in front of the checkpoint's marker with bytes that are no
+/// journal record, and answer what was there.
+fn overwrite_what_is_covered(world: &World, run: &str) -> usize {
+    let at = covered(world, run);
+    let store = world.run_file(run, "events.jsonl");
+    let mut held = std::fs::read(&store).expect("the run's journal");
+    held[..at].fill(b'#');
+    std::fs::write(&store, &held).expect("the covered history is overwritten");
+    at
+}
+
+fn statuses_of(reading: &Value) -> Vec<(String, String)> {
+    let mut nodes: Vec<(String, String)> = reading["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no nodes in {reading}"))
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().unwrap_or_default().to_string(),
+                node["status"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    nodes.sort();
+    nodes
+}
+
+/// Leave a driven run stopped, with `held` dispatched and not settled, and its
+/// checkpoint written past the run's opening.
+fn stopped_with(world: &World, run: &str, nodes: Vec<Value>, held: &str) {
+    let path = world.plan(run, &plan_of(run, nodes));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the held node to be dispatched", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == held)
+    });
+    world.run(&["stop", run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(run, "run-stopped").is_empty()
+    });
+    world.run(&["status", run, "--json"]).exited(0);
+    assert!(covered(world, run) > 0, "no checkpoint covers the run");
+}
+
+/// **No pass, append, view or reply reaches what a checkpoint covers.** Every byte in
+/// front of the marker is overwritten with bytes that are no record, and the tail
+/// carries relayed worker records stamped earlier than covered pipeline records: the
+/// adopting driver dispatches the ready node and journals its member's work, `reply`
+/// is answered, `status --json` lists the nodes with their settlements, and an armed
+/// `watch` ends on a settlement.
+#[test]
+fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
+    let world = World::new("scaling-overwritten");
+    let run = "overwritten";
+    world.script("hold.wait", "hold");
+    stopped_with(
+        &world,
+        run,
+        vec![
+            agent("first", &[]),
+            agent("hold", &["first"]),
+            agent("next", &["hold"]),
+            // Behind the held one, so nothing settles it before the reply does.
+            agent("spare", &["next"]),
+        ],
+        "hold",
+    );
+    world.release("hold.go");
+    let at = overwrite_what_is_covered(&world, run);
+    for seq in 0..3 {
+        relayed(
+            &world,
+            run,
+            "turn-activity",
+            "first",
+            seq,
+            "2000-01-01T00:00:00.000Z",
+        );
+    }
+
+    a_held_member(&world, "next", true);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the ready node to be dispatched and working", |world| {
+        past(world, run, at, "turn-activity")
+            .iter()
+            .any(|record| record["labels"]["node"] == "next")
+    });
+
+    let replied = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [
+            {"op": "settle", "id": "spare", "outcome": "done", "evidence": "settled by hand"},
+        ]})
+        .to_string(),
+    );
+    replied.exited(0);
+    assert_eq!(replied.json()["state"], json!("applied"));
+
+    assert!(
+        past(&world, run, at, "node-settled")
+            .iter()
+            .any(|record| record["labels"]["node"] == "spare"
+                && record["payload"]["status"] == "done"),
+        "the settle was answered and not applied"
+    );
+    let reading = world.run(&["status", run, "--json"]);
+    reading.exited(0);
+    assert_eq!(reading.json()["driven"], json!(true), "{}", reading.stdout);
+
+    let mut waiting = world.cmd(&[
+        "watch",
+        run,
+        "--until",
+        "node-settled",
+        "--timeout",
+        "120",
+        "--tick-interval",
+        "0",
+    ]);
+    waiting.stdout(std::process::Stdio::piped());
+    let watching = waiting.spawn().expect("the watch starts");
+    world.until("the watch to be armed", |world| {
+        std::fs::read_dir(world.run_file(run, "watchers"))
+            .is_ok_and(|mut armed| armed.next().is_some())
+    });
+    world.release("next.go");
+    let output = watching.wait_with_output().expect("the watch ends");
+    let ended: Value = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["watch"] == "return")
+        .expect("the watch returned");
+    assert!(
+        ["node-settled", "settled"].contains(&ended["condition"].as_str().unwrap_or_default()),
+        "{ended}"
+    );
+
+    // The reading lists what the run has not settled, each with its settlement,
+    // once the driver that adopted it is stopped.
+    world.run(&["stop", run, "--force"]).exited(0);
+    world.until("the adopted driver's stop to be recorded", |world| {
+        !past(world, run, at, "run-stopped").is_empty()
+    });
+    let reading = world.run(&["status", run, "--json"]);
+    reading.exited(0);
+    let unsettled = statuses_of(&reading.json()["ending"]);
+    assert!(
+        !unsettled
+            .iter()
+            .any(|(node, _)| node == "first" || node == "spare"),
+        "a node settled done is listed unsettled: {unsettled:?}"
+    );
+
+    let store = std::fs::read(world.run_file(run, "events.jsonl")).expect("the journal");
+    assert!(
+        store[..at].iter().all(|byte| *byte == b'#'),
+        "the covered history was rewritten"
+    );
+}
+
+/// Every read a run can be given — with its checkpoint, with none, and with one an
+/// earlier build wrote — recovers the same nodes, settlements and dispatch evidence,
+/// and a rebuilt checkpoint carries this build's schema.
+#[test]
+fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
+    let world = World::new("scaling-rebuild");
+    let run = "rebuilt";
+    a_held_member(&world, "worked", true);
+    world.script("broke.fail", "");
+    world.script("dropped.turn-open", "");
+    world.script("dropped.wait", "hold");
+    world.script("dropped.stops-when-interrupted", "");
+    world.script("last.wait", "hold");
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("worked", &[]),
+                agent("broke", &[]),
+                agent("dropped", &[]),
+                agent("last", &["worked"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the worker to have worked", |world| {
+        activity_of(world, run, "worked") >= 3
+    });
+    world.release("worked.go");
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "cancel", "id": "dropped"}]}).to_string(),
+        )
+        .exited(0);
+    world.until("every node but the last to settle", |world| {
+        ["worked", "broke", "dropped"].iter().all(|node| {
+            world
+                .events_of(run, "node-settled")
+                .iter()
+                .any(|event| event["labels"]["node"] == *node)
+        }) && world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "last")
+    });
+    world.run(&["stop", run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(run, "run-stopped").is_empty()
+    });
+
+    let settled: Vec<(String, String)> = world
+        .events_of(run, "node-settled")
+        .iter()
+        .map(|event| {
+            (
+                event["labels"]["node"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                event["payload"]["status"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        })
+        .collect();
+    for (node, status) in [
+        ("worked", "done"),
+        ("broke", "failed"),
+        ("dropped", "cancelled"),
+    ] {
+        assert!(
+            settled.contains(&(node.to_string(), status.to_string())),
+            "{node} did not settle {status}: {settled:?}"
+        );
+    }
+    let read = |world: &World| {
+        let reading = world.run(&["status", run, "--json"]);
+        reading.exited(0);
+        let transcript = world.run(&["transcript", run, "worked"]);
+        transcript.exited(0);
+        (reading.json(), transcript.stdout.clone())
+    };
+    let (nodes, evidence) = read(&world);
+    assert!(evidence.contains("tick 1"), "no tool call in:\n{evidence}");
+
+    let checkpoint = world.run_file(run, "checkpoint.json");
+    std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted");
+    assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
+    assert_eq!(
+        world.run_json(run, "checkpoint.json")["schema_version"],
+        json!(14)
+    );
+
+    let mut earlier = world.run_json(run, "checkpoint.json");
+    earlier["schema_version"] = json!(13);
+    earlier.as_object_mut().expect("a document").remove("tally");
+    std::fs::write(&checkpoint, earlier.to_string()).expect("an earlier build's checkpoint");
+    assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
+    assert_eq!(
+        world.run_json(run, "checkpoint.json")["schema_version"],
+        json!(14)
+    );
+
+    // And the driver rebuilds where it must, and drives what is left.
+    std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted again");
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.release("last.go");
+    world.until("the last node to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "last")
+    });
+    assert_eq!(
+        world.run_json(run, "checkpoint.json")["schema_version"],
+        json!(14)
+    );
+    let (_, evidence_after) = read(&world);
+    assert_eq!(evidence_after, evidence);
+}
+
+/// A run in the shape v0.75.0 leaves — its member heartbeats in the journal, no
+/// `liveness.json`, a schema-13 checkpoint and a retry's `edit-committed` — is
+/// adopted with its journal's existing bytes untouched, and `status`, `results`,
+/// `monitor` and `transcript` report its nodes, settlements and a dispatch's tool
+/// calls and output as they did before.
+#[test]
+fn a_run_in_the_shape_an_older_build_left_is_adopted_with_its_history_intact() {
+    let world = World::new("scaling-older");
+    let run = "older";
+    world.script("flaky.fail", "");
+    a_held_member(&world, "worked", true);
+    world.script("last.wait", "hold");
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("flaky", &[]),
+                agent("worked", &[]),
+                agent("last", &["worked"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("flaky to fail", |world| {
+        world.events_of(run, "node-settled").iter().any(|event| {
+            event["labels"]["node"] == "flaky" && event["payload"]["status"] == "failed"
+        })
+    });
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [{"op": "retry", "id": "flaky", "node": {
+                "id": "flaky-2", "persona": "engineer",
+                "task": "## What\nDo flaky again.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- flaky-2 is done."
+            }}]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the worker to have worked", |world| {
+        activity_of(world, run, "worked") >= 3
+    });
+    world.release("worked.go");
+    world.until(
+        "the retry and the worker to settle and the last node to start",
+        |world| {
+            let settled = world.events_of(run, "node-settled");
+            ["flaky-2", "worked"].iter().all(|node| {
+                settled.iter().any(|event| {
+                    event["labels"]["node"] == *node && event["payload"]["status"] == "done"
+                })
+            }) && world
+                .events_of(run, "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == "last")
+        },
+    );
+    world.run(&["stop", run, "--force"]).exited(0);
+    world.until("the stop to be recorded", |world| {
+        !world.events_of(run, "run-stopped").is_empty()
+    });
+    // What an older driver journalled for every beat, and the checkpoint it wrote.
+    let ts = now_millis();
+    for seq in 0..5 {
+        let mut beat = json!({
+            "v": 2, "ts": format_ms(ts + seq), "stream": "older-graph-1", "seq": 1_000 + seq,
+            "source": "agentgraph", "kind": "member-heartbeat",
+            "labels": {"run_id": "older-graph", "node": "worked", "member": "worker"},
+            "payload": {}, "artifacts": [],
+        })
+        .to_string();
+        beat.push('\n');
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(world.run_file(run, "events.jsonl"))
+            .and_then(|mut journal| journal.write_all(beat.as_bytes()))
+            .expect("a beat is journalled");
+    }
+    world.run(&["status", run, "--json"]).exited(0);
+    let mut older = world.run_json(run, "checkpoint.json");
+    older["schema_version"] = json!(13);
+    older.as_object_mut().expect("a document").remove("tally");
+    std::fs::write(world.run_file(run, "checkpoint.json"), older.to_string())
+        .expect("the older build's checkpoint");
+    let _ = std::fs::remove_file(world.run_file(run, "liveness.json"));
+    assert!(!world.events_of(run, "edit-committed").is_empty());
+
+    let reads = |world: &World| -> Vec<String> {
+        [
+            vec!["status", run],
+            vec!["results", run],
+            vec!["monitor", run],
+            vec!["transcript", run, "worked"],
+        ]
+        .iter()
+        .map(|args| {
+            let read = world.run(args);
+            read.exited(0);
+            read.stdout.clone()
+        })
+        .collect()
+    };
+    let before = reads(&world);
+    let history = std::fs::read(world.run_file(run, "events.jsonl")).expect("the journal");
+
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.release("last.go");
+    world.until("the last node to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "last")
+    });
+    let after_bytes = std::fs::read(world.run_file(run, "events.jsonl")).expect("the journal");
+    assert_eq!(
+        &after_bytes[..history.len()],
+        &history[..],
+        "the journal's existing bytes moved"
+    );
+
+    let after = reads(&world);
+    // `status`: the same graph, and no record of it lost.
+    let of_three = |status: &str| {
+        status
+            .lines()
+            .next()
+            .is_some_and(|line| line.contains("/3 done"))
+    };
+    assert!(
+        of_three(&before[0]) && of_three(&after[0]),
+        "{}\n---\n{}",
+        before[0],
+        after[0]
+    );
+    assert!(!after[0].contains("cannot read"), "{}", after[0]);
+    // `results`: each node the older build settled reads as it did.
+    for node in ["flaky", "flaky-2", "worked"] {
+        let line = |text: &str| {
+            text.lines()
+                .find(|line| line.split_whitespace().next() == Some(node))
+                .map(str::to_string)
+        };
+        assert!(
+            line(&before[1]).is_some(),
+            "{node} is missing from:\n{}",
+            before[1]
+        );
+        assert_eq!(line(&after[1]), line(&before[1]), "{node}");
+    }
+    // `monitor`: every line it showed before is still shown.
+    for line in before[2].lines().filter(|line| !line.starts_with("--")) {
+        assert!(after[2].contains(line), "monitor lost:\n{line}");
+    }
+    assert_eq!(after[3], before[3], "the dispatch's transcript moved");
+    assert!(before[3].contains("tick 1"), "{}", before[3]);
+}
+
+/// Milliseconds since the epoch as the journal stamps them.
+fn format_ms(millis: u64) -> String {
+    let seconds = millis / 1_000;
+    let (days, rest) = (seconds / 86_400, seconds % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60,
+        millis % 1_000
+    )
+}
+
+/// A run in the shape v0.75.0 leaves — member heartbeats in its journal and no
+/// `liveness.json` — reads `alive … ago` and `PARKED` off those records as before.
+#[test]
+fn journalled_heartbeats_with_no_liveness_file_read_as_they_did() {
+    let world = World::new("scaling-journalled-beats");
+    let run = "journalledbeats";
+    world.script("quiet.turn-open", "");
+    world.script("quiet.wait", "hold");
+    let path = world.plan(run, &plan_of(run, vec![agent("quiet", &[])]));
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the quiet member's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    world.until("the journal to be quiet past the threshold", |world| {
+        now_millis().saturating_sub(last_journalled(world, run)) > 2_000
+    });
+    assert_eq!(liveness_word(&world, run), json!("PARKED"));
+    assert!(liveness(&world, run).is_empty());
+
+    let beat = json!({
+        "v": 2, "ts": format_ms(now_millis()), "stream": "older-graph-1", "seq": 5_000,
+        "source": "agentgraph", "kind": "member-heartbeat",
+        "labels": {"run_id": "older-graph", "node": "quiet", "member": "worker"},
+        "payload": {}, "artifacts": [],
+    });
+    let mut line = beat.to_string();
+    line.push('\n');
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "events.jsonl"))
+        .and_then(|mut journal| journal.write_all(line.as_bytes()))
+        .expect("a beat is journalled");
+    assert_ne!(liveness_word(&world, run), json!("PARKED"));
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    let quiet = status
+        .stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with("quiet: running"))
+        .unwrap_or_else(|| panic!("no line for quiet:\n{}", status.stdout));
+    assert!(quiet.contains("alive "), "{quiet}");
+    world.until("the journalled beat to age past the threshold", |world| {
+        liveness_word(world, run) == json!("PARKED")
+    });
+    world.release("quiet.go");
+}
+
+/// A watch given no cursor, and an attach's first render, start where the run's
+/// checkpoint stops — the history in front of it is overwritten with bytes that are
+/// no record, and neither reports them — and the watch still returns at once on a
+/// planner surface left unread before it armed.
+#[test]
+fn a_watch_and_an_attach_start_where_the_checkpoint_stops() {
+    let world = World::new("scaling-start");
+    let run = "startpoint";
+    world.script("hold.wait", "hold");
+    stopped_with(
+        &world,
+        run,
+        vec![
+            agent("first", &[]),
+            agent("hold", &["first"]),
+            agent("after", &["hold"]),
+        ],
+        "hold",
+    );
+    world.release("hold.go");
+    world
+        .run(&[
+            "surface",
+            run,
+            "--kind",
+            "check-in",
+            "--message",
+            "still there?",
+        ])
+        .exited(0);
+    world.run(&["status", run, "--json"]).exited(0);
+    let at = overwrite_what_is_covered(&world, run);
+    assert!(at > 0);
+
+    let watched = world.run(&["watch", run, "--timeout", "30", "--tick-interval", "0"]);
+    let ended: Value = watched
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|record| record["watch"] == "return")
+        .unwrap_or_else(|| panic!("no return in {}", watched.stdout));
+    assert_eq!(ended["condition"], "surface-waiting", "{ended}");
+    assert!(
+        ended["unread"]["count"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "{ended}"
+    );
+    let printed: Vec<Value> = watched
+        .stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|record| record["watch"] == "event")
+        .collect();
+    assert!(
+        printed
+            .iter()
+            .all(|record| record["event"]["labels"]["node"] != "first"),
+        "the watch printed history its checkpoint covers: {printed:?}"
+    );
+
+    let attached = world.run(&["adopt", run, "--attach"]);
+    attached.exited(0);
+    assert!(
+        !attached.stderr.contains("graph:first"),
+        "the attach rendered history its checkpoint covers:\n{}",
+        attached.stderr
+    );
+    assert!(
+        attached.stderr.contains("graph:after"),
+        "{}",
+        attached.stderr
+    );
+}
