@@ -34,4 +34,4 @@ Concise graph events; ask the producing library for full detail by stream id.
 2026-10-10T13:54:56.392Z  graph:-                      planner-replied comment replies verified on the board by check-responses after the GraphQL limit
 2026-10-10T13:54:56.400Z  graph:-                      completion-requested comment replies verified on the board by check-responses after the GraphQL 
 -- before-transcript-refs  1/1 done  SETTLED  complete
--- cursor 1:before-transcript-refs:71411
+-- cursor 1:before-transcript-refs:71399
