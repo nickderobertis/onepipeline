@@ -185,6 +185,44 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         json!(HELD_CALL),
         "the machine record does not carry the call's whole input: {record}"
     );
+    // The reasoning before the call, and the result answering the first call,
+    // each under the field naming what it is.
+    let activity = activities(&world, run);
+    let at = |index: u64| {
+        let event = activity
+            .iter()
+            .find(|event| event["payload"]["index"] == index)
+            .unwrap_or_else(|| panic!("no activity {index} was relayed"));
+        watched_record(&records, event)["transcript"].clone()
+    };
+    let reasoned = at(0);
+    assert_eq!(
+        reasoned["reasoning"],
+        json!("The quickest proof is to run it."),
+        "{reasoned}"
+    );
+    assert_eq!(
+        reasoned["description"],
+        json!("The quickest proof is to run it.")
+    );
+    let returned = at(2);
+    assert_eq!(returned["output"], json!("the turn ran"), "{returned}");
+    assert_eq!(returned["input"], Value::Null, "{returned}");
+    // Through the `planner` profile a bare `watch` reads with, no relayed turn
+    // is shown, reference or not: that profile is what a supervisor wakes on.
+    let planner = world.run(&["watch", run, "--timeout", "0"]);
+    assert!(
+        machine(&planner.stdout)
+            .iter()
+            .all(|record| record["event"]["source"] != "agentgraph"),
+        "the planner profile showed a relayed turn:\n{}",
+        planner.stdout
+    );
+    assert!(
+        !planner.stderr.contains("turn-activity"),
+        "{}",
+        planner.stderr
+    );
     // A record carrying no reference is written exactly as it always was.
     assert!(
         records
@@ -276,6 +314,27 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     world.until("the run to settle", |world| {
         !world.events_of(run, "node-settled").is_empty()
     });
+
+    // What the agent said once released, both as its own activity and as the
+    // turn's closing words, served whole on the machine record.
+    let settled = world.run(&["watch", run, "--all", "--timeout", "0"]);
+    let records = machine(&settled.stdout);
+    let said: Vec<&Value> = records
+        .iter()
+        .filter(|record| {
+            record["event"]["payload"]["role"] == "assistant"
+                && record["event"]["kind"] == "turn-message"
+                || record["event"]["payload"]["kind"] == "message"
+        })
+        .collect();
+    assert_eq!(said.len(), 2, "{records:#?}");
+    for record in said {
+        assert_eq!(
+            record["transcript"]["message"],
+            json!("Ran what the task asked for."),
+            "{record}"
+        );
+    }
 }
 
 /// **A reference whose history is gone says so, on every view, rather than

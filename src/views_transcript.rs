@@ -209,14 +209,18 @@ impl TranscriptRef {
             path: PathBuf::from(format!("<{kind} copy>")),
             why: Why::Unreadable,
         };
+        // Omitted is the producer saying nothing; anything present has to be
+        // the type it writes. `name` alone is written `null`, on a result,
+        // which names no tool.
         let text = |key: &str| match payload.get(key) {
             Some(Value::String(text)) => Ok(Some(text.clone())),
-            Some(Value::Null) | None => Ok(None),
+            Some(Value::Null) if key == "name" => Ok(None),
+            None => Ok(None),
             Some(_) => Err(unreadable()),
         };
         let flag = |key: &str| match payload.get(key) {
             Some(Value::Bool(flag)) => Ok(*flag),
-            Some(Value::Null) | None => Ok(false),
+            None => Ok(false),
             Some(_) => Err(unreadable()),
         };
         Ok(match kind {
@@ -1307,6 +1311,19 @@ mod tests {
             odd.to_string(),
             "transcript unavailable: <turn-activity copy>: unreadable"
         );
+
+        let mut null_text = Map::new();
+        null_text.insert("text".into(), Value::Null);
+        assert_eq!(unresolved("turn-message", &null_text).why, Why::Unreadable);
+        let mut null_flag = Map::new();
+        null_flag.insert("instruction".into(), json!("## What"));
+        null_flag.insert("instruction_truncated".into(), Value::Null);
+        assert_eq!(unresolved("turn-started", &null_flag).why, Why::Unreadable);
+        let mut unnamed_result = Map::new();
+        unnamed_result.insert("kind".into(), json!("tool_result"));
+        unnamed_result.insert("name".into(), Value::Null);
+        unnamed_result.insert("output".into(), json!("ok"));
+        assert_eq!(resolved("turn-activity", &unnamed_result).description, "ok");
 
         let mut kindless = Map::new();
         kindless.insert("output".into(), json!("said"));
