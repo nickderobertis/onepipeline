@@ -1531,14 +1531,35 @@ impl Adopted {
 /// Those refusals; a lock that cannot be taken; and, detached, a retained
 /// driver that did not claim the run, with what it said in its log.
 pub fn adopt(paths: &RunPaths, how: Adopt) -> Result<Adopted> {
+    adopt_with_writeback_item_budget(paths, how, None)
+}
+
+/// Adopt a run, optionally replacing its persisted per-item write-back budget.
+///
+/// Naming no budget keeps the recorded value. Zero is refused before any write.
+/// The environment is never consulted during adoption.
+///
+/// # Errors
+///
+/// The refusals of [`adopt`], and a zero budget.
+pub fn adopt_with_writeback_item_budget(
+    paths: &RunPaths,
+    how: Adopt,
+    budget: Option<u64>,
+) -> Result<Adopted> {
+    if budget == Some(0) {
+        return Err(Error::Refused(crate::writeback::refused_zero_budget(
+            "--writeback-item-budget",
+        )));
+    }
     Ok(match how {
         Adopt::Attached => Adopted::Attached {
             run: paths.run.clone(),
-            settlement: driver::adopt_attached(paths, &mut |_| {})?,
+            settlement: driver::adopt_attached(paths, budget, &mut |_| {})?,
         },
         Adopt::Detached(retain) => Adopted::Detached {
             run: paths.run.clone(),
-            pid: driver::adopt_detached(paths, &retain)?,
+            pid: driver::adopt_detached(paths, &retain, budget)?,
         },
     })
 }

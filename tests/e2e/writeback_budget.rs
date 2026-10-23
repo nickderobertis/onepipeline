@@ -630,7 +630,7 @@ fn recorded_budget(world: &World, run: &str) -> Value {
 /// takes the shipped default — read off the launch record, which is what an
 /// `adopt` replays rather than re-reading an environment that has since moved.
 ///
-/// Resolved **once**, before the run exists: a fresh driver started from another
+/// Resolved before the run exists: a fresh driver started from another
 /// shell — with another `ONEPIPELINE_WRITEBACK_ITEM_BUDGET`, or none — would
 /// otherwise bound the run's copies by a figure its launch never chose.
 #[test]
@@ -654,7 +654,7 @@ fn the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_l
     )
     .expect("the launch config is written");
 
-    // A fresh run per rung, because the budget is resolved once, at the launch.
+    // A fresh run per launch-precedence rung.
     for (which, expected, extra, environment) in [
         ("by-config", 30, vec![], None),
         ("by-environment", 20, vec![], Some("20")),
@@ -1037,5 +1037,106 @@ fn a_destination_read_held_past_the_floor_is_cancelled_retried_and_recovers() {
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
     });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the real store's
+// deadline is sixty seconds plus the positive item budget, so a two-second hold would
+// pass even if the adopted driver still used one second per item. Each mode must hold
+// a write past the old 61-second deadline to prove the replacement driver uses 30.
+// The crate e2e boundary supplies the compiled driver, its retained replacement, and
+// the real linked store: these are the same write-back worker as the adjacent journeys.
+/// Both adoption modes can repair the persisted budget. The held update outlasts
+/// the old floor plus one second, so retaining the old value cannot pass.
+#[test]
+fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
+    for mode in ["--attach", "--detach"] {
+        let run = if mode == "--attach" {
+            "budgetattach"
+        } else {
+            "budgetdetach"
+        };
+        let (world, meeting, project) =
+            a_run_whose_first_update_is_held(run, run, 1, &["--writeback-item-budget", "1"]);
+        world
+            .run(&["adopt", "--help"])
+            .exited(0)
+            .out_has("--writeback-item-budget <SECONDS>");
+        assert_eq!(recorded_budget(&world, run), 1);
+        meeting.arrived().release();
+        meeting.arrived().release();
+        world.until_store("the original projection", |world| {
+            board_status(world, &project, "work").as_deref() == Some("in-progress")
+        });
+        crate::harness::end_driver(&world, run);
+
+        let before = world.run_json(run, "launch.json");
+        world
+            .run(&["adopt", run, mode, "--writeback-item-budget", "0"])
+            .exited(REFUSED)
+            .err_has("--writeback-item-budget")
+            .err_has("zero");
+        assert_eq!(world.run_json(run, "launch.json"), before);
+
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(world.run_file(run, "driver.log"))
+            .expect("the adoption log opens");
+        let mut adoption = world
+            .cmd(&["adopt", run, mode, "--writeback-item-budget", "30"])
+            .stdout(std::process::Stdio::null())
+            .stderr(log)
+            .spawn()
+            .expect("adoption starts");
+        world.until("the replacement budget to persist", |world| {
+            recorded_budget(world, run) == 30
+        });
+        noted(&world, run, "work", "the repaired projection");
+        let held = meeting.arrived();
+        std::thread::sleep(Duration::from_secs(2));
+        world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
+        held.release();
+        drop(meeting);
+        world.until_store("the short held projection to land", |world| {
+            serde_json::json!(world.store_tasks(&project))
+                .to_string()
+                .contains("the repaired projection")
+        });
+        let meeting = world.rendezvous(&format!("{SCRIPTED_KEY}.{UPDATE}"));
+        noted(&world, run, "work", "proof beyond the old deadline");
+        let held = meeting.arrived();
+        std::thread::sleep(Duration::from_secs(number("floor_seconds") + 3));
+        world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
+        held.release();
+        drop(meeting);
+        world.until_store("the repaired projection to land", |world| {
+            serde_json::json!(world.store_tasks(&project))
+                .to_string()
+                .contains("proof beyond the old deadline")
+        });
+        assert!(
+            !a_projection_failed(&world, run),
+            "the new budget did not bound the projection"
+        );
+        world.release("work.go");
+        assert!(adoption.wait().expect("adoption exits").success());
+        world.until("the driver to settle", |world| {
+            !world.run_file(run, "owner.lock").exists()
+        });
+        let mut later = world.cmd(&["adopt", run, mode]);
+        later.env(spelling("environment"), "99");
+        world.run_on(later, "later adoption").exited(0);
+        world.until("the later driver to finish", |world| {
+            !world.run_file(run, "owner.lock").exists()
+        });
+        assert_eq!(recorded_budget(&world, run), 30);
+        let before = world.run_json(run, "launch.json");
+        world
+            .run(&["adopt", run, mode, "--writeback-item-budget", "0"])
+            .exited(REFUSED)
+            .err_has("zero");
+        assert_eq!(world.run_json(run, "launch.json"), before);
+    }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

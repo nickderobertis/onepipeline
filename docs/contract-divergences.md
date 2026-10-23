@@ -5794,10 +5794,12 @@ failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
-then the shipped default. It is resolved **once**, at the launch, and retained in
-the launch record beside the pacemaker interval — so a driver a fresh `adopt`
-starts bounds its copies as the launch chose, and a record written before the
-field existed reads and resolves to the default. The value is a positive whole
+then the shipped default. It is resolved at launch and retained in the launch
+record beside the pacemaker interval. `adopt --writeback-item-budget SECONDS`
+replaces it under the ownership lock before the new driver projects anything,
+including before a detached driver is spawned. An adoption naming no budget
+keeps the recorded value and ignores the environment. A record written before
+the field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
 config key — by the spelling that carried it, because zero is no budget at all:
 multiplied through, it leaves the floor as the whole deadline for every plan
