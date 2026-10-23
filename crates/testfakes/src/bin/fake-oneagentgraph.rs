@@ -2098,6 +2098,41 @@ fn write_work(args: &[String], name: &str, body: &str) {
 /// the others working. The second member's turn is announced and not recorded,
 /// so an interrupt sent to it answers as one whose turn is over: two members,
 /// two answers, which is what a caller has to carry on from.
+/// What a turn's opening says it was asked, when `{key}.asked-bytes` scripted a
+/// length for it — and nothing otherwise.
+///
+/// Published **whole and unflagged** however long: what happens to an over-long
+/// text after this is the relay's to decide, and a double that pre-cut it would
+/// answer that question for the code under test.
+fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
+    let bytes = fake::node_script(dir, key, "asked-bytes")?;
+    let instruction = match bytes.trim().parse::<usize>() {
+        Ok(bytes) if bytes <= SAYABLE => "a".repeat(bytes),
+        Ok(bytes) => fake::fail(&format!(
+            "{key}.asked-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
+             anything a payload bound does not already"
+        )),
+        Err(error) => fake::fail(&format!("{key}.asked-bytes is not a byte count: {error}")),
+    };
+    // Through the sibling's own payload type, as the words a turn says are:
+    // `instruction_truncated` is that library's statement about its own field,
+    // and this double publishes what it really did.
+    match serde_json::to_value(oneagentgraph::event::TurnStarted {
+        transcript: None,
+        turn: 1,
+        role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
+        instruction: Some(instruction),
+        instruction_truncated: false,
+        started_at: fake::now(),
+        // The first turn's instruction is the composed task, which is the one
+        // authorship the sibling's own rule stamps on it.
+        origin: Some(oneagentgraph::event::Origin::Task),
+    }) {
+        Ok(payload) => Some(payload),
+        Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
+    }
+}
+
 /// A tool call carrying a `transcript` reference, when
 /// `{key}.referenced-name-bytes` scripted a length for the tool's name — and
 /// nothing otherwise.
@@ -2145,41 +2180,6 @@ fn referenced(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn activity is not an object: {error}")),
-    }
-}
-
-/// What a turn's opening says it was asked, when `{key}.asked-bytes` scripted a
-/// length for it — and nothing otherwise.
-///
-/// Published **whole and unflagged** however long: what happens to an over-long
-/// text after this is the relay's to decide, and a double that pre-cut it would
-/// answer that question for the code under test.
-fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
-    let bytes = fake::node_script(dir, key, "asked-bytes")?;
-    let instruction = match bytes.trim().parse::<usize>() {
-        Ok(bytes) if bytes <= SAYABLE => "a".repeat(bytes),
-        Ok(bytes) => fake::fail(&format!(
-            "{key}.asked-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
-             anything a payload bound does not already"
-        )),
-        Err(error) => fake::fail(&format!("{key}.asked-bytes is not a byte count: {error}")),
-    };
-    // Through the sibling's own payload type, as the words a turn says are:
-    // `instruction_truncated` is that library's statement about its own field,
-    // and this double publishes what it really did.
-    match serde_json::to_value(oneagentgraph::event::TurnStarted {
-        transcript: None,
-        turn: 1,
-        role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-        instruction: Some(instruction),
-        instruction_truncated: false,
-        started_at: fake::now(),
-        // The first turn's instruction is the composed task, which is the one
-        // authorship the sibling's own rule stamps on it.
-        origin: Some(oneagentgraph::event::Origin::Task),
-    }) {
-        Ok(payload) => Some(payload),
-        Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
     }
 }
 
