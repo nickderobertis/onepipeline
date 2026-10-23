@@ -2505,8 +2505,9 @@ fn a_takeover_whose_claim_the_board_refuses_is_refused_before_anything_is_minted
 }
 
 /// A takeover goes on waiting through a poll the board refuses, and a displaced driver
-/// whose every acknowledgement attempt is refused says so. Its fence can still clear,
-/// and the adopter starts only on the retained cross-host timer fallback.
+/// whose every acknowledgement attempt is refused says so. Its fence can still clear, and
+/// the adopter starts once its read after the wait finds that fence naming none of the
+/// displaced driver's work.
 #[test]
 fn a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement() {
     let interval = 5;
