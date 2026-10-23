@@ -364,6 +364,15 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         })
         .collect();
     assert_eq!(said.len(), 2, "{records:#?}");
+    let transcript = world.run(&["transcript", run]);
+    transcript.exited(0);
+    assert!(
+        transcript
+            .stdout
+            .contains("    assistant said\n      Ran what the task asked for.\n"),
+        "`transcript` does not show the turn's closing words under its party:\n{}",
+        transcript.stdout
+    );
     for record in said {
         assert_eq!(
             record["transcript"]["message"],
