@@ -7697,6 +7697,143 @@ mod tests {
         }
     }
 
+    /// This process's file-size limit lowered to `bytes` while it is held, and SIGXFSZ ignored,
+    /// so a write past it stops there: the bytes up to the limit land and the rest are refused
+    /// with `EFBIG`, leaving the file that write was writing incomplete for as long as anyone
+    /// cares to read it.
+    ///
+    /// Process-wide, which is safe because nextest runs each test in a process of its own.
+    #[cfg(unix)]
+    struct FileSizeLimit(libc::rlimit);
+
+    #[cfg(unix)]
+    impl FileSizeLimit {
+        fn of(bytes: usize) -> Self {
+            let mut held = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `held` is a valid `rlimit` for `getrlimit` to fill, and ignoring SIGXFSZ
+            // installs no handler: the refused write returns `EFBIG` instead of ending us.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut held), 0);
+            }
+            let limited = libc::rlimit {
+                rlim_cur: libc::rlim_t::try_from(bytes).expect("a small limit"),
+                rlim_max: held.rlim_max,
+            };
+            // SAFETY: `limited` is a valid `rlimit` below the hard limit this process holds.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limited) },
+                0,
+                "the file-size limit is lowered"
+            );
+            Self(held)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FileSizeLimit {
+        fn drop(&mut self) {
+            // SAFETY: restores the limit `of` read, which never exceeds the hard limit.
+            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &self.0) };
+        }
+    }
+
+    /// Where `write_shadow` publishes `node`'s shadow task document.
+    fn shadow_task(fixture: &Fixture, node: &str) -> PathBuf {
+        fixture
+            .dir
+            .join("tasks")
+            .join(super::project_file(&fixture.snapshot.project))
+            .join(format!("{}.md", super::task_file(node)))
+    }
+
+    /// The image-carrying step's every write stopped part-way, at each byte of the document it
+    /// rewrites: whichever write that stops — the store's rewrite of the document, which
+    /// truncates the file and writes it again, or the staging that keeps that rewrite out of
+    /// the shadow — a reader reading the shadow at that moment, with that write frozen
+    /// incomplete, reads the document `write_shadow` published, whole. The step says it failed
+    /// and leaves no staging root, and once the limit is lifted the next step lands.
+    #[cfg(unix)]
+    #[test]
+    fn a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands() {
+        let fixture = Fixture::new("rewrite-stopped");
+        let created = std::collections::BTreeSet::from(["design".to_owned()]);
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let path = shadow_task(&fixture, "design");
+        let staging = fixture.snapshot.dir.with_extension("staging");
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
+        let whole = std::fs::read_to_string(&path).expect("the published document reads");
+        for limit in 0..whole.len() {
+            write_shadow(&fixture.snapshot, &created, &fixture.ends)
+                .expect("the shadow is written");
+            let stopped = {
+                let _limit = FileSizeLimit::of(limit);
+                super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            };
+            let read = std::fs::read_to_string(&path).expect("the shadow document reads");
+            assert_eq!(
+                read, whole,
+                "a write stopped at byte {limit} left the shadow document incomplete"
+            );
+            let failed = stopped.expect_err("a write stopped part-way fails the step");
+            assert!(
+                failed.reason.contains("File too large"),
+                "the step names the stopped write: {}",
+                failed.reason
+            );
+            assert!(!staging.exists(), "a failed step left {}", staging.display());
+        }
+        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        assert!(!staging.exists(), "a landed step left {}", staging.display());
+        let (front, content) = written(&path);
+        assert_eq!(front["metadata"]["onepipeline.id"], "design");
+        let published = whole.split_once("\n---\n").expect("a whole document").1;
+        assert_eq!(content.trim_end(), published.trim_end());
+    }
+
+    /// A shadow the step cannot publish into — its task folder made unwritable after the
+    /// document was published there — fails the step naming the document, leaves the published
+    /// document and no staging root, and the step lands once the folder is writable again.
+    #[cfg(unix)]
+    #[test]
+    fn a_shadow_the_rewrite_cannot_be_published_into_fails_whole_and_recovers() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let fixture = Fixture::new("rewrite-unpublishable");
+        let created = std::collections::BTreeSet::from(["design".to_owned()]);
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let path = shadow_task(&fixture, "design");
+        let staging = fixture.snapshot.dir.with_extension("staging");
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
+        let whole = std::fs::read_to_string(&path).expect("the published document reads");
+        let folder = path.parent().expect("a task folder").to_path_buf();
+        let mode = |bits| std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(bits));
+        mode(0o555).expect("the task folder is made read-only");
+        let refused = super::write_shadow_assets(&attempt, &fixture.snapshot, &created);
+        mode(0o755).expect("the task folder is made writable again");
+        let failed = refused.expect_err("an unwritable shadow fails the step");
+        assert!(
+            failed.reason.contains("publishing shadow task")
+                && failed.reason.contains(&format!("{}.md", super::task_file("design"))),
+            "{}",
+            failed.reason
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), whole);
+        assert!(!staging.exists(), "a failed step left {}", staging.display());
+        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let (front, _) = written(&path);
+        assert_eq!(front["metadata"]["onepipeline.id"], "design");
+        assert!(!staging.exists(), "a landed step left {}", staging.display());
+    }
+
     /// The same engine reads the stable local shadow again after each command ends.
     #[test]
     fn a_retained_engine_reads_each_shadow_snapshot_fresh() {
