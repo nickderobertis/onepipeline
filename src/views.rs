@@ -376,23 +376,69 @@ fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnve
 /// Each live note the run's live driver holds in a receiver's inbox, from its
 /// sidecar — nothing where no driver is live, since a driver that is gone holds
 /// no inbox and the next one records an answer for each note it left.
+///
+/// **Nor one whose every note the journal has already answered.** A driver
+/// journals what a receiver made of its notes and only then rewrites the
+/// sidecar, so a read between the two finds a note both answered and still
+/// queued; the journal is the record, and the note is read as answered.
 fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
     if liveness.is_undriven() {
         return Vec::new();
     }
-    crate::channel::deliveries::LiveDeliveries::read(&view.paths)
-        .map(|live| {
-            live.deliveries
-                .into_iter()
-                .filter_map(|entry| {
-                    Some(InboxNote {
-                        envelope: entry.envelope,
-                        delivery: entry.delivery.into_inbox()?,
-                    })
-                })
-                .collect()
+    let Some(live) = crate::channel::deliveries::LiveDeliveries::read(&view.paths) else {
+        return Vec::new();
+    };
+    let held: Vec<InboxNote> = live
+        .deliveries
+        .into_iter()
+        .filter_map(|entry| {
+            Some(InboxNote {
+                envelope: entry.envelope,
+                delivery: entry.delivery.into_inbox()?,
+            })
         })
-        .unwrap_or_default()
+        .collect();
+    if held.is_empty() {
+        return held;
+    }
+    let channel = crate::channel::ChannelState::new(&view.paths);
+    let delivered = crate::withdrawal::readable(&view.events);
+    held.into_iter()
+        .filter(|note| !lane_answered(view, &channel, &delivered, note))
+        .collect()
+}
+
+/// Whether the journal answers every note `note`'s envelope sent its receiver:
+/// each delivered or refused. An envelope this reader cannot find, or one that
+/// sent that receiver no note, is not answered here — the sidecar's word stands.
+fn lane_answered(
+    view: &RunView,
+    channel: &crate::channel::ChannelState,
+    delivered: &[(Option<u64>, crate::edits::Operation)],
+    note: &InboxNote,
+) -> bool {
+    let InboxDelivery::Queued { node, .. } = &note.delivery;
+    let Some(sent) = channel.commands_of(note.envelope) else {
+        return false;
+    };
+    let mut notes = sent
+        .commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| {
+            matches!(command, crate::channel::Command::Note { id, .. } if id == node)
+        })
+        .peekable();
+    notes.peek().is_some()
+        && notes.all(|(index, command)| {
+            crate::withdrawal::delivered(
+                delivered,
+                note.envelope,
+                u32::try_from(index).unwrap_or(u32::MAX),
+            )
+            .is_some()
+                || refused_note(&view.events, note.envelope, index, command).is_some()
+        })
 }
 
 /// Read one run's ending, its pause, or neither, off its fold.
@@ -2382,22 +2428,55 @@ impl<'a> Row<'a> {
     }
 
     /// How the run is being driven, read from the host now.
+    ///
+    /// **A driver the document names as over is asked of the launch record
+    /// too.** The document copies the record's claim at each append, and a
+    /// driver claims a run by rewriting the record without appending: a detached
+    /// launch's retained driver, until its loop first appends, leaves a document
+    /// current against the journal that names the launcher it took over from —
+    /// a process that has exited. Read off the document alone that run is
+    /// `DRIVER DEAD` while its driver is working. So where the document's claim
+    /// reads over and the record names another, the record's is the one judged;
+    /// a run whose driver did die names the same claim in both and pays the one
+    /// read, and a live one pays nothing.
     fn liveness(&self) -> DriverLiveness {
-        driver_liveness(
-            self.summary.stop_recorded
-                || let_go(
-                    self.summary.host.as_deref(),
-                    self.summary.pid,
-                    self.summary.let_go_by.as_ref(),
-                    &self.paths,
-                ),
+        let judged = |host: Option<&str>, pid, started: Option<&str>| {
+            driver_liveness(
+                self.summary.stop_recorded
+                    || let_go(host, pid, self.summary.let_go_by.as_ref(), &self.paths),
+                host,
+                pid,
+                started,
+                self.summary.last_write_at,
+                self.summary.awaiting_human_action,
+                &self.paths,
+            )
+        };
+        let (host, pid, started) = (
             self.summary.host.as_deref(),
             self.summary.pid,
             self.summary.started.as_deref(),
-            self.summary.last_write_at,
-            self.summary.awaiting_human_action,
-            &self.paths,
-        )
+        );
+        let verdict = judged(host, pid, started);
+        if verdict != DriverLiveness::DriverDead || self.summary.stop_recorded {
+            return verdict;
+        }
+        match ledger::read_json_opt::<LaunchRecord>(&self.paths.launch()) {
+            Some(launch)
+                if (
+                    launch.recorded_host(),
+                    launch.driver_pid(),
+                    launch.driver_stamp(),
+                ) != (host, pid, started) =>
+            {
+                judged(
+                    launch.recorded_host(),
+                    launch.driver_pid(),
+                    launch.driver_stamp(),
+                )
+            }
+            _ => verdict,
+        }
     }
 
     /// Whether anything is watching the run, where its driver tier leaves room
