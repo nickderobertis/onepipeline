@@ -827,7 +827,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.8.0"
-onevcs = "0.56.7"
+onevcs = "0.56.9"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1083,7 +1083,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.16"
+onevcs-testing = "0.19.19"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
