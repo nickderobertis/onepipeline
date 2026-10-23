@@ -8208,8 +8208,7 @@ fn nowhere_to_carry(id: &str) -> Error {
 /// envelope, and reading the run's whole history backwards for it made every note
 /// to a long run cost that run's length.
 pub(crate) fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
-    let turn = crate::checkpoint::current(paths).last_turns.remove(node)?;
-    TurnAddress::of(&turn.run, &turn.member)
+    crate::checkpoint::current(paths).last_turns.remove(node)
 }
 
 /// Carry one arrival note into a node's running turn, falling through to that

@@ -1954,10 +1954,7 @@ mod tests {
             noted: std::collections::BTreeSet::from(["build".to_string()]),
             last_turns: BTreeMap::from([(
                 "build".to_string(),
-                crate::projection::TurnAt {
-                    run: "graph-run-1".into(),
-                    member: "worker".into(),
-                },
+                crate::agentgraph::TurnAddress::of("graph-run-1", "worker").expect("an address"),
             )]),
             dispatched_nodes: std::collections::BTreeSet::from(["build".to_string()]),
             settled_details: BTreeMap::from([(
@@ -1967,8 +1964,8 @@ mod tests {
             sessions_opened: BTreeMap::from([(
                 "build".to_string(),
                 crate::projection::SessionOpened {
-                    token: Some("session-1".into()),
-                    base: "main".into(),
+                    token: Some(onevcs::SessionToken("session-1".into())),
+                    base: crate::vcs::BranchName::checked("main").expect("a branch"),
                     at: "2026-09-08T11:00:00.000Z".into(),
                 },
             )]),

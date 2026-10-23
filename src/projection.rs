@@ -366,8 +366,8 @@ pub struct RunState {
     /// Where the latest `oneagentgraph` record of each node said its turn was:
     /// what a note to a node with no turn in flight is addressed to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    // llmlint: ignore[invalid_states_unrepresentable] keyed as `held_since` beside it is, by the node id the record carries; the value is the pair `agentgraph::TurnAddress::of` accepted, kept as its two strings because that type is published and carries no serde.
-    pub(crate) last_turns: BTreeMap<String, TurnAt>,
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `held_since` beside it is, by the node id the record carries.
+    pub(crate) last_turns: BTreeMap<String, crate::agentgraph::TurnAddress>,
     /// Every node a `node-dispatched` of this crate's named, whatever became of it
     /// since: what `status` counts a run's own dispatches by.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -379,7 +379,7 @@ pub struct RunState {
     /// The first record of each node's latest session `onevcs` opened: what the
     /// write-back pins a dispatch in flight to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value holds only a base `BranchName::checked` accepted.
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is.
     pub(crate) sessions_opened: BTreeMap<String, SessionOpened>,
     /// Every node an `edit-committed` added, as the newest addition wrote it —
     /// removed nodes included, which the graph no longer holds.
@@ -1956,16 +1956,6 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     }
 }
 
-/// Where one node's turn was addressed: [`RunState::last_turns`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TurnAt {
-    /// The `oneagentgraph` run.
-    pub(crate) run: String,
-    /// The member within it.
-    pub(crate) member: String,
-}
-
 /// What a node's session's first `session-opened` said:
 /// [`RunState::sessions_opened`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1973,10 +1963,11 @@ pub(crate) struct TurnAt {
 pub(crate) struct SessionOpened {
     /// The session's token, where the record named one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) token: Option<String>,
+    pub(crate) token: Option<onevcs::SessionToken>,
     /// The base it opened against.
-    pub(crate) base: String,
+    pub(crate) base: crate::vcs::BranchName,
     /// The record's own `ts`.
+    // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
     pub(crate) at: String,
 }
 
@@ -1994,13 +1985,7 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
             .zip(event.labels.member.as_deref())
             .and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member));
         if let Some(address) = address {
-            state.last_turns.insert(
-                node.clone(),
-                TurnAt {
-                    run: address.run().to_owned(),
-                    member: address.member().to_owned(),
-                },
-            );
+            state.last_turns.insert(node.clone(), address);
         }
     }
     if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
@@ -2010,7 +1995,7 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
         .payload
         .get("token")
         .and_then(Value::as_str)
-        .map(str::to_owned);
+        .map(|token| onevcs::SessionToken(token.to_owned()));
     // One open is journalled twice — as the dispatch relays it and as `onevcs`
     // streams it — and the first of them is the one kept.
     if token.is_some()
@@ -2031,7 +2016,7 @@ fn fold_addresses(state: &mut RunState, event: &Envelope) {
             node.clone(),
             SessionOpened {
                 token,
-                base: base.as_str().to_owned(),
+                base,
                 at: event.ts.clone(),
             },
         );

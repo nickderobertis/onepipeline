@@ -1407,7 +1407,7 @@ fn dispatches(state: &RunState) -> BTreeMap<String, crate::continuation::StoredD
             let opened = state.sessions_opened.get(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
-                base: opened.base.clone(),
+                base: opened.base.as_str().to_owned(),
                 opened_at: opened.at.clone(),
             };
             Some((node, dispatch))
