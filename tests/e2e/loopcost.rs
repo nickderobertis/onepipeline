@@ -410,8 +410,9 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// How often [`a_claim_read_due_inside_a_window_is_held_out_of_it`]'s world reads
-/// its claim, were nothing to hold that read out of the window.
-const CLAIM_DUE_INSIDE_A_WINDOW: Duration = Duration::from_secs(5);
+/// its claim, were nothing to hold that read out of the window: the shortest
+/// interval the setting takes, so the window over it costs seconds.
+const CLAIM_DUE_INSIDE_A_WINDOW: Duration = Duration::from_secs(1);
 
 // llmlint: ignore-block[tests_mirror_real_usage] whether a driver read its project's claim
 // inside an interval is reported by nothing a user reads — a read that finds the project its own
@@ -427,8 +428,8 @@ const CLAIM_DUE_INSIDE_A_WINDOW: Duration = Duration::from_secs(5);
 /// on a runner slow enough that those dispatches end between four and five minutes
 /// in, the read lands in the window, and what it costs reads as an idle pass's.
 /// Waiting that long here would be a slow runner's timing restated; a world whose
-/// claim is due every few seconds puts a read in every window instead, which is
-/// the same ordering on any host.
+/// claim is due every second puts a read in every window instead, which is the
+/// same ordering on any host.
 #[test]
 fn a_claim_read_due_inside_a_window_is_held_out_of_it() {
     let world = measuring(World::new("loopcost-claim").with_env(
