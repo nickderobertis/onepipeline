@@ -827,7 +827,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.8.0"
-onevcs = "0.56.6"
+onevcs = "0.56.7"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
