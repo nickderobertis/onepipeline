@@ -1380,7 +1380,7 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     first
         .exited(0)
         .out_has("build: running")
-        .out_has("now bash echo the turn ran")
+        .out_has("now echo the turn ran (")
         .out_has("event(s)")
         .out_has("ago");
     let before = events_reported(&first.stdout, "build");
@@ -1402,7 +1402,7 @@ fn status_says_what_a_live_dispatch_is_doing_and_the_readout_advances() {
     second
         .exited(0)
         .out_has("build: running")
-        .out_has("now bash cargo llvm-cov --workspace");
+        .out_has("now cargo llvm-cov --workspace (");
     assert!(
         events_reported(&second.stdout, "build") > before,
         "the readout did not advance while the node was still in flight:\n{}",
@@ -1847,7 +1847,7 @@ fn transcript_renders_a_real_dispatched_turns_tools_and_words() {
 
     let transcript = world.run(&["transcript", "read", "build"]);
     transcript.exited(0).out_has("read  build");
-    transcript.out_has("tool_call bash  echo the turn ran");
+    transcript.out_has(r#"tool_call bash  {"command":"echo the turn ran"}"#);
     transcript.out_has("report ");
     transcript.out_has("Ran what the task asked for.");
     // Both sources carry what the tool **returned**, which is the half a reader
@@ -1956,15 +1956,20 @@ fn the_views_show_what_a_dispatched_agent_said_and_thought_apart_from_its_tools(
         .lines()
         .filter(|line| line.contains("turn-activity"))
         .collect();
-    assert_eq!(
-        activities
-            .iter()
-            .filter(|line| line.trim_end().ends_with("turn-activity"))
-            .count(),
-        2,
-        "the call and its answer no longer read as the bare kind:\n{}",
-        monitor.stdout
-    );
+    // The call and its answer reference their history, so each reads as the
+    // one line describing it: the command, and the first line it returned.
+    for described in [
+        "turn-activity echo the turn ran",
+        "turn-activity the turn ran",
+    ] {
+        assert!(
+            activities
+                .iter()
+                .any(|line| line.trim_end().ends_with(described)),
+            "the call and its answer do not read as their descriptions:\n{}",
+            monitor.stdout
+        );
+    }
 
     // `transcript`: both sources — the store's relayed summaries and the
     // retained report — draw the words under their marks, and the exchange
@@ -1975,10 +1980,15 @@ fn the_views_show_what_a_dispatched_agent_said_and_thought_apart_from_its_tools(
         .stdout
         .split_once("\n  report ")
         .expect("the transcript renders the store's summaries and then the report");
-    // The call's input reads as each source has always carried it: the store's
-    // relayed summary, and the report's structured input.
+    // The call's input reads whole from either source: the history file the
+    // store's record references, and the report's structured input.
     for (source, text, indent, input) in [
-        ("store", from_the_store, "    ", "echo the turn ran"),
+        (
+            "store",
+            from_the_store,
+            "    ",
+            r#"{"command":"echo the turn ran"}"#,
+        ),
         (
             "report",
             from_the_report,

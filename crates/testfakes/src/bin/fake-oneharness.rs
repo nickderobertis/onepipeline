@@ -574,13 +574,15 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             "oneharness run requires the prompt, on `--prompt-file -` or on `--prompt`",
         );
     };
-    // The agent side is the one that asks for its events: onejudge streams both
-    // sides since 0.21, so that each says where its history is as its run
-    // begins, but only the side doing the work has activity to relay.
-    let side = if args.iter().any(|arg| arg == "--events") {
-        Side::Agent
-    } else {
+    // The judge side is the one whose prompt opens on a judge's brief — the
+    // supervisor's decision or the evaluator's verdict. Since onejudge 0.21 no
+    // flag tells the two apart: both sides stream, so each says where its
+    // history is as its run begins, and a judge whose posture can change the
+    // tree asks for its events as the agent does.
+    let side = if prompt.contains(SUPERVISOR_OPENING) || prompt.contains(fake::EVALUATOR_OPENING) {
         Side::Judge
+    } else {
+        Side::Agent
     };
     let streamed = args.iter().any(|arg| arg == "--stream");
     let view = match View::of(args) {

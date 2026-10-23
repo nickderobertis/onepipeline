@@ -4126,7 +4126,7 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     let doing = activity.doing.as_ref().map(|doing| match doing {
         crate::projection::Doing::Said(said) => said.clone(),
         crate::projection::Doing::Referenced(reference) => match transcript::resolve(reference) {
-            Ok(resolved) => one_line(&resolved.description),
+            Ok(resolved) => one_line(&voiced(&resolved)),
             Err(unresolved) => one_line(&unresolved.to_string()),
         },
     });
@@ -4577,9 +4577,24 @@ pub(crate) fn described(event: &Envelope) -> Option<String> {
         return None;
     }
     transcript::of_record(&event.kind.0, &event.payload).map(|resolved| match resolved {
+        Ok(resolved) if event.kind.0 == "turn-activity" => voiced(&resolved),
         Ok(resolved) => resolved.description,
         Err(unresolved) => unresolved.to_string(),
     })
+}
+
+/// An activity's description as a readout draws it: the agent's own words and
+/// reasoning under the marks oneharness's text view draws them with — the same
+/// line a copy of them reads as — and a tool's description as it is.
+fn voiced(resolved: &transcript::Resolved) -> String {
+    let voice = match resolved.text {
+        transcript::Text::Message(_) => Some(Voice::Message),
+        transcript::Text::Reasoning(_) => Some(Voice::Reasoning),
+        _ => None,
+    };
+    voice
+        .and_then(|voice| voice.block(&resolved.description))
+        .unwrap_or_else(|| resolved.description.clone())
 }
 
 /// How a landing reads on a rendered line.
