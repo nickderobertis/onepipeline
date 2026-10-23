@@ -1915,25 +1915,6 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     }
 }
 
-/// Record where each dispatch an adoption is clearing was working, and pin its
-/// node there.
-///
-/// Only the nodes the arm above is about to drop: a node not recorded `running`
-/// has no dispatch in flight, and an adoption of a run that had none changes
-/// nothing at all.
-///
-/// **Naming it is the floor, and pinning it is what recovers the work.** The
-/// session `onevcs` opened for the dead driver's dispatch is still open, and
-/// that library takes an open session up again when the branch it holds is the
-/// branch the next dispatch pins — so a node pinned here continues on the branch
-/// its previous dispatch committed to instead of cutting a second one beside it
-/// and leaving the first unreferenced.
-///
-/// There is one branch to pin rather than two to choose between, which is why
-/// nothing here weighs a `branch` the *planner* wrote against the session's: a
-/// pin is honoured or refused, so a session that opened at all opened on the
-/// branch the node named, and a node that named none has the branch `onevcs`
-/// gave it. The session is asked either way — it is the one that knows.
 /// The hold kind [`RunState::held_since`] dates a release hold under: a reason
 /// awaiting a dependency's release.
 pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
@@ -2009,6 +1990,25 @@ fn fold_recall(state: &mut RunState, event: &Envelope) {
     }
 }
 
+/// Record where each dispatch an adoption is clearing was working, and pin its
+/// node there.
+///
+/// Only the nodes the arm above is about to drop: a node not recorded `running`
+/// has no dispatch in flight, and an adoption of a run that had none changes
+/// nothing at all.
+///
+/// **Naming it is the floor, and pinning it is what recovers the work.** The
+/// session `onevcs` opened for the dead driver's dispatch is still open, and
+/// that library takes an open session up again when the branch it holds is the
+/// branch the next dispatch pins — so a node pinned here continues on the branch
+/// its previous dispatch committed to instead of cutting a second one beside it
+/// and leaving the first unreferenced.
+///
+/// There is one branch to pin rather than two to choose between, which is why
+/// nothing here weighs a `branch` the *planner* wrote against the session's: a
+/// pin is honoured or refused, so a session that opened at all opened on the
+/// branch the node named, and a node that named none has the branch `onevcs`
+/// gave it. The session is asked either way — it is the one that knows.
 fn abandon_the_dispatch_in_flight(state: &mut RunState) {
     // The same answer the adopting driver records in the journal, so what a
     // reader folds and what the run's own `driver-adopted` says are one

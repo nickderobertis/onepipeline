@@ -434,6 +434,7 @@ fn side_of(event: &Envelope) -> Option<Role> {
 /// writer reopening a run resumes the clock rather than walking the store again.
 ///
 /// [`of_run`]: crate::telemetry::of_run
+// llmlint: ignore[changed_behavior_has_e2e] how a late record's span is attributed is a consequence of where the checkpoint folds it, which `journal_scaling::a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered` drives; a timing assertion on it would hold a wall-clock figure, which this repository's journeys do not.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Aggregate {

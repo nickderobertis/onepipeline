@@ -1016,13 +1016,6 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     });
 }
 
-/// A worker that is alive and doing nothing is still reported quiet.
-///
-/// The watch was reset by the one event whose literal meaning is "nothing is
-/// happening", so it could fire for a worker that had *died* and never for one
-/// that was wedged. The heartbeat itself is not stopped — a member is declared
-/// dead on it one layer down — and the claim here is only that it is not
-/// mistaken for work.
 /// Every distinct beat the run's `liveness.json` has shown so far for this world:
 /// a member's beats are kept there rather than journalled.
 fn beats_of(world: &World, run: &str) -> Vec<String> {
@@ -1049,6 +1042,13 @@ fn beats_of(world: &World, run: &str) -> Vec<String> {
     beats
 }
 
+/// A worker that is alive and doing nothing is still reported quiet.
+///
+/// The watch was reset by the one event whose literal meaning is "nothing is
+/// happening", so it could fire for a worker that had *died* and never for one
+/// that was wedged. The heartbeat itself is not stopped — a member is declared
+/// dead on it one layer down — and the claim here is only that it is not
+/// mistaken for work.
 #[test]
 fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
     let world = World::new("plan-heartbeat");
