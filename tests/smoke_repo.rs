@@ -15,10 +15,15 @@
 mod repo;
 
 #[cfg(unix)]
+#[path = "smoke/cleanup.rs"]
+mod cleanup;
+
+#[cfg(unix)]
 mod unix {
     use std::fs;
     use std::path::{Path, PathBuf};
 
+    use crate::cleanup::{Created, Tracked};
     use crate::repo;
 
     /// A slug nothing owns: the probe is answered by the stand-in, so no name
@@ -424,6 +429,186 @@ mod unix {
         let refusal = repo::gh_read(&read).expect_err("a not-found is an answer");
         assert_eq!(refusal.cause, repo::Cause::NotFound, "{refusal}");
         assert_eq!(api_calls(&record), 1, "an answer is never asked again");
+    }
+
+    /// Where the cleanup stand-in keeps the scratch repository it plays: `pulls/<n>/` holds
+    /// each pull request's `state`, `head` and `title`, `branches/<name>` each branch, and
+    /// `close-error` / `delete-error`, when present, are what a close or a delete is refused
+    /// with — doing what it was asked first only where `close-takes` / `delete-takes` is
+    /// there, as GitHub sometimes does behind its own failure.
+    const STATE_ENV: &str = "ONEPIPELINE_SMOKE_GH_STATE";
+
+    /// The cleanup's `gh` stand-in: one fixed program answering the five calls
+    /// [`Created::clean`] makes from the files under [`STATE_ENV`], and recording each.
+    fn cleanup_stand_in_program() -> String {
+        format!(
+            r#"#!/bin/sh
+s="${STATE_ENV}"
+printf '%s\n' "$*" >> "$s/record"
+refuse() {{ cat "$s/$1-error" >&2; exit 1; }}
+case "$1 $2" in
+  'pr list')
+    printf '['; sep=''
+    for d in "$s"/pulls/*; do
+      [ "$(cat "$d/state")" = OPEN ] || continue
+      printf '%s{{"number":%s,"title":"%s"}}' "$sep" "$(basename "$d")" "$(cat "$d/title")"
+      sep=,
+    done
+    printf ']\n' ;;
+  'pr view')
+    d="$s/pulls/$3"
+    printf '{{"state":"%s","headRefName":"%s"}}\n' "$(cat "$d/state")" "$(cat "$d/head")" ;;
+  'pr close')
+    if [ -f "$s/close-error" ]; then
+      [ -f "$s/close-takes" ] && printf CLOSED > "$s/pulls/$3/state"
+      refuse close
+    fi
+    printf CLOSED > "$s/pulls/$3/state" ;;
+  'api -X')
+    b="${{4#*/git/refs/heads/}}"
+    if [ -f "$s/delete-error" ]; then
+      [ -f "$s/delete-takes" ] && rm -f "$s/branches/$b"
+      refuse delete
+    fi
+    rm -f "$s/branches/$b" ;;
+  'api '*)
+    case "$2" in
+      */git/ref/heads/*)
+        [ -f "$s/branches/${{2#*/git/ref/heads/}}" ] && {{ echo '{{}}'; exit 0; }}
+        echo 'gh: Not Found (HTTP 404)' >&2; exit 1 ;;
+      */git/matching-refs/heads/*)
+        p="${{2#*/git/matching-refs/heads/}}"
+        printf '['; sep=''
+        for f in $(cd "$s/branches" && find . -type f | sed 's|^\./||'); do
+          case "$f" in "$p"*) printf '%s{{"ref":"refs/heads/%s"}}' "$sep" "$f"; sep=, ;; esac
+        done
+        printf ']\n' ;;
+    esac ;;
+  *) echo "the cleanup stand-in was asked something it does not play: $*" >&2; exit 2 ;;
+esac
+"#
+        )
+    }
+
+    /// A scratch repository holding one open pull request #7, titled with `STAMP`, from the
+    /// branch `run-x/a` that is still there — what a journey leaves for its cleanup — with a
+    /// close and a delete each refused with `refused` and taken or not as `takes` says.
+    fn cleanup_repository(root: &Path, name: &str, refused: &str, takes: (bool, bool)) -> PathBuf {
+        let state = root.join(name);
+        let pull = state.join("pulls").join("7");
+        fs::create_dir_all(&pull).expect("the stand-in's pull request");
+        fs::write(pull.join("state"), "OPEN").expect("its state");
+        fs::write(pull.join("head"), "run-x/a").expect("its head");
+        fs::write(pull.join("title"), format!("feat: a ({STAMP})")).expect("its title");
+        fs::create_dir_all(state.join("branches").join("run-x")).expect("the branches");
+        fs::write(state.join("branches").join("run-x").join("a"), "").expect("its branch");
+        for (what, taken) in [("close", takes.0), ("delete", takes.1)] {
+            fs::write(state.join(format!("{what}-error")), refused).expect("the refusal");
+            if taken {
+                fs::write(state.join(format!("{what}-takes")), "").expect("the marker");
+            }
+        }
+        let bin = state.join("bin");
+        fs::create_dir(&bin).expect("the stand-in has a bin directory");
+        onepipeline_testfakes::executable(&bin.join("gh"), cleanup_stand_in_program());
+        std::env::set_var(STATE_ENV, &state);
+        let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&host_path));
+        std::env::set_var(
+            "PATH",
+            std::env::join_paths(paths).expect("the test PATH joins"),
+        );
+        state
+    }
+
+    const STAMP: &str = "run-x";
+
+    /// The journey's own last step, [`Created::clean`], run against the stand-in for what
+    /// one host recorded opening: #7 from `run-x/a`.
+    fn clean() -> (Vec<String>, Vec<String>) {
+        let mut created = Created {
+            slug: THROWAWAY.to_owned(),
+            stamp: STAMP.to_owned(),
+            prefixes: vec!["run-x/".to_owned()],
+            cleaned: false,
+        };
+        let tracked = Tracked {
+            pulls: [7].into(),
+            branches: ["run-x/a".to_owned()].into(),
+        };
+        let cleanup = created.clean(&tracked);
+        (cleanup.observed, cleanup.failures)
+    }
+
+    /// A close or a delete GitHub fails to answer is decided by the cleanup's read-back, not
+    /// by the refusal: GitHub's own failure — the wording `gh pr close` met in CI run
+    /// 39891240262 — over a close and a delete that both happened is a finished cleanup, and
+    /// the same failure over a close that did not, or a delete that did not, fails it naming
+    /// what the read-back still found. A refusal that is an answer about the request fails
+    /// it however the read-back reads, as it always did.
+    ///
+    /// Its own test, and so its own process under nextest: `PATH` is process-global.
+    #[test]
+    fn a_cleanup_github_failed_to_answer_is_decided_by_what_it_reads_back() {
+        let scratch = scratch();
+        let went_wrong = "API call failed: GraphQL: Something went wrong while executing your \
+                          query on 2026-10-23T02:50:52Z.";
+
+        cleanup_repository(&scratch.0, "both-taken", went_wrong, (true, true));
+        let (observed, failures) = clean();
+        assert!(
+            failures.is_empty(),
+            "a close and a delete that happened behind GitHub's failure finish the cleanup: \
+             {failures:#?} (observed {observed:#?})"
+        );
+        for step in [
+            "closing #7, left to the read-back",
+            "deleting run-x/a, left to the read-back",
+            r#"read back from GitHub: closed [7] of {7}; gone ["run-x/a"] of {"run-x/a"}"#,
+        ] {
+            assert!(
+                observed.iter().any(|seen| seen.contains(step)),
+                "the cleanup records {step:?}: {observed:#?}"
+            );
+        }
+
+        cleanup_repository(&scratch.0, "close-lost", went_wrong, (false, true));
+        let (_, failures) = clean();
+        for found in [
+            "#7 reads OPEN after the cleanup",
+            "still open after the cleanup: {7}",
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(found)),
+                "a close the read-back finds undone fails the cleanup with {found:?}: \
+                 {failures:#?}"
+            );
+        }
+
+        cleanup_repository(&scratch.0, "delete-lost", went_wrong, (true, false));
+        let (_, failures) = clean();
+        for found in [
+            "run-x/a is still on the remote after the cleanup",
+            r#"branches under the prefix after the cleanup: {"run-x/a"}"#,
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(found)),
+                "a delete the read-back finds undone fails the cleanup with {found:?}: \
+                 {failures:#?}"
+            );
+        }
+
+        let invalid = "HTTP 422: Validation Failed (https://api.github.com/graphql)";
+        cleanup_repository(&scratch.0, "answered", invalid, (true, true));
+        let (_, failures) = clean();
+        for found in ["closing #7: ", "deleting run-x/a: ", invalid] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(found)),
+                "a refusal that answers about the request fails the cleanup with {found:?}: \
+                 {failures:#?}"
+            );
+        }
     }
 
     /// A synthetic scratch identity, owned by nobody: every `gh` it reaches is

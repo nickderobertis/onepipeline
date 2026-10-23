@@ -24,9 +24,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use crate::continuation::{
-    change, host, onepipeline, open_pulls, ran, recorded, said, Created, Tracked,
-};
+use crate::cleanup::{Created, Tracked};
+use crate::continuation::{change, host, onepipeline, open_pulls, ran, recorded, said};
 use crate::harness::{plan_of, World};
 use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, run_stamp, scratch_repo};
