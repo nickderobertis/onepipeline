@@ -1164,10 +1164,6 @@ onevcs-testing = "0.19.13"
 # holds its plan-store CLI to the release this engine links, so it adopts that approval
 # only once this pin does. The public held-task-image read (0.9.4) is what creating
 # write-backs use to carry authoring images through the shadow store.
-# Breaking since 0.9.2: `EngineError` gains `NoProjectCounterpart`, `VersionMoved` and
-# the five `TargetTask*` refusals, which `src/writeback.rs` names in the store's own
-# word; and `CopyRequest` gains `status_policy` and `target_task`, which every copy here
-# sets to `StatusPolicy::Source` and `None`, the behaviour before either existed.
 onetaskgraph-core = "=0.11.0"
 onetaskgraph-plugin-api = "=0.11.0"
 onetaskgraph-local-md = "=0.11.0"
