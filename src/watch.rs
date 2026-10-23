@@ -325,7 +325,9 @@ pub(crate) fn watch(
             wait.read(&fresh);
             for event in fresh
                 .iter()
-                .filter(|event| meaningful(event) && request.filter.matches(event))
+                .filter(|event| {
+                    (meaningful(event) || referenced(event)) && request.filter.matches(event)
+                })
             {
                 sink(Frame::Event { view: &view, event })?;
                 quiet_since = Instant::now();
@@ -1205,6 +1207,23 @@ fn meaningful(event: &Envelope) -> bool {
         && PipelineKind::from_wire(&event.kind).is_some_and(|kind| MEANINGFUL.contains(&kind))
 }
 
+/// Whether this is a turn record of a dispatch in flight that references its
+/// history: shown beside the [`MEANINGFUL`] kinds, through the caller's own
+/// profile, as the one line [`views::described`] says it holds.
+///
+/// Beside rather than among them, because the set above is this crate's own
+/// closed vocabulary and these are a sibling's records; and only those carrying
+/// a reference, so a record carrying a bounded copy — every record a journal
+/// written before references holds — is passed over exactly as it always was.
+fn referenced(event: &Envelope) -> bool {
+    event.source == Source::Agentgraph
+        && matches!(
+            event.kind.0.as_str(),
+            "turn-started" | "turn-message" | "turn-activity"
+        )
+        && event.payload.contains_key("transcript")
+}
+
 /// The terminal condition this pass reached, if it reached one, and whether a
 /// blocking surface is among what ended it.
 ///
@@ -1438,7 +1457,14 @@ enum Record<'a> {
     /// of it — exactly as `next` hands its caller the events it read, so a
     /// consumer needing a field this crate does not put on the line never has to
     /// go back to the store for it.
-    Event { event: &'a Envelope },
+    Event {
+        event: &'a Envelope,
+        /// What a turn record's `transcript` reference resolved to: its
+        /// description and its whole text, or why it could not be read.
+        /// Omitted for every record that carries no reference.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript: Option<ResolvedRecord>,
+    },
     Heartbeat {
         run_id: &'a str,
         unread: UnreadRecord<'a>,
@@ -1462,6 +1488,66 @@ enum Record<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<&'a Summary>,
     },
+}
+
+/// A turn record's referenced content, as the machine record carries it.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ResolvedRecord {
+    /// The description, and the whole text under the field naming what it is:
+    /// `instruction`, `message`, `reasoning`, or a tool's `input` and `output`.
+    Resolved {
+        description: String,
+        #[serde(flatten)]
+        text: serde_json::Map<String, serde_json::Value>,
+    },
+    /// The file the reference names, why it was not read, and the line every
+    /// view renders that as.
+    Unavailable {
+        unavailable: String,
+        path: String,
+        why: views::transcript::Why,
+    },
+}
+
+impl ResolvedRecord {
+    fn of(event: &Envelope) -> Option<Self> {
+        use views::transcript::Text;
+        if !referenced(event) {
+            return None;
+        }
+        Some(
+            match views::transcript::of_record(&event.kind.0, &event.payload)? {
+                Ok(resolved) => {
+                    let mut text = serde_json::Map::new();
+                    match &resolved.text {
+                        Text::Instruction(said) => {
+                            text.insert("instruction".into(), said.clone().into());
+                        }
+                        Text::Message(said) => {
+                            text.insert("message".into(), said.clone().into());
+                        }
+                        Text::Reasoning(said) => {
+                            text.insert("reasoning".into(), said.clone().into());
+                        }
+                        Text::Tool { output, .. } => {
+                            text.insert("input".into(), resolved.text.input_text().into());
+                            text.insert("output".into(), output.clone().into());
+                        }
+                    }
+                    Self::Resolved {
+                        description: resolved.description,
+                        text,
+                    }
+                }
+                Err(unresolved) => Self::Unavailable {
+                    unavailable: unresolved.to_string(),
+                    path: unresolved.path.display().to_string(),
+                    why: unresolved.why,
+                },
+            },
+        )
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1525,7 +1611,10 @@ impl Lines {
         let (human, machine) = match frame {
             Frame::Event { view, event } => (
                 views::event_line(view, event),
-                rendered(&Record::Event { event })?,
+                rendered(&Record::Event {
+                    event,
+                    transcript: ResolvedRecord::of(event),
+                })?,
             ),
             Frame::Tick { view } => {
                 let unread = view.unread();

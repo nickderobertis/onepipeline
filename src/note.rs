@@ -1153,16 +1153,21 @@ impl Routing {
     /// says the turn opened on *a* note, and several notes routed at once — two
     /// in one envelope are acknowledged one turn apart and recorded at one
     /// instant — open separate turns, so the stamp alone would put every
-    /// pending note on the first of them. An instruction cut short of the text
-    /// by the payload bound is no evidence either way, and confirms nothing.
+    /// pending note on the first of them. `instruction` is the prompt the turn
+    /// was opened with, resolved through [`crate::views::transcript`] — the
+    /// whole of it where the record references its history, so a note past the
+    /// bound a copy is cut to is still found. A copy cut short of the text is no
+    /// evidence either way, and neither is a reference that resolved to nothing:
+    /// both confirm nothing.
     fn presented_by(
         &mut self,
         party: Party,
         opened: &oneagentgraph::event::TurnStarted,
+        instruction: Option<&str>,
         text: &str,
     ) -> Option<Evidence> {
         let turn = opened.turn;
-        let carries_this_note = opened.instruction.contains(text);
+        let carries_this_note = instruction.is_some_and(|instruction| instruction.contains(text));
         let delivered =
             opened.origin == Some(oneagentgraph::event::Origin::Delivered) && carries_this_note;
         let shown_to_both = Self::NextTurnToOpen {
@@ -1416,6 +1421,14 @@ impl Presentations {
         } else {
             return Vec::new();
         };
+        let resolved = crate::views::transcript::of_record(&envelope.kind.0, &envelope.payload);
+        let instruction = match &resolved {
+            Some(Ok(crate::views::transcript::Resolved {
+                text: crate::views::transcript::Text::Instruction(instruction),
+                ..
+            })) => Some(instruction.as_str()),
+            _ => None,
+        };
         let mut shown = Vec::new();
         for routed in &mut self.routed {
             if started_at < routed.routed_at {
@@ -1424,7 +1437,7 @@ impl Presentations {
             let Some(evidence) =
                 routed
                     .routing
-                    .presented_by(party, &opened, routed.note.text.as_str())
+                    .presented_by(party, &opened, instruction, routed.note.text.as_str())
             else {
                 continue;
             };

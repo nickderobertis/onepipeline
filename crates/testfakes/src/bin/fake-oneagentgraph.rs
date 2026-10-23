@@ -2118,9 +2118,10 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     // `instruction_truncated` is that library's statement about its own field,
     // and this double publishes what it really did.
     match serde_json::to_value(oneagentgraph::event::TurnStarted {
+        transcript: None,
         turn: 1,
         role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-        instruction,
+        instruction: Some(instruction),
         instruction_truncated: false,
         started_at: fake::now(),
         // The first turn's instruction is the composed task, which is the one
@@ -2590,9 +2591,10 @@ fn emit(
         // and a double that pre-cut it would answer that question for the code
         // under test.
         match serde_json::to_value(oneagentgraph::event::TurnMessage {
+            transcript: None,
             turn: 1,
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-            text: said,
+            text: Some(said),
             truncated: false,
             // The agent's own words: none of the sibling's three origins names
             // them, so the sibling stamps nothing and so does this double.

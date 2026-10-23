@@ -570,6 +570,14 @@ pub struct NodeActivity {
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
     pub doing: Option<String>,
+    /// The last `turn-activity` this node's dispatch recorded, where it
+    /// referenced its history rather than carrying a copy: what it is doing is
+    /// that reference's description, read when the readout is drawn rather than
+    /// when the record is folded — a fold reads no history file, so a state
+    /// resumed from a checkpoint never carries an answer the file has since
+    /// changed. Set in place of [`doing`](Self::doing), never beside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<crate::views::transcript::TranscriptRef>,
     /// What this node's dispatch has done, once it has done anything.
     ///
     /// Named for progress rather than for events because a heartbeat is an event
@@ -2398,6 +2406,27 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
+    // A record referencing its history carries no copy to read, so what it is
+    // doing is the reference itself, described when the readout is drawn. A
+    // result answers the call already on the line, as below; a reference this
+    // build cannot read says so rather than leaving the last line standing.
+    if event.payload.contains_key("transcript") {
+        if text("kind") == crate::report::TOOL_RESULT {
+            return;
+        }
+        match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
+            Some(Ok(reference)) => {
+                activity.transcript = Some(reference);
+                activity.doing = None;
+            }
+            Some(Err(unresolved)) => {
+                activity.transcript = None;
+                activity.doing = Some(unresolved.to_string());
+            }
+            None => {}
+        }
+        return;
+    }
     // The agent's own words name no tool, and are what it is doing all the
     // same: its text or its reasoning, on the line oneharness draws it on, so a
     // node thinking between two calls reads as thinking rather than as still
@@ -2405,6 +2434,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
     if let Some(voice) = crate::report::Voice::of(text("kind")) {
         if let Some(said) = voice.line(text("output")) {
             activity.doing = Some(said);
+            activity.transcript = None;
         }
         return;
     }
@@ -2424,6 +2454,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .join(" ");
     if !summary.is_empty() {
         activity.doing = Some(summary);
+        activity.transcript = None;
     }
 }
 

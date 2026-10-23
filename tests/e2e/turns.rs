@@ -21,6 +21,7 @@ use oneagentgraph::event::{
     EventKind, JudgeDecided, Party, TurnActivity, TurnCompleted, TurnMessage, TurnStarted,
     MAX_PAYLOAD_TEXT_BYTES,
 };
+use onepipeline::views::transcript::{Resolved, Text};
 use serde_json::Value;
 
 const NODE: &str = "work";
@@ -49,6 +50,30 @@ fn payload<T: serde::de::DeserializeOwned>(event: &Value, kind: EventKind) -> T 
             kind.as_str()
         )
     })
+}
+
+/// What one relayed turn record's content resolves to, through the engine's own
+/// resolver: the whole text out of the history file a reference names, or the
+/// copy a record without one carries — whichever this producer wrote.
+fn content(event: &Value) -> Resolved {
+    let kind = event["kind"].as_str().expect("an envelope names its kind");
+    let payload = event["payload"]
+        .as_object()
+        .expect("an envelope carries a payload");
+    match onepipeline::views::transcript::of_record(kind, payload) {
+        Some(Ok(resolved)) => resolved,
+        Some(Err(unresolved)) => panic!("a relayed {kind} did not resolve: {unresolved}: {event}"),
+        None => panic!("a relayed {kind} is no turn record: {event}"),
+    }
+}
+
+/// The whole text one record resolves to, whatever kind of text it is.
+fn said(event: &Value) -> String {
+    match content(event).text {
+        Text::Instruction(text) | Text::Message(text) | Text::Reasoning(text) => text,
+        Text::Tool { output, .. } => output.unwrap_or_default(),
+        other => panic!("{other:?}"),
+    }
 }
 
 /// The whole of a real dispatched turn reaches the merged store: its opening,
@@ -91,8 +116,8 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
     // The instruction is **the node's own task prose**, which is the whole point
     // of the field: a turn's opening that carried some other text would say the
     // dispatch was asked something it was not.
-    assert_eq!(started.instruction, task, "{opening}");
-    assert!(!started.instruction_truncated, "{opening}");
+    assert_eq!(said(opening), task, "{opening}");
+    assert!(!content(opening).cut, "{opening}");
     assert!(
         started.started_at.ends_with('Z'),
         "the turn opened at no instant: {opening}"
@@ -107,7 +132,7 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
         .iter()
         .map(|event| payload(event, EventKind::TurnActivity))
         .collect();
-    let [thought, call, result, said] = &acts[..] else {
+    let [thought, call, result, spoke] = &acts[..] else {
         panic!(
             "the turn relayed {} activities, not its reasoning, the call, the answer and \
              its words: {activity:?}",
@@ -117,25 +142,29 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
     // The agent's own items are relayed as themselves: their text under
     // `output`, and nothing that would read them as a tool — no name, no input
     // summary, no call identity.
-    for (item, kind, text) in [
-        (thought, "reasoning", "The quickest proof is to run it."),
-        (said, "message", "Ran what the task asked for."),
+    for (item, event, kind, text) in [
+        (thought, &activity[0], "reasoning", "The quickest proof is to run it."),
+        (spoke, &activity[3], "message", "Ran what the task asked for."),
     ] {
         assert_eq!(item.kind, kind, "{activity:?}");
-        assert_eq!(item.output.as_deref(), Some(text), "{activity:?}");
+        assert_eq!(said(event), text, "{activity:?}");
         assert_eq!(item.name, None, "{activity:?}");
-        assert_eq!(item.detail, "", "{activity:?}");
+        assert!(item.detail.as_deref().unwrap_or_default().is_empty(), "{activity:?}");
         assert_eq!(item.tool_call_id, None, "{activity:?}");
     }
     assert!(
-        thought.index < call.index && result.index < said.index,
+        thought.index < call.index && result.index < spoke.index,
         "the turn's words are out of order with its exchange: {activity:?}"
     );
     assert_eq!(call.kind, "tool_call", "{activity:?}");
     assert_eq!(call.name.as_deref(), Some("bash"), "{activity:?}");
-    assert_eq!(call.detail, "echo the turn ran", "{activity:?}");
     assert_eq!(
-        call.output, None,
+        content(&activity[1]).description,
+        "echo the turn ran",
+        "{activity:?}"
+    );
+    assert!(
+        matches!(content(&activity[1]).text, Text::Tool { output: None, .. }),
         "a call carries an observation it has not been given yet: {activity:?}"
     );
     assert_eq!(result.kind, "tool_result", "{activity:?}");
@@ -143,11 +172,11 @@ fn a_real_dispatched_turn_relays_every_field_its_producer_publishes() {
     // failed result can say which tool failed (oneharness #1403).
     assert_eq!(result.name, call.name, "{activity:?}");
     assert_eq!(
-        result.output.as_deref(),
-        Some("the turn ran"),
+        said(&activity[2]),
+        "the turn ran",
         "the observation the tool returned did not survive the relay: {activity:?}"
     );
-    assert!(!result.output_truncated, "{activity:?}");
+    assert!(!content(&activity[2]).cut, "{activity:?}");
     assert_eq!(
         call.tool_call_id, result.tool_call_id,
         "the call and its answer reached the store joined to nothing: {activity:?}"
@@ -239,35 +268,37 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
     // — so a relay that renamed a field, dropped one, or stamped one of its own
     // onto a sibling's payload fails here rather than passing on a shape this
     // file restated.
-    let said = relayed(&world, "talk", EventKind::TurnMessage);
-    let messages: Vec<TurnMessage> = said
+    let spoken = relayed(&world, "talk", EventKind::TurnMessage);
+    let messages: Vec<TurnMessage> = spoken
         .iter()
         .map(|event| payload(event, EventKind::TurnMessage))
         .collect();
     let [answered, asked_again, answered_again] = &messages[..] else {
         panic!(
-            "the conversation relayed {} things said, not the three it is: {said:?}",
+            "the conversation relayed {} things said, not the three it is: {spoken:?}",
             messages.len()
         );
     };
 
     // The agent's reply: its own turn, its own party, and the words the turn
     // really ended on rather than a summary of them.
-    assert_eq!(answered.turn, 1, "{said:?}");
-    assert_eq!(answered.role, Party::Assistant.as_str(), "{said:?}");
-    assert_eq!(answered.text, ANSWERED, "{said:?}");
-    assert!(!answered.truncated, "{said:?}");
+    assert_eq!(answered.turn, 1, "{spoken:?}");
+    assert_eq!(answered.role, Party::Assistant.as_str(), "{spoken:?}");
+    assert_eq!(said(&spoken[0]), ANSWERED, "{spoken:?}");
+    assert!(!content(&spoken[0]).cut, "{spoken:?}");
 
     // The supervisor's, on the **other** party. This is what a single-sided
     // dispatch has no counterpart for, and getting the party wrong is invisible
     // to every reader that only counts messages.
-    assert_eq!(asked_again.role, Party::User.as_str(), "{said:?}");
-    assert_eq!(asked_again.text, ask, "{said:?}");
-    assert!(!asked_again.truncated, "{said:?}");
+    assert_eq!(asked_again.role, Party::User.as_str(), "{spoken:?}");
+    // Its whole text: a reference resolves to the closing text of the judge's
+    // own session, which is the decision it answered with — the ask inside it.
+    assert!(said(&spoken[1]).contains(ask), "{spoken:?}");
+    assert!(!content(&spoken[1]).cut, "{spoken:?}");
 
     // And the turn it produced: the same party as the first, a turn later.
-    assert_eq!(answered_again.turn, answered.turn + 1, "{said:?}");
-    assert_eq!(answered_again.role, Party::Assistant.as_str(), "{said:?}");
+    assert_eq!(answered_again.turn, answered.turn + 1, "{spoken:?}");
+    assert_eq!(answered_again.role, Party::Assistant.as_str(), "{spoken:?}");
 
     // Both parties' turns opened, and each opening says what that party was
     // answering. The second agent turn's instruction is the supervisor's own
@@ -279,24 +310,32 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
         .iter()
         .map(|event| payload(event, EventKind::TurnStarted))
         .collect();
-    let instructions: Vec<(&str, &str)> = openings
+    // Each resolves to the whole prompt that party's turn was opened on, so
+    // what is held is that it carries what that party was answering: a
+    // supervisor's prompt carries the agent's reply among the rest of its
+    // brief.
+    let instructions: Vec<(&str, String)> = openings
         .iter()
-        .map(|opening| (opening.role.as_str(), opening.instruction.as_str()))
+        .zip(&opened)
+        .map(|(opening, event)| (opening.role.as_str(), said(event)))
         .collect();
-    assert_eq!(
-        instructions,
-        vec![
-            (Party::Assistant.as_str(), task.as_str()),
-            (Party::User.as_str(), ANSWERED),
-            (Party::Assistant.as_str(), ask),
-            (Party::User.as_str(), ANSWERED),
-        ],
+    let answering = [
+        (Party::Assistant.as_str(), task.as_str()),
+        (Party::User.as_str(), ANSWERED),
+        (Party::Assistant.as_str(), ask),
+        (Party::User.as_str(), ANSWERED),
+    ];
+    assert!(
+        instructions.len() == answering.len()
+            && instructions
+                .iter()
+                .zip(answering)
+                .all(|((role, prompt), (party, answers))| *role == party
+                    && prompt.contains(answers)),
         "the conversation's turns did not open on what each party was answering: {opened:?}"
     );
     assert!(
-        openings
-            .iter()
-            .all(|opening| !opening.instruction_truncated),
+        opened.iter().all(|event| !content(event).cut),
         "{opened:?}"
     );
 
@@ -621,8 +660,8 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     };
     let said: TurnMessage = payload(message, EventKind::TurnMessage);
     assert_eq!(
-        said.text.len(),
-        MAX_PAYLOAD_TEXT_BYTES,
+        said.text.as_deref().map(str::len),
+        Some(MAX_PAYLOAD_TEXT_BYTES),
         "a payload text past the bound reached the store at its own length"
     );
     assert!(
@@ -717,7 +756,7 @@ fn a_relayed_payload_text_past_the_bound_is_cut_and_flagged_rather_than_served_w
     };
     let said: TurnMessage = payload(message, EventKind::TurnMessage);
     assert!(
-        !said.truncated && said.text.len() < MAX_PAYLOAD_TEXT_BYTES,
+        !said.truncated && said.text.as_deref().is_some_and(|text| text.len() < MAX_PAYLOAD_TEXT_BYTES),
         "an ordinary turn's words were cut: {message}"
     );
     // Absent rather than `false`: the producer omits its own flag when it did

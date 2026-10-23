@@ -105,11 +105,10 @@ fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
         match event["kind"].as_str() {
             Some("node-dispatched") => dispatched.push(Vec::new()),
             Some("turn-started") => {
-                if let (Some(turns), Some(instruction)) = (
-                    dispatched.last_mut(),
-                    event["payload"]["instruction"].as_str(),
-                ) {
-                    turns.push(instruction.to_string());
+                if let (Some(turns), Some(instruction)) =
+                    (dispatched.last_mut(), instruction_of(&event))
+                {
+                    turns.push(instruction);
                 }
             }
             _ => {}
@@ -118,7 +117,25 @@ fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
     dispatched
 }
 
+/// The whole prompt one relayed `turn-started` opened its turn on, read through
+/// the engine's own resolver: out of the history file a reference names, or the
+/// copy a record without one carries.
+fn instruction_of(event: &Value) -> Option<String> {
+    let payload = event["payload"].as_object()?;
+    match onepipeline::views::transcript::of_record("turn-started", payload)? {
+        Ok(resolved) => match resolved.text {
+            onepipeline::views::transcript::Text::Instruction(instruction) => Some(instruction),
+            other => panic!("a turn opening resolved to something other than a prompt: {other:?}"),
+        },
+        Err(unresolved) => panic!("a relayed turn opening did not resolve: {unresolved}: {event}"),
+    }
+}
+
 /// Every turn one node opened, read back through the producer's own payload type.
+///
+/// Its `instruction` is the whole prompt the turn opened on, resolved through
+/// [`instruction_of`] wherever the record references its history instead of
+/// carrying a copy.
 ///
 /// Through that type rather than by field name, because `deny_unknown_fields`
 /// on it is what makes this an assertion about the *whole* payload this engine
@@ -131,11 +148,22 @@ fn openings_of(world: &World, run: &str, node: &str) -> Vec<TurnStarted> {
         .iter()
         .filter(|event| event["labels"]["node"] == node && event["kind"] == "turn-started")
         .map(|event| {
-            serde_json::from_value(event["payload"].clone()).unwrap_or_else(|error| {
-                panic!("a relayed turn-started is not the payload the linked oneagentgraph declares: {error}: {event}")
-            })
+            let mut opening: TurnStarted = serde_json::from_value(event["payload"].clone())
+                .unwrap_or_else(|error| {
+                    panic!("a relayed turn-started is not the payload the linked oneagentgraph declares: {error}: {event}")
+                });
+            opening.instruction = instruction_of(event);
+            opening
         })
         .collect()
+}
+
+/// Whether one turn opened on a prompt carrying `text`.
+fn carries(opening: &TurnStarted, text: &str) -> bool {
+    opening
+        .instruction
+        .as_deref()
+        .is_some_and(|instruction| instruction.contains(text))
 }
 
 /// Every word a party of one node said, read back the same way.
@@ -512,7 +540,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     };
     let delivered = by_origin(Origin::Delivered);
     assert!(
-        delivered.len() == 1 && delivered[0].instruction.contains(NOTE),
+        delivered.len() == 1 && carries(delivered[0], NOTE),
         "the turn that carried the manager's note is not stamped as a delivery:\n{openings:#?}"
     );
     assert_eq!(
@@ -530,7 +558,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
         !supervised.is_empty()
             && supervised
                 .iter()
-                .all(|opening| opening.instruction.contains("Run the check again")),
+                .all(|opening| carries(opening, "Run the check again")),
         "the turn the supervisor sent the worker back on is not stamped as the \
          supervisor's own:\n{openings:#?}"
     );
@@ -4157,7 +4185,7 @@ fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown(
     let openings = openings_of(&world, run, "build");
     let read_in = openings
         .iter()
-        .find(|opening| opening.instruction.contains(NOTE))
+        .find(|opening| carries(opening, NOTE))
         .unwrap_or_else(|| panic!("no worker turn opened on the note's text:\n{openings:#?}"));
     assert_eq!(read_in.origin, Some(Origin::Supervisor), "{read_in:?}");
     let shown = presentations_of(&world, run, "build");
@@ -4326,7 +4354,7 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     let turn_carrying = |text: &str| -> u64 {
         let carrying: Vec<&TurnStarted> = openings
             .iter()
-            .filter(|opening| opening.instruction.contains(text))
+            .filter(|opening| carries(opening, text))
             .collect();
         assert_eq!(
             carrying.len(),
@@ -4832,7 +4860,7 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
     let openings = openings_of(&world, run, "service");
     let second_opening = openings
         .iter()
-        .find(|turn| turn.instruction.contains("## Manager notes"))
+        .find(|turn| carries(turn, "## Manager notes"))
         .expect("the second dispatch's opening turn is in the store");
     assert_eq!(second_opening.turn, 1, "{second_opening:?}");
     assert_eq!(

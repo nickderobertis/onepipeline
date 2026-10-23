@@ -188,8 +188,15 @@ impl Journal {
 ///
 /// `truncated` is only ever set to `true`: a producer that said `false` and then
 /// handed over an over-long text was wrong about its own payload.
+///
+/// Only a record still carrying a copy is cut. One carrying a `transcript`
+/// reference carries no content copy at all — the content is in the history
+/// file it names, read through [`crate::views::transcript`] — so it is kept
+/// exactly as its producer wrote it.
 fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
-    if !envelope.payload.values().any(over_the_bound) {
+    if envelope.payload.contains_key(TRANSCRIPT)
+        || !envelope.payload.values().any(over_the_bound)
+    {
         return Cow::Borrowed(envelope);
     }
     let mut cut = envelope.clone();
@@ -201,6 +208,9 @@ fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
     cut.payload.insert("truncated".to_string(), json!(true));
     Cow::Owned(cut)
 }
+
+/// The payload key a turn record carries its history reference under.
+const TRANSCRIPT: &str = "transcript";
 
 /// Whether one payload value is a text past the bound.
 ///
