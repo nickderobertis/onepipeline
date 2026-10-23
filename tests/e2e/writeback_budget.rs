@@ -1056,13 +1056,34 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         } else {
             "budgetdetach"
         };
-        let (world, meeting, project) =
-            a_run_whose_first_update_is_held(run, run, 1, &["--writeback-item-budget", "1"]);
+        let world = World::new(run);
+        world.script("work.wait", "hold");
+        // The queued dependent retains its note through adoption: a running
+        // worker can consume its own next-dispatch note as it resumes.
+        let project = world.plan(
+            run,
+            &plan_of(run, vec![agent("work", &[]), agent("later", &["work"])]),
+        );
+        let meeting = world.rendezvous(&format!("{SCRIPTED_KEY}.{UPDATE}"));
+        let world = world
+            .through_scripted_source()
+            .with_env(RENDEZVOUS_SECONDS_ENV, "600");
+        world
+            .run(&[
+                "start",
+                &project,
+                "--detach",
+                "--writeback-item-budget",
+                "1",
+            ])
+            .exited(0);
         world
             .run(&["adopt", "--help"])
             .exited(0)
             .out_has("--writeback-item-budget <SECONDS>");
         assert_eq!(recorded_budget(&world, run), 1);
+        // Two queued items, followed by the running prerequisite.
+        meeting.arrived().release();
         meeting.arrived().release();
         meeting.arrived().release();
         world.until_store("the original projection", |world| {
@@ -1092,7 +1113,7 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
         world.until("the replacement budget to persist", |world| {
             recorded_budget(world, run) == 30
         });
-        noted(&world, run, "work", "the repaired projection");
+        noted(&world, run, "later", "the repaired projection");
         let held = meeting.arrived();
         std::thread::sleep(Duration::from_secs(2));
         world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
@@ -1104,7 +1125,7 @@ fn adoption_replaces_the_budget_and_later_adoptions_keep_it() {
                 .contains("the repaired projection")
         });
         let meeting = world.rendezvous(&format!("{SCRIPTED_KEY}.{UPDATE}"));
-        noted(&world, run, "work", "proof beyond the old deadline");
+        noted(&world, run, "later", "proof beyond the old deadline");
         let held = meeting.arrived();
         std::thread::sleep(Duration::from_secs(number("floor_seconds") + 3));
         world.unscript(&format!("{SCRIPTED_KEY}.{UPDATE}.rendezvous"));
