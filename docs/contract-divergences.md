@@ -12617,9 +12617,10 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    nodes waits for the wait to pass. Snapshots that arrive while
    a write is in flight are coalesced into the newest, so at most one write is pending and
    none carries a state older than one already written. Settlement never waits on the fence.
-   This is a change for a run whose store is unreachable or refuses the fence: work already
-   dispatched runs on and settles, and the run completes once the store returns, but nothing
-   new starts while it is gone. Before, such a run went on dispatching. At closeout the
+   This is a change for a run whose store is unreachable or refuses the fence: while the
+   store is gone no new node is dispatched, because no fence write can land, but every node
+   already dispatched still settles and the run still completes, store or no store. Before,
+   such a run went on dispatching through the outage. At closeout the
    terminal fence release shares the existing bounded writeback attempt, and clears only a
    fence still naming this run and host.
    A driver can start nothing once no read of its claim began within one interval and the
