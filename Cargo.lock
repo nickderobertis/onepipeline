@@ -1743,9 +1743,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.56.5"
+version = "0.56.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bee09e5912ff3a47eab73986931fc66d01266456b396e934223eb0925c45ca2"
+checksum = "658512535e54858ae950202814444bfad6a5b6c5d30becc6a9fd47b91e541a4c"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1775,9 +1775,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.19.15"
+version = "0.19.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a596e17c03920cfd48c42000bfb4425019301cbacfd6d79aadce3d6e108cb16"
+checksum = "04d6b3e8574bdfc65d85e4869c3b3775a47c4c9106e46cdf55c16e5da987d8f8"
 dependencies = [
  "onevcs",
  "serde",
@@ -2312,7 +2312,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
