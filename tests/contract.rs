@@ -11727,14 +11727,10 @@ fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_s
         self, Resolved, Text, TranscriptRef, Unresolved, Why, DESCRIPTION_MAX_CHARS,
     };
     let _: fn(&TranscriptRef) -> std::result::Result<Resolved, Unresolved> = transcript::resolve;
-    let _: fn(
-        &str,
-        &serde_json::Map<String, Value>,
-    ) -> Option<std::result::Result<TranscriptRef, Unresolved>> = TranscriptRef::of;
-    let _: fn(
-        &str,
-        &serde_json::Map<String, Value>,
-    ) -> Option<std::result::Result<Resolved, Unresolved>> = transcript::of_record;
+    type OfPayload<T> =
+        fn(&str, &serde_json::Map<String, Value>) -> Option<std::result::Result<T, Unresolved>>;
+    let _: OfPayload<TranscriptRef> = TranscriptRef::of;
+    let _: OfPayload<Resolved> = transcript::of_record;
     assert_eq!(DESCRIPTION_MAX_CHARS, 120);
     assert_contract_names(
         "transcript resolver's",
