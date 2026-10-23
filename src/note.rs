@@ -1421,6 +1421,15 @@ impl Presentations {
         } else {
             return Vec::new();
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] the unresolved half — a turn
+        // whose referenced prompt is gone or unreadable at the moment this run reads it —
+        // has no journey, because no interface reaches it on purpose: the linked sibling
+        // resolves the prompt itself before it stamps a reference (`Transcript::available`)
+        // and keeps the bounded copy where it cannot, and this run reads the record the
+        // instant it is relayed, so the file would have to vanish inside that window. The
+        // half is held by `a_referenced_prompt_that_cannot_be_read_confirms_no_note` below,
+        // over this very `observe`, the real resolver and history files oneharness's own
+        // writer wrote; the resolved half by `tests/note`'s past-the-bound journey.
         let resolved = crate::views::transcript::of_record(&envelope.kind.0, &envelope.payload);
         let instruction = match &resolved {
             Some(Ok(crate::views::transcript::Resolved {
@@ -1429,6 +1438,7 @@ impl Presentations {
             })) => Some(instruction.as_str()),
             _ => None,
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let mut shown = Vec::new();
         for routed in &mut self.routed {
             if started_at < routed.routed_at {

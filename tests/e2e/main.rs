@@ -295,7 +295,15 @@ mod surface;
 // `mod criteria_rule` above.
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive a
+// real supervised dispatch over the real sibling and read it back through `monitor`, `watch`,
+// `status`, `transcript` and `scratch` — `views`, `watch`, `projection`, `journal`, `note`
+// and `scratch` under `src/` at once, plus the repository's own `graphs/` and `personas/`
+// the dispatch runs — so the crate is the narrowest edge they can honestly sit behind, as
+// for `mod shutdown` above. An edge of their own would be a new project in the graph, and so
+// a new required context in `ci.yml` and branch protection, which is not this change's to add.
 mod transcript_refs;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod turns;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys read
 // `docs/stop-guard.md` and `docs/contract-divergences.md` (the synopsis and shape drift

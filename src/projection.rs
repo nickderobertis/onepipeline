@@ -2438,6 +2438,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         }
         match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
             Some(Ok(reference)) => activity.doing = Some(Doing::Referenced(reference)),
+            // llmlint: ignore[changed_behavior_has_e2e] a `transcript` that is not a reference is a record no producer in this stack writes — the linked sibling serializes it from its own typed `ActivityTranscript` — so only a store something wearing a producer's clothes left behind reaches this, the ground `fold_refusal` suppresses its own `None` half on; the diagnostic it renders is the resolver's, held by `views::transcript`'s `unreadable_history_names_the_file_and_says_so`.
             Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
             None => {}
         }
