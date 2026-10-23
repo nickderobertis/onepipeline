@@ -11,15 +11,9 @@
 //! pause holds on Windows, where a `git` on `PATH` must be an executable.
 //!
 //! Exits 70 without running `git` when its own setup fails: no `HELD_GIT_REAL`, a hold
-//! missing `HELD_GIT_CLONE` or `HELD_GIT_DIR`, a pause file it cannot write, or a `git`
-//! that does not start. A `git` killed by a signal, which has no exit code, exits 1.
-
-// llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` has no `project.json`
-// of its own, like every double beside this file: its files are inputs of the
-// `onepipeline-note-journeys` project (`noteJourneySource` lists `crates/**/*` in `nx.json`)
-// and of the root project's `visualDocsSource`, and the crate is a member of the one Cargo
-// workspace those projects build. It ships nowhere, and a project of its own would restate
-// their targets over the same build unit.
+//! missing `HELD_GIT_CLONE` or `HELD_GIT_DIR`, a held clone or working directory that
+//! does not resolve, a pause file it cannot write, or a `git` that does not start. A
+//! `git` killed by a signal, which has no exit code, exits 1.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -59,7 +53,7 @@ fn hold() -> std::io::Result<()> {
     };
     let clone = variable("HELD_GIT_CLONE")?;
     let control = variable("HELD_GIT_DIR")?;
-    if !same(&std::env::current_dir()?, &clone) {
+    if !same(&std::env::current_dir()?, &clone)? {
         return Ok(());
     }
     // `create_new` makes the claim atomic, so of several starts only the first waits.
@@ -80,9 +74,16 @@ fn hold() -> std::io::Result<()> {
     Ok(())
 }
 
-fn same(left: &Path, right: &Path) -> bool {
-    match (left.canonicalize(), right.canonicalize()) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
+/// Whether `here` is the held `clone`. Either one that cannot be resolved is an error
+/// rather than a mismatch, so a hold set up wrongly refuses instead of quietly not holding.
+fn same(here: &Path, clone: &Path) -> std::io::Result<bool> {
+    let resolved = |path: &Path| {
+        path.canonicalize().map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("{} does not resolve: {error}", path.display()),
+            )
+        })
+    };
+    Ok(resolved(here)? == resolved(clone)?)
 }

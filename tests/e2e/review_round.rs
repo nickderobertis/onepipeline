@@ -1301,6 +1301,8 @@ fn a_failed_round_command_names_its_node_detail_and_event_order() {
     let outcome = settlement["payload"]["outcome"]
         .as_str()
         .expect("the refusal names its outcome");
+    // Unwind-safe in fact: the closure only reads `world`'s journal and `output`, and
+    // writes nothing either holds, so both are whole after the assertion unwinds.
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         passed_in_round(&world, run, &output, "rework-h");
     }))
@@ -1650,6 +1652,43 @@ fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
 
 /// How long the second read waits for any lock before saying which one it waited on.
 const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A hold whose clone does not resolve is set up wrongly, and `held-git` says so and exits
+/// 70 without running `git`, rather than taking every directory for "not the clone" and
+/// running `git` with no pause, which would let a journey's held read pass unheld.
+#[test]
+fn held_git_refuses_a_hold_whose_clone_does_not_resolve() {
+    let world = World::new("held-git-unresolved-clone");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let control = world.root.join("held");
+    std::fs::create_dir_all(&control).expect("a directory for the pause");
+    let missing = world.root.join("no-such-clone");
+    let refused = std::process::Command::new(crate::harness::double("held-git"))
+        .args(["init", "--quiet", "initialised"])
+        .current_dir(&world.root)
+        .env("HELD_GIT_REAL", &real)
+        .env("HELD_GIT_HOLD", "1")
+        .env("HELD_GIT_CLONE", &missing)
+        .env("HELD_GIT_DIR", &control)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(70), "{stderr}");
+    assert!(
+        stderr.contains(&missing.display().to_string()) && stderr.contains("does not resolve"),
+        "the refusal does not name the clone that does not resolve: {stderr}"
+    );
+    assert!(
+        !world.root.join("initialised").exists(),
+        "a refused hold ran the real git"
+    );
+    assert!(
+        !control.join("inside").exists(),
+        "a refused hold claimed the pause"
+    );
+}
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.
