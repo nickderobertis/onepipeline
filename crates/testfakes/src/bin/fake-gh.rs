@@ -1425,7 +1425,9 @@ impl Check {
     /// A check that has started carries `startedAt`. Where `rerun` is set, the run a
     /// ready change reports is a different run from the draft's: a workflow that runs
     /// on `ready_for_review` re-runs on a lift, and `onevcs` 0.36.0 tells a run
-    /// attached after a lift from the draft's by that start alone.
+    /// attached after a lift from the draft's by that start alone. A check that
+    /// concluded carries `completedAt` too, which `onevcs` 0.56.6 records on its
+    /// `change-check` beside the start.
     fn rollup_entry(&self, rerun: bool) -> serde_json::Value {
         let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
         if self.state != State::Queued {
@@ -1437,6 +1439,11 @@ impl Check {
         }
         if let State::Settled(conclusion) = self.state {
             entry["conclusion"] = serde_json::json!(conclusion.wire());
+            entry["completedAt"] = serde_json::json!(if rerun {
+                READY_RUN_COMPLETED
+            } else {
+                DRAFT_RUN_COMPLETED
+            });
         }
         entry
     }
@@ -1447,6 +1454,12 @@ const DRAFT_RUN_STARTED: &str = "2026-01-01T00:00:00Z";
 
 /// When the run a ready change reported started — a later run than the draft's.
 const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
+
+/// When the run a draft reported concluded.
+const DRAFT_RUN_COMPLETED: &str = "2026-01-01T00:03:00Z";
+
+/// When the run a ready change reported concluded.
+const READY_RUN_COMPLETED: &str = "2026-01-01T00:08:00Z";
 
 /// What this host reports about one change request's checks.
 ///

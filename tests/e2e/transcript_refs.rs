@@ -203,6 +203,34 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         status.stdout
     );
 
+    // A checkpoint the build before references left — schema 13, its fold of
+    // the same record the copy-era `bash` with no reference — is rebuilt from
+    // the journal rather than read: the readout is the reference's, still.
+    let checkpoint = world.run_file(run, "checkpoint.json");
+    let mut earlier: Value = serde_json::from_slice(
+        &std::fs::read(&checkpoint).expect("reading the run left a checkpoint"),
+    )
+    .expect("the checkpoint is JSON");
+    assert_eq!(earlier["schema_version"], json!(14), "{earlier}");
+    let activity = earlier["state"]["activity"][NODE]
+        .as_object_mut()
+        .unwrap_or_else(|| panic!("the checkpoint folded no activity for {NODE}"));
+    assert!(
+        activity.remove("transcript").is_some(),
+        "the checkpoint does not keep the reference it folded: {activity:?}"
+    );
+    activity.insert("doing".into(), json!("bash"));
+    earlier["schema_version"] = json!(13);
+    std::fs::write(&checkpoint, earlier.to_string()).expect("the earlier checkpoint is laid down");
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    assert!(
+        status.stdout.contains(&format!("now {description} ("))
+            && !status.stdout.contains("now bash ("),
+        "a schema-13 checkpoint was read rather than rebuilt from the journal:\n{}",
+        status.stdout
+    );
+
     let transcript = world.run(&["transcript", run]);
     transcript.exited(0);
     assert!(
