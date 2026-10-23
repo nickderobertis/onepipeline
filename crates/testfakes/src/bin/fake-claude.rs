@@ -47,6 +47,21 @@ fn main() -> ExitCode {
             std::thread::park();
         }
     }
+    // The process a held turn starts once it is released, where `turn.late-child`
+    // asks: it records its own pid and runs until something ends it, with every
+    // signal's default action, as a provider turn has.
+    if args.first().map(String::as_str) == Some("late-child") {
+        let [_, pid_file] = args.as_slice() else {
+            return fake::refuse("late-child takes exactly one pid file");
+        };
+        let staged = format!("{pid_file}.partial");
+        std::fs::write(&staged, format!("{}\n", std::process::id()))
+            .and_then(|()| std::fs::rename(&staged, pid_file))
+            .unwrap_or_else(|error| fake::fail(&format!("cannot record the late child: {error}")));
+        loop {
+            std::thread::park();
+        }
+    }
     // Before the script directory is required: oneharness probes a resolved
     // binary with `--version` to decide whether the identity is installed, and
     // that probe is not a turn — a double that refused it would report every
@@ -394,6 +409,29 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // engine dispatches again after a failed publication.
     if !observing && dir.join("turn.hold").exists() && held_here(dir, &prompt) {
         fake::wait_for(&dir.join("turn.go"));
+        // `turn.late-child` names a task, and that task's released turn starts a
+        // process of its own and records its pid in `turn.late-child.pid`: a
+        // process the dispatch started at a moment the journey chose, such as
+        // after a stop has listed the tree.
+        if fake::node_script(dir, "turn", "late-child")
+            .is_some_and(|what| what_the_task_says(&prompt) == what)
+        {
+            let pid_file = dir.join("turn.late-child.pid");
+            let exe = std::env::current_exe()
+                .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
+            // Not waited on: it runs until whatever ends the dispatch ends it.
+            #[allow(clippy::zombie_processes)]
+            std::process::Command::new(exe)
+                .args(["late-child", &pid_file.to_string_lossy()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap_or_else(|error| {
+                    fake::fail(&format!("cannot start the late child: {error}"))
+                });
+            fake::wait_for(&pid_file);
+        }
         if streaming {
             tool_call(2, "cargo llvm-cov --workspace");
         }

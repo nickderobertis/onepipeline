@@ -199,9 +199,9 @@ pub enum Stop {
 /// signals at all, because a teardown that cannot see what it must end has to
 /// say so rather than end half of it.
 ///
-/// The table is read a moment before the signals go out, so a child started
-/// inside that moment is missed; signalling the root first is what closes that
-/// in practice.
+/// On Unix a child started after the table was read is not missed: the tree is
+/// frozen and listed again until a listing finds nothing new, and only then
+/// signalled — see the Unix `platform_stop`.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
     platform_stop(&[pid], how).0
 }
@@ -354,6 +354,17 @@ fn listed() {
 /// its signal was delivered to.
 type Signalling = (Teardown, Vec<u32>, Vec<u32>);
 
+/// How long a teardown keeps freezing what each new listing finds before it
+/// signals what it has.
+///
+/// A frozen process starts nothing, so the listings settle as soon as the tree
+/// is frozen, which is a listing or two. What this bounds is a tree with a
+/// process in it this user may not stop and that keeps starting more: the
+/// teardown signals what it found rather than waiting on it, and the
+/// confirmation after it is what reports that tree as still running.
+#[cfg(unix)]
+const FREEZE_BOUND: Duration = Duration::from_secs(2);
+
 #[cfg(unix)]
 fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     let signal = match how {
@@ -371,13 +382,36 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
         return (Teardown::NotAttempted, Vec::new(), Vec::new());
     };
     listed();
-    // The roots first, so what is left has stopped growing while its members are
-    // taken down.
-    for root in aimed.clone() {
-        for descendant in descended_from(&table, root) {
-            if !aimed.contains(&descendant) {
-                aimed.push(descendant);
+    aim_at_descent(&mut aimed, &table, self::pid());
+    // Frozen before anything is signalled, and listed again until a listing
+    // finds nothing new. One listing is a moment old by the time its signals go
+    // out, and a dispatch that starts its next turn inside that moment starts a
+    // process no walk of it found: the dispatch dies of the signal, the turn is
+    // handed to `init`, and it runs on — spending what the stop was asked to
+    // stop. A stopped process starts nothing, and a stopped parent is still the
+    // parent of what it did start, so once the tree is frozen a listing is
+    // complete. Nothing outside descent is frozen, and every process that is
+    // frozen is let go again below, whatever the signal did.
+    let mut frozen: Vec<u32> = Vec::new();
+    let deadline = Instant::now().checked_add(FREEZE_BOUND);
+    loop {
+        for pid in &aimed {
+            if !frozen.contains(pid) && signal_one(*pid, libc::SIGSTOP) == Reached::Delivered {
+                frozen.push(*pid);
             }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            break;
+        }
+        // A listing this host will not give leaves the teardown with the tree
+        // it has already found, which is no less than it had before freezing.
+        let Some(table) = process_table() else {
+            break;
+        };
+        let found = aimed.len();
+        aim_at_descent(&mut aimed, &table, self::pid());
+        if aimed.len() == found {
+            break;
         }
     }
     // Every answer is kept: one process this user may not signal is one still
@@ -386,6 +420,11 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
     let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
+    // The signal waits on a stopped process until it runs again, so this is
+    // what delivers it — and what leaves nothing frozen behind a teardown.
+    for pid in &frozen {
+        let _ = signal_one(*pid, libc::SIGCONT);
+    }
     let delivered = aimed
         .iter()
         .zip(&answers)
@@ -393,6 +432,39 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
         .map(|(pid, _)| *pid)
         .collect();
     (established(&answers), aimed, delivered)
+}
+
+/// Add to `aimed` every process `table` shows descended from what it already
+/// holds — but never `me`, nor anything reached only through it.
+///
+/// The roots stay first and in their order, so what is signalled first is
+/// what would otherwise go on starting more. Every member is walked, not the
+/// roots alone, so a member whose parent exited before it was frozen still
+/// reaches what it starts afterwards. `me` is the stopping process: a stop run
+/// from inside the tree it ends — an agent of the run stopping its own run —
+/// must not freeze itself, which would leave it and the whole run stopped for
+/// good, nor end itself before it has signalled the rest. What it started is
+/// the `ps` it lists with, a new one every listing, so not walking through it
+/// is also what lets the listings settle. A stop that is the roots' *parent*
+/// is above the walk and changes nothing about it.
+#[cfg(unix)]
+fn aim_at_descent(aimed: &mut Vec<u32>, table: &[(u32, u32)], me: u32) {
+    // Without its own row, `me` is a process no walk reaches, and so is
+    // everything it started.
+    let without_me: Vec<(u32, u32)> = table
+        .iter()
+        .copied()
+        .filter(|(pid, _)| *pid != me)
+        .collect();
+    let mut walked = 0;
+    while walked < aimed.len() {
+        for descendant in descended_from(&without_me, aimed[walked]) {
+            if !aimed.contains(&descendant) {
+                aimed.push(descendant);
+            }
+        }
+        walked += 1;
+    }
 }
 
 /// What the answers from one round of signalling establish about the tree.
@@ -2793,6 +2865,45 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    /// What a teardown aims at is descent from what it already holds — kept in
+    /// order, roots first — and never the stopping process or what it started,
+    /// while a stop that is the roots' own parent still reaches all of it.
+    ///
+    /// A stop run from inside the run it ends is a descendant of that run's
+    /// roots, and the teardown freezes what it aims at: aiming at itself would
+    /// leave it, and the run with it, stopped for good, and aiming at the `ps`
+    /// it lists with would find a new process every listing. A member held
+    /// from an earlier listing is walked too, so a process whose parent exited
+    /// before it was frozen still reaches what it starts afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_aims_at_descent_and_never_at_the_stop_or_what_it_started() {
+        // 10 is the root; 12 is the stop, under 11; 13 is its `ps`. 20 was
+        // found under the root before and has since been handed to `init`.
+        let table = [
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (13, 12),
+            (14, 11),
+            (15, 14),
+            (20, 1),
+            (21, 20),
+        ];
+        let mut aimed = vec![10, 20];
+        aim_at_descent(&mut aimed, &table, 12);
+        assert_eq!(aimed[..2], [10, 20], "the roots were not kept first");
+        let mut rest = aimed[2..].to_vec();
+        rest.sort_unstable();
+        assert_eq!(rest, [11, 14, 15, 21]);
+        // A stop that started the roots itself is above the walk, and reaches
+        // all of it.
+        let mut aimed = vec![11];
+        aim_at_descent(&mut aimed, &table, 10);
+        aimed.sort_unstable();
+        assert_eq!(aimed, [11, 12, 13, 14, 15]);
     }
 
     /// A live process, a process already gone, and an id that is not a process

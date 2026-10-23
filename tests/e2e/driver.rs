@@ -4106,6 +4106,86 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
     world.release("build.go");
 }
 
+/// A stop ends a process its run's dispatch starts **after** the stop has
+/// listed the tree, and leaves the run beside it running.
+///
+/// The race a stop run under load meets: its listing is a moment old by the
+/// time its signals go out, and a dispatch that starts its next provider turn
+/// inside that moment starts a process no walk found. The dispatch dies of its
+/// signal, the turn is handed to `init`, and it runs on, spending what the stop
+/// was asked to stop. Held rather than raced: the stop at the point it has
+/// listed the tree, and the dispatch's turn released to start its child only
+/// then, so the child falls on the far side of the listing on any host.
+///
+/// The run beside it is held mid-turn through the whole stop and then finishes,
+/// so it was neither ended nor left frozen by a teardown aimed elsewhere.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_a_process_its_dispatch_starts_after_the_stop_has_listed_the_tree() {
+    let world = World::new("driver-stop-late-child");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    let (run, beside) = ("latechild", "besidelate");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // dispatch starts its process on is the property, and no user-facing input can place
+    // it. The failpoint only orders the real binaries; the launch, the stop, the dispatch
+    // and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop latechild"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.go");
+        world.until("the dispatch to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up: this is
+    // the process the stop missed, by the pid it recorded itself, and nothing
+    // reaches it once its parents are gone.
+    let survived = !process_ended(child);
+    if survived {
+        end_process(child);
+    }
+    stopped.exited(0);
+    assert!(
+        !survived,
+        "pid {child}, started by the run's dispatch after the stop listed the tree, was still \
+         running once the stop reported success"
+    );
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
+}
+
 /// A stop that cannot see what it must end refuses, changes nothing, and works
 /// on the retry.
 ///
