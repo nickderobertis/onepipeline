@@ -419,11 +419,12 @@ fn lane_answered(
 ) -> bool {
     let InboxDelivery::Queued { node, .. } = &note.delivery;
     let Some(sent) = channel.commands_of(note.envelope) else {
-        // llmlint: ignore[changed_behavior_has_e2e] no verb reaches this arm: the sidecar names
-        // only an envelope its driver claimed off the queue, and the queue keeps every envelope
-        // it was sent, so it is unreadable only where the channel's files are damaged — and the
-        // answer there is the reading every build before this one gave, the sidecar's own.
+        // llmlint: ignore-block[changed_behavior_has_e2e] no verb reaches this arm: the sidecar
+        // names only an envelope its driver claimed off the queue, and the queue keeps every
+        // envelope it was sent, so it is unreadable only where the channel's files are damaged —
+        // and the answer there is the reading every build before this one gave, the sidecar's own.
         return false;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     sent.commands
         .iter()
