@@ -455,7 +455,7 @@ pub(crate) struct Tally {
     /// one reports that the graph it drives may be missing an edit.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) unreadable: u64,
-    /// Every line read that [`journal::integrity`] counts as lost, in file order,
+    /// Every line read that a [`journal::Integrity`] counts as lost, in file order,
     /// each where it is: what a view says of a store's own losses, kept here
     /// because the fold already met every one of them and a view asking again
     /// would read the whole store to be told.
@@ -882,9 +882,9 @@ pub(crate) fn current(paths: &RunPaths) -> RunState {
     Projected::open_with(paths, Persist::No).into_state()
 }
 
-/// What a run's journal holds that is not a whole record — [`journal::integrity`]'s
-/// answer — off the losses its checkpoint's fold already met and a read of only
-/// what lies past them.
+/// What a run's journal holds that is not a whole record — the
+/// [`journal::Integrity`] a read of the whole file answers — off the losses its
+/// checkpoint's fold already met and a read of only what lies past them.
 ///
 /// The fold numbers each loss as it meets it, so every line in front of what it
 /// has read is accounted for without being read again; what is past that is the

@@ -5357,17 +5357,17 @@ impl FromTheStore {
             let Some(node) = event.labels.node.clone() else {
                 continue;
             };
-            match crate::journal::PipelineKind::from_wire(&event.kind) {
-                Some(crate::journal::PipelineKind::NodeSettled) => {
-                    if let Some(from) = event.payload.get("continued") {
-                        let run = from
-                            .get("run")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned);
-                        continued.insert(node, run);
-                    }
-                }
-                _ => {}
+            if crate::journal::PipelineKind::from_wire(&event.kind)
+                != Some(crate::journal::PipelineKind::NodeSettled)
+            {
+                continue;
+            }
+            if let Some(from) = event.payload.get("continued") {
+                let run = from
+                    .get("run")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned);
+                continued.insert(node, run);
             }
         }
         (!continued.is_empty()).then_some(Self {

@@ -407,7 +407,7 @@ pub(crate) fn finished_records_within(
 /// this build can read.
 ///
 /// The loss rides beside the record rather than being read again later, because
-/// what [`integrity`] says a store lost is exactly the lines a fold already met:
+/// what an [`Integrity`] says a store lost is exactly the lines a fold already met:
 /// a reader that wanted it from the fold's own read of those lines would
 /// otherwise have to read the whole store once more to be told it.
 #[derive(Debug, Clone)]
@@ -420,7 +420,7 @@ pub(crate) struct FinishedLine {
     pub(crate) lost: Option<Lost>,
 }
 
-/// What of one line [`integrity`] counts as lost: which of its two classes, where
+/// What of one line an [`Integrity`] counts as lost: which of its two classes, where
 /// in the file the line begins, and how many of its bytes are no record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Lost {
@@ -433,7 +433,7 @@ pub(crate) struct Lost {
     pub(crate) bytes: u64,
 }
 
-/// What [`integrity`] counts lost of one line it read as `reading`: nothing for a
+/// What an [`Integrity`] counts lost of one line it read as `reading`: nothing for a
 /// whole record or a blank line, the fragment in front of a glued record, and the
 /// whole line otherwise.
 fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
@@ -458,7 +458,7 @@ fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
 }
 
 /// [`finished_records_within`], with what each line lost: the read a fold that
-/// keeps a run's [`integrity`] beside its state takes.
+/// keeps a run's [`Integrity`] beside its state takes.
 pub(crate) fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<FinishedLine> {
     if len == 0 {
         return Vec::new();
@@ -491,7 +491,7 @@ pub(crate) fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
     finished_lines_within(path, from, length.saturating_sub(from))
 }
 
-/// What [`integrity`] counts lost of every line from `from` to the end of the
+/// What an [`Integrity`] counts lost of every line from `from` to the end of the
 /// file — finished or not — numbering them from `first_line`, the count of lines
 /// in front of `from`.
 ///
@@ -790,11 +790,16 @@ impl Integrity {
     }
 }
 
-/// What one run's journal holds that is not a whole record.
+/// What one run's journal holds that is not a whole record, read from its first
+/// byte.
 ///
 /// Read from the file rather than from the folded events, because what this is
-/// about is exactly the records the fold never saw.
-pub fn integrity(path: &Path) -> Integrity {
+/// about is exactly the records the fold never saw. What a view says is
+/// [`crate::checkpoint::integrity`]'s answer, which reads only what the run's
+/// checkpoint does not account for; this whole read is the reference the tests
+/// hold that answer to.
+#[cfg(test)]
+pub(crate) fn integrity(path: &Path) -> Integrity {
     let mut integrity = Integrity {
         healed: ledger::torn_tails(path),
         ..Integrity::default()
