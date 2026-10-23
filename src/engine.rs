@@ -3026,6 +3026,11 @@ impl InPass {
         std::mem::take(&mut self.state().handed)
     }
 
+    /// Whether anything was applied here that the loop has not folded, answered
+    /// once: the loop folds it on hearing so.
+    fn take_applied(&self) -> bool {
+        std::mem::take(&mut self.state().applied)
+    }
 
     /// Whether nothing applied here is waiting for the loop to fold it, and
     /// nothing claimed here is waiting for the loop to judge it.
@@ -4047,6 +4052,13 @@ fn reconcile_edits(
         .as_deref()
         .and_then(|deliveries| deliveries.in_pass.clone());
     let _claiming = in_pass.as_deref().map(InPass::claiming);
+    // What the claimer applied earlier in this pass is folded before anything claimed
+    // now is judged: an envelope judged without it would be judged against a run
+    // that has not had it — a second `settle` of a node taken for the first.
+    if in_pass.as_deref().is_some_and(InPass::take_applied) {
+        state.refresh(paths);
+        changed = true;
+    }
     let mut fresh = in_pass
         .as_deref()
         .map(InPass::take_handed)

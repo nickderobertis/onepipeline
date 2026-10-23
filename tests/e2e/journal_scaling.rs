@@ -1433,3 +1433,103 @@ fn what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_
     world.release("build.go");
 }
 
+/// **What the claimer applied beside a pass is folded before the loop judges an
+/// envelope in that same pass.** The loop holds one settle of `later`, a second
+/// settle at another landing is applied beside the held pass, and a third, back at
+/// the first landing, is queued beside a `finding` — which the claimer leaves to
+/// the loop. Released, the loop answers it applied, a correction of the landing the
+/// second stated: judged against a fold without the second, it was refused as a
+/// settle of what the record already said.
+#[test]
+fn an_envelope_the_loop_judges_after_the_claimer_applied_one_is_judged_against_it() {
+    let (world, seam) = held_world("scaling-claim-folded");
+    let world = world.with_env(crate::harness::LOOP_STATS_ENV, "1");
+    let run = "claimfolded";
+    a_held_member(&world, "build", false);
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("later", &["build"])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the member's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    let settle = |landing: &str| {
+        json!({"op": "settle", "id": "later", "outcome": "done",
+               "evidence": "the work landed by hand", "landing": landing})
+    };
+    let first = "1111111111111111111111111111111111111111";
+    let second = "2222222222222222222222222222222222222222";
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [settle(first)]}).to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    // Two passes begun since, so the loop's own fold holds the first whichever
+    // thread applied it.
+    crate::harness::reporting(&world, run);
+    let passes = crate::harness::counts(&world, run).passes;
+    world.until("the loop to fold the first settle", |world| {
+        crate::harness::counts(world, run).passes >= passes + 2
+    });
+
+    hold_the_pass(&world, &seam);
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [settle(second)]}).to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let third = std::fs::read_to_string(&queue)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u64;
+    let mut again = world.cmd(&["reply", run]);
+    again
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut replying = again.spawn().expect("the third settle is submitted");
+    use std::io::Write;
+    replying
+        .stdin
+        .take()
+        .expect("a stdin")
+        .write_all(
+            json!({"version": 2, "commands": [
+                settle(first),
+                {"op": "finding", "message": "the landing was restated", "blocking": false},
+            ]})
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("written");
+    let cursor = world.run_file(run, "channel/commands-cursor.json");
+    world.until("the claimer to claim the third and hand it back", |_| {
+        std::fs::read_to_string(&cursor)
+            .ok()
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .is_some_and(|claimed| claimed > third)
+    });
+
+    release_the_pass(&seam);
+    let replied = replying
+        .wait_with_output()
+        .expect("the third settle is answered");
+    let receipt = String::from_utf8_lossy(&replied.stdout);
+    assert!(
+        receipt.contains("\"applied\""),
+        "the loop judged the third settle against a fold without the second: {receipt}"
+    );
+    let settled = world
+        .events_of(run, "node-settled")
+        .iter()
+        .filter(|event| event["labels"]["node"] == "later")
+        .count();
+    assert_eq!(settled, 3, "each of the three settles is one settlement");
+    world.release("build.go");
+}
