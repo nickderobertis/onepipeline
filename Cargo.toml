@@ -1158,11 +1158,15 @@ onevcs-testing = "0.19.13"
 # repository-naming tasks route, refusing a split private home as
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
-# **0.10.0 is the floor** for the public held-task-image read that creating write-backs
-# use to carry authoring images through the shadow store.
-onetaskgraph-core = "=0.10.0"
-onetaskgraph-plugin-api = "=0.10.0"
-onetaskgraph-local-md = "=0.10.0"
+#
+# **0.11.0 links the cheaper approval**: approving a plan on a GitHub Projects board
+# lists its members and writes its document metadata in one request each, and a host
+# holds its plan-store CLI to the release this engine links, so it adopts that approval
+# only once this pin does. The public held-task-image read (0.9.4) is what creating
+# write-backs use to carry authoring images through the shadow store.
+onetaskgraph-core = "=0.11.0"
+onetaskgraph-plugin-api = "=0.11.0"
+onetaskgraph-local-md = "=0.11.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

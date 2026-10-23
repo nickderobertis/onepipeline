@@ -154,6 +154,8 @@ fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::Co
                 scope,
                 destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)
                     .expect("a source name"),
+                status_policy: onetaskgraph_core::StatusPolicy::Source,
+                target_task: None,
                 match_by: None,
                 recreate: false,
                 create: false,

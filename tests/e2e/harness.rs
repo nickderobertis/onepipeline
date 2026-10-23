@@ -1371,6 +1371,8 @@ impl World {
                     items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
                     scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination,
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     match_by: Some(onetaskgraph_core::MatchBy::Title),
                     recreate: false,
                     create: false,
