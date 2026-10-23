@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use crate::harness::{agent, epoch_millis, now_millis, plan_of, World};
 use serde_json::{json, Value};
 
+// llmlint: ignore-block[tests_mirror_real_usage] the criteria for this node require a journey that holds the reconcile pass by a failpoint the way the repository's existing journeys hold one; no verb holds a pass, and the hold is the debug build's own seam.
 /// A world whose driver pauses where a journey arms it: the debug build's
 /// file-based failpoints, under a directory of this world's own.
 fn held_world(name: &str) -> (World, PathBuf) {
@@ -38,6 +39,7 @@ fn release_the_pass(seam: &Path) {
     let _ = std::fs::remove_file(seam.join("before-claim"));
     std::fs::write(seam.join("before-claim.release"), "").expect("the pass is released");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// One node held running, beating every 100 ms — and, where `works`, emitting a
 /// `turn-activity` with every beat.
@@ -398,6 +400,7 @@ fn a_heartbeat_does_not_wake_a_watch_and_a_settlement_does() {
     world.release("keep.go");
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the criteria require synthesized run directories — a run in the shape v0.75.0 left, journalled heartbeats with no liveness file, relayed records stamped before covered history, and covered history overwritten with non-records — which no verb of this build writes, because this build no longer journals heartbeats or writes a schema-13 checkpoint.
 /// Append one relayed record straight to a run's journal, as a driver's relay
 /// would have: a sibling's own stream and stamp.
 fn relayed(world: &World, run: &str, kind: &str, node: &str, seq: u64, ts: &str) {
@@ -454,6 +457,35 @@ fn overwrite_what_is_covered(world: &World, run: &str) -> usize {
     std::fs::write(&store, &held).expect("the covered history is overwritten");
     at
 }
+
+/// Append one `member-heartbeat` to a run's journal, as a driver before this one
+/// relayed every beat.
+fn journal_a_beat(world: &World, run: &str, node: &str, seq: u64, ts: &str) {
+    let mut beat = json!({
+        "v": 2, "ts": ts, "stream": "older-graph-1", "seq": seq,
+        "source": "agentgraph", "kind": "member-heartbeat",
+        "labels": {"run_id": "older-graph", "node": node, "member": "worker"},
+        "payload": {}, "artifacts": [],
+    })
+    .to_string();
+    beat.push('\n');
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(world.run_file(run, "events.jsonl"))
+        .and_then(|mut journal| journal.write_all(beat.as_bytes()))
+        .expect("a beat is journalled");
+}
+
+/// Rewrite a run's checkpoint as v0.75.0 wrote it: schema 13, no tally.
+fn as_schema_13(world: &World, run: &str) {
+    let mut older = world.run_json(run, "checkpoint.json");
+    older["schema_version"] = json!(13);
+    older.as_object_mut().expect("a document").remove("tally");
+    std::fs::write(world.run_file(run, "checkpoint.json"), older.to_string())
+        .expect("the older build's checkpoint");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 fn statuses_of(reading: &Value) -> Vec<(String, String)> {
     let mut nodes: Vec<(String, String)> = reading["nodes"]
@@ -702,10 +734,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
         json!(14)
     );
 
-    let mut earlier = world.run_json(run, "checkpoint.json");
-    earlier["schema_version"] = json!(13);
-    earlier.as_object_mut().expect("a document").remove("tally");
-    std::fs::write(&checkpoint, earlier.to_string()).expect("an earlier build's checkpoint");
+    as_schema_13(&world, run);
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
@@ -794,27 +823,10 @@ fn a_run_in_the_shape_an_older_build_left_is_adopted_with_its_history_intact() {
     // What an older driver journalled for every beat, and the checkpoint it wrote.
     let ts = now_millis();
     for seq in 0..5 {
-        let mut beat = json!({
-            "v": 2, "ts": format_ms(ts + seq), "stream": "older-graph-1", "seq": 1_000 + seq,
-            "source": "agentgraph", "kind": "member-heartbeat",
-            "labels": {"run_id": "older-graph", "node": "worked", "member": "worker"},
-            "payload": {}, "artifacts": [],
-        })
-        .to_string();
-        beat.push('\n');
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(world.run_file(run, "events.jsonl"))
-            .and_then(|mut journal| journal.write_all(beat.as_bytes()))
-            .expect("a beat is journalled");
+        journal_a_beat(&world, run, "worked", 1_000 + seq, &format_ms(ts + seq));
     }
     world.run(&["status", run, "--json"]).exited(0);
-    let mut older = world.run_json(run, "checkpoint.json");
-    older["schema_version"] = json!(13);
-    older.as_object_mut().expect("a document").remove("tally");
-    std::fs::write(world.run_file(run, "checkpoint.json"), older.to_string())
-        .expect("the older build's checkpoint");
+    as_schema_13(&world, run);
     let _ = std::fs::remove_file(world.run_file(run, "liveness.json"));
     assert!(!world.events_of(run, "edit-committed").is_empty());
 
@@ -930,20 +942,14 @@ fn journalled_heartbeats_with_no_liveness_file_read_as_they_did() {
     assert_eq!(liveness_word(&world, run), json!("PARKED"));
     assert!(liveness(&world, run).is_empty());
 
-    let beat = json!({
-        "v": 2, "ts": format_ms(now_millis()), "stream": "older-graph-1", "seq": 5_000,
-        "source": "agentgraph", "kind": "member-heartbeat",
-        "labels": {"run_id": "older-graph", "node": "quiet", "member": "worker"},
-        "payload": {}, "artifacts": [],
-    });
-    let mut line = beat.to_string();
-    line.push('\n');
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(world.run_file(run, "events.jsonl"))
-        .and_then(|mut journal| journal.write_all(line.as_bytes()))
-        .expect("a beat is journalled");
+    // A liveness file this build cannot read says nothing, and the journal's
+    // beats are read as before.
+    std::fs::write(
+        world.run_file(run, "liveness.json"),
+        json!({"schema_version": 2, "members": []}).to_string(),
+    )
+    .expect("an unreadable liveness file");
+    journal_a_beat(&world, run, "quiet", 5_000, &format_ms(now_millis()));
     assert_ne!(liveness_word(&world, run), json!("PARKED"));
     let status = world.run(&["status", run]);
     status.exited(0);
@@ -1032,4 +1038,135 @@ fn a_watch_and_an_attach_start_where_the_checkpoint_stops() {
         "{}",
         attached.stderr
     );
+}
+
+/// An envelope naming a dispatch in flight is not the claimer's: it is handed to
+/// the loop, and so is everything claimed after it, which the loop answers in the
+/// order they were submitted once its pass goes on. One the claimer may answer and
+/// whose processing fails is answered refused, the failure its reason, while the
+/// pass is still held.
+#[test]
+fn what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused() {
+    let (world, seam) = held_world("scaling-claim-order");
+    let run = "claimorder";
+    a_held_member(&world, "build", false);
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("build", &[]),
+                agent("later", &["build"]),
+                agent("other", &["build"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the member's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    hold_the_pass(&world, &seam);
+
+    let queue = world.run_file(run, "channel/commands.jsonl");
+    let next = std::fs::read_to_string(&queue)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u64;
+    // The failing seam names the envelope the claimer answers.
+    std::fs::write(seam.join(format!("fail-envelope-{next}")), "").expect("the seam is armed");
+    let failed = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [
+            {"op": "settle", "id": "other", "outcome": "done", "evidence": "by hand"},
+        ]})
+        .to_string(),
+    );
+    assert!(
+        failed.stderr.contains("failed while processing") || failed.stdout.contains("refused"),
+        "{}\n{}",
+        failed.stdout,
+        failed.stderr
+    );
+
+    let mut amend = world.cmd(&["reply", run]);
+    amend
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut amending = amend.spawn().expect("the amend is submitted");
+    use std::io::Write;
+    amending
+        .stdin
+        .take()
+        .expect("a stdin")
+        .write_all(
+            json!({"version": 2, "commands": [{"op": "amend", "id": "build", "text": "one more thing"}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("written");
+    world.until("the amend to be queued", |_| {
+        std::fs::read_to_string(&queue)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u64
+            >= next + 2
+    });
+    let mut settle = world.cmd(&["reply", run]);
+    settle
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    let mut settling = settle.spawn().expect("the settle is submitted");
+    settling
+        .stdin
+        .take()
+        .expect("a stdin")
+        .write_all(
+            json!({"version": 2, "commands": [
+                {"op": "settle", "id": "later", "outcome": "done", "evidence": "by hand"},
+            ]})
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("written");
+    world.until("the settle to be queued and claimed", |_| {
+        std::fs::read_to_string(&queue)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count() as u64
+            >= next + 3
+    });
+    let outcomes = || -> Vec<Value> {
+        std::fs::read_to_string(world.run_file(run, "channel/command-outcomes.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let answered = |id: u64| outcomes().into_iter().find(|outcome| outcome["id"] == id);
+    let refused =
+        answered(next).expect("the failing envelope was answered while the pass was held");
+    assert_eq!(refused["applied"], json!(false), "{refused}");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(
+        answered(next + 1).is_none() && answered(next + 2).is_none(),
+        "an envelope behind one naming a running dispatch was answered before the loop: {:?}",
+        outcomes()
+    );
+
+    release_the_pass(&seam);
+    world.until("both to be answered", |_| {
+        answered(next + 1).is_some() && answered(next + 2).is_some()
+    });
+    let order: Vec<u64> = outcomes()
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .filter(|id| *id > next)
+        .collect();
+    assert_eq!(order, vec![next + 1, next + 2], "answered out of order");
+    let _ = amending.wait();
+    let _ = settling.wait();
+    world.release("build.go");
 }

@@ -2992,12 +2992,22 @@ struct InPassState {
     /// Whether the loop holds envelopes it claimed behind a note: nothing is taken
     /// past them.
     holding: bool,
-    /// Whether the loop is waiting between passes.
-    waiting: bool,
+    /// What the loop is doing, which decides whether this may claim.
+    mode: InPassMode,
     /// What was claimed here and is the loop's to judge, in claim order.
     handed: Vec<crate::channel::Claimed>,
-    /// Set when the loop is done with this claimer.
-    stop: bool,
+}
+
+/// What the loop a claimer serves is doing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum InPassMode {
+    /// Inside a pass: the claimer claims.
+    #[default]
+    InPass,
+    /// Waiting between passes: the loop claims once the queue moves.
+    Waiting,
+    /// Done with the claimer, for good.
+    Stopped,
 }
 
 impl InPass {
@@ -3026,6 +3036,7 @@ impl InPass {
 
     /// Whether the loop may start `node`: no envelope applied here named it since
     /// the loop last folded. A node admitted is one this claimer leaves alone.
+    // llmlint: ignore[changed_behavior_has_e2e] the refusal arm needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place; the claimer's applying and handing back are driven by `journal_scaling::a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_released` and `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused`.
     fn admit(&self, node: &str) -> bool {
         let mut state = self.state();
         if state.touched.contains(node) {
@@ -3042,13 +3053,22 @@ impl InPass {
         let mut state = self.state();
         state.in_flight = in_flight.keys().cloned().collect();
         state.holding = holding;
-        state.waiting = false;
+        if state.mode != InPassMode::Stopped {
+            state.mode = InPassMode::InPass;
+        }
         state.touched.clear();
         std::mem::take(&mut state.applied)
     }
 
     fn waiting(&self, waiting: bool) {
-        self.state().waiting = waiting;
+        let mut state = self.state();
+        if state.mode != InPassMode::Stopped {
+            state.mode = if waiting {
+                InPassMode::Waiting
+            } else {
+                InPassMode::InPass
+            };
+        }
     }
 
     /// Start the claimer for one run's loop.
@@ -3065,7 +3085,7 @@ impl InPass {
     }
 
     fn stop(&self) {
-        self.state().stop = true;
+        self.state().mode = InPassMode::Stopped;
     }
 
     /// Stop claiming, wait out a claim in progress, and say whether nothing it
@@ -3084,10 +3104,12 @@ impl InPass {
             std::thread::sleep(CHANNEL_POLL);
             {
                 let state = self.state();
-                if state.stop {
-                    return;
+                match state.mode {
+                    InPassMode::Stopped => return,
+                    InPassMode::Waiting => continue,
+                    InPassMode::InPass => {}
                 }
-                if state.waiting || state.holding || !state.handed.is_empty() {
+                if state.holding || !state.handed.is_empty() {
                     continue;
                 }
             }
@@ -3121,7 +3143,7 @@ impl InPass {
         let _claiming = self.claiming();
         {
             let state = self.state();
-            if state.stop || state.waiting || state.holding || !state.handed.is_empty() {
+            if state.mode != InPassMode::InPass || state.holding || !state.handed.is_empty() {
                 return Ok(());
             }
         }

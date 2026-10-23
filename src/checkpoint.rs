@@ -631,8 +631,13 @@ impl Projected {
     /// as it reads any tail: its final instant held open, and the document written
     /// once.
     fn rebuild(&mut self, paths: &RunPaths) -> u64 {
+        self.rebuild_in(paths, REBUILD_WINDOW)
+    }
+
+    /// [`rebuild`](Self::rebuild), a `window` of bytes at a time.
+    fn rebuild_in(&mut self, paths: &RunPaths, window: u64) -> u64 {
         let journal = paths.journal();
-        let mut window = REBUILD_WINDOW;
+        let mut window = window;
         let mut took = 0;
         loop {
             let length = length_of(&journal);
@@ -1703,6 +1708,28 @@ mod tests {
     /// to check it — is the one that reports what the document says. A whole-store
     /// fold, with no document to resume from, reads the rewritten bytes and reports
     /// what they say instead.
+    /// A rebuild folded a window at a time — windows far smaller than a record
+    /// included, which it widens until one fits — lands on the state one read of
+    /// the whole store folds to, and covers every record but the last instant.
+    #[test]
+    fn a_rebuild_in_windows_lands_on_the_whole_stores_fold() {
+        let root = scratch("windows");
+        let paths = a_recorded_run(&root, "r-windows");
+        settle(&paths, "build", "done");
+        settle(&paths, "ship", "done");
+        let _ = std::fs::remove_file(paths.checkpoint());
+        let whole = folded_as(&Projected::open_with(&paths, Persist::No).state);
+        for window in [1, 64, 4_096] {
+            let mut rebuilt = Projected::empty(Persist::No);
+            let took = rebuilt.rebuild_in(&paths, window);
+            // A window as long as the store leaves all of it to the refresh below.
+            assert_eq!(took > 0, window < 4_096, "window {window} took {took}");
+            rebuilt.refresh(&paths);
+            assert_eq!(folded_as(&rebuilt.state), whole, "window {window}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_covered_record_changed_in_place_is_never_read_again() {
         let root = scratch("prefix-changed");

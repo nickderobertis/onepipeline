@@ -939,6 +939,7 @@ impl Maintainer {
     /// final line whose writer has not finished it does not: the count stays at
     /// the boundary in front of it, which is where the next read resumes once its
     /// newline lands.
+    // llmlint: ignore[changed_behavior_has_e2e] a record landing behind what this writer folded needs two producers' clocks to cross under one append, which no invocation places on purpose; the late arrival's fold is driven end to end on the checkpoint's side by `journal_scaling::a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered`, and this writer's by `a_record_stamped_behind_the_newest_instant_is_folded_without_reading_the_store_again`.
     fn catch_up(&mut self) {
         let grown = journal::finished_records_from(&self.paths.journal(), self.accounted);
         self.accounted += grown.iter().map(|(_, bytes)| bytes).sum::<u64>();

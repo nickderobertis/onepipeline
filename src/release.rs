@@ -1164,8 +1164,9 @@ impl Watch {
         self.relayed = Some(Instant::now());
         // How far each stream has been relayed, off the run's checkpoint and what
         // was appended past it rather than off a read of its whole history.
-        let mut relayed =
-            crate::vcs::Watermarks::of_streams(crate::checkpoint::streams_reached(paths));
+        // Read only once a session's stream is about to be: a pass with no session
+        // to relay reads nothing of the run at all.
+        let mut marks: Option<crate::vcs::Watermarks> = None;
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that
             // session as it is written, and two readers of one stream deciding
@@ -1200,6 +1201,9 @@ impl Watch {
                     .get(node)
                     .and_then(|node| node.persona.as_deref()),
             );
+            let relayed = marks.get_or_insert_with(|| {
+                crate::vcs::Watermarks::of_streams(crate::checkpoint::streams_reached(paths))
+            });
             for mut envelope in crate::vcs::events(session.token(), filter) {
                 if releases_nothing
                     || envelope.dimensions.phase != Some(crate::event::Phase::Release)

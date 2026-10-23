@@ -12833,7 +12833,8 @@ rules on it.
    beat in `<run>/liveness.json` — `{"schema_version": 1, "members": [{"node",
    "graph_run", "member", "last_heartbeat_at"}]}`, one entry per member keyed by the
    first three, written whole and atomically when a beat advances an entry, dropped when
-   its dispatch settles — and a reader takes a member's last beat as the later of the
+   its dispatch settles (the block after this list is one such document, which
+   `heartbeat::tests` reads into the type) — and a reader takes a member's last beat as the later of the
    journal's and the file's, so a run an earlier build journalled reads as it did. Every
    other record a member emits is still journalled.
 2. **`PARKED` counts a dispatch member's heartbeat as activity, and an observer's not at
@@ -12852,6 +12853,12 @@ rules on it.
    count every unread surface off the channel's own state, it returns only on
    settlements after it armed, and its ending cursor resumes with nothing skipped or
    repeated. A watch given a cursor is unchanged.
+
+```json
+{"schema_version": 1,
+ "members": [{"node": "build", "graph_run": "graph-run-1", "member": "worker",
+              "last_heartbeat_at": "2026-10-23T12:00:00.000Z"}]}
+```
 
 Behind the three, and inside the existing contract: every per-pass, per-append and
 per-call reader on the driver's path, `status --json`, `watch` and `reply`'s read before it

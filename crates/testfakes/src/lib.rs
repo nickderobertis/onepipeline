@@ -814,7 +814,7 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
                                 "stream": format!("fake-observer-{}", std::process::id()),
                                 "seq": seq,
                                 "source": "agentgraph",
-                                "kind": "member-heartbeat",
+                                "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
                                 "labels": {"run_id": format!("fake-observer-{}", std::process::id()), "member": "monitor"},
                                 "payload": {},
                             })

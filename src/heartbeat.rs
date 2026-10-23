@@ -183,6 +183,7 @@ pub(crate) fn clear(paths: &RunPaths) {
 
 /// Written whole and atomically, best effort: a file that could not be written
 /// costs a reader the beats since the journal last carried one, and nothing else.
+// llmlint: ignore[changed_behavior_has_e2e] a liveness file that cannot be written needs a run directory the driver itself writes and may not, which is host sabotage rather than a journey; what a reader does with no usable file — read the journal's beats — is driven by `journal_scaling::journalled_heartbeats_with_no_liveness_file_read_as_they_did`.
 fn write(paths: &RunPaths, liveness: &Liveness) {
     let _ = ledger::write_json(&paths.liveness(), liveness);
 }
@@ -210,5 +211,35 @@ pub(crate) fn last_write_with_beats(paths: &RunPaths, last_write_at: Option<u64>
     match Liveness::read(paths).latest() {
         Some(latest) => Some(last_write_at.map_or(latest, |was| was.max(latest))),
         None => last_write_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The document entry 141 of `docs/contract-divergences.md` shows is one this
+    /// type reads, and writes back as itself: the one place the shape is stated
+    /// outside the type is held to it.
+    #[test]
+    fn the_shape_the_divergence_states_is_the_shape_the_type_reads() {
+        let entry = include_str!("../docs/contract-divergences.md")
+            .split("## 141.")
+            .nth(1)
+            .expect("entry 141");
+        let block = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("a json block in entry 141");
+        let read: Liveness = serde_json::from_str(block).expect("the stated shape reads");
+        assert_eq!(read.members.len(), 1);
+        assert_eq!(read.members[0].member, "worker");
+        let written: serde_json::Value = serde_json::to_value(&read).expect("it serialises");
+        let stated: serde_json::Value = serde_json::from_str(block).expect("it parses");
+        assert_eq!(written, stated);
+        let mut later = stated;
+        later["schema_version"] = serde_json::json!(LIVENESS_SCHEMA_VERSION + 1);
+        assert!(serde_json::from_value::<Liveness>(later).is_err());
     }
 }
