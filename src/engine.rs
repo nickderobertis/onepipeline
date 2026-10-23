@@ -8288,6 +8288,7 @@ fn start_ready(
                 }
             }
         }
+        crate::continuation::before_dispatch(&node.id);
         let cancel = CancellationToken::new();
         // llmlint: ignore-block[changed_behavior_has_e2e] each `?` is the refusal of a
         // record this build cannot read, and no invocation a user can type

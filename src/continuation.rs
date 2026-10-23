@@ -135,6 +135,23 @@ const FENCE_LINGER: Duration = Duration::from_secs(10);
 /// journey can hold that read until the displaced driver has got where it needs it.
 const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
 
+/// The test failpoint met before every read a takeover makes while it waits, so a journey can
+/// read the store as the displaced driver left it before the takeover has seen it.
+const TAKEOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_READ_GATE";
+
+/// The test failpoint met at the moment a driver would start a dispatch of the node
+/// [`BEGIN_GATE_NODE_ENV`] names, so a journey can hold a dispatch being admitted.
+const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
+const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
+
+/// Met at the moment a dispatch of `node` would start: [`BEGIN_GATE_ENV`]'s failpoint, where
+/// [`BEGIN_GATE_NODE_ENV`] names `node`, and nothing otherwise.
+pub(crate) fn before_dispatch(node: &str) {
+    if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
+        let _ = crate::ordering::meet(BEGIN_GATE_ENV);
+    }
+}
+
 /// The key a displaced driver's acknowledgement is written under, inside the claim it
 /// acknowledges.
 pub(crate) const ACKNOWLEDGED_KEY: &str = "acknowledged";
@@ -1213,6 +1230,7 @@ pub(crate) fn hand_over(
         if wait.is_some_and(|wait| written.elapsed() >= wait) {
             let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
         }
+        let _ = crate::ordering::meet(TAKEOVER_READ_GATE_ENV);
         let read = store
             .project_metadata_within(project, CLAIM_READ_DEADLINE)
             .and_then(|metadata| {

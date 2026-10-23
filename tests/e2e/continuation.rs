@@ -893,7 +893,17 @@ fn a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over
     let closes = launch_detached(&world, "closes", vec![agent("first", &[])]);
     let mine = first.arrived();
     until_claimed_by(&world, &closes, "closes");
-    let successor = world.on_host("host-b");
+    // llmlint: ignore-block[tests_mirror_real_usage] the successor has nothing left to
+    // dispatch, so on a fast host it starts, closes out and releases its claim before the
+    // claim the displaced run's closeout left can be read. Its takeover's reads while it waits
+    // are held, and only ordered: the takeover, both closeouts and the claim asserted are the
+    // binaries' own.
+    let successor_reads = crate::harness::Rendezvous::failpoint();
+    let successor = world.on_host("host-b").with_env(
+        "ONEPIPELINE_TEST_TAKEOVER_READ_GATE",
+        &successor_reads.address(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let taking = take_over_in_background(&successor, &closes);
     let claimed = until_claimed_on(&world, &closes, "host-b");
     let third = world.on_host("host-c");
@@ -909,18 +919,24 @@ fn a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over
     // The run taken over finishes its one dispatch, which publishes nothing, and closes out:
     // its release finds the successor's claim and acknowledges it, and only then does the
     // successor start.
+    let reading =
+        successor_reads.arrived_within("the takeover to read the claim", || successor.dump());
     mine.release();
     world.until("the run taken over to close out", |world| {
         world.run_file("closes", "result.json").is_file()
     });
-    let said = launched_over(taking);
-    assert!(said.contains("acknowledged the takeover"), "{said}");
     let now = stored_claim(&world, &closes);
     assert_eq!(
         (&now["run"], &now["host"]),
         (&claimed["run"], &claimed["host"]),
         "the closeout took the claim"
     );
+    assert_eq!(now["acknowledged"]["run"], "closes", "{now}");
+    // The takeover's held read, and every one after it, goes on.
+    drop(reading);
+    drop(successor_reads);
+    let said = launched_over(taking);
+    assert!(said.contains("acknowledged the takeover"), "{said}");
     successor.until("the successor to close out", |world| {
         world.run_file("closes", "result.json").is_file()
     });
@@ -1226,6 +1242,10 @@ fn a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over() {
 /// what paces a takeover's reads of the claim while it waits, and nothing a running driver
 /// does.
 const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+
+/// The failpoint met at the moment a dispatch of the node [`BEGIN_NODE`] names would start.
+const BEGIN_GATE: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE";
+const BEGIN_NODE: &str = "ONEPIPELINE_TEST_CLAIM_BEGIN_NODE";
 
 /// A team world whose every host has a takeover read the claim every tenth of `interval`
 /// seconds, at least one apart, and gives a cancelled dispatch one second, so a takeover
@@ -3282,7 +3302,7 @@ fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
         &successor,
         &successor.project,
         &["start", &project, "--detach", "--take-over"],
-        takeover_wait(5) + crate::harness::ONE_STEP,
+        takeover_wait(1) + crate::harness::ONE_STEP,
     )
     .exited(0);
     // The successor's driver's own claim, which replaced the one its takeover waited under.
@@ -3419,12 +3439,12 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
         &successor,
         &successor.project,
         &["start", &project, "--detach", "--take-over"],
-        takeover_wait(5) + crate::harness::ONE_STEP,
+        takeover_wait(1) + crate::harness::ONE_STEP,
     );
     took.exited(0);
     let said = &took.stderr;
     assert!(
-        since.elapsed() >= takeover_wait(5),
+        since.elapsed() >= takeover_wait(1),
         "the takeover started {:?} after it launched, inside the wait",
         since.elapsed()
     );
@@ -3432,7 +3452,7 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
         said.contains(&format!(
             "run '{run}' on host '{}' has not acknowledged in {}s",
             claim["host"].as_str().expect("a host"),
-            takeover_wait(5).as_secs()
+            takeover_wait(1).as_secs()
         )) && said.contains("none of its publications is under way"),
         "{said}"
     );
