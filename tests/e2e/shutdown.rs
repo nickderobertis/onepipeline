@@ -407,10 +407,14 @@ fn nothing_new_starts_once_a_shutdown_has_begun() {
 const STARTED_MEANWHILE: &str =
     "started while this shutdown was reading the run, so it is ended with its driver";
 
-/// Launch `run` with its one node `work` held, and shut it down while its driver is
+/// Launch `run` with its node `work` held, and shut it down while its driver is
 /// admitting that node: the dispatch starts after the shutdown read the registry and
 /// after its teardown listed the tree it ends. Answers the shutdown and the pids the
-/// run's registry names.
+/// run's registry names for `work`.
+///
+/// `standing`, where given, is a node ahead of `work` in the plan that is already
+/// running when the shutdown begins, and is held, and whatever it was scripted to
+/// do with the shutdown's ask, it does.
 ///
 /// Held rather than raced: the driver at the moment it would start the node, and the
 /// shutdown once it has listed what it ends, so the dispatch's start falls between the
@@ -418,9 +422,18 @@ const STARTED_MEANWHILE: &str =
 /// to end when its driver does: no turn is announced, and nothing is written to the
 /// pipe a driver that has gone no longer reads.
 #[cfg(unix)]
-fn shut_down_while_admitting(world: &World, run: &str) -> (crate::harness::Run, Vec<u32>) {
+fn shut_down_while_admitting(
+    world: &World,
+    run: &str,
+    standing: Option<&str>,
+) -> (crate::harness::Run, Vec<u32>) {
     world.script("work.wait", "hold");
-    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let mut nodes: Vec<Value> = standing.iter().map(|node| agent(node, &[])).collect();
+    if let Some(node) = standing {
+        held(world, node);
+    }
+    nodes.push(agent("work", &[]));
+    let project = world.plan(run, &plan_of(run, nodes));
     // llmlint: ignore-block[tests_mirror_real_usage] which side of the shutdown's listing the
     // dispatch starts on is the property, and no user-facing input can place it. The failpoints
     // only order the real binaries; the launch, the shutdown and every outcome asserted are the
@@ -436,6 +449,9 @@ fn shut_down_while_admitting(world: &World, run: &str) -> (crate::harness::Run, 
         .run_on_within(start, "start --detach", crate::harness::ONE_STEP)
         .exited(0);
     let admitting = begins.arrived_within("the driver to come to start 'work'", || world.dump());
+    world.until("the standing node's dispatch to be registered", |world| {
+        world.dispatch_records(run).len() == usize::from(standing.is_some())
+    });
     let mut shutdown = world.cmd(&["shutdown", run, "--grace", "1"]);
     shutdown.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
     let shut = std::thread::scope(|scope| {
@@ -451,7 +467,7 @@ fn shut_down_while_admitting(world: &World, run: &str) -> (crate::harness::Run, 
         admitting.release();
         world.until(
             "the dispatch the driver was admitting to be registered",
-            |world| !world.dispatch_records(run).is_empty(),
+            |world| world.dispatch_records(run).len() > usize::from(standing.is_some()),
         );
         at_the_listing.release();
         // Only the first listing is held: any later one the shutdown makes finds
@@ -462,17 +478,20 @@ fn shut_down_while_admitting(world: &World, run: &str) -> (crate::harness::Run, 
     // llmlint: ignore-end[tests_mirror_real_usage]
     assert_eq!(
         host_shutdown(world, run)["dispatches"],
-        json!(0),
+        json!(usize::from(standing.is_some())),
         "the shutdown was to have read the run before its dispatch started"
     );
     let pids: Vec<u32> = world
         .dispatch_records(run)
         .iter()
         .map(|record| {
-            let entry: Value = serde_json::from_str(
+            serde_json::from_str::<Value>(
                 &std::fs::read_to_string(record).expect("a registry entry is read"),
             )
-            .expect("a registry entry is JSON");
+            .expect("a registry entry is JSON")
+        })
+        .filter(|entry| entry["node"] == "work")
+        .map(|entry| {
             u32::try_from(entry["pid"].as_u64().expect("a registry entry names a pid"))
                 .expect("a pid fits")
         })
@@ -494,7 +513,7 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
     let world =
         World::new("shutdown-started-meanwhile").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let run = "meanwhile";
-    let (shut, pids) = shut_down_while_admitting(&world, run);
+    let (shut, pids) = shut_down_while_admitting(&world, run, None);
     let outlived: Vec<u32> = pids
         .iter()
         .copied()
@@ -526,7 +545,7 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_that_will_not_go_is_repor
         World::new("shutdown-started-stays").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     world.script("work.ignores-the-ask", "yes");
     let run = "stays";
-    let (shut, pids) = shut_down_while_admitting(&world, run);
+    let (shut, pids) = shut_down_while_admitting(&world, run, None);
     let standing: Vec<u32> = pids
         .iter()
         .copied()
@@ -547,6 +566,44 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_that_will_not_go_is_repor
     assert!(
         shut.stdout.contains("partly stopped"),
         "the teardown was not reported in stop's own words:\n{}",
+        shut.stdout
+    );
+    assert_eq!(host_shutdown(&world, run)["teardown"], "partly-signalled");
+    shut.exited(REFUSED);
+}
+
+/// A teardown that already left a survivor is not reported whole by ending a
+/// dispatch started while the shutdown read the run: that dispatch is ended, and
+/// the run's teardown is still partly stopped, on the report and on the record.
+#[cfg(unix)]
+#[test]
+fn a_late_dispatch_ended_does_not_make_a_partial_teardown_whole() {
+    let world =
+        World::new("shutdown-started-partial").with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("service.ignores-the-ask", "yes");
+    let run = "partial";
+    let (shut, pids) = shut_down_while_admitting(&world, run, Some("service"));
+    let survivor = registered_pid(&world, run, "service");
+    let survived = !crate::harness::process_ended(survivor);
+    // The one process this journey's run left that no `World` takes with it.
+    end_process(survivor);
+    world.release("service.go");
+    assert!(
+        survived,
+        "the standing node that ignores the ask did not outlive it, so this journey proves nothing"
+    );
+    for pid in &pids {
+        assert!(
+            crate::harness::process_ended(*pid),
+            "the late dispatch (pid {pid}) outlived the shutdown:\n{}",
+            shut.stderr
+        );
+        shut.err_has(&format!("'work' (pid {pid}) {STARTED_MEANWHILE}"));
+    }
+    assert!(
+        shut.stdout
+            .contains(&format!("Still running: service (pid {survivor})")),
+        "the survivor is not named by pid:\n{}",
         shut.stdout
     );
     assert_eq!(host_shutdown(&world, run)["teardown"], "partly-signalled");
