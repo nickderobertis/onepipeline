@@ -400,11 +400,18 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
                 frozen.push(*pid);
             }
         }
+        // llmlint: ignore[changed_behavior_has_e2e] the bound is met only by a tree that keeps
+        // growing while frozen, which takes a process this user may not stop starting more —
+        // one owned by somebody else, not a thing to go and make. Every journey that ends a
+        // tree runs through this loop, and what follows a bound met — the signal, and the
+        // confirmation that reports a tree still standing — is what this journey holds:
+        // `a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_clean_stop`.
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             break;
         }
         // A listing this host will not give leaves the teardown with the tree
-        // it has already found, which is no less than it had before freezing.
+        // it has already found, which is no less than it had before freezing:
+        // `a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it`.
         let Some(table) = process_table() else {
             break;
         };

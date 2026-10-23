@@ -4186,6 +4186,100 @@ fn a_stop_ends_a_process_its_dispatch_starts_after_the_stop_has_listed_the_tree(
     );
 }
 
+/// A stop whose host stops listing once it has frozen the tree still ends that
+/// tree, and leaves none of it frozen.
+///
+/// The teardown freezes what its first listing found before it lists again,
+/// so a listing refused after that is met with a frozen tree in hand: it is
+/// signalled and let go as it stands. A teardown that gave up there would leave
+/// every process of the run stopped, which reads as running to every view and
+/// ends nothing.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it() {
+    let world = World::new("driver-stop-relist-fails");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "relistfails", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !dispatches(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_fails_after_its_first_listing());
+    let stopped = world.run_on(command, "stop with a ps that lists once");
+    let left: Vec<u32> = tree
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    // Ended here, by the pids read before the stop, before anything is
+    // asserted: a tree left frozen is one nothing else on this host ends.
+    for pid in &left {
+        end_process(*pid);
+    }
+    stopped.exited(0);
+    assert!(
+        left.is_empty(),
+        "pids {left:?} of the run's tree {tree:?} were still there once the stop answered"
+    );
+    world.release("build.go");
+}
+
+/// A stop run from **inside** the run it ends — an agent of the run stopping
+/// its own run — ends the run and answers, rather than freezing or ending
+/// itself on the way.
+///
+/// The stop is a descendant of the tree it aims at, so a teardown that aimed at
+/// every descendant would aim at the stop too: freezing it leaves the stop and
+/// the whole run stopped for good, and ending it leaves the rest of the tree
+/// unsignalled with nobody told.
+#[cfg(unix)]
+#[test]
+fn a_stop_run_from_inside_its_own_run_ends_the_run_and_answers() {
+    let world = World::new("driver-stop-from-inside");
+    world.script("build.stops-its-run", "");
+    world.script("build.wait", "hold");
+    let (_, driver) = start_detached_announcing(&world, "frominside", vec![agent("build", &[])]);
+    let recorded = world.fakes.join("build.stopper.pid");
+    world.until("the dispatch to start a stop of its own run", |_| {
+        recorded.is_file()
+    });
+    let stopper: u32 = std::fs::read_to_string(&recorded)
+        .expect("the stop recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read now, while a stop that froze itself would still hold the dispatch
+    // under the driver, so a failure can end what it left by these pids.
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+    let deadline = std::time::Instant::now() + crate::harness::ONE_STEP;
+    while !process_ended(stopper) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let answered = process_ended(stopper);
+    if !answered {
+        for pid in std::iter::once(stopper).chain(tree.iter().copied()) {
+            end_process(pid);
+        }
+    }
+    assert!(
+        answered,
+        "a stop run from inside its own run had not answered within {:?}",
+        crate::harness::ONE_STEP
+    );
+    let said =
+        std::fs::read_to_string(world.fakes.join("build.stopper.out")).expect("what the stop said");
+    assert!(said.contains("\"stopped\":true"), "{said}");
+    assert!(
+        process_ended(driver),
+        "the run's driver, pid {driver}, outlived a stop that answered:\n{said}"
+    );
+}
+
 /// A stop that cannot see what it must end refuses, changes nothing, and works
 /// on the retry.
 ///
