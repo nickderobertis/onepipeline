@@ -204,6 +204,14 @@ pub enum Stop {
 /// signalled — see the Unix `platform_stop`.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
     let (established, _, _, discovery) = platform_stop(&[pid], how);
+    as_discovered(established, discovery)
+}
+
+/// What a teardown may claim once it is known whether its discovery finished:
+/// a tree it signalled whole is only partly signalled if it stopped looking
+/// before the listings settled. The one rule [`stop`] and [`confirmed`] both
+/// apply, so neither can report a clean stop the other would refuse.
+fn as_discovered(established: Teardown, discovery: Discovery) -> Teardown {
     match (established, discovery) {
         (Teardown::Signalled, Discovery::Incomplete) => Teardown::PartlySignalled,
         (established, _) => established,
@@ -278,7 +286,7 @@ pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardow
 // `a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed`, and through the
 // binary in `tests/e2e/driver.rs`.
 fn confirmed(established: Teardown, discovery: Discovery, gone: impl FnOnce() -> bool) -> Teardown {
-    match established {
+    let confirmed = match established {
         // A tree that is gone within the patience was reached, however the
         // per-process asks read at the instant they were made; one still
         // standing when it runs out is the run the operator has to be told is
@@ -287,14 +295,15 @@ fn confirmed(established: Teardown, discovery: Discovery, gone: impl FnOnce() ->
         // watches only what was found, and what was not found is exactly what
         // may still be running.
         Teardown::Signalled | Teardown::PartlySignalled => {
-            if gone() && discovery == Discovery::Complete {
+            if gone() {
                 Teardown::Signalled
             } else {
                 Teardown::PartlySignalled
             }
         }
         established => established,
-    }
+    };
+    as_discovered(confirmed, discovery)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -443,36 +452,13 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     // complete. Nothing outside descent is frozen, and every process that is
     // frozen is let go again once it has been signalled, by `Paused`.
     let mut frozen = Paused(Vec::new());
-    let deadline = Instant::now().checked_add(FREEZE_BOUND);
-    let discovery = loop {
-        for pid in &aimed {
-            if !frozen.0.contains(pid) && signal_one(*pid, libc::SIGSTOP) == Reached::Delivered {
-                frozen.0.push(*pid);
-            }
-        }
-        // llmlint: ignore[changed_behavior_has_e2e] the bound is met only by a tree that keeps
-        // growing while frozen, which takes a process this user may not stop starting more —
-        // one owned by somebody else, not a thing to go and make. Every journey that ends a
-        // tree runs through this loop, and what follows a bound met — the signal, and the
-        // confirmation that reports a tree still standing — is what this journey holds:
-        // `a_stop_whose_tree_takes_the_ask_and_stays_refuses_rather_than_reporting_a_clean_stop`;
-        // and it ends discovery exactly as a refused listing does, which
-        // `a_stop_whose_relisting_fails_never_reports_success_beside_a_child_it_missed` holds.
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            break Discovery::Incomplete;
-        }
-        // A listing this host will not give leaves the teardown with the tree
-        // it has already found, which it still signals — and says it may not
-        // be the whole of it.
-        let Some(table) = process_table() else {
-            break Discovery::Incomplete;
-        };
-        let found = aimed.len();
-        aim_at_descent(&mut aimed, &table, self::pid());
-        if aimed.len() == found {
-            break Discovery::Complete;
-        }
-    };
+    let discovery = discover(
+        &mut aimed,
+        &mut frozen.0,
+        Instant::now().checked_add(FREEZE_BOUND),
+        |pid| signal_one(pid, libc::SIGSTOP) == Reached::Delivered,
+        process_table,
+    );
     // Every answer is kept: one process this user may not signal is one still
     // running, and a teardown that reported the tree as reached anyway would be
     // the same false completion in a smaller place. And a walk that found
@@ -489,6 +475,44 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
         .map(|(pid, _)| *pid)
         .collect();
     (established(&answers), aimed, delivered, discovery)
+}
+
+/// Pause everything in `aimed`, list again, and add what the listing finds,
+/// until a listing finds nothing new — and say whether it got there.
+///
+/// Every pid `pause` reports paused is recorded in `paused`, which the caller
+/// holds for letting them go. Discovery is [`Discovery::Incomplete`] when a
+/// listing is refused, and when `deadline` passes before the listings settle:
+/// in both the caller signals what it has, and what it does not have is what
+/// may still be running. Takes its pausing and its listing so the decision
+/// can be driven to each of its ends, the deadline above all — a tree that
+/// keeps growing while paused takes a process this user may not pause.
+#[cfg(unix)]
+fn discover(
+    aimed: &mut Vec<u32>,
+    paused: &mut Vec<u32>,
+    deadline: Option<Instant>,
+    mut pause: impl FnMut(u32) -> bool,
+    mut list: impl FnMut() -> Option<Vec<(u32, u32)>>,
+) -> Discovery {
+    loop {
+        for pid in aimed.iter() {
+            if !paused.contains(pid) && pause(*pid) {
+                paused.push(*pid);
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Discovery::Incomplete;
+        }
+        let Some(table) = list() else {
+            return Discovery::Incomplete;
+        };
+        let found = aimed.len();
+        aim_at_descent(aimed, &table, self::pid());
+        if aimed.len() == found {
+            return Discovery::Complete;
+        }
+    }
 }
 
 /// Add to `aimed` every process `table` shows descended from what it already
@@ -4007,6 +4031,75 @@ try {
             confirmed(Teardown::Signalled, Discovery::Complete, || true),
             Teardown::Signalled,
             "a teardown that reached its whole tree was not reported as one"
+        );
+    }
+
+    /// Discovery reaches each of its three ends, and pauses everything it found
+    /// on the way to any of them.
+    ///
+    /// Settled: a listing that finds nothing new. Incomplete: a listing the
+    /// host refuses, and a deadline passed while the tree is still growing —
+    /// the second needs a tree that grows while paused, which a real host gives
+    /// only to a process this user may not pause, so the listing is handed in.
+    #[cfg(unix)]
+    #[test]
+    fn discovery_settles_or_says_it_did_not_and_pauses_what_it_found() {
+        let grown = vec![(10, 1), (11, 10), (12, 11)];
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let settled = discover(
+            &mut aimed,
+            &mut paused,
+            None,
+            |_| true,
+            || Some(grown.clone()),
+        );
+        assert_eq!(settled, Discovery::Complete);
+        assert_eq!(
+            (aimed.clone(), paused.clone()),
+            (vec![10, 11, 12], vec![10, 11, 12])
+        );
+
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let refused = discover(&mut aimed, &mut paused, None, |_| true, || None);
+        assert_eq!(
+            (refused, aimed, paused),
+            (Discovery::Incomplete, vec![10], vec![10])
+        );
+
+        // A tree that grows at every listing never settles, so only the
+        // deadline ends it: whatever was found by then is paused, and the
+        // answer is that discovery did not finish.
+        let mut next = 100;
+        let mut growing = || {
+            next += 1;
+            Some((101..=next).map(|pid| (pid, 10)).chain([(10, 1)]).collect())
+        };
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let deadline = Instant::now().checked_add(std::time::Duration::from_millis(20));
+        let bounded = discover(&mut aimed, &mut paused, deadline, |_| true, &mut growing);
+        assert_eq!(bounded, Discovery::Incomplete);
+        assert!(
+            aimed.len() > 1,
+            "the tree never grew, so the bound was not what ended it"
+        );
+        assert_eq!(
+            paused, aimed,
+            "something found before the bound was left unpaused"
+        );
+        // And with time to spare it is the listing that ends it, not the bound.
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let unbounded = discover(
+            &mut aimed,
+            &mut paused,
+            None,
+            |pid| pid != 10,
+            || Some(grown.clone()),
+        );
+        assert_eq!(unbounded, Discovery::Complete);
+        assert_eq!(
+            paused,
+            vec![11, 12],
+            "a pid the pause did not reach was recorded as paused"
         );
     }
 
