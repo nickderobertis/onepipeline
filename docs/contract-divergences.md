@@ -12818,3 +12818,46 @@ binary over real git and `onevcs`, and
 the host does. `src/taskgraph.rs`'s
 `the_boundary_fields_reconcile_with_the_records_they_are_read_from` reads a private project
 holding a public and a private task.
+
+## 141. A driver's cost grew with its run's history, and every member heartbeat was a journal record — OPEN
+
+**Proposal, for the planner who owns the contract: the Merged stream paragraph, the
+`PARKED` paragraph and the `watch` verb take the three changes below.** The manager ruled
+each on the plan node `op-journal-scaling` (correlations
+`c-1d51b107c05330156c86c648645884bf` and `c-3135b48c5c7173b19043b7f00c2ae8ae`), and this
+build implements them; `docs/contract.md`'s own wording is unchanged until the planner
+rules on it.
+
+1. **Member liveness is kept beside the journal, not in it.** A driver no longer appends a
+   `member-heartbeat` to `events.jsonl`. It keeps each in-flight dispatch member's latest
+   beat in `<run>/liveness.json` — `{"schema_version": 1, "members": [{"node",
+   "graph_run", "member", "last_heartbeat_at"}]}`, one entry per member keyed by the
+   first three, written whole and atomically when a beat advances an entry, dropped when
+   its dispatch settles — and a reader takes a member's last beat as the later of the
+   journal's and the file's, so a run an earlier build journalled reads as it did. Every
+   other record a member emits is still journalled.
+2. **`PARKED` counts a dispatch member's heartbeat as activity, and an observer's not at
+   all.** The paragraph's "its journal has been quiet" reads "its journal and its
+   dispatch members' heartbeats have been quiet". An observer's members belong to no
+   dispatch: their beats are neither journalled nor kept, so they no longer keep a run
+   from reading `PARKED` — **a run with no dispatch in flight and a live observer can now
+   read `PARKED` where it read `ACTIVE`.** `OBSERVER DEAD` and `OBSERVER NOT RESTARTED`
+   read the launch record and `oneagentgraph`'s own history, as before. A heartbeat no
+   longer wakes an armed watch; every other record that woke one still does.
+3. **A `watch` given no `--cursor`, and an attached driver's first render, start at the
+   byte the run's checkpoint covers** rather than at the journal's first byte: they print
+   the records past it — the whole journal of a run with no checkpoint yet — and then
+   everything as it arrives. What a watch returns on is unchanged: it still returns at
+   once on a planner surface left unread before it armed, its heartbeat and ending lines
+   count every unread surface off the channel's own state, it returns only on
+   settlements after it armed, and its ending cursor resumes with nothing skipped or
+   repeated. A watch given a cursor is unchanged.
+
+Behind the three, and inside the existing contract: every per-pass, per-append and
+per-call reader on the driver's path, `status --json`, `watch` and `reply`'s read before it
+queues resumes from `checkpoint.json` (schema 15, still the one journal-derived snapshot,
+still regenerable and safe to delete) and the bytes appended past it, never from byte 0; a
+record arriving past the checkpoint that the merge order would place in front of a covered
+one is folded after the covered history; and a checkpoint of another schema is rebuilt by
+one streaming read. `RunView::open` keeps its whole-store `events`, and its state is that
+same fold.
