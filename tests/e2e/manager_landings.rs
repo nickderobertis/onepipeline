@@ -1909,6 +1909,7 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
     let (c_flow, _, _) = &by_session["manager-c"];
     watch(&managers[0], a_flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
     let c_owed = world.run(&["unwatched", "--session", "manager-c"]);
+    if !c_owed.stdout.contains("LIVE") { let (cc, co, ce) = c.ended(); panic!("DIAG c {cc}\n{co}\n{ce}\n{}", world.dump()); }
     assert!(
         c_owed.stdout.contains("LIVE") && !c_owed.stdout.contains("DIED"),
         "{}",
@@ -4084,11 +4085,18 @@ fn zz_probe_after_a_death() {
     let mc = world.as_session("manager-c");
     let mut a = Started::spawn(&ma, None, &["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
     world.until("a held", |_| held.holding());
-    a.kill();
     let mut train = vec!["integrate"];
     train.extend(TRAIN);
     train.push("--push");
-    let c = Started::spawn(&mc, Some(&repository.checkout), &train);
+    let mut c = Started::spawn(&mc, Some(&repository.checkout), &train);
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    let before = world.run(&["unwatched", "--session", "manager-c"]);
+    eprintln!("C BEFORE KILL: {}", before.stdout);
+    eprintln!("C exited before kill? {:?}", c.child.try_wait());
+    a.kill();
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    eprintln!("C after kill? {:?}", c.child.try_wait());
+    held.release();
     let (code, out, err) = c.ended();
-    panic!("c ended {code}\nOUT:{out}\nERR:{err}");
+    panic!("c ended {code}\nOUT:{out}\nERR:{err}\nDUMP:{}", world.dump());
 }
