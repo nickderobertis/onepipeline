@@ -142,6 +142,7 @@ pub(crate) fn beat(paths: &RunPaths, event: &Envelope) {
         .members
         .iter_mut()
         .find(|beat| beat.node == node && beat.graph_run == graph_run && beat.member == member);
+    // llmlint: ignore[changed_behavior_has_e2e] a beat arriving no later than the one kept needs a member's clock to step back, which no double produces through the binary; `a_beat_no_later_than_the_one_kept_leaves_it` below holds the arm over the real file.
     match held {
         Some(beat)
             if projection::millis_of(&beat.last_heartbeat_at).is_some_and(|was| was >= at) =>
@@ -217,6 +218,42 @@ pub(crate) fn last_write_with_beats(paths: &RunPaths, last_write_at: Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A beat stamped no later than the one an entry keeps leaves the entry as it
+    /// is: the file says when a member was last heard from, and an older beat
+    /// arriving late does not make that earlier.
+    #[test]
+    fn a_beat_no_later_than_the_one_kept_leaves_it() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-heartbeat-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+        ));
+        let paths = RunPaths::under(&root, "beats");
+        paths.create().expect("the run directory");
+        let beat_at = |ts: &str| {
+            let mut event: Envelope = serde_json::from_value(serde_json::json!({
+                "v": 2, "ts": ts, "stream": "graph-1", "seq": 0, "source": "agentgraph",
+                "kind": "member-heartbeat",
+                "labels": {"run_id": "graph-1", "node": "build", "member": "worker"},
+                "payload": {}, "artifacts": [],
+            }))
+            .expect("an envelope");
+            event.seq = 1;
+            beat(&paths, &event);
+        };
+        beat_at("2026-10-23T12:00:05.000Z");
+        beat_at("2026-10-23T12:00:01.000Z");
+        beat_at("2026-10-23T12:00:05.000Z");
+        let kept = Liveness::read(&paths);
+        assert_eq!(kept.members.len(), 1);
+        assert_eq!(
+            kept.members[0].last_heartbeat_at,
+            "2026-10-23T12:00:05.000Z"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The document entry 141 of `docs/contract-divergences.md` shows is one this
     /// type reads, and writes back as itself: the one place the shape is stated

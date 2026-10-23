@@ -3261,6 +3261,7 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
                         crate::heartbeat::beat(&paths, &envelope);
                         Message::Journalled(envelope)
                     }
+                    // llmlint: ignore[changed_behavior_has_e2e] a relay that cannot write needs the run's journal to refuse an append mid-run, which is host sabotage; the arm hands the envelope on unwritten so the loop's own write — the one every relayed record took before this thread, and whose failure is reported as it always was — makes the attempt again.
                     Message::Event(envelope) => match journal.relay(&envelope) {
                         Ok(()) => Message::Journalled(envelope),
                         Err(_) => Message::Event(envelope),
