@@ -5875,6 +5875,91 @@ fn a_run_whose_observer_graph_finished_is_reported_unwatched() {
     world.release("turn.settle");
 }
 
+/// The same verdict read while the driver has **claimed the run and appended
+/// nothing since**: the listing reads a live driver, not the launcher it took
+/// over from.
+///
+/// A detached launcher claims the run, appends its first records — each
+/// rewriting the run's summary document from the launch record naming that
+/// launcher — and exits once its retained driver has written its own claim. That
+/// claim is a rewrite of the launch record and no append, so until the driver's
+/// loop appends, the summary is current against the journal and names a process
+/// that has exited. `runs` read its driver off the summary, and so read `DRIVER
+/// DEAD` there: the Windows lane's `0/1 done  DRIVER DEAD`, where the observer
+/// settled before the driver's first append.
+///
+/// The driver is held at that point rather than raced to it, so the window is the
+/// journey's order on any host.
+#[test]
+fn a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_driven() {
+    // llmlint: ignore-block[tests_mirror_real_usage] where the driver is held is the
+    // property, and no user-facing input can place it. The failpoint only orders the
+    // real binary; the launch, the observer graph and both views are the binary's own.
+    let claimed = crate::harness::Rendezvous::failpoint();
+    // Restarting switched off, for the reason the journeys above give.
+    let world = World::new("real-observer-before-append")
+        .with_env(OBSERVER_RESTARTS_ENV, "0")
+        .with_env("ONEPIPELINE_TEST_DRIVER_CLAIMED_GATE", &claimed.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+
+    let path = world.plan("outlived", &plan_of("outlived", vec![agent("build", &[])]));
+    world
+        .run_on_agentgraph(&[
+            "start",
+            &path,
+            "--detach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .exited(0);
+    let held = claimed.arrived_within_a_step(&world, "the retained driver to claim the run");
+
+    let graph_run = || {
+        world.run_json("outlived", "launch.json")["graph_run"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        !graph_run().is_empty(),
+        "the driver's claim does not name its observer graph"
+    );
+    world.until("the observer graph to write its ending", |world| {
+        std::fs::read_to_string(
+            world
+                .graph_state()
+                .join(graph_run())
+                .join(oneagentgraph::run::RECORD_FILE),
+        )
+        .is_ok_and(|record| record.contains("finished_ms"))
+    });
+    // The window this journey is about: the summary still names the launcher.
+    let summary = world.run_json("outlived", "summary.json");
+    let launch = world.run_json("outlived", "launch.json");
+    assert_ne!(
+        summary["pid"], launch["pid"],
+        "the summary already names the driver, so there is no window to read: {summary}"
+    );
+
+    for view in [vec!["runs"], vec!["status"]] {
+        let rendered = world.run_on_agentgraph(&view);
+        rendered.exited(0);
+        let line = rows(&rendered.stdout)
+            .into_iter()
+            .find(|line| line.contains("outlived"))
+            .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout));
+        assert!(
+            line.contains("ACTIVE") && line.contains("OBSERVER DEAD"),
+            "a run its driver has claimed is read by {view:?} as undriven: {line}"
+        );
+    }
+    held.release();
+    world.release("turn.go");
+    world.release("turn.settle");
+}
+
 /// An observer's **ending is recorded before anything can read that it has
 /// gone**: nothing this crate publishes lands inside the interval between the
 /// graph announcing it has settled and its record saying so.

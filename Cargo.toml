@@ -1158,12 +1158,13 @@ onevcs-testing = "0.19.19"
 # repository-naming tasks route, refusing a split private home as
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
-#
-# **0.11.0 links the cheaper approval**: approving a plan on a GitHub Projects board
-# lists its members and writes its document metadata in one request each, and a host
-# holds its plan-store CLI to the release this engine links, so it adopts that approval
-# only once this pin does. The public held-task-image read (0.9.4) is what creating
-# write-backs use to carry authoring images through the shadow store.
+# **0.11.0 carries the copy chain** (`otg-member-copy`, `otg-preserve-status`,
+# `otg-target-task`): https://github.com/nickderobertis/onetaskgraph/releases/tag/v0.11.0
+# Created members use MembersOnly; settlement still writes the source status.
+# It also links cheaper approval: GitHub Projects approval lists members and writes
+# document metadata in one request each. The public held-task-image read (0.9.4)
+# carries authoring images through the shadow store. Hosts hold their plan-store CLI
+# to this linked release, adopting both improvements together.
 onetaskgraph-core = "=0.11.0"
 onetaskgraph-plugin-api = "=0.11.0"
 onetaskgraph-local-md = "=0.11.0"
@@ -1183,7 +1184,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.85.1"
+version = "0.87.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

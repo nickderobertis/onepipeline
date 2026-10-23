@@ -123,9 +123,9 @@ pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 /// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`
 /// is for the per-node hook: `--writeback-item-budget` beats it, it beats the
 /// launch config's own `writeback_item_budget`, and beneath all three is
-/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. Read once, at the launch, and
-/// retained in the launch record — so an `adopt` replays what its launch resolved
-/// rather than whatever this variable happens to say later.
+/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. Read at launch and retained in
+/// the launch record. An `adopt` ignores this variable and keeps the recorded
+/// budget unless its own flag replaces it.
 pub const WRITEBACK_ITEM_BUDGET_ENV: &str = "ONEPIPELINE_WRITEBACK_ITEM_BUDGET";
 
 /// How long a run-end hook is awaited, in seconds, when a launch names no
@@ -771,6 +771,18 @@ pub struct AdoptArgs {
     /// Print the launch record and return, leaving the fresh driver unattended.
     #[arg(long)]
     pub detach: bool,
+    /// How long the settlement write-back allows its store per item it writes,
+    /// in seconds.
+    ///
+    /// A targeted update's deadline is the sixty-second floor every other store
+    /// command is bounded by plus this; the copy creating added items is allowed
+    /// the floor plus this multiplied by the number of items it creates, so the
+    /// backstop that cancels an unreachable store's write scales with what it
+    /// writes instead of being outgrown by it. A positive whole number:
+    /// zero is no budget at all and is refused. Given here it replaces the
+    /// recorded budget for this driver and every later one; naming none keeps it.
+    #[arg(long, value_name = "SECONDS")]
+    pub writeback_item_budget: Option<u64>,
 }
 
 /// The flag that tells a retained driver it is taking a run over rather than
