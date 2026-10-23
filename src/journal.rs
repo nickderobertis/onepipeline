@@ -420,13 +420,22 @@ pub(crate) struct FinishedLine {
     pub(crate) lost: Option<Lost>,
 }
 
+/// Which of the two classes an [`Integrity`] counts a lost line under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LossKind {
+    /// A record whose writer did not finish it.
+    Truncated,
+    /// A whole line this build cannot read.
+    Unparseable,
+}
+
 /// What of one line an [`Integrity`] counts as lost: which of its two classes, where
 /// in the file the line begins, and how many of its bytes are no record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Lost {
-    /// A record whose writer did not finish it, rather than a whole line this
-    /// build cannot read.
-    pub(crate) truncated: bool,
+    /// Which class it is lost under.
+    pub(crate) kind: LossKind,
     /// Where in the file the line begins.
     pub(crate) offset: u64,
     /// How many of its bytes are not a record this build can read.
@@ -440,17 +449,17 @@ fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
     match reading {
         Reading::Whole(_) | Reading::Blank => None,
         Reading::Glued { lost, .. } => Some(Lost {
-            truncated: true,
+            kind: LossKind::Truncated,
             offset,
             bytes: *lost,
         }),
         Reading::Truncated => Some(Lost {
-            truncated: true,
+            kind: LossKind::Truncated,
             offset,
             bytes,
         }),
         Reading::Unparseable => Some(Lost {
-            truncated: false,
+            kind: LossKind::Unparseable,
             offset,
             bytes,
         }),
@@ -722,10 +731,9 @@ impl Integrity {
             offset: lost.offset,
             bytes: lost.bytes,
         };
-        if lost.truncated {
-            self.truncated.push(loss);
-        } else {
-            self.unparseable.push(loss);
+        match lost.kind {
+            LossKind::Truncated => self.truncated.push(loss),
+            LossKind::Unparseable => self.unparseable.push(loss),
         }
     }
 

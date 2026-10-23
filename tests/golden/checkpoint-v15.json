@@ -149,7 +149,7 @@
     "unreadable": 1,
     "losses": [
       {
-        "truncated": false,
+        "kind": "unparseable",
         "line": 7,
         "offset": 1024,
         "bytes": 33

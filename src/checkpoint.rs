@@ -467,9 +467,8 @@ pub(crate) struct Tally {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LineLost {
-    /// A record whose writer did not finish it, rather than a whole line this
-    /// build cannot read.
-    pub(crate) truncated: bool,
+    /// Which class it is lost under.
+    pub(crate) kind: journal::LossKind,
     /// The 1-based line it is on, counted from the journal's first byte.
     pub(crate) line: u64,
     /// Where in the file the line begins.
@@ -841,7 +840,7 @@ fn fold_in_merge_order(
     for (at, line) in (first + 1..).zip(records) {
         if let Some(lost) = line.lost {
             tally.losses.push(LineLost {
-                truncated: lost.truncated,
+                kind: lost.kind,
                 line: at,
                 offset: lost.offset,
                 bytes: lost.bytes,
@@ -902,7 +901,7 @@ pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
         read.count(
             usize::try_from(lost.line).unwrap_or(usize::MAX),
             Some(journal::Lost {
-                truncated: lost.truncated,
+                kind: lost.kind,
                 offset: lost.offset,
                 bytes: lost.bytes,
             }),
@@ -2021,7 +2020,7 @@ mod tests {
             judged: std::collections::BTreeSet::from(["build".to_string()]),
             unreadable: 1,
             losses: vec![LineLost {
-                truncated: false,
+                kind: journal::LossKind::Unparseable,
                 line: 7,
                 offset: 1_024,
                 bytes: 33,
