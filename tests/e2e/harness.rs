@@ -1371,6 +1371,8 @@ impl World {
                     items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
                     scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination,
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     match_by: Some(onetaskgraph_core::MatchBy::Title),
                     recreate: false,
                     create: false,
@@ -2576,6 +2578,82 @@ impl World {
         Run::of(command.output().expect("the binary runs"), &[args], self)
     }
 
+    /// [`run_on`](World::run_on), within `patience`: a command that has not answered by
+    /// then — or that exited while something it started still holds its output open — is
+    /// ended, and fails naming `args` and what it had printed, rather than leaving the
+    /// journey blocked until the runner's timeout names only the test.
+    pub fn run_on_within(
+        &self,
+        command: Command,
+        args: &str,
+        patience: std::time::Duration,
+    ) -> Run {
+        use std::io::Read;
+        let mut command = command;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary runs");
+        let collect = |mut stream: Box<dyn Read + Send>| {
+            let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let into = std::sync::Arc::clone(&read);
+            let reading = std::thread::spawn(move || {
+                let mut chunk = [0_u8; 4096];
+                while let Ok(got @ 1..) = stream.read(&mut chunk) {
+                    into.lock()
+                        .expect("one reader")
+                        .extend_from_slice(&chunk[..got]);
+                }
+            });
+            (read, reading)
+        };
+        let (stdout, out_reading) =
+            collect(Box::new(child.stdout.take().expect("stdout is piped")));
+        let (stderr, err_reading) =
+            collect(Box::new(child.stderr.take().expect("stderr is piped")));
+        let deadline = std::time::Instant::now() + patience;
+        let mut status = None;
+        while std::time::Instant::now() < deadline {
+            status = child.try_wait().expect("the command can be waited on");
+            if status.is_some() && out_reading.is_finished() && err_reading.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let text = |held: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+            held.lock().expect("one reader").clone()
+        };
+        let finished = out_reading.is_finished() && err_reading.is_finished();
+        let Some(status) = status.filter(|_| finished) else {
+            // Ours, started above: ended so the journey's teardown has nothing of it to wait on.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`onepipeline {args}` had not answered {patience:?} after it started{}\n\
+                 stdout: {}\nstderr: {}\nthe runs root held:\n{}",
+                if status.is_some() {
+                    " (it exited, and something it started still held its output open)"
+                } else {
+                    ""
+                },
+                String::from_utf8_lossy(&text(&stdout)),
+                String::from_utf8_lossy(&text(&stderr)),
+                self.dump()
+            );
+        };
+        Run::of(
+            Output {
+                status,
+                stdout: text(&stdout),
+                stderr: text(&stderr),
+            },
+            &[args],
+            self,
+        )
+    }
+
     /// The host's own channel server over one run's channel: the generic
     /// `host-channel-server` double, which speaks the bus's serving contract and
     /// nothing of this crate's — a JSON frame on its stdin is a surface of
@@ -3572,37 +3650,52 @@ impl Rendezvous {
         Arrival::of(stream)
     }
 
-    /// [`arrived`](Self::arrived), bounded as [`World::until`] bounds a step: a
-    /// process that never reaches the failpoint, or reaches it and never finishes
-    /// announcing itself, fails the journey naming `what`, what it announced, and
-    /// what the runs root held, rather than holding it to the runner's own
-    /// timeout.
-    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
-        self.arrived_within(world, what, ONE_STEP)
+    /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
+    /// end, a process that never reaches the failpoint, or reaches it and never finishes
+    /// announcing itself, fails naming `what` it was waiting for, what it announced, and
+    /// `seen` — what the journey can say of where things stood — rather than blocking
+    /// until the runner's timeout names only the test.
+    pub fn arrived_within(&self, what: &str, seen: impl Fn() -> String) -> Arrival {
+        self.arrived_by(what, ONE_STEP, seen)
     }
 
-    /// [`arrived_within_a_step`](Self::arrived_within_a_step) with the step's
-    /// deadline given: the connection and the announcement after it share one.
-    fn arrived_within(&self, world: &World, what: &str, patience: std::time::Duration) -> Arrival {
+    /// [`arrived_within`](Self::arrived_within), saying where things stood as
+    /// [`World::until`] does: by what the runs root held.
+    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
+        self.arrived_within(what, || format!("the runs root held:\n{}", world.dump()))
+    }
+
+    /// [`arrived_within`](Self::arrived_within) with the step's deadline given: the
+    /// connection and the announcement after it share one.
+    fn arrived_by(
+        &self,
+        what: &str,
+        patience: std::time::Duration,
+        seen: impl Fn() -> String,
+    ) -> Arrival {
         use std::io::Read;
         let deadline = std::time::Instant::now() + patience;
         self.listener
             .set_nonblocking(true)
             .expect("the listener can be polled");
         let mut met = None;
-        world.until_within(patience, what, |_| match self.listener.accept() {
-            Ok((stream, _)) => {
-                met = Some(stream);
-                true
+        let arrived = waited_for(patience, std::time::Duration::from_millis(20), || {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    met = Some(stream);
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-            Err(error) => panic!("the failpoint's listener failed waiting for {what}: {error}"),
         });
         self.listener
             .set_nonblocking(false)
             .expect("the listener blocks again");
-        let mut stream = met.expect("the wait ends on an arrival");
-        // An accepted socket inherits the listener's mode on some hosts.
+        let Some(mut stream) = met.filter(|_| arrived) else {
+            panic!("timed out after {patience:?} waiting for {what}; {}", seen());
+        };
+        // Windows hands an accepted socket the listener's mode.
         stream
             .set_nonblocking(false)
             .expect("the arrival's connection blocks");
@@ -3611,9 +3704,9 @@ impl Rendezvous {
         let stalled = |announced: &[u8], why: &str| -> ! {
             panic!(
                 "timed out after {patience:?} waiting for {what}: the process connected and \
-                 announced {:?} of its pid line, then {why}; the runs root held:\n{}",
+                 announced {:?} of its pid line, then {why}; {}",
                 String::from_utf8_lossy(announced),
-                world.dump()
+                seen()
             )
         };
         loop {
@@ -3652,16 +3745,19 @@ impl Rendezvous {
 
 impl Arrival {
     fn of(stream: std::net::TcpStream) -> Self {
+        Self::announced(stream).expect("the dispatch announces itself")
+    }
+
+    /// The arrival on `stream` once it has announced its pid, or the read that failed.
+    fn announced(stream: std::net::TcpStream) -> std::io::Result<Self> {
         use std::io::BufRead;
         let mut announced = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
-            .read_line(&mut announced)
-            .expect("the dispatch announces itself");
+        std::io::BufReader::new(stream.try_clone()?).read_line(&mut announced)?;
         let pid = announced
             .trim()
             .parse::<u32>()
             .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
-        Arrival { pid, stream }
+        Ok(Arrival { pid, stream })
     }
 }
 
@@ -3689,6 +3785,7 @@ fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
     use std::io::{Read, Write};
     let world = World::new("rendezvous-bounded");
     let patience = std::time::Duration::from_secs(1);
+    let held = || format!("the runs root held:\n{}", world.dump());
     let failure = |waited: Box<dyn FnOnce() + '_>| -> String {
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(waited))
             .expect_err("the wait returned where it was due to fail");
@@ -3702,7 +3799,7 @@ fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
     let mut peer = std::net::TcpStream::connect(meeting.address()).expect("the peer connects");
     peer.write_all(b"4242\n")
         .expect("the peer announces itself");
-    let arrival = meeting.arrived_within(&world, "the peer to announce itself", patience);
+    let arrival = meeting.arrived_by("the peer to announce itself", patience, held);
     assert_eq!(arrival.pid, 4242);
     arrival.release();
     let mut released = [0; 2];
@@ -3715,7 +3812,7 @@ fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
     half.write_all(b"42")
         .expect("the peer announces part of itself");
     let said = failure(Box::new(|| {
-        stalled.arrived_within(&world, "the stalled peer to announce itself", patience);
+        stalled.arrived_by("the stalled peer to announce itself", patience, held);
     }));
     assert!(
         said.contains("waiting for the stalled peer to announce itself")
@@ -3727,7 +3824,7 @@ fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
 
     let absent = Rendezvous::failpoint();
     let said = failure(Box::new(|| {
-        absent.arrived_within(&world, "a peer that never connects", patience);
+        absent.arrived_by("a peer that never connects", patience, held);
     }));
     assert!(
         said.contains("waiting for a peer that never connects")
