@@ -2195,11 +2195,11 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A creation carries its task's images by having the store rewrite the task's shadow
-/// document, which the store does by truncating the file and writing it again. A reader part
-/// of the way through that document when the rewrite runs — held there by the projection's
-/// own ordering gate, between the document being published and its images being carried —
-/// still reads the whole document it opened: the rewrite reaches the shadow by a rename, so
-/// the file the reader holds is never the one written.
+/// document. A reader part of the way through that document when the rewrite runs — held
+/// there by the projection's own ordering gate, between the document being published and its
+/// images being carried — still reads the whole document it opened: the store writes the
+/// replacement beside it and renames it into place, so the file the reader holds is never
+/// the one written.
 #[test]
 fn a_reader_part_way_through_a_shadow_document_reads_it_whole_across_its_image_rewrite() {
     use std::io::{Read, Write};
