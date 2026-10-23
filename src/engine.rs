@@ -2564,6 +2564,19 @@ fn converge(
                         unpublished = true;
                     }
                     // llmlint: ignore-end[changed_behavior_has_e2e]
+                    // Test failpoint only, and nothing at all where its variable is
+                    // unset: a journey holds the first answered lane here, its
+                    // records journalled and the sidecar not yet rewritten, to read
+                    // the run in that window.
+                    static NOTE_RECORDED_GATE_MET: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !NOTE_RECORDED_GATE_MET.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        if let Err(error) =
+                            crate::ordering::meet("ONEPIPELINE_TEST_NOTE_RECORDED_GATE")
+                        {
+                            eprintln!("onepipeline: {error}");
+                        }
+                    }
                     deliveries.publish();
                 }
                 // Before the node's settlement, which the dispatch thread sends
