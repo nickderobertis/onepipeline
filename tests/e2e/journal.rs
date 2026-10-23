@@ -838,10 +838,10 @@ fn an_append_that_heals_and_then_runs_out_of_room_still_reports_the_loss() {
 /// lock would walk straight past a held one and heal the store under it.
 ///
 /// Unix only, because the holder is `flock(2)`. The Windows half of that seam
-/// excludes a second appender at `CreateFile` instead — see
-/// `sys::open_locked_append` — and holding *that* from a test would prove the
-/// share mode rather than the exclusion. Divergence 18 in the divergence record
-/// is the standing note about which journeys this suite runs on one platform.
+/// is a `LockFileEx` lock on one byte past any data — see
+/// `sys::open_locked_append` — which this suite has no way to take from outside
+/// the binary. Divergence 18 in the divergence record is the standing note about
+/// which journeys this suite runs on one platform.
 #[cfg(unix)]
 #[test]
 fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
@@ -943,6 +943,115 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
         read_torn_log(&world.run_file(&run, "events.jsonl.torn")).len(),
         1,
         "the fragment was healed more than once"
+    );
+}
+
+/// A process appending to a run's journal is admitted while the run's driver,
+/// and appenders of this binary beside it, hold the journal — and the driver
+/// folds what that process wrote.
+///
+/// The appenders here hold the journal the way every writer of this binary does,
+/// across the tail heal, the record and its append receipt. On Unix that hold is
+/// `flock`, which a process that does not ask for it walks past. On Windows it
+/// was a share mode admitting no second writer, so for as long as any of them
+/// held it, a plain append open from another process failed with a sharing
+/// violation — a `reply` or a relay's appender would wait it out, and anything
+/// else was refused. Every foreign open below is a single attempt for that
+/// reason: a retry would pass on a share mode that refuses it.
+///
+/// The foreign record is one this build cannot read, so the driver's fold of it
+/// is observable: a successful run's driver removes its dispatch scratch unless
+/// its journal holds a record it cannot read, and here it must keep it.
+#[test]
+fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it() {
+    use std::io::Write;
+
+    let world = World::new("journal-foreign-append");
+    let run = "foreign";
+    let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    world.script("build.wait", "hold");
+    world.script("build.turn-open", "");
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the held dispatch", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    let journal = world.run_file(run, "events.jsonl");
+    let stamp = world.journal(run).last().expect("a record")["ts"].clone();
+
+    const APPENDERS: usize = 8;
+    const FOREIGN: usize = 40;
+    let mut appenders: Vec<_> = (0..APPENDERS)
+        .map(|n| {
+            let message = format!("appender {n} was here");
+            world
+                .cmd(&["surface", run, "--kind", "check-in", "--message", &message])
+                .spawn()
+                .expect("the binary starts")
+        })
+        .collect();
+    // llmlint: ignore-block[tests_mirror_real_usage] the appender under test is a process
+    // that is *not* this binary: no verb writes a record this build cannot read, and the
+    // property is precisely that a writer outside the binary's lock is admitted. The
+    // driver, its fold and the binary's own appenders racing it are all real.
+    for seq in 0..FOREIGN {
+        let record = json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":seq, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&journal)
+            .unwrap_or_else(|e| panic!("append {seq} was refused while the journal was held: {e}"))
+            .write_all(format!("{record}\n").as_bytes())
+            .expect("the record is written");
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    for appender in &mut appenders {
+        assert!(
+            appender.wait().expect("the appender ran").success(),
+            "an appender refused"
+        );
+    }
+    world.release("build.go");
+    world.until("the driver to release its ending", |world| {
+        world.run_file(run, "result.json").is_file() && !world.run_file(run, "owner.lock").exists()
+    });
+
+    let after = std::fs::read_to_string(&journal).expect("the journal reads");
+    let records: Vec<Value> = after
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("a record was written over: {e}: {line}"))
+        })
+        .collect();
+    let mut foreign: Vec<u64> = records
+        .iter()
+        .filter(|record| record["stream"] == "future-producer")
+        .map(|record| record["seq"].as_u64().expect("a seq"))
+        .collect();
+    foreign.sort_unstable();
+    assert_eq!(
+        foreign,
+        (0..FOREIGN as u64).collect::<Vec<_>>(),
+        "a foreign record is gone"
+    );
+    let messages: Vec<&str> = records
+        .iter()
+        .filter(|record| record["kind"] == "planner-surface-queued")
+        .filter_map(|record| record["payload"]["message"].as_str())
+        .collect();
+    for n in 0..APPENDERS {
+        let mine = format!("appender {n} was here");
+        assert!(
+            messages.contains(&mine.as_str()),
+            "{mine} is gone: {messages:?}"
+        );
+    }
+    assert!(
+        world.events_of(run, "scratch-removed").is_empty(),
+        "the driver removed scratch over a record it could not read"
+    );
+    assert!(
+        world.run_file(run, "scratch").is_dir(),
+        "the scratch is gone"
     );
 }
 
