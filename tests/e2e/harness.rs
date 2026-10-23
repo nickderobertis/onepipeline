@@ -3571,6 +3571,34 @@ impl Rendezvous {
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
         Arrival::of(stream)
     }
+
+    /// [`arrived`](Self::arrived), bounded as [`World::until`] bounds a step: a
+    /// process that never reaches the failpoint fails the journey naming `what`
+    /// and what the runs root held, rather than holding it to the runner's own
+    /// timeout.
+    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let mut met = None;
+        world.until(what, |_| match self.listener.accept() {
+            Ok((stream, _)) => {
+                met = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the failpoint's listener failed waiting for {what}: {error}"),
+        });
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener blocks again");
+        let stream = met.expect("the wait ends on an arrival");
+        // An accepted socket inherits the listener's mode on some hosts.
+        stream
+            .set_nonblocking(false)
+            .expect("the arrival's connection blocks");
+        Arrival::of(stream)
+    }
 }
 
 impl Arrival {
