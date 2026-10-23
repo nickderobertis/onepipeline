@@ -55,7 +55,7 @@ pub enum DriverLiveness {
 }
 // llmlint: ignore-end[names_match_behavior]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::event::{Envelope, Source};
@@ -659,7 +659,10 @@ impl HostShutdown {
         let mut pending = BTreeMap::new();
         let mut dispatches = BTreeMap::new();
         let mut found: Option<(&str, Option<crate::payload::HostShutdown>)> = None;
-        for event in &view.events {
+        // Over the records the fold keeps whole, which hold every one of the three
+        // kinds read here: a run's history is not read for a shutdown it has had
+        // at most a few of.
+        for event in &view.state.recalled {
             match PipelineKind::from_wire(&event.kind) {
                 Some(PipelineKind::DriverAdopted) => {
                     pending.clear();
@@ -4183,18 +4186,10 @@ fn drafted_nodes(view: &RunView) -> Vec<(String, Option<String>)> {
 /// The `detail` the newest `node-settled` for one node carried.
 ///
 /// One read for the two views that print it, so a settlement cannot be quoted two
-/// ways.
+/// ways — off the fold, [`RunState::settled_details`], rather than the run's
+/// history.
 fn settled_detail(view: &RunView, node: &str) -> Option<String> {
-    view.events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.kind.0 == PipelineKind::NodeSettled.as_str()
-                && event.labels.node.as_deref() == Some(node)
-        })
-        .and_then(|event| event.payload.get("detail"))
-        .and_then(|detail| detail.as_str())
-        .map(str::to_owned)
+    view.state.settled_details.get(node).cloned()
 }
 
 /// What a ready node reads as while the driver holds it for published releases,
@@ -5051,7 +5046,7 @@ fn evidence(landed: &onevcs::Landed) -> String {
 /// edit was applied or abandoned has to be told.
 fn driver_exit_lines(view: &RunView) -> String {
     let mut out = String::new();
-    if let Some(event) = view.events.iter().rev().find(|event| {
+    if let Some(event) = view.state.recalled.iter().rev().find(|event| {
         event.source == Source::Pipeline
             && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
     }) {
@@ -5197,7 +5192,10 @@ fn note_lines(view: &RunView) -> String {
             "  {earlier} earlier note(s) answered queued are not shown here\n"
         ));
     }
-    let delivered = crate::withdrawal::readable(&view.events);
+    // The commits carrying a note and the refusals naming an envelope are among the
+    // records the fold keeps whole, so neither is read out of the run's history.
+    let recalled = &view.state.recalled;
+    let delivered = crate::withdrawal::readable(recalled);
     for (id, index, command) in left.split_off(earlier) {
         let crate::channel::Command::Note { id: node, .. } = &command else {
             continue;
@@ -5213,7 +5211,7 @@ fn note_lines(view: &RunView) -> String {
                 crate::withdrawal::disposition(&reached)
             )
         })
-        .or_else(|| refused_note(&view.events, id, index, &command))
+        .or_else(|| refused_note(recalled, id, index, &command))
         .unwrap_or_else(|| {
             "no answer is recorded yet: the driver that handed it is gone, and the run's next \
                  driver records one"
@@ -5320,8 +5318,11 @@ fn delivery_phrase(delivery: &Delivery) -> String {
 /// nobody can read renders as a node the run never had. It is said here because
 /// the only place it used to be said was the driver's stderr, which a detached
 /// run writes to a log file nobody opens.
+///
+/// Off the losses the run's checkpoint's fold already met and what lies past it —
+/// [`crate::checkpoint::integrity`] — rather than a read of the whole store.
 fn journal_loss_line(view: &RunView) -> String {
-    let integrity = crate::journal::integrity(&view.paths.journal());
+    let integrity = crate::checkpoint::integrity(&view.paths);
     if integrity.is_whole() {
         return String::new();
     }
@@ -5346,8 +5347,10 @@ struct FromTheStore {
 impl FromTheStore {
     fn of(view: &RunView) -> Option<Self> {
         let mut continued = BTreeMap::new();
-        let mut dispatched = BTreeSet::new();
-        for event in &view.events {
+        // A continued settlement is among the records the fold keeps whole, and the
+        // nodes the run dispatched are folded as they are: neither is read out of
+        // the run's history.
+        for event in &view.state.recalled {
             if event.source != crate::event::Source::Pipeline {
                 continue;
             }
@@ -5364,15 +5367,12 @@ impl FromTheStore {
                         continued.insert(node, run);
                     }
                 }
-                Some(crate::journal::PipelineKind::NodeDispatched) => {
-                    dispatched.insert(node);
-                }
                 _ => {}
             }
         }
         (!continued.is_empty()).then_some(Self {
             continued,
-            dispatched: dispatched.len(),
+            dispatched: view.state.dispatched_nodes.len(),
         })
     }
 

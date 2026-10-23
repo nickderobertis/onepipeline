@@ -79,7 +79,7 @@ pub(crate) fn validate(
         }
     };
     let named = format!("note {index} of envelope {id}, to node '{node}'");
-    let journal = crate::journal::read(&paths.journal());
+    let journal = crate::checkpoint::current(paths).recalled;
     let records = committed(&journal)?;
     if let Some(by) = withdrawn_by(&records, id, index) {
         return Err(refuse(format!(
@@ -269,7 +269,7 @@ pub(crate) fn undriven(operation: &Operation) -> Error {
 /// what the envelope's own judgment skips once it is judged, for a note
 /// withdrawn while its envelope was held unjudged.
 pub(crate) fn withdrawn_from(paths: &RunPaths, sent: u64) -> std::collections::BTreeSet<usize> {
-    readable(&crate::journal::read(&paths.journal()))
+    readable(&crate::checkpoint::current(paths).recalled)
         .into_iter()
         .filter_map(|(_, operation)| match operation {
             Operation::NoteWithdrawn {
@@ -319,7 +319,7 @@ pub(crate) fn as_withdrawn(
     paths: &RunPaths,
     mut outcome: CommandOutcome,
 ) -> Result<CommandOutcome> {
-    for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
+    for (by, operation) in readable(&crate::checkpoint::current(paths).recalled) {
         if let Operation::NoteWithdrawn {
             envelope,
             index,
@@ -371,7 +371,7 @@ fn refuse_withdrawn(
 /// The channel's, where an answer cannot be written.
 pub(crate) fn answer_owed(paths: &RunPaths) -> Result<()> {
     let channel = ChannelState::new(paths);
-    for (by, operation) in readable(&crate::journal::read(&paths.journal())) {
+    for (by, operation) in readable(&crate::checkpoint::current(paths).recalled) {
         let Operation::NoteWithdrawn {
             envelope: sent,
             index,

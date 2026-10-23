@@ -869,7 +869,9 @@ pub(crate) fn lines(view: &RunView, cap: Option<usize>) -> String {
         (None, Some(_)) => Some(ScratchEnding::Paused),
         (None, None) => return String::new(),
     };
-    let Some(event) = view.events.iter().rev().find(|event| {
+    // Among the records the fold keeps whole, so the run's history is not read for
+    // the one an ending wrote.
+    let Some(event) = view.state.recalled.iter().rev().find(|event| {
         matches!(
             PipelineKind::from_wire(&event.kind),
             Some(PipelineKind::ScratchRemoved | PipelineKind::ScratchRetained)

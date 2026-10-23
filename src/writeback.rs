@@ -110,8 +110,6 @@ use crate::cli::{
     WRITEBACK_REFUSED_CLASS, WRITEBACK_TARGETED_WRITES, WRITEBACK_WAIT_FILE,
     WRITEBACK_WAIT_SCHEMA_VERSION,
 };
-use crate::edits::Operation;
-use crate::event::Source;
 use crate::graph::{Landing, NodeStatus};
 use crate::ledger::{LaunchRecord, RunPaths};
 use crate::plan::Node;
@@ -1086,10 +1084,12 @@ impl Writeback {
     /// Replace any queued projection with the newest journal fold.
     ///
     /// Called once per change to what the snapshot is made of rather than once
-    /// per reconcile pass: building one folds the run's whole journal twice, and
-    /// the loop used to hand over two identical snapshots forty times a second on
-    /// a run where nothing was happening. The statuses are handed in for the same
-    /// reason — the caller has already derived them.
+    /// per reconcile pass: the loop used to hand over two identical snapshots forty
+    /// times a second on a run where nothing was happening. Built from `state`
+    /// alone — the sessions, added nodes and settlements it projects are folded
+    /// into it as they arrive — so a publish reads none of the run's history. The
+    /// statuses are handed in for the same reason — the caller has already
+    /// derived them.
     pub fn publish(
         &self,
         paths: &RunPaths,
@@ -1330,19 +1330,23 @@ fn snapshot_of(
             crate::vcs::REVIEW_DRAFTED.clone_into(outcome);
         }
     }
-    let mut dispatches = dispatches(paths, state);
+    let mut dispatches = dispatches(state);
     dispatches.retain(|node, _| !state.restacking.contains_key(node));
     Some(Snapshot {
         project,
         dir: paths.dir.join("writeback"),
-        nodes: all_nodes(paths, state),
+        nodes: all_nodes(state),
         statuses,
         outcomes,
         landings: state.landings.clone(),
         landing_commits: state.landing_commits.clone(),
         change_urls: state.change_urls.clone(),
         stated_landings: state.stated_landings.clone(),
-        settlements: settlements(paths),
+        settlements: state
+            .board_settlements
+            .iter()
+            .map(|(node, settled)| (node.clone(), Value::Object(settled.clone())))
+            .collect(),
         superseded: state.superseded.clone(),
         reworks: reworks_of(state),
         continued_metadata: continued_metadata(paths, launch, state),
@@ -1391,65 +1395,20 @@ fn snapshot_of(
 ///
 /// A session that named no base, or a record carrying no time, is left out rather than
 /// written half: a host that pins the node needs the branch and the base together.
-fn dispatches(
-    paths: &RunPaths,
-    state: &RunState,
-) -> BTreeMap<String, crate::continuation::StoredDispatch> {
+fn dispatches(state: &RunState) -> BTreeMap<String, crate::continuation::StoredDispatch> {
     let open = state.sessions_in_flight();
     if open.is_empty() {
         return BTreeMap::new();
     }
-    /// What a node's `session-opened` said: the base it opened against, and when.
-    struct Opened {
-        token: Option<onevcs::SessionToken>,
-        base: crate::vcs::BranchName,
-        // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
-        at: String,
-    }
-    let mut opened: BTreeMap<String, Opened> = BTreeMap::new();
-    for event in crate::journal::read(&paths.journal()) {
-        if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
-            continue;
-        }
-        let Some(node) = event
-            .labels
-            .node
-            .clone()
-            .filter(|node| open.contains_key(node))
-        else {
-            continue;
-        };
-        let token = event
-            .payload
-            .get("token")
-            .and_then(Value::as_str)
-            .map(|token| onevcs::SessionToken(token.to_owned()));
-        if token.is_some() && opened.get(&node).is_some_and(|held| held.token == token) {
-            continue;
-        }
-        if let Some(base) = event
-            .payload
-            .get("base")
-            .and_then(Value::as_str)
-            .and_then(crate::vcs::BranchName::checked)
-        {
-            opened.insert(
-                node,
-                Opened {
-                    token,
-                    base,
-                    at: event.ts.clone(),
-                },
-            );
-        }
-    }
+    // Folded as each `session-opened` arrives — `RunState::sessions_opened` — rather
+    // than read out of the run's history on every publish.
     open.into_iter()
         .filter_map(|(node, session)| {
-            let Opened { base, at, .. } = opened.remove(&node)?;
+            let opened = state.sessions_opened.get(&node)?;
             let dispatch = crate::continuation::StoredDispatch {
                 branch: session.branch().as_str().to_owned(),
-                base: base.as_str().to_owned(),
-                opened_at: at,
+                base: opened.base.clone(),
+                opened_at: opened.at.clone(),
             };
             Some((node, dispatch))
         })
@@ -4887,7 +4846,10 @@ fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> Project
     }
 }
 
-fn all_nodes(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Node> {
+/// Every node the run ever held: the plan's, each an edit added — as the newest
+/// addition wrote it, `RunState::nodes_added`, a removed one included — and the
+/// graph's as it stands.
+fn all_nodes(state: &RunState) -> BTreeMap<String, Node> {
     let mut nodes: BTreeMap<String, Node> = state
         .plan
         .as_ref()
@@ -4895,93 +4857,13 @@ fn all_nodes(paths: &RunPaths, state: &RunState) -> BTreeMap<String, Node> {
         .flat_map(|plan| plan.tasks.iter())
         .map(|node| (node.id.clone(), node.clone()))
         .collect();
-    for event in crate::journal::read(&paths.journal()) {
-        if event.source != Source::Pipeline
-            || event.kind.0 != crate::journal::PipelineKind::EditCommitted.as_str()
-        {
-            continue;
-        }
-        let Some(operations) = event
-            .payload
-            .get("operations")
-            .and_then(|v| serde_json::from_value::<Vec<Operation>>(v.clone()).ok())
-        else {
-            continue;
-        };
-        for operation in operations {
-            if let Operation::NodeAdded { node, .. } = operation {
-                nodes.insert(node.id.clone(), *node);
-            }
-        }
+    for (id, node) in &state.nodes_added {
+        nodes.insert(id.clone(), node.clone());
     }
     for node in state.graph.iter() {
         nodes.insert(node.id.clone(), node.clone());
     }
     nodes
-}
-
-fn settlements(paths: &RunPaths) -> BTreeMap<String, Value> {
-    let mut found: BTreeMap<String, Value> = BTreeMap::new();
-    // The nodes whose next settlement ends a restack or a readjustment no agent turn
-    // was spent on: their content did not change.
-    let mut clean: BTreeSet<String> = BTreeSet::new();
-    for event in crate::journal::read(&paths.journal()) {
-        if event.source != Source::Pipeline {
-            continue;
-        }
-        let Some(node) = event.labels.node.as_ref() else {
-            continue;
-        };
-        let kind = event.kind.0.as_str();
-        if kind == crate::journal::PipelineKind::NodeRestacked.as_str()
-            || kind == crate::journal::PipelineKind::NodeReadjusted.as_str()
-        {
-            if event.payload.get("agent_dispatched") == Some(&Value::Bool(false)) {
-                clean.insert(node.clone());
-            }
-            continue;
-        }
-        if kind != crate::journal::PipelineKind::NodeSettled.as_str() {
-            continue;
-        }
-        // The settlement as the node reached it: which launch read it back from the
-        // store is this run's record, and the board's settlement is what the next
-        // launch continues — the same fields, whoever carried them.
-        let mut settlement = event.payload;
-        settlement.remove("continued");
-        // A clean restack or readjustment that left the draft where it was moves only
-        // its head and its unread verdict, and neither is the board's to hold: a cold
-        // host reads the head off the branch on the origin and the verdict off the next
-        // batched read, so the task is not written for it. One that moved the draft's
-        // base or stack is.
-        let placed = |settled: &Map<String, Value>| {
-            settled.get("stack").map(|stack| {
-                let mut stack = stack.clone();
-                if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
-                    for parent in parents {
-                        // Where it stands is its branch: a parent's head moves with every
-                        // push, and its node with every rework of that same branch.
-                        if let Some(parent) = parent.as_object_mut() {
-                            parent.remove("head");
-                            parent.remove("node");
-                        }
-                    }
-                }
-                stack
-            })
-        };
-        let unmoved = |before: &Value| {
-            ["base", "status", "branch", "change_url", "landing"]
-                .iter()
-                .all(|key| before.get(*key) == settlement.get(*key))
-                && before.as_object().map(placed) == Some(placed(&settlement))
-        };
-        if clean.remove(node) && found.get(node).is_some_and(unmoved) {
-            continue;
-        }
-        found.insert(node.clone(), Value::Object(settlement));
-    }
-    found
 }
 
 fn project_file(project: &QualifiedId) -> String {

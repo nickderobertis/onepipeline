@@ -504,8 +504,8 @@ fn statuses_of(reading: &Value) -> Vec<(String, String)> {
 }
 
 /// Leave a driven run stopped, with `held` dispatched and not settled, and its
-/// checkpoint written past the run's opening.
-fn stopped_with(world: &World, run: &str, nodes: Vec<Value>, held: &str) {
+/// checkpoint written past the run's opening; answer the project its board is.
+fn stopped_with(world: &World, run: &str, nodes: Vec<Value>, held: &str) -> String {
     let path = world.plan(run, &plan_of(run, nodes));
     world.run(&["start", &path, "--detach"]).exited(0);
     world.until("the held node to be dispatched", |world| {
@@ -520,20 +520,33 @@ fn stopped_with(world: &World, run: &str, nodes: Vec<Value>, held: &str) {
     });
     world.run(&["status", run, "--json"]).exited(0);
     assert!(covered(world, run) > 0, "no checkpoint covers the run");
+    path
+}
+
+/// The metadata the run's board holds for one node, where it holds an item for it.
+fn on_the_board(world: &World, project: &str, node: &str) -> Option<Value> {
+    world
+        .store_tasks(project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == node)
+        .map(|task| task["item"]["metadata"].clone())
 }
 
 /// **No pass, append, view or reply reaches what a checkpoint covers.** Every byte in
 /// front of the marker is overwritten with bytes that are no record, and the tail
 /// carries relayed worker records stamped earlier than covered pipeline records: the
 /// adopting driver dispatches the ready node and journals its member's work, `reply`
-/// is answered, `status --json` lists the nodes with their settlements, and an armed
-/// `watch` ends on a settlement.
+/// is answered — a settle, and a note carried to a node's next dispatch, which that
+/// dispatch is composed with — text `status` names the running node and no loss in
+/// the store, `status --json` lists the nodes with their settlements, the board keeps
+/// the settlement only the covered history recorded beside the one the reply made,
+/// and an armed `watch` ends on a settlement.
 #[test]
 fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     let world = World::new("scaling-overwritten");
     let run = "overwritten";
     world.script("hold.wait", "hold");
-    stopped_with(
+    let project = stopped_with(
         &world,
         run,
         vec![
@@ -542,6 +555,8 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
             agent("next", &["hold"]),
             // Behind the held one, so nothing settles it before the reply does.
             agent("spare", &["next"]),
+            // Behind it too, so the note the reply carries waits for its dispatch.
+            agent("told", &["next"]),
         ],
         "hold",
     );
@@ -583,9 +598,39 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
                 && record["payload"]["status"] == "done"),
         "the settle was answered and not applied"
     );
+    let noted = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [
+            {"op": "note", "id": "told", "addressee": "worker",
+             "text": "the fixture moved", "deliver": "next"},
+        ]})
+        .to_string(),
+    );
+    noted.exited(0);
     let reading = world.run(&["status", run, "--json"]);
     reading.exited(0);
     assert_eq!(reading.json()["driven"], json!(true), "{}", reading.stdout);
+
+    // Every line of the text is read off the checkpoint and what was appended past
+    // it: a read of the whole store would meet the overwritten bytes, and say the
+    // run's record of itself is incomplete.
+    let text = world.run(&["status", run]);
+    text.exited(0);
+    assert!(text.stdout.contains("  next: running for"), "{}", text.stdout);
+    assert!(
+        !text.stdout.contains("record of itself is incomplete"),
+        "{}",
+        text.stdout
+    );
+
+    // The board keeps the settlement only the covered history holds beside the one
+    // the reply made: a projection folded from the store's bytes would have lost it.
+    world.until_store("the board to hold both settlements", |world| {
+        ["first", "spare"].iter().all(|node| {
+            on_the_board(world, &project, node)
+                .is_some_and(|item| item["onepipeline.settlement"]["status"] == "done")
+        })
+    });
 
     let mut waiting = world.cmd(&[
         "watch",
@@ -613,6 +658,19 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     assert!(
         ["node-settled", "settled"].contains(&ended["condition"].as_str().unwrap_or_default()),
         "{ended}"
+    );
+    world.until("the noted node to be dispatched", |world| {
+        past(world, run, at, "node-dispatched")
+            .iter()
+            .any(|record| record["labels"]["node"] == "told")
+    });
+    let told = past(&world, run, at, "node-dispatched")
+        .into_iter()
+        .find(|record| record["labels"]["node"] == "told")
+        .expect("the noted node's dispatch");
+    assert!(
+        told["payload"].to_string().contains("the fixture moved"),
+        "the dispatch was not composed with the note carried to it: {told}"
     );
 
     // The reading lists what the run has not settled, each with its settlement,

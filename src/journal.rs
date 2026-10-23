@@ -396,6 +396,70 @@ pub(crate) fn finished_records_within(
     from: u64,
     len: u64,
 ) -> Vec<(Option<Envelope>, u64)> {
+    finished_lines_within(path, from, len)
+        .into_iter()
+        .map(|line| (line.record, line.bytes))
+        .collect()
+}
+
+/// One **finished** line of a run's journal as a fold takes it: the record it
+/// holds, how many bytes of the file it occupies, and what of it is no record
+/// this build can read.
+///
+/// The loss rides beside the record rather than being read again later, because
+/// what [`integrity`] says a store lost is exactly the lines a fold already met:
+/// a reader that wanted it from the fold's own read of those lines would
+/// otherwise have to read the whole store once more to be told it.
+#[derive(Debug, Clone)]
+pub(crate) struct FinishedLine {
+    /// The record, where the line holds one this build reads.
+    pub(crate) record: Option<Envelope>,
+    /// How many bytes of the file the line occupies, its terminator included.
+    pub(crate) bytes: u64,
+    /// What of the line is lost, where any of it is.
+    pub(crate) lost: Option<Lost>,
+}
+
+/// What of one line [`integrity`] counts as lost: which of its two classes, where
+/// in the file the line begins, and how many of its bytes are no record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lost {
+    /// A record whose writer did not finish it, rather than a whole line this
+    /// build cannot read.
+    pub(crate) truncated: bool,
+    /// Where in the file the line begins.
+    pub(crate) offset: u64,
+    /// How many of its bytes are not a record this build can read.
+    pub(crate) bytes: u64,
+}
+
+/// What [`integrity`] counts lost of one line it read as `reading`: nothing for a
+/// whole record or a blank line, the fragment in front of a glued record, and the
+/// whole line otherwise.
+fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
+    match reading {
+        Reading::Whole(_) | Reading::Blank => None,
+        Reading::Glued { lost, .. } => Some(Lost {
+            truncated: true,
+            offset,
+            bytes: *lost,
+        }),
+        Reading::Truncated => Some(Lost {
+            truncated: true,
+            offset,
+            bytes,
+        }),
+        Reading::Unparseable => Some(Lost {
+            truncated: false,
+            offset,
+            bytes,
+        }),
+    }
+}
+
+/// [`finished_records_within`], with what each line lost: the read a fold that
+/// keeps a run's [`integrity`] beside its state takes.
+pub(crate) fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<FinishedLine> {
     if len == 0 {
         return Vec::new();
     }
@@ -404,14 +468,46 @@ pub(crate) fn finished_records_within(
         if !line.terminated {
             break;
         }
-        let occupies = line.bytes + 1;
-        let whole = match reading(line, path) {
+        let (offset, bytes) = (line.offset, line.bytes);
+        let reading = reading(line, path);
+        let lost = lost_of(&reading, offset, bytes);
+        let record = match reading {
             Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
             Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
         };
-        grown.push((whole, occupies));
+        grown.push(FinishedLine {
+            record,
+            bytes: bytes + 1,
+            lost,
+        });
     }
     grown
+}
+
+/// [`finished_lines_within`], over everything from `from` to the end of the file
+/// as it stands now.
+pub(crate) fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    finished_lines_within(path, from, length.saturating_sub(from))
+}
+
+/// What [`integrity`] counts lost of every line from `from` to the end of the
+/// file — finished or not — numbering them from `first_line`, the count of lines
+/// in front of `from`.
+///
+/// What a reader holding the losses of everything in front of `from` already
+/// asks of the rest, trusting the boundary as [`finished_records_from`] does.
+pub(crate) fn losses_from(path: &Path, from: u64, first_line: u64) -> Integrity {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    let mut integrity = Integrity::default();
+    for line in ledger::read_appended_envelope_lines(path, from, length.saturating_sub(from)) {
+        let number = usize::try_from(first_line)
+            .unwrap_or(usize::MAX)
+            .saturating_add(line.line);
+        let (offset, bytes) = (line.offset, line.bytes);
+        integrity.count(number, lost_of(&reading(line, path), offset, bytes));
+    }
+    integrity
 }
 
 /// Every **finished** record a run's journal has grown by since its first `from`
@@ -616,6 +712,23 @@ pub struct Integrity {
 }
 
 impl Integrity {
+    /// Count what line `line` lost, under the class it lost it as.
+    pub(crate) fn count(&mut self, line: usize, lost: Option<Lost>) {
+        let Some(lost) = lost else {
+            return;
+        };
+        let loss = Loss {
+            line,
+            offset: lost.offset,
+            bytes: lost.bytes,
+        };
+        if lost.truncated {
+            self.truncated.push(loss);
+        } else {
+            self.unparseable.push(loss);
+        }
+    }
+
     /// Whether the store holds every record it was ever written, whole.
     pub fn is_whole(&self) -> bool {
         self.truncated.is_empty() && self.unparseable.is_empty() && self.healed.is_empty()
@@ -688,24 +801,7 @@ pub fn integrity(path: &Path) -> Integrity {
     };
     for line in ledger::read_envelope_lines(path, 0) {
         let (number, offset, bytes) = (line.line, line.offset, line.bytes);
-        match reading(line, path) {
-            Reading::Whole(_) | Reading::Blank => {}
-            Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
-                line: number,
-                offset,
-                bytes: lost,
-            }),
-            Reading::Truncated => integrity.truncated.push(Loss {
-                line: number,
-                offset,
-                bytes,
-            }),
-            Reading::Unparseable => integrity.unparseable.push(Loss {
-                line: number,
-                offset,
-                bytes,
-            }),
-        }
+        integrity.count(number, lost_of(&reading(line, path), offset, bytes));
     }
     integrity
 }

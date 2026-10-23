@@ -430,7 +430,14 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
                 println!("{reading}");
                 return Ok(EXIT_SUCCESS);
             }
-            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
+            // One run's text reads the same off its checkpoint: every record a line
+            // of it quotes is folded or kept whole there, so its history is not read.
+            let status = match args.run.as_deref() {
+                Some(run) => verbs::Status::Run(verbs::RunStatus {
+                    view: RunView::open_current(&verbs::resolved(&ledger::runs_root(), run)?)?,
+                }),
+                None => verbs::status(&ledger::runs_root(), None)?,
+            };
             if args.no_providers {
                 print!("{}", status.render_without_providers());
             } else {
@@ -4138,7 +4145,10 @@ fn note_record(
     paths: &RunPaths,
     envelope: u64,
 ) -> Result<Option<std::result::Result<crate::note::Reached, String>>> {
-    for record in journal::read(&paths.journal()).into_iter().rev() {
+    // Off the records the projection keeps whole — every refusal naming an envelope
+    // and every commit carrying a note — rather than the run's history: this is asked
+    // every few milliseconds for as long as a reply waits.
+    for record in crate::checkpoint::current(paths).recalled.into_iter().rev() {
         if record
             .payload
             .get("envelope")

@@ -61,6 +61,36 @@
     "attestations": [],
     "decisions_pending": {},
     "holds": {},
+    "noted": [
+      "build"
+    ],
+    "last_turns": {
+      "build": {
+        "run": "graph-run-1",
+        "member": "worker"
+      }
+    },
+    "dispatched_nodes": [
+      "build"
+    ],
+    "settled_details": {
+      "build": "awaiting the engine's release"
+    },
+    "sessions_opened": {
+      "build": {
+        "token": "session-1",
+        "base": "main",
+        "at": "2026-09-08T11:00:00.000Z"
+      }
+    },
+    "board_settlements": {
+      "build": {
+        "status": "done"
+      }
+    },
+    "settled_clean": [
+      "ship"
+    ],
     "completion_requests": [],
     "surfaces_queued": 0,
     "surfaces_read": 0,
@@ -115,6 +145,14 @@
     "judged": [
       "build"
     ],
-    "unreadable": 1
+    "unreadable": 1,
+    "losses": [
+      {
+        "truncated": false,
+        "line": 7,
+        "offset": 1024,
+        "bytes": 33
+      }
+    ]
   }
 }

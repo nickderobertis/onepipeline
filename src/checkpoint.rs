@@ -455,6 +455,27 @@ pub(crate) struct Tally {
     /// one reports that the graph it drives may be missing an edit.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub(crate) unreadable: u64,
+    /// Every line read that [`journal::integrity`] counts as lost, in file order,
+    /// each where it is: what a view says of a store's own losses, kept here
+    /// because the fold already met every one of them and a view asking again
+    /// would read the whole store to be told.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) losses: Vec<LineLost>,
+}
+
+/// One line [`Tally::losses`] holds: [`journal::Lost`], placed by its line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LineLost {
+    /// A record whose writer did not finish it, rather than a whole line this
+    /// build cannot read.
+    pub(crate) truncated: bool,
+    /// The 1-based line it is on, counted from the journal's first byte.
+    pub(crate) line: u64,
+    /// Where in the file the line begins.
+    pub(crate) offset: u64,
+    /// How many of its bytes are not a record this build can read.
+    pub(crate) bytes: u64,
 }
 
 fn is_zero(count: &u64) -> bool {
@@ -512,6 +533,9 @@ pub(crate) struct Projected {
     /// The byte every record read so far ends at: the marker, and the open instant
     /// past it.
     read_through: u64,
+    /// How many lines end at [`read_through`](Self::read_through): what a line read
+    /// past it is numbered after.
+    lines_through: u64,
     /// The greatest `seq` each stream reached in the records past the marker —
     /// what a writer opening on this run takes its next `seq` above, beside the
     /// marker's own.
@@ -573,6 +597,7 @@ impl Projected {
                 tally: checkpoint.tally.clone(),
                 covered_tally: checkpoint.tally,
                 read_through: checkpoint.coverage.bytes,
+                lines_through: checkpoint.coverage.records,
                 coverage: checkpoint.coverage,
                 claimed_past: BTreeMap::new(),
                 took: 0,
@@ -610,7 +635,7 @@ impl Projected {
             self.readjust = readjust;
             rebuilt = self.rebuild(paths);
         }
-        let grown = journal::finished_records_from(&journal, self.coverage.bytes);
+        let grown = journal::finished_lines_from(&journal, self.coverage.bytes);
         self.took = rebuilt + grown.len() as u64;
         self.take_with(paths, &grown, OpenInstant::HeldBack, Persist::Yes);
         // Not folded from the journal and therefore not part of what a fold of it
@@ -645,7 +670,7 @@ impl Projected {
             if window >= length.saturating_sub(from) {
                 return took;
             }
-            let grown = journal::finished_records_within(&journal, from, window);
+            let grown = journal::finished_lines_within(&journal, from, window);
             if grown.is_empty() {
                 // A window holding no finished record is one record larger than the
                 // window, widened so it is read whole next time.
@@ -709,6 +734,7 @@ impl Projected {
             covered_tally: Tally::default(),
             coverage: Coverage::default(),
             read_through: 0,
+            lines_through: 0,
             claimed_past: BTreeMap::new(),
             took: 0,
             persist,
@@ -725,7 +751,7 @@ impl Projected {
     fn take_with(
         &mut self,
         paths: &RunPaths,
-        grown: &[(Option<Envelope>, u64)],
+        grown: &[journal::FinishedLine],
         open: OpenInstant,
         write: Persist,
     ) {
@@ -733,13 +759,22 @@ impl Projected {
         let accountable = extent(grown, open);
         let (covered, ahead) = grown.split_at(accountable);
 
-        fold_in_merge_order(paths, &mut self.covered, &mut self.covered_tally, covered);
-        for (event, bytes) in covered {
-            self.coverage.absorb(event.as_ref(), *bytes);
+        let first = self.coverage.records;
+        fold_in_merge_order(
+            paths,
+            &mut self.covered,
+            &mut self.covered_tally,
+            covered,
+            first,
+        );
+        for line in covered {
+            self.coverage.absorb(line.record.as_ref(), line.bytes);
         }
-        self.read_through = self.coverage.bytes + ahead.iter().map(|(_, bytes)| bytes).sum::<u64>();
+        self.read_through =
+            self.coverage.bytes + ahead.iter().map(|line| line.bytes).sum::<u64>();
+        self.lines_through = self.coverage.records + ahead.len() as u64;
         self.claimed_past = BTreeMap::new();
-        for event in ahead.iter().filter_map(|(event, _)| event.as_ref()) {
+        for event in ahead.iter().filter_map(|line| line.record.as_ref()) {
             let reached = self.claimed_past.entry(event.stream.clone()).or_default();
             *reached = (*reached).max(event.seq);
         }
@@ -757,7 +792,8 @@ impl Projected {
         }
         self.state = self.covered.clone();
         self.tally = self.covered_tally.clone();
-        fold_in_merge_order(paths, &mut self.state, &mut self.tally, ahead);
+        let first = self.coverage.records;
+        fold_in_merge_order(paths, &mut self.state, &mut self.tally, ahead, first);
     }
 
     /// Write the checkpoint.
@@ -788,17 +824,31 @@ impl Projected {
 /// The sort belongs here rather than at the read: the file's order is not the
 /// fold's, and a record this build cannot read drops out of the run entirely —
 /// it folds to nothing, and placing it would need a timestamp it does not have.
+///
+/// `first` is how many lines are in front of `records`, which is what each loss
+/// among them is numbered after.
 fn fold_in_merge_order(
     paths: &RunPaths,
     state: &mut RunState,
     tally: &mut Tally,
-    records: &[(Option<Envelope>, u64)],
+    records: &[journal::FinishedLine],
+    first: u64,
 ) {
     let mut ordered: Vec<Envelope> = records
         .iter()
-        .filter_map(|(event, _)| event.clone())
+        .filter_map(|line| line.record.clone())
         .collect();
     tally.unreadable += (records.len() - ordered.len()) as u64;
+    for (at, line) in (first + 1..).zip(records) {
+        if let Some(lost) = line.lost {
+            tally.losses.push(LineLost {
+                truncated: lost.truncated,
+                line: at,
+                offset: lost.offset,
+                bytes: lost.bytes,
+            });
+        }
+    }
     journal::merge_order(&mut ordered);
     for event in &ordered {
         projection::fold_one(state, event);
@@ -823,6 +873,44 @@ pub(crate) fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
         *held = (*held).max(*seq);
     }
     reached
+}
+
+/// A run's folded state off its checkpoint and what was appended past it, writing
+/// nothing back: what a reader beside a driver that keeps the run's checkpoint
+/// itself folds — another run's record, or a dependency's — once per question.
+pub(crate) fn current(paths: &RunPaths) -> RunState {
+    Projected::open_with(paths, Persist::No).into_state()
+}
+
+/// What a run's journal holds that is not a whole record — [`journal::integrity`]'s
+/// answer — off the losses its checkpoint's fold already met and a read of only
+/// what lies past them.
+///
+/// The fold numbers each loss as it meets it, so every line in front of what it
+/// has read is accounted for without being read again; what is past that is the
+/// one record a writer may be in the middle of, and the fragments an append healed
+/// out of the file are in the log kept beside it, as they always were.
+pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
+    let projected = Projected::open_with(paths, Persist::No);
+    let journal = paths.journal();
+    let mut integrity = journal::losses_from(&journal, projected.read_through, projected.lines_through);
+    let mut read = journal::Integrity {
+        healed: ledger::torn_tails(&journal),
+        ..journal::Integrity::default()
+    };
+    for lost in &projected.tally.losses {
+        read.count(
+            usize::try_from(lost.line).unwrap_or(usize::MAX),
+            Some(journal::Lost {
+                truncated: lost.truncated,
+                offset: lost.offset,
+                bytes: lost.bytes,
+            }),
+        );
+    }
+    read.truncated.append(&mut integrity.truncated);
+    read.unparseable.append(&mut integrity.unparseable);
+    read
 }
 
 /// Fold a run from its checkpoint, and leave the checkpoint where this fold
@@ -858,7 +946,7 @@ pub(crate) fn resume_point(paths: &RunPaths) -> u64 {
 /// journal.
 pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
     let mut projected = Projected::open(paths);
-    let rest = journal::finished_records_from(&paths.journal(), projected.coverage.bytes);
+    let rest = journal::finished_lines_from(&paths.journal(), projected.coverage.bytes);
     if !rest.is_empty() {
         projected.take_with(paths, &rest, OpenInstant::Covered, Persist::Yes);
     }
@@ -928,7 +1016,7 @@ fn length_of(journal: &std::path::Path) -> u64 {
 /// leaving them uncovered is what lets an ordinary one sort in front of them in
 /// the merge rather than land behind the barrier. A run proved ended has no next
 /// arrival, and covers them all.
-fn extent(grown: &[(Option<Envelope>, u64)], open: OpenInstant) -> usize {
+fn extent(grown: &[journal::FinishedLine], open: OpenInstant) -> usize {
     match open {
         OpenInstant::HeldBack => before_the_open_instant(grown),
         OpenInstant::Covered => grown.len(),
@@ -942,11 +1030,11 @@ fn extent(grown: &[(Option<Envelope>, u64)], open: OpenInstant) -> usize {
 /// stamped out of order does not hold an earlier instant open too — those records
 /// are placed already, and taking them with the tail would move a boundary
 /// nothing arriving next can reach.
-fn before_the_open_instant(grown: &[(Option<Envelope>, u64)]) -> usize {
+fn before_the_open_instant(grown: &[journal::FinishedLine]) -> usize {
     let Some(last) = grown
         .iter()
         .rev()
-        .find_map(|(event, _)| event.as_ref().map(|event| event.ts.clone()))
+        .find_map(|line| line.record.as_ref().map(|event| event.ts.clone()))
     else {
         // Nothing datable in the whole of it: no instant is open, because no
         // arrival can sort in front of a record that folds to nothing.
@@ -954,7 +1042,7 @@ fn before_the_open_instant(grown: &[(Option<Envelope>, u64)]) -> usize {
     };
     grown
         .iter()
-        .rposition(|(event, _)| event.as_ref().is_some_and(|event| event.ts != last))
+        .rposition(|line| line.record.as_ref().is_some_and(|event| event.ts != last))
         .map_or(0, |before| before + 1)
 }
 
@@ -1627,6 +1715,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **What a run's store lost is said off the fold that met it**, the same as a
+    /// read of the whole file says it.
+    ///
+    /// Every class [`journal::integrity`] tells apart — a blank line it passes
+    /// over, a line this build cannot read, a fragment with a record glued after
+    /// it, and a record whose writer has not finished it — each numbered and
+    /// placed where the file holds it: in front of the marker, past it, and in the
+    /// unfinished tail a fold never reads as a record. And then again once the
+    /// covered bytes are overwritten, which only a reader that never goes back over
+    /// them still answers.
+    #[test]
+    fn what_a_store_lost_is_read_off_the_fold_as_a_whole_read_says_it() {
+        let root = scratch("losses");
+        let paths = a_recorded_run(&root, "r-losses");
+        let store = paths.journal();
+        an_instant_later();
+        crate::ledger::append_line(&store, "").expect("appended");
+        crate::ledger::append_line(&store, "this is not a record").expect("appended");
+        settle(&paths, "build", "done");
+        let glued = crate::ledger::read_records(&store)
+            .last()
+            .map(|record| record.text.clone())
+            .expect("a settlement");
+        crate::ledger::append_line(&store, &format!("{{\"v\":1,\"torn\"{glued}"))
+            .expect("appended");
+        an_instant_later();
+        settle(&paths, "ship", "done");
+        let _ = fold_and_checkpoint(&paths);
+        crate::ledger::append_line(&store, "past the marker").expect("appended");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&store)
+            .expect("the journal");
+        std::io::Write::write_all(&mut file, b"{\"v\":1,\"half").expect("a torn tail");
+
+        let whole = journal::integrity(&store);
+        assert_eq!(whole.unparseable.len(), 2, "{whole:?}");
+        assert_eq!(whole.truncated.len(), 2, "{whole:?}");
+        assert_eq!(integrity(&paths), whole);
+
+        let covered = super::readable(&paths).expect("a checkpoint").coverage;
+        let mut held = std::fs::read(&store).expect("the run's journal");
+        held[..usize::try_from(covered.bytes).expect("a length")].fill(b'#');
+        std::fs::write(&store, &held).expect("the covered bytes are overwritten");
+        assert_eq!(integrity(&paths).phrase(), whole.phrase());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Every value the state carries goes back through the check that made it,
     /// rather than straight into the field.
     ///
@@ -1813,6 +1949,34 @@ mod tests {
             // Written only for a node that kept its branch, and pinned for the same
             // reason.
             remotes: BTreeMap::from([("kept".to_string(), onevcs::Preservation::Pushed)]),
+            // What a view, a note and the write-back read off the fold rather than
+            // the run's history, pinned for the same reason.
+            noted: std::collections::BTreeSet::from(["build".to_string()]),
+            last_turns: BTreeMap::from([(
+                "build".to_string(),
+                crate::projection::TurnAt {
+                    run: "graph-run-1".into(),
+                    member: "worker".into(),
+                },
+            )]),
+            dispatched_nodes: std::collections::BTreeSet::from(["build".to_string()]),
+            settled_details: BTreeMap::from([(
+                "build".to_string(),
+                "awaiting the engine's release".to_string(),
+            )]),
+            sessions_opened: BTreeMap::from([(
+                "build".to_string(),
+                crate::projection::SessionOpened {
+                    token: Some("session-1".into()),
+                    base: "main".into(),
+                    at: "2026-09-08T11:00:00.000Z".into(),
+                },
+            )]),
+            board_settlements: BTreeMap::from([(
+                "build".to_string(),
+                serde_json::Map::from_iter([("status".to_string(), json!("done"))]),
+            )]),
+            settled_clean: std::collections::BTreeSet::from(["ship".to_string()]),
             // Written only for a node whose last activity referenced its history,
             // and pinned for the same reason.
             activity: BTreeMap::from([(
@@ -1858,6 +2022,12 @@ mod tests {
             last_event_kind: Some("node-settled".into()),
             judged: std::collections::BTreeSet::from(["build".to_string()]),
             unreadable: 1,
+            losses: vec![LineLost {
+                truncated: false,
+                line: 7,
+                offset: 1_024,
+                bytes: 33,
+            }],
         };
         coverage.digest = coverage.sealed_with(&state, &tally);
         Checkpoint {

@@ -8202,12 +8202,14 @@ fn nowhere_to_carry(id: &str) -> Error {
 /// record instead — which is what makes a note to a node whose dispatch has
 /// *finished* reach the member that had it, and be refused by that member's own
 /// account of how it ended.
+///
+/// Off the run's checkpoint and what was appended past it, where the fold keeps
+/// each node's latest address as [`RunState::last_turns`]: a note is answered per
+/// envelope, and reading the run's whole history backwards for it made every note
+/// to a long run cost that run's length.
 pub(crate) fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
-    journal::read(&paths.journal())
-        .into_iter()
-        .rev()
-        .filter(|envelope| envelope.labels.node.as_deref() == Some(node))
-        .find_map(|envelope| addressed_by(&envelope))
+    let turn = crate::checkpoint::current(paths).last_turns.remove(node)?;
+    TurnAddress::of(&turn.run, &turn.member)
 }
 
 /// Carry one arrival note into a node's running turn, falling through to that
@@ -9017,15 +9019,13 @@ struct AtDispatch {
 /// pass, and the same fold the continuation composes its own notes from, so the
 /// two cannot disagree about what a dispatch was owed.
 ///
-/// **Only where the projected state says a note can stand.** The fold reads the
-/// run's whole journal, and a dispatch is the one act a run performs once per
-/// node, so asking it of every dispatch made recording a hundred-node run pay a
-/// hundred reads of its own growing store — forty megabytes over one such run,
-/// every byte of which folded to nothing, because nobody had noted a node. What
-/// the fold can find is bounded by what the projection already holds: see
-/// [`may_hold_a_note`]. A node it rules out, and a replacement whose superseded
-/// nodes it rules out, is composed with nothing and spends nothing without the
-/// store being opened.
+/// **Only where the projected state says a note can stand**, and then over the
+/// records [`RunState::recalled`] keeps rather than the run's journal: a dispatch
+/// is the one act a run performs once per node, so a fold of the whole store per
+/// dispatch made recording a hundred-node run pay a hundred reads of its own
+/// growing store. What the fold can find is bounded by what the projection already
+/// holds: see [`may_hold_a_note`]. A node it rules out, and a replacement whose
+/// superseded nodes it rules out, is composed with nothing and spends nothing.
 ///
 /// # Errors
 ///
@@ -9045,11 +9045,14 @@ fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<A
             carried_in: Vec::new(),
         });
     }
-    let journal = journal::read(&paths.journal());
-    let standing = crate::note::drain_carried(paths, node, crate::note::standing(&journal, node)?)?;
+    // The records a node's notes are folded from are the few the projection keeps
+    // whole — every commit carrying a note, and each dispatch of a node one was
+    // ever written for — so the fold reads those rather than the run's history.
+    let journal = &state.recalled;
+    let standing = crate::note::drain_carried(paths, node, crate::note::standing(journal, node)?)?;
     let mut spent = standing.read();
     for superseded in supersedes {
-        spent.extend(crate::note::standing(&journal, superseded)?.notes());
+        spent.extend(crate::note::standing(journal, superseded)?.notes());
     }
     Ok(AtDispatch {
         spent,
