@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.85.1](https://github.com/nickderobertis/onepipeline/compare/v0.85.0...v0.85.1) - 2026-10-23
+
+### Fixed
+
+- *(driver)* end a run's observers for good when it is stopped ([#1112](https://github.com/nickderobertis/onepipeline/pull/1112))
+
 ## [0.85.0](https://github.com/nickderobertis/onepipeline/compare/v0.84.1...v0.85.0) - 2026-10-22
 
 ### Added

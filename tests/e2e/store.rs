@@ -1273,6 +1273,8 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination: onetaskgraph_plugin_api::SourceName::new("strict")
                         .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     match_by: None,
                     recreate: false,
                     create: false,

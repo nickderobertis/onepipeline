@@ -3412,6 +3412,19 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   either would name a graph run that had ended and stay silent about a run nobody
   will watch again, so the listing asks the launch record, and only for a run its
   driver tier leaves room to say so.
+
+  *Implementation behaviour, not a contract divergence:* that restart is held
+  still by `stop`. A stop of a run launched with an observer graph holds the
+  run's observer restarts — the run directory's `observer-restart.lock`, which
+  the driver makes as it starts watching — for its whole teardown, from before it
+  cancels the recorded observer until it has answered, waiting out a restart
+  already under way so the observer it cancels is the one now watching. While
+  the hold is held the driver restarts nothing and says so on its log, so no
+  observer starts behind the teardown's cancel or its listing. A stop that
+  cannot take the hold signals nothing and refuses, naming the lock, and a
+  driver that cannot take it restarts nothing until it can. A stop that refused
+  lets the hold go, and the run it left running is watched again at the
+  driver's next look.
 - **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
   run roots it could not read with each root's own reason — on the same terms
   `Survey::skipped` already states, because a cheap listing that reported only

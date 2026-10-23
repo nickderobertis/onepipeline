@@ -94,7 +94,7 @@ use onetaskgraph_core::config::{Layer, Origin as SettingOrigin, Setting, Setting
 use onetaskgraph_core::{
     classify, ConfigError, CopyAction, CopyItems, CopyReport, CopyRequest, CopyScope, Delivered,
     DeliveryOutcome, Engine, EngineError, Failure, GlobalId, Qualified, QueryResponse,
-    SourceFailure, SourceState,
+    SourceFailure, SourceState, StatusPolicy,
 };
 use onetaskgraph_plugin_api::{
     DependencyEdge, DependencyEndpoint, DependencyKind, ItemKind, MetadataKey, NativeId, Project,
@@ -697,6 +697,14 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::CreateCarried { .. } => decided("create-carried"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: its copy only creates lineages that have no item yet, so none has a counterpart to be misrouted from, and an item that exists is changed by a targeted update; `writeback::tests` holds the word.
         EngineError::Misrouted { .. } => decided("misrouted"),
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back,
+        // whose copy never names a `target_task`; `writeback::tests` holds each word.
+        EngineError::TargetTaskWith { .. } => decided("target-task-with"),
+        EngineError::TargetTaskNeedsOne => decided("target-task-needs-one"),
+        EngineError::TargetTaskSource { .. } => decided("target-task-source"),
+        EngineError::TargetTaskMissing { .. } => decided("target-task-missing"),
+        EngineError::TargetTaskOrigin { .. } => decided("target-task-origin"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::AssetNotReferenced { .. } => decided("asset-not-referenced"),
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
@@ -3290,6 +3298,8 @@ fn create(
             .expect("one item is not none"),
         scope: CopyScope::MembersOnly(members.clone()),
         destination: snapshot.project.global().source,
+        status_policy: StatusPolicy::Source,
+        target_task: None,
         match_by: None,
         recreate: false,
         create: false,
@@ -6465,6 +6475,21 @@ mod tests {
                 counterpart: id(),
                 route: onetaskgraph_plugin_api::SourceName::new("linear").expect("a source name"),
             },
+            // The explicit-target refusals 0.11.0 added: a write-back never names a target.
+            EngineError::TargetTaskWith {
+                flag: onetaskgraph_core::CopyLookup::Create,
+            },
+            EngineError::TargetTaskNeedsOne,
+            EngineError::TargetTaskSource {
+                target: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("board")
+                    .expect("a source name"),
+            },
+            EngineError::TargetTaskMissing { target: id() },
+            EngineError::TargetTaskOrigin {
+                target: id(),
+                item: id(),
+            },
             // The asset failures 0.3.3 added: a copied record whose content references an
             // asset it does not hold, or one bound for a plugin that stores none, and the
             // three a create or render refuses, which a write-back never performs.
@@ -7581,6 +7606,8 @@ mod tests {
                             onetaskgraph_core::CopyItems::new(vec![shadow.clone()]).unwrap(),
                         ),
                         destination: onetaskgraph_plugin_api::SourceName::new("plans").unwrap(),
+                        status_policy: onetaskgraph_core::StatusPolicy::Source,
+                        target_task: None,
                         match_by: None,
                         recreate: false,
                         create: false,
