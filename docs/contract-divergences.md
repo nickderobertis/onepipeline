@@ -12652,8 +12652,9 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
    store too: after its `dispatch-stopped` records it takes every one that ended, gracefully
    or killed, off the run's fence; one that would not go stays fenced. Where it watched the
-   run's whole process tree end, its driver with it, it lets go of every node the fence
-   names, including a dispatch the driver had fenced but not yet started. `adopt` after a host
+   run's whole process tree end, its driver with it, it also lets go of every node the
+   journal holds in flight, including a dispatch the driver had fenced but not yet started.
+   A node of another plan, or a settlement not yet on the store, stays fenced. `adopt` after a host
    shutdown, or after the driver's process died, resumes those nodes onto their recorded
    branches at once. A renamed directory does not release its launch record's run id:
    minting reserves it, so no successor reads a live displaced driver's claim as its own.

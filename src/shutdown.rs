@@ -666,21 +666,31 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
 
     // The dispatches that stopped are recorded stopped on the project's store too, so a run
     // taking the project over waits on none of them; one that would not go stays fenced. A
-    // teardown this host watched end the run's whole tree, its driver with it, leaves nothing
-    // of the run running: every node its fence names is let go, a dispatch the driver had
-    // fenced and not yet started among them.
+    // teardown this host watched end the run's whole tree, its driver with it, leaves none of
+    // its dispatches running: every node the journal holds in flight is let go too, a
+    // dispatch the driver had fenced and not yet started among them.
+    let tree_gone = matches!(
+        teardown,
+        crate::journal::StopTeardown::Signalled | crate::journal::StopTeardown::NothingToStop
+    );
+    let mut let_go: std::collections::BTreeSet<String> = dispatches
+        .iter()
+        .filter(|stopped| stopped.ended != DispatchEnding::StillRunning)
+        .map(|stopped| stopped.node.clone())
+        .collect();
+    if tree_gone {
+        let_go.extend(
+            view.state
+                .statuses()
+                .into_iter()
+                .filter(|(_, status)| *status == crate::graph::NodeStatus::Running)
+                .map(|(node, _)| node),
+        );
+    }
     crate::continuation::release_stopped(
         paths,
         &view.launch,
-        &dispatches
-            .iter()
-            .filter(|stopped| stopped.ended != DispatchEnding::StillRunning)
-            .map(|stopped| stopped.node.clone())
-            .collect(),
-        matches!(
-            teardown,
-            crate::journal::StopTeardown::Signalled | crate::journal::StopTeardown::NothingToStop
-        ),
+        &let_go,
         &crate::boundary::of_run(&crate::boundary::plan_now(&view.state)).scope,
     );
 

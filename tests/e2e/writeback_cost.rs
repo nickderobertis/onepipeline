@@ -329,11 +329,28 @@ impl Pacer {
         // An admission goes once the fence is idle. A node's dispatch waits for the write
         // naming it, so its first admission queues that write and dispatches nothing, and
         // the one after it has landed dispatches the node and queues nothing new: each
-        // write carries one admission's snapshot.
+        // write carries one admission's snapshot. In a step whose attempt waits on no
+        // admission, an admission also waits for the write-back's attempt in flight to have
+        // ended, so each dispatch's word lands in an attempt of its own rather than one
+        // that may or may not still be open.
         let at = fakes.clone();
+        let attempts_of = world.run_file(RUN, "writeback-projections.jsonl");
+        let step = Arc::clone(&admits);
         std::thread::spawn(move || loop {
             let arrival = begin.arrived();
-            paced(|| fence_of(&at).idle(&at).then_some(()));
+            paced(|| {
+                let fence = fence_of(&at);
+                let quiet = !step.lock().expect("the step").is_empty() || {
+                    let ended = fence.others.iter().filter(|call| call[0] == END).count();
+                    let called_by_attempts = read_jsonl(&attempts_of)
+                        .iter()
+                        .filter(|record| record["calls"] != json!({}))
+                        .count();
+                    fence.others.last().is_none_or(|call| call[0] == END)
+                        && called_by_attempts == ended
+                };
+                (quiet && fence.idle(&at)).then_some(())
+            });
             arrival.release();
         });
         // An attempt goes once the fence is idle and its latest write names every admission
@@ -630,7 +647,9 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
             )
     });
 
-    pacer.expect(&[("c", 1), ("f", 1)]);
+    // c's and f's dispatches each wait for their fence, and each admission for the attempt
+    // before it, so b's settlement, c's dispatch and f's each land in an attempt of their own.
+    pacer.expect(&[]);
     go("b");
     then_at_rest(&world, "b", |world| {
         settled(world, "b", "done")

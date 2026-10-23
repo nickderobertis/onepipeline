@@ -2192,27 +2192,23 @@ pub(crate) fn release_left_standing(
 
 /// Take the dispatches a host shutdown stopped off this run's fence on its project: they are
 /// no longer running, so a run taking the project over waits on none of them — the store
-/// records them stopped, and the adopter resumes each onto its recorded branch at once. Where
-/// `tree_gone`, the shutdown watched the run's whole process tree end, its driver with it, so
-/// every node the fence names is let go.
+/// records them stopped, and the adopter resumes each onto its recorded branch at once.
 ///
 /// Read first, and written only where the fence still names this run on this host; nodes
 /// it names that were not `stopped` — a settlement not yet on the store, a dispatch that
-/// would not go — stay unless the tree is gone. Each call bounded by [`CLAIM_READ_DEADLINE`],
-/// not made inside a wait the store asked for, and best effort: what could not be done is said
-/// on standard error, and an adopter then waits for the fence as it would for a driver that
-/// died.
+/// would not go — stay. Each call bounded by [`CLAIM_READ_DEADLINE`], not made inside a wait
+/// the store asked for, and best effort: what could not be done is said on standard error,
+/// and an adopter then waits for the fence as it would for a driver that died.
 pub(crate) fn release_stopped(
     paths: &crate::ledger::RunPaths,
     launch: &crate::ledger::LaunchRecord,
     stopped: &std::collections::BTreeSet<String>,
-    tree_gone: bool,
     term_scope: &[String],
 ) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
     };
-    if (stopped.is_empty() && !tree_gone) || crate::writeback::store_asked_to_wait(&paths.dir) {
+    if stopped.is_empty() || crate::writeback::store_asked_to_wait(&paths.dir) {
         return;
     }
     let run = crate::publicid::on_store(launch);
@@ -2224,11 +2220,8 @@ pub(crate) fn release_stopped(
             let Some(fenced) = fence_on(&run, &host, &project, &metadata) else {
                 return Ok(());
             };
-            let left: std::collections::BTreeSet<String> = if tree_gone {
-                std::collections::BTreeSet::new()
-            } else {
-                fenced.difference(stopped).cloned().collect()
-            };
+            let left: std::collections::BTreeSet<String> =
+                fenced.difference(stopped).cloned().collect();
             if left == fenced {
                 return Ok(());
             }
