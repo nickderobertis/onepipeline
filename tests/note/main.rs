@@ -3505,6 +3505,90 @@ fn a_queued_notes_refusal_journalled_before_its_sidecar_is_rewritten_is_shown_re
     });
 }
 
+/// A receiver's note **delivered**, read while the driver has journalled it and
+/// not yet rewritten its delivery sidecar: `status` drops that receiver from its
+/// inbox and shows the note delivered, and still names the other receiver, whose
+/// note the journal has not answered.
+///
+/// The delivered half of the window
+/// [`a_queued_notes_refusal_journalled_before_its_sidecar_is_rewritten_is_shown_refused`]
+/// holds open for a refusal, over the envelope
+/// [`status_names_each_receivers_inbox_and_drops_each_as_it_answers`] sends.
+#[test]
+fn a_delivered_notes_record_journalled_before_its_sidecar_is_rewritten_drops_only_its_receiver() {
+    // llmlint: ignore-block[tests_mirror_real_usage] where the driver is held is the
+    // property, and no user-facing input can place it. The failpoint only orders the
+    // real binary; the run, the conversations, the reply and `status` are its own.
+    let recorded = harness::Rendezvous::failpoint();
+    let world = World::new("note-delivered-before-sidecar")
+        .with_env("ONEPIPELINE_TEST_NOTE_RECORDED_GATE", &recorded.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let run = "deliveredbeforesidecar";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", BUILD_NOTE, None),
+            note_op("lint", "worker", LINT_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    world.until("both notes to wait in their inboxes", |world| {
+        awaiting_an_answer(world, run) == 2
+    });
+    assert_eq!(receipt(both)["state"], json!("applied"));
+    let id = queued_id_of(&world, run, BUILD_NOTE);
+
+    release_turn_of(&world, run, "build");
+    let held = recorded.arrived_within_a_step(&world, "the driver to record build's lane");
+    // The window this journey is about: build's note is journalled delivered,
+    // and the sidecar still holds it in build's inbox.
+    assert_eq!(
+        note_records_of(&world, run, id, 0),
+        1,
+        "build's note is not journalled once at the hold"
+    );
+    assert!(
+        sidecar_of(&world, run)
+            .iter()
+            .any(|(envelope, delivery)| *envelope == id
+                && serde_json::to_value(delivery).expect("a delivery")["node"] == "build"),
+        "the sidecar no longer holds build's note, so there is no window to read"
+    );
+
+    let held_by = |node: &str| format!("inbox: {node} holds envelope {id}'s note, queued since ");
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains(&held_by("build")) && status.stdout.contains(&held_by("lint")),
+        "status does not drop build's delivered note and keep lint's waiting one:\n{}",
+        status.stdout
+    );
+    assert!(
+        status.stdout.contains(&format!(
+            "note: envelope {id}'s note 0 to build, answered queued — note-delivered"
+        )),
+        "status does not show build's note's result:\n{}",
+        status.stdout
+    );
+    assert_eq!(
+        inbox_reading(&world, run),
+        vec![(id.to_string(), "queued".to_owned(), "lint".to_owned())],
+        "status --json does not name lint's note alone as waiting"
+    );
+
+    held.release();
+    release_turn_of(&world, run, "lint");
+    note_recorded(&world, run, id, 1);
+    world.until("status to name no inbox", |world| {
+        !world.run(&["status", run]).stdout.contains("inbox:")
+    });
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
+    });
+}
+
 /// The same refusal through this crate's own API: `note::deliver` submits the
 /// note to the run's live driver, which answers its envelope `queued` as it hands
 /// the note off, and the call then waits on that note's own record — so a

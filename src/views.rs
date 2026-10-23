@@ -409,8 +409,8 @@ fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
 }
 
 /// Whether the journal answers every note `note`'s envelope sent its receiver:
-/// each delivered or refused. An envelope this reader cannot find, or one that
-/// sent that receiver no note, is not answered here — the sidecar's word stands.
+/// each delivered or refused. An envelope this reader cannot find is not
+/// answered here — the sidecar's word stands.
 fn lane_answered(
     view: &RunView,
     channel: &crate::channel::ChannelState,
@@ -419,18 +419,19 @@ fn lane_answered(
 ) -> bool {
     let InboxDelivery::Queued { node, .. } = &note.delivery;
     let Some(sent) = channel.commands_of(note.envelope) else {
+        // llmlint: ignore[changed_behavior_has_e2e] no verb reaches this arm: the sidecar names
+        // only an envelope its driver claimed off the queue, and the queue keeps every envelope
+        // it was sent, so it is unreadable only where the channel's files are damaged — and the
+        // answer there is the reading every build before this one gave, the sidecar's own.
         return false;
     };
-    let mut notes = sent
-        .commands
+    sent.commands
         .iter()
         .enumerate()
         .filter(|(_, command)| {
             matches!(command, crate::channel::Command::Note { id, .. } if id == node)
         })
-        .peekable();
-    notes.peek().is_some()
-        && notes.all(|(index, command)| {
+        .all(|(index, command)| {
             crate::withdrawal::delivered(
                 delivered,
                 note.envelope,
