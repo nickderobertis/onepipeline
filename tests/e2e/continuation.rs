@@ -2359,22 +2359,22 @@ enum ClaimAnswer {
 
 /// A claim read that fails ends no dispatch: with `x` in flight for longer than the lapse the
 /// claim's old lease had — two of the intervals the setting still names and a read's deadline
-/// — `x` finishes, the next dispatch starts, and only its publication waits, until a read
-/// answers; while it waits, another dispatch starts and settles.
+/// — `x` finishes, the next dispatch starts and publishes while the failure persists;
+/// another dispatch starts and settles beside it.
 #[test]
-fn a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication() {
+fn a_claim_read_that_fails_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-fails", ClaimAnswer::Fails);
 }
 
 /// The same for a claim read the store holds past its deadline.
 #[test]
-fn a_claim_read_that_times_out_ends_no_dispatch_and_holds_only_its_publication() {
+fn a_claim_read_that_times_out_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-times-out", ClaimAnswer::TimesOut);
 }
 
 /// The same for a claim read the store refuses as rate limited.
 #[test]
-fn a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication() {
+fn a_rate_limited_claim_read_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-rate-limited", ClaimAnswer::RateLimited);
 }
 
@@ -2394,15 +2394,17 @@ fn a_claim_read_finding_its_landed_claim_gone_ends_no_dispatch_and_publishes() {
 }
 
 /// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
-/// the moment `x` is in flight: `w` is held until `y`'s publication is waiting, so `z` starts
-/// while it waits.
+/// the moment `x` is in flight: `w` is held until `y` reaches its publication, so `z` starts
+/// beside it.
 fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     use std::time::Duration;
     // The interval the claim's old lease ran on: it lapsed at two of them and a read's
     // twenty-second deadline, which `x` is held well past.
     let interval = 2;
     let lapsed = Duration::from_secs(2 * interval + 20);
-    let world = takeover_world(name, interval).through_scripted_source();
+    let world = takeover_world(name, interval)
+        .through_scripted_source()
+        .with_env(crate::harness::LOOP_STATS_ENV, "1");
     world.script("y.work", "y's change\n");
     let x = world.rendezvous("x");
     let w = world.rendezvous("w");
@@ -2486,41 +2488,32 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             .iter()
             .any(|event| event["kind"] == "change-opened")
     };
-    // While y's publication waits, w finishes and z starts and settles beside it.
+    // Dispatches keep settling, and y publishes before the failed read recovers.
     let z_settled = |world: &World| {
         world
             .events_of(run, "node-settled")
             .iter()
             .any(|event| event["labels"]["node"] == "z")
     };
-    match (answer, held) {
-        (ClaimAnswer::NoClaim | ClaimAnswer::ClaimGone, _) => {
-            beside.release();
-            world.until("z to settle", z_settled);
-        }
-        (ClaimAnswer::TimesOut, Some(held)) => {
-            // y's publication waits on the read that does not answer, and on no other.
-            let read = held.arrived();
-            beside.release();
-            world.until("z to settle", z_settled);
-            world.until_run_file_holds(run, "driver.log", "did not answer within 20 seconds");
-            assert!(
-                !published(&world),
-                "y published on a read that did not answer"
-            );
+    let read = held.as_ref().map(|held| held.arrived());
+    beside.release();
+    world.until("z to settle", z_settled);
+    world.until(
+        "y to publish while the claim read failure persists",
+        published,
+    );
+    let counts = crate::harness::counts(&world, run);
+    assert_eq!(counts.claim_reads, 1, "{answer:?}: {counts:?}");
+    // Recover only after publication, so closeout can release the claim normally.
+    match answer {
+        ClaimAnswer::TimesOut => {
             world.store_stops_holding("get_project");
-            read.release();
+            read.expect("the held read").release();
         }
-        (_, _) => {
-            world.until_run_file_holds(run, "driver.log", "before it publishes");
-            beside.release();
-            world.until("z to settle", z_settled);
-            assert!(
-                !published(&world),
-                "{answer:?}: y published on a read that did not answer"
-            );
+        ClaimAnswer::Fails | ClaimAnswer::RateLimited => {
             world.store_stops_refusing("get_project");
         }
+        ClaimAnswer::NoClaim | ClaimAnswer::ClaimGone => {}
     }
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
@@ -2544,6 +2537,84 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
         !log.contains("ends its dispatches in progress"),
         "{answer:?}: {log}"
     );
+    one_change_request_per_branch(&world);
+}
+
+/// A wait reported by write-back after the publication fence lands prevents another store
+/// call, but does not hold publication. The real projection establishes the wait while the
+/// driver's publication admission is ordered at the boundary between its fence and read.
+#[test]
+fn a_publication_inside_an_existing_store_wait_starts_without_a_claim_read() {
+    // llmlint: ignore-block[tests_mirror_real_usage] only orders the real driver's admission
+    // after its real fence write while the real write-back worker receives a rate limit.
+    // No user input fixes this interleaving; publication, store calls and the wait deadline
+    // are asserted through the binary's journal and the store's own call records.
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = takeover_world("publication-store-wait", 1)
+        .through_scripted_source()
+        .with_env(crate::harness::LOOP_STATS_ENV, "1")
+        .with_env(
+            "ONEPIPELINE_TEST_BEFORE_PUBLICATION_CLAIM_GATE",
+            &gate.address(),
+        );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.script("y.work", "y's change\n");
+    let y = world.rendezvous("y");
+    let w = world.rendezvous("w");
+    let run = "waiting";
+    let mut plan = plan_of(run, vec![lifecycle("y", &[]), agent("w", &[])]);
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let publishing = y.arrived();
+    let working = w.arrived();
+    until_claimed_by(&world, &project, run);
+    let updates = world.store_holds("update_task");
+    working.release();
+    let update = updates.arrived();
+    publishing.release();
+    let admission = gate.arrived();
+    drop(gate);
+    assert_eq!(stored_publishing(&world, &project)["nodes"], json!(["y"]));
+    world.store_refuses_once(
+        "update_task",
+        &json!({
+            "kind": "rate-limited", "retry_after_seconds": 30,
+            "message": "the board needs a pause"
+        }),
+    );
+    world.store_stops_holding("update_task");
+    update.release();
+    let wait_file = world.run_file(run, "writeback-wait.json");
+    world.until("write-back to record the store's wait", |_| {
+        wait_file.is_file()
+    });
+    let wait: Value = serde_json::from_slice(&std::fs::read(&wait_file).unwrap()).unwrap();
+    let calls = world.store_calls().len();
+    admission.release();
+    world.until("y to publish inside the store wait", |world| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["kind"] == "change-opened")
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    assert!(
+        now < u128::from(wait["not_before_unix_ms"].as_u64().unwrap()),
+        "publication waited for the store's wait to end"
+    );
+    assert_eq!(crate::harness::counts(&world, run).claim_reads, 0);
+    assert_eq!(
+        world.store_calls().len(),
+        calls,
+        "a store call was made inside the wait"
+    );
+    assert_eq!(settled(&world, run, "w")["status"], "done");
     one_change_request_per_branch(&world);
 }
 
