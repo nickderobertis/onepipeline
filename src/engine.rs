@@ -1692,6 +1692,7 @@ fn converge(
             derived = None;
             unpublished = true;
             moved = true;
+            crate::ordering::edits_taken()?;
         }
         deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an

@@ -3571,6 +3571,41 @@ impl Rendezvous {
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
         Arrival::of(stream)
     }
+
+    /// [`arrived`](Self::arrived), waited for through [`World::until`]: a failpoint
+    /// the binary never reaches fails naming `what` and the runs root as it stood,
+    /// rather than waiting on the runner's own backstop.
+    pub fn arrived_in(&self, world: &World, what: &str) -> Arrival {
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener polls");
+        let mut accepted = None;
+        world.until(what, |_| match self.listener.accept() {
+            Ok((stream, _)) => {
+                accepted = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("the failpoint's listener failed waiting for {what}: {error}"),
+        });
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener blocks again");
+        let stream = accepted.expect("the wait ended on an arrival");
+        stream
+            .set_nonblocking(false)
+            .expect("the arrival's connection blocks");
+        Arrival::of(stream)
+    }
+
+    /// Let every later arrival go as it comes, for the rest of the test: a failpoint
+    /// met again past the ordering a journey drives — another identity, another
+    /// sweep, another run — holds nothing.
+    pub fn release_the_rest(self) {
+        std::thread::spawn(move || loop {
+            self.arrived().release();
+        });
+    }
 }
 
 impl Arrival {

@@ -115,6 +115,11 @@ const IDENTITY_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_IDENTITY_GATE";
 /// it waits for the sweep, so a journey knows the stop is up.
 const STOP_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_STOP_GATE";
 
+/// The test failpoint a retirement pass meets at every identity, once it has begun
+/// reading what the run names there and before it retires anything, so a journey can
+/// order what the run comes to name against that read.
+const NAMES_GATE_ENV: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
+
 /// Meet `variable`'s failpoint the first time `met` is asked, and never again.
 fn meet_once(met: &AtomicBool, variable: &str) {
     if !met.swap(true, Ordering::SeqCst) {
@@ -721,6 +726,7 @@ fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Reti
     let providers = onevcs::Providers::real();
     let unreached = visit(keys, stop, |identity| {
         let current = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let _ = crate::ordering::meet(NAMES_GATE_ENV);
         let named = resolved(&current, |repo| {
             providers
                 .vcs
