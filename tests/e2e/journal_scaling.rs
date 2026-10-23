@@ -117,8 +117,8 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
         &plan_of(run, vec![agent("build", &[]), agent("later", &["build"])]),
     );
     world.run(&["start", &path, "--detach"]).exited(0);
-    world.until("the member to be heartbeating", |world| {
-        beat_of(world, run, "build").is_some()
+    world.until("the member's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
     });
 
     hold_the_pass(&world, &seam);
