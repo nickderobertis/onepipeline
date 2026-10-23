@@ -47,15 +47,13 @@ impl Journal {
     /// Open the run's journal for appending.
     pub fn open(paths: &RunPaths) -> Self {
         let stream = format!("{}-{}", sys::hostname(), sys::pid());
-        let next_seq = ledger::read_lines(&paths.journal())
-            .iter()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|value| value.get("stream").and_then(Value::as_str) == Some(stream.as_str()))
-            .filter_map(|value| value.get("seq").and_then(Value::as_u64))
-            .max()
-            .map_or(0, |max| max + 1);
+        // Read off the run's checkpoint and the records past it, as the summary
+        // beside it is: a writer opening on a long run reads what is new, never the
+        // history its next sequence number has to be above.
+        let (summary, claimed) = crate::summary::Maintainer::opened_for(paths, &stream);
+        let next_seq = claimed.map_or(0, |max| max + 1);
         Self {
-            summary: crate::summary::Maintainer::of(paths),
+            summary,
             paths: paths.clone(),
             stream,
             next_seq,
@@ -326,6 +324,45 @@ pub fn read(path: &Path) -> Vec<Envelope> {
 pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
     let mut grown = Vec::new();
     for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
+            break;
+        }
+        let occupies = line.bytes + 1;
+        let whole = match reading(line, path) {
+            Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
+            Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+        };
+        grown.push((whole, occupies));
+    }
+    grown
+}
+
+/// [`finished_records_after`], for a reader that **trusts the boundary it resumes
+/// at** rather than asking the byte in front of it.
+///
+/// What a reader resuming from a checkpoint reads: the bytes in front of `from`
+/// are history it has already folded and never reads again — not even the one
+/// terminator the bus reader asks about, since a run's covered history is exactly
+/// what that reader may no longer assume is there to read. Everything from `from`
+/// to the end of the file as it stands now.
+pub(crate) fn finished_records_from(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    finished_records_within(path, from, length.saturating_sub(from))
+}
+
+/// [`finished_records_from`], over at most `len` bytes from `from`: what a rebuild
+/// folds one window at a time. A record the window ends inside is left for the
+/// next one, exactly as a record whose writer has not finished it is.
+pub(crate) fn finished_records_within(
+    path: &Path,
+    from: u64,
+    len: u64,
+) -> Vec<(Option<Envelope>, u64)> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut grown = Vec::new();
+    for line in ledger::read_appended_envelope_lines(path, from, len) {
         if !line.terminated {
             break;
         }

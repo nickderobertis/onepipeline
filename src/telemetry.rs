@@ -313,7 +313,8 @@ impl Usage {
 /// A session records the phases of a node's workspace and publication, and its
 /// last record is what it is doing until the next one — so this is carried
 /// forward rather than derived per event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum Phase {
     /// Preparing the workspace: the clone, the worktree, the fetch.
     Setup,
@@ -424,11 +425,17 @@ fn side_of(event: &Envelope) -> Option<Role> {
 ///
 /// **Fed in merge order.** Every millisecond of the wall clock is attributed to
 /// whatever was open across it, so the order records arrive in is the order the
-/// spans are measured in; a caller that appends out of order rebuilds rather
-/// than folding — see [`summary::Maintainer`](crate::summary::Maintainer).
+/// spans are measured in. A record arriving after one stamped later than it is
+/// folded where it arrives rather than by reading the store again, so its span
+/// is measured from there — see [`crate::checkpoint`] for why no reader goes
+/// back over a history it has already folded.
+///
+/// Carried in a run's `checkpoint.json` beside the fold it was taken with, so a
+/// writer reopening a run resumes the clock rather than walking the store again.
 ///
 /// [`of_run`]: crate::telemetry::of_run
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Aggregate {
     /// The first stamped record, which the wall clock is measured from. `None`
     /// until one arrives: a store with nothing stamped in it has no clock, which

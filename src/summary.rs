@@ -66,7 +66,7 @@ use crate::graph;
 use crate::journal;
 use crate::ledger::{self, LaunchRecord, RunPaths, Skipped};
 use crate::projection::{self, RunState};
-use crate::telemetry::{self, RunTelemetry};
+use crate::telemetry::RunTelemetry;
 
 /// The schema version of the summary document.
 ///
@@ -625,32 +625,17 @@ impl RunSummary {
         self
     }
 
-    /// The same summary, always by folding the whole store.
+    /// The same summary, by folding the store from its checkpoint.
     ///
     /// What the fallback runs, and what the writer's own account is held equal
-    /// to: one derivation, so the two accounts of a run cannot drift apart.
+    /// to: one derivation, so the two accounts of a run cannot drift apart. It
+    /// reads what the checkpoint does not cover and nothing else — the fallback a
+    /// listing takes for a stale row is the same bounded read a driver's writer
+    /// opens with.
     fn folded(paths: &RunPaths, stamp: Stamp) -> crate::Result<Self> {
-        let view = crate::views::RunView::open(paths)?;
         let launch = ledger::read_json(&paths.launch())?;
-        let judged: BTreeSet<String> = view
-            .events
-            .iter()
-            .filter_map(crate::report::a_judge_failed)
-            .map(str::to_string)
-            .collect();
-        Ok(Self::derive(
-            &paths.run,
-            &launch,
-            &Store {
-                state: &view.state,
-                name: plan_name(paths),
-                event_count: view.events.len() as u64,
-                last_event_kind: view.events.last().map(|event| event.kind.0.clone()),
-                timing: &telemetry::of_run(paths, &view.events),
-                judged: &judged,
-            },
-            stamp,
-        ))
+        let maintainer = Maintainer::of(paths);
+        Ok(maintainer.derived(&launch, stamp))
     }
 
     /// Compose the document out of a run's launch record and its folded state.
@@ -833,50 +818,20 @@ impl Listing {
 /// A run's store folded: everything the summary is derived from except the
 /// launch record.
 ///
-/// One value rather than four fields side by side, because it is carried
-/// forward as a unit — [`Maintainer`] holds the fold of everything settled and
-/// re-folds the records still arriving at one instant onto a copy of it, and a
-/// copy that took three of the four would be a state describing a store nobody
-/// recorded.
-#[derive(Debug, Default, Clone)]
+/// One value rather than its parts side by side, because it is carried forward
+/// as a unit — the state, and the [`Tally`](crate::checkpoint::Tally) the
+/// checkpoint carries beside it over the same records.
+#[derive(Debug, Clone)]
 struct Folded {
     state: RunState,
-    aggregate: telemetry::Aggregate,
-    events: u64,
-    /// The kind of the record the **merge order** ends with, which for a store
-    /// folded in that order is whatever was taken last.
-    last_event_kind: Option<String>,
-    /// The nodes some record in this store carries a **failing judge verdict**
-    /// for.
-    ///
-    /// Folded a record at a time because that is all it takes: a verdict is on
-    /// the settlement that carried it and nothing later withdraws one, so the
-    /// set only grows. It is the one input to `judge_rejected` that lives in the
-    /// store rather than in the state beside it.
-    judged: BTreeSet<String>,
+    tally: crate::checkpoint::Tally,
 }
 
 impl Folded {
-    /// The state of an empty store, as [`projection::fold`] starts from.
-    fn new() -> Self {
-        Self {
-            state: RunState {
-                strict: true,
-                ..RunState::default()
-            },
-            ..Self::default()
-        }
-    }
-
-    /// Take one record that belongs at the end of the merge order.
+    /// Take one record that belongs at the end of what is folded.
     fn take(&mut self, paths: &RunPaths, event: &Envelope) {
         projection::fold_one(&mut self.state, event);
-        self.aggregate.fold(paths, event);
-        self.events += 1;
-        self.last_event_kind = Some(event.kind.0.clone());
-        if let Some(node) = crate::report::a_judge_failed(event) {
-            self.judged.insert(node.to_string());
-        }
+        self.tally.take(paths, event);
     }
 }
 
@@ -887,250 +842,162 @@ impl Folded {
 /// store, so the document is written by whatever wrote the record it describes
 /// and is current for a live run rather than as of some later pass.
 ///
-/// # Why an appended record can be folded at all
+/// # What it costs
 ///
-/// Because the derivations are over the store in **merge order**, and while
-/// every record arrives at or past the last instant already recorded, that order
-/// is: records by timestamp, ties between streams broken by stream id, each
-/// stream's own `seq` preserved. So this holds the fold of everything stamped
-/// *before* the newest instant, and the handful of records stamped **at** it —
-/// two producers relay their own timestamps into this store and a millisecond
-/// holds several records, so a record arriving beside one already folded has to
-/// be able to sort in front of it. Serving the summary re-folds that handful
-/// onto a copy, which is bounded by one instant's records rather than by the
-/// run's length.
-///
-/// Two arrivals do not belong anywhere this can place them, and the answer to
-/// both is to read the store again. One is a record stamped *behind* the newest
-/// instant **any** stream has reached — a producer's clock is not this one's, and
-/// the merge holds a stream stamped ahead of the others back until they drain, so
-/// the order can end behind an instant the store already carries. The other is a
-/// record whose
-/// stream has already had a **higher** `seq` folded and settled: a stream is
-/// merged in its own `seq` order whatever its stamps say, so a producer that
-/// publishes `seq` 10 stamped before its `seq` 5 puts the later record first in
-/// the merge and there is no instant this can hold it at. Both are real — the
-/// second is what an `oneharness-session` record does, published out of band and
-/// stamped when its session opened — and both are rare, which is what makes
-/// reading again affordable.
+/// Opening it costs what [`crate::checkpoint::Projected`] costs — the checkpoint
+/// and the records past it, or one streaming read where there is no checkpoint to
+/// resume from — and each record after that costs the record. A record stamped
+/// behind one already folded, or published out of its stream's own `seq` order,
+/// is folded where it arrives rather than by reading the store again: the
+/// checkpoint's module note says why no writer goes back over the history it has
+/// folded, and why that moves nothing a settlement turns on.
 #[derive(Debug)]
 pub(crate) struct Maintainer {
     paths: RunPaths,
     /// The plan's name, read once: `plan.json` is the run's launch record and is
     /// never rewritten, so what it said when this writer opened is what it says.
     name: Option<String>,
-    /// The fold of every record stamped **before** [`open_ts`](Self::open_ts).
-    settled: Folded,
-    /// The records stamped **at** it, unfolded, so one arriving beside them can
-    /// still sort in front of them.
-    open: Vec<Envelope>,
-    /// The instant the **merge order ends at**. Empty for a store with nothing in
-    /// it, which every stamp is past.
-    open_ts: String,
-    /// The newest instant **any** record in this store carries, which is not
-    /// always the one above.
-    ///
-    /// The merge is a k-way one — each stream in its own `seq`, streams
-    /// interleaved by `ts` — so a stream whose head is stamped ahead of every
-    /// other stream's remaining records is held back until those are drained, and
-    /// the order then ends on a record stamped *behind* one already placed. A
-    /// producer whose clock runs ahead of this one's is ordinary between hosts, so
-    /// this is not a rare shape. An arrival behind this instant has records to
-    /// sort in front of wherever the order happens to end, and is not one this
-    /// state can place.
-    newest_ts: String,
+    /// The fold of every record accounted for.
+    folded: Folded,
     /// How many bytes of the journal this state has accounted for. See
     /// [`Stamp`].
     accounted: u64,
-    /// The highest `seq` each stream has **settled**, which is what an arriving
-    /// record of that stream has to be past: the merge orders a stream by its own
-    /// `seq` and by nothing else, so a lower one arriving now belongs in front of
-    /// a record this state has already frozen.
-    settled_seq: BTreeMap<String, u64>,
 }
 
 impl Maintainer {
-    /// Build the state of a run's store as it stands, by reading it once.
-    ///
-    /// The one unbounded read in this file, and it happens where an unbounded
-    /// read already did: a journal writer opens by reading the store to find the
-    /// sequence number it may claim.
+    /// Build the state of a run's store as it stands, from its checkpoint and the
+    /// records past it.
     pub(crate) fn of(paths: &RunPaths) -> Self {
-        // What is accounted for is exactly what was read: the finished records the
-        // bus reader handed back, up to the boundary after the last of them. A final
-        // line whose writer had not finished it is left out of both, so the count is
-        // always a position that reader resumes from — counting its bytes would put
-        // the next tail read inside that record once its writer finished it, which
-        // the reader refuses as no boundary at all. An appender that landed across
-        // the read is past the count, which reads as stale rather than as an answer.
-        let read = journal::finished_records_after(&paths.journal(), 0);
-        let accounted: u64 = read.iter().map(|(_, bytes)| *bytes).sum();
-        let mut events: Vec<Envelope> = read.into_iter().filter_map(|(record, _)| record).collect();
-        journal::merge_order(&mut events);
-
-        // The last instant's records are held open rather than folded, because
-        // the next record to arrive may be stamped at that same instant and
-        // belong in front of one of them.
-        //
-        // The **trailing run** of them, counted from the end, and not every
-        // record that happens to carry that stamp: the merge orders by each
-        // stream's own `seq` first, so a store some producer stamped out of
-        // order can carry that instant earlier as well — and taking those with
-        // it would re-sort records the merge had already placed, which is a
-        // different store from the one on disk.
-        let open_ts = events
-            .last()
-            .map(|event| event.ts.clone())
-            .unwrap_or_default();
-        let opened = events
-            .iter()
-            .rposition(|event| event.ts != open_ts)
-            .map_or(0, |before| before + 1);
-        let mut settled = Folded::new();
-        let mut settled_seq = BTreeMap::new();
-        for event in &events[..opened] {
-            settled.take(paths, event);
-            seq_reached(&mut settled_seq, event);
-        }
-        Self {
-            paths: paths.clone(),
-            name: plan_name(paths),
-            settled,
-            open: events[opened..].to_vec(),
-            newest_ts: events
-                .iter()
-                .map(|event| &event.ts)
-                .max()
-                .cloned()
-                .unwrap_or_default(),
-            open_ts,
-            accounted,
-            settled_seq,
-        }
+        Self::opened(paths).0
     }
 
-    /// The whole store folded: everything settled, plus the newest instant's
-    /// records in the order the merge puts them.
-    ///
-    /// Within one instant the merge orders by stream and then by each stream's
-    /// own `seq`, which is what this sorts by — the same order
-    /// [`journal::merge_order`] would put them in, decided in one place so the
-    /// two cannot disagree.
-    fn current(&self) -> Folded {
-        let mut folded = self.settled.clone();
-        let mut open: Vec<&Envelope> = self.open.iter().collect();
-        open.sort_by(|a, b| a.stream.cmp(&b.stream).then(a.seq.cmp(&b.seq)));
-        for event in open {
-            folded.take(&self.paths, event);
-        }
-        folded
+    /// [`of`](Self::of), with the greatest `seq` `stream` claims among the records
+    /// it read — what a journal writer opening on this run takes its own above.
+    pub(crate) fn opened_for(paths: &RunPaths, stream: &str) -> (Self, Option<u64>) {
+        let (maintainer, projected) = Self::opened(paths);
+        let claimed = projected.seq_claimed(stream);
+        (maintainer, claimed)
+    }
+
+    fn opened(paths: &RunPaths) -> (Self, crate::checkpoint::Projected) {
+        // Held in memory: a checkpoint is the reconcile loop's to write, once a
+        // pass, and a writer that rewrote it per record would pay the whole fold's
+        // serialization for every line it appends.
+        let projected =
+            crate::checkpoint::Projected::open_with(paths, crate::checkpoint::Persist::No);
+        let maintainer = Self {
+            paths: paths.clone(),
+            name: plan_name(paths),
+            folded: Folded {
+                state: (*projected).clone(),
+                tally: projected.tally().clone(),
+            },
+            accounted: projected.read_through(),
+        };
+        (maintainer, projected)
     }
 
     /// Take one appended record, and write the run's summary.
     ///
-    /// Called after the record has reached the file, so a read of the store —
-    /// the answer to a record this state cannot place — reads a store that
-    /// already holds it.
+    /// Called after the record has reached the file, so the count it moves is a
+    /// boundary the file holds.
     ///
     /// `bytes` is the record's own size, terminator included. This state's count is
-    /// always a record boundary the bus reader handed back — it never counts a line
-    /// whose writer had not finished it — and that is what makes the arithmetic
-    /// below sound. The append that wrote this record may first have healed a
-    /// fragment a dead writer left ([`ledger::append_line_healed`] reports it), but a
-    /// heal cuts only what follows the file's last boundary, which is never in front
-    /// of this count, so the count needs nothing from it. And a line that was
-    /// half-written when this state last read, and has been finished since, is read
-    /// whole from that boundary rather than resumed from inside. A store shorter than
-    /// the count plus this record is not the store this state was holding, and is
-    /// read again rather than folded from an offset nothing can place.
+    /// always a record boundary — it never counts a line whose writer had not
+    /// finished it — and that is what makes the arithmetic below sound. A store
+    /// shorter than the count plus this record is not the store this state was
+    /// holding, and is opened again rather than folded from an offset nothing can
+    /// place.
     pub(crate) fn appended(&mut self, event: &Envelope, bytes: u64) {
         let len = journal_stamp(&self.paths).0;
         if len == self.accounted + bytes {
             // Ours alone: the file grew by exactly this record, so what is folded
             // here and what the file holds are the same store.
-            self.fold(event, bytes);
+            self.folded.take(&self.paths, event);
+            self.accounted += bytes;
         } else if len > self.accounted + bytes {
             // Somebody else appended beside us, which is the ordinary shape of a
-            // run being driven: the relay thread writes the observer's envelopes
+            // run being driven: the relay thread writes the dispatches' envelopes
             // while the engine thread writes the graph's. What the store grew by
-            // is read **from where this state left off** rather than from the
-            // beginning — reading it whole per append would make recording a run
-            // quadratic in its own length, which is the cost this document exists
-            // to remove, reintroduced at the writer.
+            // is read **from where this state left off**.
             self.catch_up();
         } else {
             // The file is not the file this state was holding: it is shorter than
             // what was accounted for and the record just written to it — replaced,
-            // or cut back past a boundary this state counted. Nothing here can be
-            // placed against it.
+            // or cut back past a boundary this state counted.
             *self = Self::of(&self.paths);
         }
         self.write();
     }
 
-    /// Fold one record, or read the store again where it does not belong at or
-    /// past the newest instant — and say which it did.
-    ///
-    /// A read has taken the whole store, so a caller walking a tail of it has
-    /// nothing left to fold and must stop rather than fold the same records
-    /// twice.
-    fn fold(&mut self, event: &Envelope, bytes: u64) -> Rebuilt {
-        let settled_past_it = self
-            .settled_seq
-            .get(&event.stream)
-            .is_some_and(|reached| event.seq <= *reached);
-        // A record stamped later than the instant still open closes that instant,
-        // so one whose own stream is *already* further on inside it cannot be
-        // placed either: the merge would put this record in front of one about to
-        // be frozen behind it.
-        let closing_over_it = event.ts > self.open_ts
-            && self
-                .open
-                .iter()
-                .any(|held| held.stream == event.stream && held.seq > event.seq);
-        if settled_past_it || closing_over_it || event.ts < self.newest_ts {
-            *self = Self::of(&self.paths);
-            return Rebuilt::Yes;
-        }
-        if event.ts > self.open_ts {
-            self.settled = self.current();
-            for settled in &self.open {
-                seq_reached(&mut self.settled_seq, settled);
-            }
-            self.open_ts = event.ts.clone();
-            self.open.clear();
-        }
-        self.open.push(event.clone());
-        if event.ts > self.newest_ts {
-            self.newest_ts = event.ts.clone();
-        }
-        self.accounted += bytes;
-        Rebuilt::No
-    }
-
     /// Fold every finished record the store has grown by since this state last
-    /// accounted for it.
+    /// accounted for it, in the merge order of what arrived.
     ///
     /// Bounded by what arrived rather than by what the run has ever recorded: the
-    /// tail is read from the byte this state stopped at. A record in it stamped
-    /// behind the newest instant takes the whole store again, which is the same
-    /// answer [`fold`](Self::fold) gives for one appended here — and one this
-    /// build cannot read still advances the count, because it is still a line the
-    /// file holds. A final line whose writer has not finished it does not: the
-    /// count stays at the boundary in front of it, which is where the next read
-    /// resumes once its newline lands.
+    /// tail is read from the byte this state stopped at. One this build cannot read
+    /// still advances the count, because it is still a line the file holds. A
+    /// final line whose writer has not finished it does not: the count stays at
+    /// the boundary in front of it, which is where the next read resumes once its
+    /// newline lands.
     fn catch_up(&mut self) {
-        for (record, bytes) in
-            journal::finished_records_after(&self.paths.journal(), self.accounted)
-        {
-            match record {
-                // A read answered the whole tail; there is nothing left of it
-                // this state has not already taken.
-                Some(event) if self.fold(&event, bytes) == Rebuilt::Yes => return,
-                Some(_) => {}
-                None => self.accounted += bytes,
-            }
+        let grown = journal::finished_records_from(&self.paths.journal(), self.accounted);
+        self.accounted += grown.iter().map(|(_, bytes)| bytes).sum::<u64>();
+        let mut arrived: Vec<Envelope> =
+            grown.into_iter().filter_map(|(record, _)| record).collect();
+        journal::merge_order(&mut arrived);
+        for event in &arrived {
+            self.folded.take(&self.paths, event);
         }
+    }
+
+    /// The summary this state derives, under `launch`, stamped `stamp`.
+    fn derived(&self, launch: &LaunchRecord, stamp: Stamp) -> RunSummary {
+        let mut state = self.folded.state.clone();
+        // Cross-DAG edges are resolved the way a view resolves them, so a row
+        // and the graph it opens cannot describe different graphs. A graph
+        // naming no other run pays a walk of its own nodes and nothing else; one
+        // that does names pays that edge's read, which is what any reader of it
+        // already pays.
+        state.cross_dag = crate::crossdag::resolve_quietly(
+            &self
+                .paths
+                .dir
+                .parent()
+                .map_or_else(ledger::runs_root, Path::to_path_buf),
+            &state.graph,
+        );
+        // The landings a closing driver re-read and wrote to its result, taken
+        // exactly where a folding reader takes them. Without it the two accounts
+        // of one run would disagree on the one field that outlives the journal:
+        // a change the run watched reach its base after the record that said it
+        // had not.
+        //
+        // Asked only where there is something for it to move. That re-read only
+        // ever turns `unlanded` into `landed`, so a run with no unlanded change
+        // has the same state either way — and this runs on the **append path**,
+        // where a file opened per record is a cost the whole run pays to answer
+        // a question almost every record has no stake in.
+        if state
+            .landings
+            .values()
+            .any(|landing| *landing == graph::Landing::Unlanded)
+        {
+            crate::views::landings_the_run_re_read(&mut state, &self.paths);
+        }
+        let tally = &self.folded.tally;
+        RunSummary::derive(
+            &self.paths.run,
+            launch,
+            &Store {
+                state: &state,
+                name: self.name.clone(),
+                event_count: tally.events,
+                last_event_kind: tally.last_event_kind.clone(),
+                timing: &tally.aggregate.finish(&self.paths.run, &state),
+                judged: &tally.judged,
+            },
+            stamp,
+        )
     }
 
     /// Write what the run stands at now.
@@ -1152,52 +1019,7 @@ impl Maintainer {
         let Some(launch) = self.launch() else {
             return;
         };
-        let mut folded = self.current();
-        // Cross-DAG edges are resolved the way a view resolves them, so a row
-        // and the graph it opens cannot describe different graphs. A graph
-        // naming no other run pays a walk of its own nodes and nothing else; one
-        // that does names pays that edge's read, which is what any reader of it
-        // already pays.
-        folded.state.cross_dag = crate::crossdag::resolve_quietly(
-            &self
-                .paths
-                .dir
-                .parent()
-                .map_or_else(ledger::runs_root, Path::to_path_buf),
-            &folded.state.graph,
-        );
-        // The landings a closing driver re-read and wrote to its result, taken
-        // exactly where a folding reader takes them. Without it the two accounts
-        // of one run would disagree on the one field that outlives the journal:
-        // a change the run watched reach its base after the record that said it
-        // had not.
-        //
-        // Asked only where there is something for it to move. That re-read only
-        // ever turns `unlanded` into `landed`, so a run with no unlanded change
-        // has the same state either way — and this runs on the **append path**,
-        // where a file opened per record is a cost the whole run pays to answer
-        // a question almost every record has no stake in.
-        if folded
-            .state
-            .landings
-            .values()
-            .any(|landing| *landing == graph::Landing::Unlanded)
-        {
-            crate::views::landings_the_run_re_read(&mut folded.state, &self.paths);
-        }
-        let summary = RunSummary::derive(
-            &self.paths.run,
-            &launch,
-            &Store {
-                state: &folded.state,
-                name: self.name.clone(),
-                event_count: folded.events,
-                last_event_kind: folded.last_event_kind.clone(),
-                timing: &folded.aggregate.finish(&self.paths.run, &folded.state),
-                judged: &folded.judged,
-            },
-            (self.accounted, journal_stamp(&self.paths).1),
-        );
+        let summary = self.derived(&launch, (self.accounted, journal_stamp(&self.paths).1));
         let _ = ledger::write_json(&self.paths.summary(), &summary);
     }
 
@@ -1240,24 +1062,6 @@ impl Maintainer {
 // inducing needs host sabotage rather than a user journey.
 pub(crate) fn seal(paths: &RunPaths) {
     Maintainer::of(paths).write();
-}
-
-/// Record how far a stream has been folded, keeping the highest `seq` seen.
-///
-/// The highest rather than the last, because a producer may publish its own
-/// records out of `seq` order and the question this answers is what the merge
-/// has already placed.
-fn seq_reached(reached: &mut BTreeMap<String, u64>, event: &Envelope) {
-    let held = reached.entry(event.stream.clone()).or_insert(event.seq);
-    *held = (*held).max(event.seq);
-}
-
-/// Whether folding a record took the whole store again — which is what a caller
-/// walking a tail has to stop on, or it folds the same records twice.
-#[derive(Debug, PartialEq, Eq)]
-enum Rebuilt {
-    No,
-    Yes,
 }
 
 #[cfg(test)]
@@ -1631,18 +1435,28 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    /// A record that arrives **behind** the newest instant recorded is not folded
-    /// onto the end of it.
+    /// A record that arrives **behind** the newest instant recorded is folded onto
+    /// the end of what is folded, and nothing already folded is read again.
     ///
     /// Two producers relay their own timestamps into this store, so a record
-    /// landing out of order is a case rather than a hypothetical — and the whole
-    /// of the timing account is a walk of the timeline in order. The answer is
-    /// to rebuild, and what proves it is the fold beside it: the two rows are
-    /// one row.
+    /// landing out of order is a case rather than a hypothetical. The bytes the
+    /// writer has already folded are overwritten before it arrives, so a writer
+    /// that went back over them to place it would serve a row of nothing.
     #[test]
-    fn a_record_stamped_behind_the_newest_instant_is_reread_rather_than_folded_onto_the_end() {
+    fn a_record_stamped_behind_the_newest_instant_is_folded_without_reading_the_store_again() {
         let root = scratch("out-of-order");
         let paths = recorded(&root, "demo", 4);
+        let mut journal = Journal::open(&paths);
+        let before = RunSummary::of(&paths).expect("the run reads");
+
+        let store = paths.journal();
+        // Every byte but the terminators, which an append heals a store back to.
+        let held: Vec<u8> = std::fs::read(&store)
+            .expect("the run's journal")
+            .into_iter()
+            .map(|byte| if byte == b'\n' { byte } else { b'#' })
+            .collect();
+        std::fs::write(&store, &held).expect("the folded bytes are overwritten");
 
         // A sibling's record, stamped before everything already in the store.
         let mut behind = event(PipelineKind::NodeReady, "demo", "a-sibling", 7);
@@ -1652,22 +1466,12 @@ mod tests {
         behind
             .payload
             .insert("usage".into(), json!({"input_tokens": 11}));
-        let mut journal = Journal::open(&paths);
         journal.relay(&behind).expect("relayed");
 
         let served = RunSummary::of(&paths).expect("the run reads");
-        std::fs::remove_file(paths.summary()).expect("the document");
-        let folded = RunSummary::of(&paths).expect("the run reads");
-        assert_eq!(
-            served, folded,
-            "a record stamped behind the newest instant left the two accounts apart"
-        );
-        // And it is measured where it belongs: the run's clock now starts at the
-        // record that is stamped first.
-        assert!(
-            folded.timing.wall_ms > 0,
-            "a record stamped years before the store left no wall clock"
-        );
+        assert_eq!(served.event_count, before.event_count + 1);
+        assert_eq!(served.node_counts, before.node_counts);
+        assert_eq!(served.last_event_kind.as_deref(), Some("turn-completed"));
         std::fs::remove_dir_all(&root).ok();
     }
 
