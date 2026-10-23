@@ -946,18 +946,18 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
     );
 }
 
-/// A process appending to a run's journal is admitted while the run's driver,
-/// and appenders of this binary beside it, hold the journal — and the driver
-/// folds what that process wrote.
+/// A process appending to a run's journal is admitted while the run's driver holds
+/// the journal open inside an append of its own — and the driver writes after that
+/// record rather than over it, and folds it.
 ///
-/// The appenders here hold the journal the way every writer of this binary does,
-/// across the tail heal, the record and its append receipt. On Unix that hold is
-/// `flock`, which a process that does not ask for it walks past. On Windows it
-/// was a share mode admitting no second writer, so for as long as any of them
-/// held it, a plain append open from another process failed with a sharing
-/// violation — a `reply` or a relay's appender would wait it out, and anything
-/// else was refused. Every foreign open below is a single attempt for that
-/// reason: a retry would pass on a share mode that refuses it.
+/// Every appender of this binary holds the journal across the tail heal, the record
+/// and its append receipt. On Unix that hold is `flock`, which a process that does
+/// not ask for it walks past. On Windows it was a share mode admitting no second
+/// writer, so for as long as any of them held it, a plain append open from another
+/// process failed with a sharing violation. The failpoint holds the driver inside
+/// that window, between its open of the journal and its write, so every foreign
+/// append below is made while the journal is held, and each is a single attempt: a
+/// retry would pass on a share mode that refuses it.
 ///
 /// The foreign record is one this build cannot read, so the driver's fold of it
 /// is observable: a successful run's driver removes its dispatch scratch unless
@@ -971,28 +971,50 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
     let plan = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     world.script("build.wait", "hold");
     world.script("build.turn-open", "");
-    world.run(&["start", &plan, "--detach"]).exited(0);
+    // llmlint: ignore-block[tests_mirror_real_usage] an ordering failpoint holds the real
+    // driver inside its append of the node's settlement, with the journal open, which no
+    // user-facing input can place. The launch, the run, its fold and its ending are real.
+    let held = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &plan, "--detach"]);
+    start.env("ONEPIPELINE_TEST_JOURNAL_HELD_GATE", held.address());
+    start.env("ONEPIPELINE_TEST_JOURNAL_HELD_KIND", "node-settled");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(start, "start --detach").exited(0);
     world.until("the held dispatch", |world| {
         !world.events_of(run, "turn-started").is_empty()
     });
     let journal = world.run_file(run, "events.jsonl");
     let stamp = world.journal(run).last().expect("a record")["ts"].clone();
+    world.release("build.go");
+    let appending = held.arrived_within("the driver's append of the settlement", || {
+        format!("the journal read {:?}", world.journal(run).len())
+    });
 
-    const APPENDERS: usize = 8;
+    assert_eq!(
+        u64::from(appending.pid),
+        world.run_json(run, "launch.json")["pid"]
+            .as_u64()
+            .expect("a driver pid"),
+        "the process inside the append is not the run's driver"
+    );
+    assert!(
+        world.events_of(run, "node-settled").is_empty(),
+        "the held append was written before its hold"
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let journal = journal.canonicalize().expect("the journal resolves");
+        let open = std::fs::read_dir(format!("/proc/{}/fd", appending.pid))
+            .expect("the driver's descriptors read")
+            .filter_map(|fd| std::fs::read_link(fd.ok()?.path()).ok())
+            .any(|target| target == journal);
+        assert!(open, "the held driver does not have the journal open");
+    }
+
     const FOREIGN: usize = 40;
-    let mut appenders: Vec<_> = (0..APPENDERS)
-        .map(|n| {
-            let message = format!("appender {n} was here");
-            world
-                .cmd(&["surface", run, "--kind", "check-in", "--message", &message])
-                .spawn()
-                .expect("the binary starts")
-        })
-        .collect();
     // llmlint: ignore-block[tests_mirror_real_usage] the appender under test is a process
     // that is *not* this binary: no verb writes a record this build cannot read, and the
-    // property is precisely that a writer outside the binary's lock is admitted. The
-    // driver, its fold and the binary's own appenders racing it are all real.
+    // property is precisely that a writer outside the binary's lock is admitted.
     for seq in 0..FOREIGN {
         let record = json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":seq, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
         std::fs::OpenOptions::new()
@@ -1003,13 +1025,7 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
             .expect("the record is written");
     }
     // llmlint: ignore-end[tests_mirror_real_usage]
-    for appender in &mut appenders {
-        assert!(
-            appender.wait().expect("the appender ran").success(),
-            "an appender refused"
-        );
-    }
-    world.release("build.go");
+    appending.release();
     world.until("the driver to release its ending", |world| {
         world.run_file(run, "result.json").is_file() && !world.run_file(run, "owner.lock").exists()
     });
@@ -1022,29 +1038,25 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
                 .unwrap_or_else(|e| panic!("a record was written over: {e}: {line}"))
         })
         .collect();
-    let mut foreign: Vec<u64> = records
+    let foreign: Vec<(usize, u64)> = records
         .iter()
-        .filter(|record| record["stream"] == "future-producer")
-        .map(|record| record["seq"].as_u64().expect("a seq"))
+        .enumerate()
+        .filter(|(_, record)| record["stream"] == "future-producer")
+        .map(|(at, record)| (at, record["seq"].as_u64().expect("a seq")))
         .collect();
-    foreign.sort_unstable();
     assert_eq!(
-        foreign,
+        foreign.iter().map(|(_, seq)| *seq).collect::<Vec<_>>(),
         (0..FOREIGN as u64).collect::<Vec<_>>(),
         "a foreign record is gone"
     );
-    let messages: Vec<&str> = records
+    let settled = records
         .iter()
-        .filter(|record| record["kind"] == "planner-surface-queued")
-        .filter_map(|record| record["payload"]["message"].as_str())
-        .collect();
-    for n in 0..APPENDERS {
-        let mine = format!("appender {n} was here");
-        assert!(
-            messages.contains(&mine.as_str()),
-            "{mine} is gone: {messages:?}"
-        );
-    }
+        .position(|record| record["kind"] == "node-settled")
+        .expect("the held settlement is written");
+    assert!(
+        foreign.iter().all(|(at, _)| *at < settled),
+        "the held settlement was not written after what was appended under it"
+    );
     assert!(
         world.events_of(run, "scratch-removed").is_empty(),
         "the driver removed scratch over a record it could not read"

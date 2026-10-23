@@ -111,6 +111,27 @@ pub(crate) fn settlement_projecting<'a>(
     Ok(())
 }
 
+static JOURNAL_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, inside this process's first append to a run's journal of a record of the kind
+/// `ONEPIPELINE_TEST_JOURNAL_HELD_KIND` names, with the journal open and its appender lock
+/// held: a journey holds the appender there to write to the journal from another process.
+pub(crate) fn journal_held(path: &std::path::Path, line: &str) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_JOURNAL_HELD_KIND") else {
+        return Ok(());
+    };
+    let kind = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|record| record.get("kind")?.as_str().map(str::to_owned));
+    if path.file_name() == Some(std::ffi::OsStr::new("events.jsonl"))
+        && kind.as_deref() == Some(target.as_str())
+        && !JOURNAL_HELD.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_JOURNAL_HELD_GATE")?;
+    }
+    Ok(())
+}
+
 pub(crate) fn settlement_recorded(paths: &crate::ledger::RunPaths, node: &str) -> Result<()> {
     if settlement_target(node) {
         SETTLEMENT_ACTIVE.store(false, std::sync::atomic::Ordering::Relaxed);
