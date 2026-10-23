@@ -3679,21 +3679,26 @@ impl Rendezvous {
             .set_nonblocking(true)
             .expect("the listener can be polled");
         let mut met = None;
-        let arrived = waited_for(patience, std::time::Duration::from_millis(20), || {
-            match self.listener.accept() {
+        let arrived = waited_for(
+            patience,
+            std::time::Duration::from_millis(20),
+            || match self.listener.accept() {
                 Ok((stream, _)) => {
                     met = Some(stream);
                     true
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
                 Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
-            }
-        });
+            },
+        );
         self.listener
             .set_nonblocking(false)
             .expect("the listener blocks again");
         let Some(mut stream) = met.filter(|_| arrived) else {
-            panic!("timed out after {patience:?} waiting for {what}; {}", seen());
+            panic!(
+                "timed out after {patience:?} waiting for {what}; {}",
+                seen()
+            );
         };
         // Windows hands an accepted socket the listener's mode.
         stream
