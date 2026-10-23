@@ -1177,6 +1177,108 @@ fn a_takeover_on_the_drivers_host_once_its_pid_has_died_waits_on_nothing() {
     assert!(records_of(&elsewhere, run, "node-held", "x").is_empty());
 }
 
+/// The takeover-wait files `world`'s runs root holds.
+fn takeover_waits(world: &World) -> Vec<PathBuf> {
+    std::fs::read_dir(&world.runs)
+        .map(|entries| {
+            entries
+                .filter_map(std::result::Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("takeover-wait-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A takeover already waiting on a driver of this host starts once that driver's pid has
+/// died, on this host's records, without waiting out the claim's terms or an
+/// acknowledgement.
+#[cfg(unix)]
+#[test]
+fn a_waiting_takeover_starts_once_its_drivers_pid_dies_on_this_host() {
+    let run = "claim-host-dies";
+    let world = claim_world(run);
+    world.script("x.work", "x's change\n");
+    let elsewhere = world.on_host(&this_host());
+    let x = world.rendezvous("x");
+    let project = world.plan(run, &plan_of(run, vec![lifecycle("x", &[])]));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let mine = x.arrived();
+    let branch = recorded_branch(&world, &project, "x");
+    let pid = world.run_json(run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("the driver's pid");
+    let taking = take_over(&elsewhere, &project);
+    elsewhere.until("the takeover to be waiting", |world| {
+        !takeover_waits(world).is_empty()
+    });
+    crate::harness::end_process(pid);
+    let said = taken_over(taking);
+    drop(mine);
+    assert!(said.contains("--take-over claimed"), "{said}");
+    assert!(!said.contains("has not acknowledged"), "{said}");
+    assert!(!said.contains("acknowledged the takeover"), "{said}");
+    assert!(takeover_waits(&elsewhere).is_empty(), "the wait outlived it");
+    x.arrived().release();
+    elsewhere.until("the takeover to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(sessions_opened_after(&elsewhere, run, 0), vec![branch]);
+}
+
+/// The file a takeover keeps while it waits is said by the all-runs `status` only while the
+/// takeover's process lives: one whose process was killed outright, leaving its file behind,
+/// is removed by the next `status` and not said.
+#[test]
+fn a_takeover_wait_whose_process_was_killed_is_removed_by_status_and_not_said() {
+    let base = claim_world("claim-wait-killed");
+    let successor = base.on_host("host-b");
+    let world = base;
+    let x = world.rendezvous("x");
+    let run = "claim-wait-killed";
+    let project = world.plan(run, &plan_of(run, vec![agent("x", &[])]));
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let mine = x.arrived();
+    until_claim(&world, run, "confirmed");
+    let mut taking = take_over(&successor, &project);
+    successor.until("the takeover to be waiting", |world| {
+        !takeover_waits(world).is_empty()
+    });
+    let waiting = successor.run(&["status"]);
+    waiting.exited(0);
+    assert!(
+        waiting
+            .stdout
+            .lines()
+            .any(|line| line.starts_with(&format!("takeover of {project} by run '{run}'"))),
+        "{}",
+        waiting.stdout
+    );
+    // Killed outright: nothing of it removes its own file.
+    taking.kill().expect("the takeover is killed");
+    taking.wait().expect("the takeover is reaped");
+    let left = takeover_waits(&successor);
+    assert_eq!(left.len(), 1, "a killed takeover removed its own file: {left:?}");
+    let after = successor.run(&["status"]);
+    after.exited(0);
+    assert!(
+        !after.stdout.contains("takeover of "),
+        "status said the wait of a process that is gone:\n{}",
+        after.stdout
+    );
+    assert!(!left[0].exists(), "status left a dead process's wait file standing");
+    drop(mine);
+}
+
 /// The node ids `run` dispatched, each with when.
 fn dispatches(world: &World, run: &str) -> Vec<(String, String)> {
     world
