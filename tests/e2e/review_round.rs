@@ -771,8 +771,15 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// it starts about 10,000, and more on a slower host, which renders and asks on a timer
 /// more often over a longer run — so the bound sits well above the first and below
 /// anything the round cost before.
+///
+/// `onevcs` 0.56.9, whose open session's read is never refused beside a probe, runs its
+/// checkout reads with `--git-dir` and adds about 3,600 starts over 0.56.7: counted on
+/// Linux the round went from 11,400–11,700 to 15,100–15,200, chiefly `rev-parse
+/// --is-inside-work-tree` and `show-ref --verify`, and none of it from the engine. The
+/// bound follows it, still below what the round cost before, and comes back down once
+/// those reads cost near what they did.
 #[cfg(unix)]
-const GIT_STARTS: usize = 15_000;
+const GIT_STARTS: usize = 17_000;
 
 /// Hold the round to [`GIT_STARTS`].
 ///
