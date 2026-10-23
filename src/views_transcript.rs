@@ -380,7 +380,14 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
             (TranscriptRef::Activity(_), Some("event")) if field("run_id") == Some(&history_id) => {
                 let Some(wanted) = index else { continue };
                 let raw = entry.get("event").unwrap_or(&Value::Null);
-                if raw.get("index").and_then(Value::as_u64) != Some(wanted.index) {
+                // An entry of this candidate whose index is no integer may be the
+                // one asked for and cannot be told apart: it is unreadable, and
+                // makes a miss an unreadable file rather than a missing entry.
+                let Some(at) = raw.get("index").and_then(Value::as_u64) else {
+                    unreadable = true;
+                    continue;
+                };
+                if at != wanted.index {
                     continue;
                 }
                 // Read through oneharness's own event type, so a field of the
@@ -1287,6 +1294,25 @@ mod tests {
             pending.why,
             Why::MissingEntry,
             "an unterminated line was read as an entry"
+        );
+
+        // An entry of this candidate whose index is not an integer could be the
+        // one asked for: a miss beside it is unreadable, not missing.
+        let written = Written::new("typed-index", "## What\nindex it");
+        let path = written.writer.path().to_path_buf();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("the session file");
+        let odd_index = json!({"type": "event", "run_id": written.run_id.to_string(),
+            "event": {"kind": "tool_call", "index": "zero"}});
+        std::io::Write::write_all(&mut file, format!("{odd_index}\n").as_bytes())
+            .expect("the entry is written");
+        let unknown = unresolved("turn-activity", &activity(written.reference.clone(), 0));
+        assert_eq!(
+            unknown.why,
+            Why::Unreadable,
+            "an unindexed entry was read as no entry"
         );
     }
 
