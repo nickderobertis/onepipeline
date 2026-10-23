@@ -27,6 +27,16 @@ const PAST_THE_BOUND: &str = "SENTINEL-PAST-THE-JOURNAL-BOUND";
 /// description is the first and the whole input carries both.
 const HELD_CALL: &str = "cargo nextest run --workspace --no-fail-fast\necho held-call-finished";
 
+/// Ends what the held call returns, past every ceiling a copy or a view ever
+/// held a tool's output to.
+const OUTPUT_TAIL: &str = "HELD-OUTPUT-TAIL";
+
+/// What the held call returns: longer than the 4,096 characters a journal copy
+/// or the transcript's report ceiling ever kept, with [`OUTPUT_TAIL`] last.
+fn held_output() -> String {
+    format!("{}{OUTPUT_TAIL}", "test result: ok. 1 passed\n".repeat(240))
+}
+
 /// A node task longer than a journal copy holds, with [`PAST_THE_BOUND`] at its
 /// end.
 fn long_task() -> String {
@@ -93,6 +103,7 @@ fn held_mid_turn(world: &World, run: &str) -> Value {
     world.write_supervised_node_graph();
     world.script("turn.hold", "hold");
     world.script("turn.held-call", HELD_CALL);
+    world.script("turn.held-output", &held_output());
     let mut node = agent(NODE, &[]);
     node["task"] = Value::String(long_task());
     let path = world.plan(run, &plan_of(run, vec![node]));
@@ -288,6 +299,31 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
             .contains("tool_call bash  {\"command\":\"cargo nextest run --workspace --no-fail-fast\\necho held-call-finished\"}"),
         "`transcript` does not show the call's whole input:\n{}",
         transcript.stdout
+    );
+    // What the call returned, whole: its tail past the ceiling a view ever cut
+    // a tool's output at, with no note of anything left out.
+    world.until("the held call's result to be relayed", |world| {
+        activities(world, run)
+            .iter()
+            .any(|event| event["payload"]["index"] == 4)
+    });
+    let transcript = world.run(&["transcript", run]);
+    let result_line = transcript
+        .stdout
+        .lines()
+        .take_while(|line| !line.starts_with("  report "))
+        .find(|line| line.contains(OUTPUT_TAIL))
+        .unwrap_or_else(|| {
+            panic!(
+                "`transcript` does not show the held call's output to its end:\n{}",
+                transcript.stdout
+            )
+        });
+    assert!(
+        result_line.trim_start().starts_with("tool_result")
+            && result_line.chars().count() > held_output().len()
+            && !result_line.contains(" characters]"),
+        "the held call's output was cut or noted as cut: {result_line}"
     );
     assert!(!ended(&world), "the turn ended while it was being read");
 

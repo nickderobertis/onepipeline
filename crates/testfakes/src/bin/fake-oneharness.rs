@@ -1373,10 +1373,15 @@ fn work(
         redirect.delivered();
     } else if let Some([go, settle]) = gates {
         // The call a held turn makes once released: a journey names its command
-        // with `turn.held-call`, and it is `cargo llvm-cov --workspace` otherwise.
+        // with `turn.held-call`, and it is `cargo llvm-cov --workspace` otherwise;
+        // and what it returned with `turn.held-output`, [`OBSERVED`] otherwise.
         let command = fake::node_script(dir, "turn", "held-call")
             .unwrap_or_else(|| "cargo llvm-cov --workspace".to_string());
-        let held = [call(3, &command), observation(4)];
+        let mut answered = observation(4);
+        if let Some(output) = fake::node_script(dir, "turn", "held-output") {
+            answered.output = Some(output);
+        }
+        let held = [call(3, &command), answered];
         for event in &held {
             drew_any |= draw(event)?;
         }
