@@ -74,11 +74,28 @@ fn measured(name: &str) -> World {
 ///
 /// Applied over a world rather than only made fresh, so a setting the world
 /// already carries is one these override.
+///
+/// **And a claim read no window here can reach.** A driver reads its project's
+/// claim on its own interval from its launch, whatever the run is doing, so a
+/// journey whose set-up ends close to that interval opens its window over the
+/// read: the scale journey's hundred dispatches ended four to five minutes in on
+/// a Windows runner, inside the shipped five, and each of its drivers' windows
+/// held one claim read and the store bytes that pass read. So the interval is
+/// pinned at [`PINNED_CLAIM_INTERVAL`], longer than any journey here runs, and
+/// the one read a driver makes is its launch's, before any window opens.
 fn measuring(world: World) -> World {
     world
         .with_env(LOOP_STATS_ENV, "1")
         .with_env(RENDEZVOUS_SECONDS_ENV, "900")
+        .with_env(
+            CLAIM_INTERVAL_ENV,
+            &PINNED_CLAIM_INTERVAL.as_secs().to_string(),
+        )
 }
+
+/// The claim interval a measured driver reads on: a day, the longest the setting
+/// takes, and longer than every journey here by far.
+const PINNED_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 
 /// The setting naming how often a driver reads the claim on its project, in whole
 /// seconds.
