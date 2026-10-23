@@ -1329,8 +1329,21 @@ fn work(
         observation(2),
     ];
     let mut drew_any = false;
+    // Each event is on disk before it is drawn, as the real CLI appends every
+    // normalized event to the session before it reaches the stream: a record
+    // the sibling relays off this stream resolves the moment it is relayed.
+    let mut persisted = std::collections::BTreeSet::new();
+    let mut draw = |event: &ActionEvent| -> Result<bool, String> {
+        if let Some((writer, identity, run_id)) = &begun {
+            writer
+                .append_event(*run_id, identity.as_str(), event.clone())
+                .map_err(|error| format!("cannot append a live history event: {error}"))?;
+            persisted.insert(event.index);
+        }
+        view.event(event)
+    };
     for event in &events {
-        drew_any |= view.event(event)?;
+        drew_any |= draw(event)?;
     }
     // A worker turn that reports again after a hold: what a live readout of a
     // running dispatch is read against. The first event proves the stream
@@ -1359,9 +1372,13 @@ fn work(
         ran_on.clone_from(&redirect.input);
         redirect.delivered();
     } else if let Some([go, settle]) = gates {
-        let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
+        // The call a held turn makes once released: a journey names its command
+        // with `turn.held-call`, and it is `cargo llvm-cov --workspace` otherwise.
+        let command = fake::node_script(dir, "turn", "held-call")
+            .unwrap_or_else(|| "cargo llvm-cov --workspace".to_string());
+        let held = [call(3, &command), observation(4)];
         for event in &held {
-            drew_any |= view.event(event)?;
+            drew_any |= draw(event)?;
         }
         events.extend(held);
         // Held again, so the node is *still in flight* when the second reading
@@ -1391,7 +1408,7 @@ fn work(
     // The agent's own last words close the turn, as a real turn's final
     // message does: the same text its report answers with.
     let said = spoken(events.len(), "message", outcome.text());
-    drew_any |= view.event(&said)?;
+    drew_any |= draw(&said)?;
     events.push(said);
 
     fake::record(dir, TURN_ENDED, &[ran_on.clone()]);
@@ -1433,7 +1450,7 @@ fn work(
             &ran_on,
             mode,
             &report.results,
-            begun,
+            begun.map(|begun| (begun, persisted)),
         )?);
     }
     view.closing(report, drew_any)?;
@@ -1631,10 +1648,12 @@ impl History {
         prompt: &str,
         mode: PermissionMode,
         results: &[RunResult],
-        begun: Option<Begun>,
+        begun: Option<(Begun, std::collections::BTreeSet<usize>)>,
     ) -> Result<String, String> {
         let (writer, mut begun) = match begun {
-            Some((writer, identity, run_id)) => (writer, Some((identity, run_id))),
+            Some(((writer, identity, run_id), persisted)) => {
+                (writer, Some((identity, run_id, persisted)))
+            }
             None => (self.open(project)?, None),
         };
         for result in results {
@@ -1649,11 +1668,16 @@ impl History {
             })?;
             // The candidate the stream already announced keeps the id it was
             // announced under, so what was relayed resolves to what is written.
-            let run_id = match begun.take() {
-                Some((announced, run_id)) if announced == identity => run_id,
+            let (run_id, persisted) = match begun.take() {
+                Some((announced, run_id, persisted)) if announced == identity => {
+                    (run_id, persisted)
+                }
                 other => {
                     begun = other;
-                    writer.begin_harness_run(&identity, prompt)
+                    (
+                        writer.begin_harness_run(&identity, prompt),
+                        std::collections::BTreeSet::new(),
+                    )
                 }
             };
             writer
@@ -1663,7 +1687,7 @@ impl History {
                     result.model.as_deref(),
                     prompt,
                     result,
-                    &std::collections::BTreeSet::new(),
+                    &persisted,
                 )
                 .map_err(|error| {
                     format!(
@@ -1802,8 +1826,13 @@ fn judge_turn(
     let recorded = answer.and_then(|answer| {
         let mut report = report(&answer, None, Outcome::Answered, identity, mode);
         if let Some(history) = history {
-            report.history_file =
-                Some(history.write(&project, prompt, mode, &report.results, begun)?);
+            report.history_file = Some(history.write(
+                &project,
+                prompt,
+                mode,
+                &report.results,
+                begun.map(|begun| (begun, std::collections::BTreeSet::new())),
+            )?);
         }
         // Streamed, the answer is the stream's terminal `result` line; buffered,
         // it is the one document.

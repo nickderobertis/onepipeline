@@ -802,6 +802,98 @@ fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usiz
     })
 }
 
+/// **A note past the bound a journal copy holds is still confirmed.** The note is
+/// carried — `deliver: next`, so no live turn takes it — and the supervising
+/// side reads it into the worker's next turn behind more than the 4,096 bytes a
+/// turn record's copy was ever cut to, so the only place its text appears is past
+/// that bound. The turn's record carries a reference into the worker's history
+/// instead of a copy, and the run confirms the presentation off the whole prompt
+/// the reference resolves to — from the words, as a carried note is — and then
+/// the judge's with the turn that answered. Matched against a copy cut at the
+/// bound, the same turn confirms nothing.
+#[test]
+fn a_note_past_the_bound_of_a_copy_is_confirmed_off_the_whole_prompt() {
+    let world = World::new("note-past-the-bound");
+    let run = "pastbound";
+    let preamble = "Read the whole log before answering, line by line.\n".repeat(90);
+    assert!(preamble.len() > onepipeline::event::MAX_PAYLOAD_TEXT_BYTES);
+    world.script("judge.asks-again", &format!("{preamble}{NOTE}"));
+    world.script("turn.hold", "hold");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    assert_eq!(recorded(&world, run)["reached"], json!("carried"));
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The turn that carried it: a reference and no copy, whose whole prompt
+    // holds the note only past the bound.
+    let opening = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "build" && event["kind"] == "turn-started")
+        .filter(|event| event["payload"]["role"] == "assistant")
+        .find(|event| instruction_of(event).is_some_and(|prompt| prompt.contains(NOTE)))
+        .unwrap_or_else(|| panic!("no worker turn opened on the note's text"));
+    assert!(
+        opening["payload"].get("transcript").is_some()
+            && opening["payload"].get("instruction").is_none(),
+        "the turn's record is not a reference: {opening}"
+    );
+    let prompt = instruction_of(&opening).expect("the turn opened on a prompt");
+    let at = prompt.find(NOTE).expect("the prompt carries the note");
+    assert!(
+        at >= onepipeline::event::MAX_PAYLOAD_TEXT_BYTES,
+        "the note starts at byte {at}, inside the bound a copy holds, so this proves \
+         nothing about a note past it"
+    );
+    let mut copy = prompt.clone();
+    copy.truncate(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES);
+    assert!(
+        !copy.contains(NOTE),
+        "a copy cut at the bound would carry the note too"
+    );
+
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| {
+                (
+                    event["payload"]["party"].clone(),
+                    event["payload"]["evidence"].clone(),
+                    event["payload"]["turn"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                json!("worker"),
+                json!("instruction-text"),
+                opening["payload"]["turn"].clone()
+            ),
+            (
+                json!("supervisor"),
+                json!("answering-turn"),
+                opening["payload"]["turn"].clone()
+            ),
+        ],
+        "a note past the bound was not confirmed shown off the whole prompt:\n{shown:#?}"
+    );
+}
+
 /// A note waiting on a turn that takes it only as it ends leaves the run
 /// recording everything else.
 ///

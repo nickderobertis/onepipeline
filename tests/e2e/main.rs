@@ -295,6 +295,7 @@ mod surface;
 // `mod criteria_rule` above.
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod transcript_refs;
 mod turns;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys read
 // `docs/stop-guard.md` and `docs/contract-divergences.md` (the synopsis and shape drift
