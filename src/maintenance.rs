@@ -723,10 +723,10 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
 /// record held back behind it reaches a reader only after the next sweep may
 /// already have maintained the same slots again.
 ///
-/// Once `stop` is raised no further identity is begun; the one in progress runs
-/// its whole `retire_finished`, every deletion and record in it included. An
-/// identity whose names the loop never answers — it raised `stop`, or it has gone
-/// — is not begun either.
+/// An identity is begun once the loop has answered for it, and the one in
+/// progress runs its whole `retire_finished`, every deletion and record in it
+/// included. Once `stop` is raised no further identity is: the loop raising it is
+/// closing, and answers nothing more.
 fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retirements {
     let mut retirements = Retirements::default();
     if keys.is_empty() {
@@ -734,12 +734,7 @@ fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retiremen
     }
     let providers = onevcs::Providers::real();
     for (at, identity) in keys.iter().enumerate() {
-        let current = if stop.load(Ordering::SeqCst) {
-            None
-        } else {
-            named_now(tx, stop)
-        };
-        let Some(current) = current else {
+        let Some(current) = named_now(tx, stop) else {
             retirements.unreached = keys[at..].to_vec();
             break;
         };
@@ -766,16 +761,26 @@ fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retiremen
 }
 
 /// Every branch a live node of this run names, as the loop answers on its own
-/// thread; `None` where it never will — `stop` was raised while waiting, because
-/// the loop that would answer is joining this thread, or the loop has gone.
+/// thread; `None` where it never will — `stop` is raised, because the loop that
+/// would answer is closing and joining this thread, or the loop has gone.
 fn named_now(tx: &Sender<Message>, stop: &AtomicBool) -> Option<Vec<Named>> {
     let (answer, answered) = mpsc::channel();
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+    // reaches the two `None`s for a loop that has gone — the send refused, the answer
+    // dropped unanswered: the loop keeps its receiver, and with it every queued
+    // request's answer, until it has joined this thread, because `close`, `retired`
+    // and the sweep's `Drop` join it first and `converge` drops its `Maintenance`
+    // before its receiver. The unit test
+    // `a_pass_waits_on_the_loop_for_what_the_run_names_and_no_longer` holds that a
+    // gone loop begins nothing. A closing loop's stop, the arm below, is driven by
+    // `maintenance::a_closing_driver_cuts_a_retirement_pass_waiting_on_what_the_run_names`.
     tx.send(Message::Naming(answer)).ok()?;
     let _ = crate::ordering::meet(NAMES_GATE_ENV);
     loop {
         match answered.recv_timeout(NAMES_STOP_POLL) {
             Ok(named) => return Some(named),
             Err(RecvTimeoutError::Disconnected) => return None,
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(RecvTimeoutError::Timeout) if stop.load(Ordering::SeqCst) => return None,
             Err(RecvTimeoutError::Timeout) => {}
         }
