@@ -22,7 +22,10 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, held_publication, lifecycle, plan_of, project_id, renamed, World};
+use crate::harness::{
+    agent, counts, held_publication, lifecycle, plan_of, project_id, renamed, reporting, World,
+    LOOP_STATS_ENV,
+};
 use crate::publication_boundary::declare_visibility;
 
 /// Plan A's name: the private repository's own.
@@ -411,14 +414,20 @@ fn held_and_claimed(world: &World, project: &str, run: &str, node: &str) -> Valu
 fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
     let world = World::new("public-id-claim")
         .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "2")
-        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1")
+        .with_env(LOOP_STATS_ENV, "1");
     world.repository("local-direct", &[]);
     registered(&world);
     let project = world.plan(A, &plan_of(A, vec![agent("work", &[])]));
 
-    // Driving: three claim intervals pass, and each read finds the run's own claim.
+    // Driving: the driver reads its claim three more times, and each read finds the run's own
+    // claim.
     held_and_claimed(&world, &project, A, "work");
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    reporting(&world, A);
+    let read = counts(&world, A).claim_reads;
+    world.until("the driver to read its claim three more times", |world| {
+        counts(world, A).claim_reads >= read + 3
+    });
     assert!(
         world.events_of(A, "driver-superseded").is_empty(),
         "the driver read its own claim, naming its public id, as a takeover"
