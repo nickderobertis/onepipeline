@@ -1504,10 +1504,10 @@ impl CloneReads {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these two journeys are
-// the busy round's regression proofs of the onevcs this crate links, and each costs 4-9 s. A
-// tier of their own would still depend on all of src/** through the harness, which builds the
-// onepipeline binary, and placing them is left to the re-plan of this repository's test tiers.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey is one of
+// the busy round's two regression proofs of the onevcs this crate links, and costs 4-9 s. A
+// tier of its own would still depend on all of src/** through the harness, which builds the
+// onepipeline binary, and placing it is left to the re-plan of this repository's test tiers.
 /// On macOS the busy round's stack-base close was refused for a process working inside
 /// that session's clone: a `git` an `onevcs` landing-status read had started there. This
 /// is that ordering on any platform, against the `onevcs` this crate links: a real
@@ -1584,10 +1584,15 @@ fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
     );
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// How long the close beside the held read waits for any lock before saying where it
 /// waited: what ends that close, so the journey reads which decision it reached.
 const CLOSE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey is the other
+// regression proof, of the same onevcs, and costs 4-9 s; it stays in this tier for the same
+// reason as the close journey above, until the re-plan of this repository's test tiers.
 /// The busy round's four drivers and its commands read one identity at once: each
 /// view render and reconcile asks `onevcs` for landings (`vcs::landing_now`,
 /// `vcs::landings_now`), each driver asks it for session holders, and every one of those
@@ -1641,9 +1646,10 @@ fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
     }
 }
 
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// How long the second read waits for any lock before saying which one it waited on.
 const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.
