@@ -1800,6 +1800,13 @@ fn with_no_manager_session_a_landing_runs_unowned_and_says_so() {
 /// reported only to its owner, and the other two finish under theirs. Two of
 /// them name the same branch of different identities, and the third an ordered
 /// train, so isolation is by identity and operation, never by branch name.
+///
+/// The train starts first and is held at its publishing push before the other
+/// two start, so it holds the shared identity and manager a's landing queues
+/// behind it: the landing killed is one waiting its turn, and the train it
+/// waited on is the one still held when it dies. Left to the scheduler, either
+/// could reach the identity first, and a landing killed at its own held push
+/// leaves that push running for the train's to race once both are released.
 #[test]
 fn three_managers_landing_at_once_are_each_supervised_alone() {
     let (world, repository, held) = held_world("ml-three", "local-direct");
@@ -1820,30 +1827,34 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
 
     let sessions = ["manager-a", "manager-b", "manager-c"];
     let managers: Vec<World> = sessions.iter().map(|s| world.as_session(s)).collect();
-    let mut started = vec![
-        Started::spawn(
-            &managers[0],
-            None,
-            &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
-        ),
-        Started::spawn(
-            &managers[1],
-            None,
-            &["publish-branch", BRANCH, "--repo", "other", "--no-draft"],
-        ),
-    ];
     let mut train = vec!["integrate"];
     train.extend(TRAIN);
     train.push("--push");
-    started.push(Started::spawn(
-        &managers[2],
-        Some(&repository.checkout),
-        &train,
-    ));
+    let mut c = Started::spawn(&managers[2], Some(&repository.checkout), &train);
+    let mut c_ended = None;
+    world.until("manager c's train to be held at its push", |_| {
+        if c_ended.is_none() {
+            c_ended = c.child.try_wait().ok().flatten();
+        }
+        held.holding() || c_ended.is_some()
+    });
+    if let Some(status) = c_ended {
+        let (_, out, said) = c.ended();
+        panic!("manager c's train ended {status} before its push was held:\n{out}\n{said}");
+    }
+    let mut a = Started::spawn(
+        &managers[0],
+        None,
+        &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+    );
+    let b = Started::spawn(
+        &managers[1],
+        None,
+        &["publish-branch", BRANCH, "--repo", "other", "--no-draft"],
+    );
     world.until("all three landings to register", |world| {
         landings(world).len() == 3
     });
-    world.until("the service landings to be held", |_| held.holding());
     let mut by_session = std::collections::BTreeMap::new();
     for (flow, id) in landings(&world) {
         let request = sidecar(&world, &flow, &id, "request.json");
@@ -1863,9 +1874,6 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
 
     // Manager b's landing — into the other identity, which no hook holds — ends
     // on its own; a and c are each owed their own live flow and nobody else's.
-    let mut a = started.remove(0);
-    let b = started.remove(0);
-    let c = started.remove(0);
     let (b_code, _, b_said) = b.ended();
     assert_eq!(b_code, 0, "{b_said}");
     world
@@ -1909,7 +1917,6 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
     let (c_flow, _, _) = &by_session["manager-c"];
     watch(&managers[0], a_flow, &["--timeout", "0"]).ended_on(EXIT_FLOW_FAILED, "flow-failed");
     let c_owed = world.run(&["unwatched", "--session", "manager-c"]);
-    if !c_owed.stdout.contains("LIVE") { let (cc, co, ce) = c.ended(); panic!("DIAG c {cc}\n{co}\n{ce}\n{}", world.dump()); }
     assert!(
         c_owed.stdout.contains("LIVE") && !c_owed.stdout.contains("DIED"),
         "{}",
@@ -1929,6 +1936,68 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
             .all(|(_, significance)| significance != "progress"),
         "{c_woken:?}"
     );
+}
+
+/// A landing reads the manager's own checkout without writing its index: what it
+/// reads there takes none of git's optional locks, so a second landing's
+/// `git merge` in that checkout never meets an `index.lock` this one took.
+///
+/// The checkout's index is left stale — a tracked file's stat no longer what the
+/// index recorded, its content unchanged — which is exactly the state a
+/// `git status` refreshes by rewriting the index through `index.lock`. Held at
+/// its publishing push, the landing has read the checkout and written nothing to
+/// it yet, and the index is byte for byte what it was: it was never locked,
+/// because it was never written. Released, the landing fast-forwards the
+/// checkout, a write of its own, and lands.
+#[test]
+fn a_landing_reads_the_managers_checkout_without_taking_its_index_lock() {
+    let (world, repository, held) = held_world("ml-index", "local-direct");
+    branch_with_work(&world, &repository, BRANCH, "widget.txt");
+    let checkout = &repository.checkout;
+    let readme = std::fs::OpenOptions::new()
+        .write(true)
+        .open(checkout.join("README.md"))
+        .expect("the seed file opens");
+    readme
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))
+        .expect("the seed file's time is set");
+    drop(readme);
+    // `diff-files` compares the index's stat data with the tree's and writes
+    // nothing, so it reads the staleness without curing it.
+    let stale = || git(&world, checkout, &["diff-files", "--name-only"]);
+    assert_eq!(stale(), "README.md\n", "the index was not left stale");
+    let index = checkout.join(".git").join("index");
+    let before = std::fs::read(&index).expect("the index is read");
+
+    let mut landing = Started::spawn(
+        &world,
+        None,
+        &["publish-branch", BRANCH, "--repo", "service", "--no-draft"],
+    );
+    let mut ended = None;
+    world.until("the landing's publishing push to be held", |_| {
+        if ended.is_none() {
+            ended = landing.child.try_wait().ok().flatten();
+        }
+        held.holding() || ended.is_some()
+    });
+    assert!(
+        ended.is_none(),
+        "the landing ended {ended:?} before its push"
+    );
+
+    assert_eq!(
+        stale(),
+        "README.md\n",
+        "the landing refreshed the checkout's index"
+    );
+    assert!(
+        std::fs::read(&index).expect("the index is read again") == before,
+        "the landing rewrote the checkout's index, which git does only under index.lock"
+    );
+    held.release();
+    let (code, _, said) = landing.ended();
+    assert_eq!(code, EXIT_SUCCESS, "{said}");
 }
 
 /// An integration train records its own local progress — the lock, the gate's
@@ -4072,31 +4141,4 @@ fn three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_
             );
         }
     }
-}
-
-#[test]
-fn zz_probe_after_a_death() {
-    let (world, repository, held) = held_world("ml-probe", "local-direct");
-    for branch in TRAIN {
-        branch_with_work(&world, &repository, branch, &format!("{branch}.txt"));
-    }
-    branch_with_work(&world, &repository, BRANCH, "widget.txt");
-    let ma = world.as_session("manager-a");
-    let mc = world.as_session("manager-c");
-    let mut a = Started::spawn(&ma, None, &["publish-branch", BRANCH, "--repo", "service", "--no-draft"]);
-    world.until("a held", |_| held.holding());
-    let mut train = vec!["integrate"];
-    train.extend(TRAIN);
-    train.push("--push");
-    let mut c = Started::spawn(&mc, Some(&repository.checkout), &train);
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    let before = world.run(&["unwatched", "--session", "manager-c"]);
-    eprintln!("C BEFORE KILL: {}", before.stdout);
-    eprintln!("C exited before kill? {:?}", c.child.try_wait());
-    a.kill();
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    eprintln!("C after kill? {:?}", c.child.try_wait());
-    held.release();
-    let (code, out, err) = c.ended();
-    panic!("c ended {code}\nOUT:{out}\nERR:{err}\nDUMP:{}", world.dump());
 }
