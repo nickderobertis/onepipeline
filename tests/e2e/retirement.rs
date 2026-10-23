@@ -2492,6 +2492,7 @@ fn origin_hook(repo: &Repository, script: &str) {
 }
 
 /// Whether `live`'s journal records the add of `late` committed.
+#[cfg(unix)]
 fn added_late(world: &World) -> bool {
     world
         .events_of("live", "edit-committed")
@@ -2501,10 +2502,12 @@ fn added_late(world: &World) -> bool {
 
 /// The failpoint a driver meets once, on the first pass whose edits moved the run,
 /// before that pass goes on.
+#[cfg(unix)]
 const EDITS_TAKEN_GATE: &str = "ONEPIPELINE_TEST_EDITS_TAKEN_GATE";
 
 /// The failpoint a retirement pass meets at every identity, once it has begun
 /// reading what the run names there and before it retires anything.
+#[cfg(unix)]
 const NAMES_GATE: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
 
 /// Hold every push the origin receives until the journey writes `go`, having
