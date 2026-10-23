@@ -54,8 +54,8 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -119,6 +119,10 @@ const STOP_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_STOP_GATE";
 /// reading what the run names there and before it retires anything, so a journey can
 /// order what the run comes to name against that read.
 const NAMES_GATE_ENV: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
+
+/// How often a retirement pass waiting on the loop for what the run names looks
+/// at its sweep's `stop`: the loop that would answer may be the one joining it.
+const NAMES_STOP_POLL: Duration = Duration::from_millis(50);
 
 /// Meet `variable`'s failpoint the first time `met` is asked, and never again.
 fn meet_once(met: &AtomicBool, variable: &str) {
@@ -702,13 +706,16 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
     )
 }
 
-/// Retire each identity's finished branches, leaving alone every branch in
-/// `named` as it stands when the pass reaches that identity.
+/// Retire each identity's finished branches, leaving alone every branch the run
+/// names as the pass reaches that identity.
 ///
-/// Read per identity rather than once for the sweep, because the loop keeps it
-/// current while the sweep runs: a node that came to name a branch after the
-/// sweep started — a retry pinned to it, a node added naming it — is left alone
-/// by every identity the pass has yet to reach.
+/// Asked of the loop at each identity rather than once for the sweep, so a node
+/// that came to name a branch after the sweep started — a retry pinned to it, a
+/// node added naming it — is left alone by every identity the pass has yet to
+/// reach. Asked rather than read off a copy the loop refreshes: the loop answers
+/// on its own thread, which applies an edit before it answers the edit's
+/// envelope, so every edit answered before the pass reached an identity is in
+/// what that identity is told — however far the rest of the loop's pass has got.
 ///
 /// A pass of its own once every identity is maintained, rather than one
 /// interleaved with them, so the maintenance is recorded when it is done: a
@@ -717,16 +724,25 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
 /// already have maintained the same slots again.
 ///
 /// Once `stop` is raised no further identity is begun; the one in progress runs
-/// its whole `retire_finished`, every deletion and record in it included.
-fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Retirements {
+/// its whole `retire_finished`, every deletion and record in it included. An
+/// identity whose names the loop never answers — it raised `stop`, or it has gone
+/// — is not begun either.
+fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retirements {
     let mut retirements = Retirements::default();
     if keys.is_empty() {
         return retirements;
     }
     let providers = onevcs::Providers::real();
-    let unreached = visit(keys, stop, |identity| {
-        let current = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let _ = crate::ordering::meet(NAMES_GATE_ENV);
+    for (at, identity) in keys.iter().enumerate() {
+        let current = if stop.load(Ordering::SeqCst) {
+            None
+        } else {
+            named_now(tx, stop)
+        };
+        let Some(current) = current else {
+            retirements.unreached = keys[at..].to_vec();
+            break;
+        };
         let named = resolved(&current, |repo| {
             providers
                 .vcs
@@ -745,9 +761,25 @@ fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Reti
                 },
             ),
         );
-    });
-    retirements.unreached = unreached;
+    }
     retirements
+}
+
+/// Every branch a live node of this run names, as the loop answers on its own
+/// thread; `None` where it never will — `stop` was raised while waiting, because
+/// the loop that would answer is joining this thread, or the loop has gone.
+fn named_now(tx: &Sender<Message>, stop: &AtomicBool) -> Option<Vec<Named>> {
+    let (answer, answered) = mpsc::channel();
+    tx.send(Message::Naming(answer)).ok()?;
+    let _ = crate::ordering::meet(NAMES_GATE_ENV);
+    loop {
+        match answered.recv_timeout(NAMES_STOP_POLL) {
+            Ok(named) => return Some(named),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) if stop.load(Ordering::SeqCst) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
@@ -804,12 +836,7 @@ impl Sweep {
     /// Start one sweep. `None` where this host will not start a thread, which
     /// is reported and costs nothing else: the schedule is asked again at the
     /// next pace.
-    fn start(
-        config: MaintenanceConfig,
-        named: Arc<Mutex<Vec<Named>>>,
-        paths: &RunPaths,
-        tx: Sender<Message>,
-    ) -> Option<Self> {
+    fn start(config: MaintenanceConfig, paths: &RunPaths, tx: Sender<Message>) -> Option<Self> {
         let started_at = crate::sys::now_rfc3339();
         // The marker before the thread, so no reader meets a live sweep with
         // nothing on disk saying so. A marker that could not be written costs
@@ -838,7 +865,7 @@ impl Sweep {
                 let retirements = if cut {
                     Retirements::never_begun(keys)
                 } else {
-                    retire(&keys, &named, &stopping)
+                    retire(&keys, &tx, &stopping)
                 };
                 let _ = tx.send(Message::Retired(Box::new(retirements)));
             });
@@ -1162,9 +1189,6 @@ pub(crate) struct Maintenance {
     pace: Duration,
     last_started: Option<Instant>,
     sweep: Option<Sweep>,
-    /// Every branch a live node of this run names, as of the loop's last pass:
-    /// shared with the running sweep, whose retirement pass reads it.
-    named: Arc<Mutex<Vec<Named>>>,
 }
 
 impl Maintenance {
@@ -1179,7 +1203,6 @@ impl Maintenance {
             pace: pace(),
             last_started: None,
             sweep: None,
-            named: Arc::default(),
         }
     }
 
@@ -1196,30 +1219,18 @@ impl Maintenance {
     /// running, and the pace has elapsed since it last started one. A launch
     /// naming no schedule starts nothing, ever.
     ///
-    /// `named` is every branch a live node of this run names, which the sweep's
-    /// retirement pass leaves alone. It is asked when a sweep starts and on every
-    /// pass while one runs, so the pass reads what the run names as it reaches
-    /// each identity rather than what it named when the sweep began.
-    pub(crate) fn consider(
-        &mut self,
-        idle: bool,
-        paths: &RunPaths,
-        tx: &Sender<Message>,
-        named: impl FnOnce() -> Vec<Named>,
-    ) {
+    /// What the run names, which the sweep's retirement pass leaves alone, the
+    /// pass asks of the loop over `tx` as it reaches each identity — see
+    /// [`Message::Naming`].
+    pub(crate) fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
         let Some(config) = &self.config else {
             return;
         };
-        if self.sweep.is_some() {
-            *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
-            return;
-        }
-        if !idle || !crate::engine::due(self.last_started, self.pace) {
+        if self.sweep.is_some() || !idle || !crate::engine::due(self.last_started, self.pace) {
             return;
         }
         self.last_started = Some(Instant::now());
-        *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
-        self.sweep = Sweep::start(config.clone(), Arc::clone(&self.named), paths, tx.clone());
+        self.sweep = Sweep::start(config.clone(), paths, tx.clone());
     }
 
     /// How long until this driver could next start a sweep, for the loop's wait.
@@ -2190,6 +2201,56 @@ mod tests {
         assert!(Retirements::default().payload().get("cut_short").is_none());
     }
 
+    /// A retirement pass is told what the loop answers it at the moment it asks,
+    /// and begins no identity the loop does not answer for: not where the stop is
+    /// raised while it waits — the loop that would answer is the one joining it —
+    /// and not where the loop has gone.
+    #[test]
+    fn a_pass_waits_on_the_loop_for_what_the_run_names_and_no_longer() {
+        let named = vec![Named {
+            repo: Some("tail".to_owned()),
+            branch: "keep/late".to_owned(),
+        }];
+        let (tx, rx) = mpsc::channel();
+        let stop = AtomicBool::new(false);
+        let answering = {
+            let named = named.clone();
+            std::thread::spawn(move || match rx.recv() {
+                Ok(Message::Naming(answer)) => answer.send(named).is_ok(),
+                _ => false,
+            })
+        };
+        assert_eq!(named_now(&tx, &stop), Some(named));
+        assert!(answering.join().expect("the loop answers"));
+
+        // Asked, and never answered, until the stop is up.
+        let (tx, rx) = mpsc::channel::<Message>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let raising = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let asked = rx.recv();
+                stop.store(true, Ordering::SeqCst);
+                asked.is_ok_and(|message| matches!(message, Message::Naming(_)))
+            })
+        };
+        let keys = vec![
+            "github.com/owner/service".to_owned(),
+            "github.com/owner/tail".to_owned(),
+        ];
+        assert_eq!(retire(&keys, &tx, &stop).unreached, keys);
+        assert!(raising.join().expect("the loop raised the stop"));
+
+        // The loop has gone: nothing begun, nothing waited on.
+        let (tx, rx) = mpsc::channel::<Message>();
+        drop(rx);
+        let stop = AtomicBool::new(false);
+        assert_eq!(named_now(&tx, &stop), None);
+        let gone = retire(&keys, &tx, &stop);
+        assert_eq!(gone.unreached, keys);
+        assert!(gone.retired.is_empty() && gone.failed.is_empty());
+    }
+
     /// A driver with no schedule starts nothing and waits on nothing; one with a
     /// schedule waits until its pace, and — where the pace is due but the pass
     /// was not idle — asks again on the recheck rather than at once.
@@ -2218,13 +2279,13 @@ mod tests {
         // Due now, and the pass was not idle: nothing starts, and the wait is
         // the recheck rather than zero.
         assert_eq!(scheduled.next_due(), RECHECK);
-        scheduled.consider(false, &paths, &tx, Vec::new);
+        scheduled.consider(false, &paths, &tx);
         assert!(!scheduled.is_sweeping());
         assert_eq!(scheduled.next_due(), RECHECK);
         // Started once: the wait is then the pace, and a second idle pass
         // inside it starts nothing more.
         scheduled.last_started = Some(Instant::now());
-        scheduled.consider(true, &paths, &tx, Vec::new);
+        scheduled.consider(true, &paths, &tx);
         assert!(!scheduled.is_sweeping());
         let until = scheduled.next_due();
         assert!(
