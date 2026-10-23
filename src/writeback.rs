@@ -1641,11 +1641,11 @@ impl Drop for Writeback {
     }
 }
 
-/// How long the copy is allowed per item, as this run's launch chose.
+/// How long the copy is allowed per item, as the run's launch record names.
 ///
 /// Off the launch record rather than this process's environment, so a driver a fresh
-/// `adopt` starts bounds its copies as the launch resolved them; a record written before
-/// the field existed names none, and runs under the shipped default.
+/// `adopt` starts uses the recorded budget, including an explicit adoption override.
+/// A record written before the field existed names none and uses the shipped default.
 fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
     launch
         .item_budget()
