@@ -938,10 +938,9 @@ pub struct LaunchRecord {
     /// The write-back's per-item budget, in seconds, or `0` on a record that
     /// names none.
     ///
-    /// **Resolved once, at the launch**, out of the flag, the environment, and
-    /// the launch config in that order — so an `adopt` bounds the copies it
-    /// projects as its launch chose rather than by an environment that has
-    /// since moved. Read through [`item_budget`](Self::item_budget), which is
+    /// Resolved at launch out of the flag, the environment, and the launch
+    /// config in that order. An `adopt --writeback-item-budget` replaces it;
+    /// adoption otherwise keeps it and ignores the environment. Read through [`item_budget`](Self::item_budget), which is
     /// where `0` becomes "the record does not say" again: the shipped default,
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`] — and never a budget of
     /// zero, which is no budget at all. Defaulted so a record written before

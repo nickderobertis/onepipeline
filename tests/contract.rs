@@ -4144,6 +4144,33 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     // meets it in, and nothing compiles that. So the entry is held against it
     // here: every spelling, in the order the entry proposes, and the default.
     let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let passage = readme
+        .split_once("**write-back item budget**")
+        .expect("the README documents the write-back budget")
+        .1
+        .split("\n\n")
+        .next()
+        .expect("the budget passage");
+    let example = passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|code| code.starts_with("adopt RUN "))
+        .expect("the budget passage shows an adoption command");
+    let words =
+        std::iter::once("onepipeline").chain(example.split_whitespace().map(|word| match word {
+            "RUN" => "budgeted-run",
+            "SECONDS" => "30",
+            word => word,
+        }));
+    let parsed = Cli::try_parse_from(words).unwrap_or_else(|error| {
+        panic!("the README's adoption `{example}` does not parse: {error}")
+    });
+    let Command::Adopt(adopted) = parsed.command else {
+        panic!("the README's budget example is not an adoption: {example}")
+    };
+    assert_eq!(adopted.writeback_item_budget, Some(30));
+
     let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut found: Vec<usize> = Vec::new();
     for spelling in &precedence {
@@ -9413,6 +9440,12 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
 
     let in_source = verb_functions_in_source();
     let mut in_contract = verb_functions_in_contract();
+    let adoption_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("71.")["sdk_verbs"].clone())
+            .expect("entry 71 names its SDK verbs");
+    in_contract.extend(adoption_verbs);
+    let _: fn(&RunPaths, Adopt, Option<u64>) -> Result<Adopted> =
+        verbs::adopt_with_writeback_item_budget;
     let review_verbs: Vec<String> =
         serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
             .expect("entry 122 names its SDK verbs");
