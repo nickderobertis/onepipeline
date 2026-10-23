@@ -684,13 +684,6 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::NoProjectCounterpart { .. } => decided("no-project-counterpart"),
         EngineError::NotAMember { .. } => decided("not-a-member"),
         EngineError::UnrecordedMember { .. } => decided("unrecorded-member"),
-        // llmlint: ignore-block[changed_behavior_has_e2e] write-back never sets target_task; these public engine refusals cannot be raised by its requests. The exhaustive store-word test holds each classification against the linked engine.
-        EngineError::TargetTaskWith { .. } => decided("target-task-with"),
-        EngineError::TargetTaskNeedsOne => decided("target-task-needs-one"),
-        EngineError::TargetTaskSource { .. } => decided("target-task-source"),
-        EngineError::TargetTaskMissing { .. } => decided("target-task-missing"),
-        EngineError::TargetTaskOrigin { .. } => decided("target-task-origin"),
-        // llmlint: ignore-end[changed_behavior_has_e2e]
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, whose copy never sets `create`; `writeback::tests` holds the word.
         EngineError::CreateWith { .. } => decided("create-with"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back, as above.
@@ -3292,8 +3285,6 @@ fn create(
     )
     .expect("a creation names at least one lineage");
     let mut request = CopyRequest {
-        status_policy: onetaskgraph_core::StatusPolicy::Source,
-        target_task: None,
         items: CopyItems::new(vec![shadow_id(&project_file(&snapshot.project))])
             .expect("one item is not none"),
         scope: CopyScope::MembersOnly(members.clone()),
@@ -6450,19 +6441,6 @@ mod tests {
             },
             // The copy refusals 0.2.57 added: `--create` beside a lookup or onto a carrier, and a
             // routed item whose counterpart sits in a source it no longer routes to.
-            EngineError::TargetTaskWith {
-                flag: onetaskgraph_core::CopyLookup::Recreate,
-            },
-            EngineError::TargetTaskNeedsOne,
-            EngineError::TargetTaskSource {
-                target: id(),
-                destination: onetaskgraph_plugin_api::SourceName::new("plans").unwrap(),
-            },
-            EngineError::TargetTaskMissing { target: id() },
-            EngineError::TargetTaskOrigin {
-                target: id(),
-                item: id(),
-            },
             EngineError::CreateWith {
                 flag: onetaskgraph_core::CopyLookup::Recreate,
             },
@@ -7606,8 +7584,6 @@ mod tests {
                             onetaskgraph_core::CopyItems::new(vec![shadow.clone()]).unwrap(),
                         ),
                         destination: onetaskgraph_plugin_api::SourceName::new("plans").unwrap(),
-                        status_policy: onetaskgraph_core::StatusPolicy::Source,
-                        target_task: None,
                         match_by: None,
                         recreate: false,
                         create: false,

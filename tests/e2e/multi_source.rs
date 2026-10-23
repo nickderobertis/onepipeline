@@ -87,8 +87,6 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
     let report = world.store_call(|engine| async move {
         engine
             .copy(&onetaskgraph_core::CopyRequest {
-                status_policy: onetaskgraph_core::StatusPolicy::Source,
-                target_task: None,
                 items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
                 scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
@@ -610,6 +608,15 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
             vec![on(HOME, "core", &[]), on(HOME, "ship", &["core"])],
         ),
     );
+    let body = "A person's complete project body survives the initial routed copy.\n";
+    let home_file = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", global(&home).native));
+    // llmlint: ignore-block[tests_mirror_real_usage] a local-md board is its Markdown folder; appending a body is a person's board edit through that real storage boundary.
+    let document = std::fs::read_to_string(&home_file).expect("the home project reads");
+    std::fs::write(&home_file, document + body).expect("the person's body is saved");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let read_home = |world: &World| world.store_project(&home)["items"][0]["item"].clone();
     assert!(
         read_home(&world)["metadata"]
@@ -636,6 +643,21 @@ fn a_live_add_routed_to_the_second_source_lands_in_a_member_project_created_for_
         landed_words(world, &home)
             .is_some_and(|board| board.get("adopt").map(String::as_str) == Some("queued"))
     });
+    let shadow = world.run_file(name, "writeback/projects").join(format!(
+        "{}.md",
+        home.as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    ));
+    // llmlint: ignore-block[tests_mirror_real_usage] the shadow is the real local-md source the full copy reads; checking its published body proves fallback did not leave an identity-only project.
+    let shadow = std::fs::read_to_string(shadow).expect("the full-scope shadow reads");
+    let (_, shadow_body) = shadow
+        .strip_prefix("---\n")
+        .and_then(|text| text.split_once("---\n"))
+        .expect("the shadow has complete front matter");
+    assert_eq!(shadow_body.trim(), body.trim());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     // A stop reads the landed baseline back in a process of its own. The added item is in a
     // source the launch read no task from, so only the home's member list, which now names the
     // member the store created, makes it the run's: read whole, it is released where it lives.
@@ -1189,8 +1211,6 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
     let (report, landed) = world.store_call(|engine| async move {
         let report = engine
             .copy(&onetaskgraph_core::CopyRequest {
-                status_policy: onetaskgraph_core::StatusPolicy::Source,
-                target_task: None,
                 items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
                 scope: onetaskgraph_core::CopyScope::Documents,
                 destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
@@ -1313,8 +1333,6 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
         world.store_call(|engine| async move {
             let report = engine
                 .copy(&onetaskgraph_core::CopyRequest {
-                    status_policy: onetaskgraph_core::StatusPolicy::Source,
-                    target_task: None,
                     items: onetaskgraph_core::CopyItems::new(vec![design]).expect("one item"),
                     scope: onetaskgraph_core::CopyScope::Documents,
                     destination: onetaskgraph_plugin_api::SourceName::new(STORE_SOURCE)
