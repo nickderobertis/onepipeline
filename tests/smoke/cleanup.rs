@@ -184,15 +184,22 @@ impl Created {
                 return BTreeSet::new();
             }
         };
-        listed
-            .iter()
-            .filter(|pull| {
-                pull["title"]
-                    .as_str()
-                    .is_some_and(|title| title.contains(&self.stamp))
-            })
-            .filter_map(|pull| pull["number"].as_u64())
-            .collect()
+        // An entry naming no title or number is a listing that cannot say whether it
+        // carries the stamp, and is a failure rather than a pull request that does not.
+        let mut stamped = BTreeSet::new();
+        for pull in &listed {
+            match (pull["title"].as_str(), pull["number"].as_u64()) {
+                (Some(title), Some(number)) => {
+                    if title.contains(&self.stamp) {
+                        stamped.insert(number);
+                    }
+                }
+                _ => cleanup.failed(format!(
+                    "an open pull request names no title or number: {pull}"
+                )),
+            }
+        }
+        stamped
     }
 
     /// Pull request `number`'s state and head branch, or the failure that kept them.
@@ -265,13 +272,23 @@ impl Created {
                     continue;
                 }
             };
-            branches.extend(
-                refs.iter()
-                    .filter_map(|reference| reference["ref"].as_str())
-                    .filter_map(|reference| reference.strip_prefix("refs/heads/"))
-                    .filter(|branch| branch.starts_with(prefix.as_str()))
-                    .map(str::to_owned),
-            );
+            // A reference naming no branch is one this cleanup cannot say is gone, so it
+            // fails rather than reading as a branch that is not there.
+            for reference in &refs {
+                match reference["ref"]
+                    .as_str()
+                    .and_then(|name| name.strip_prefix("refs/heads/"))
+                {
+                    Some(branch) => {
+                        if branch.starts_with(prefix.as_str()) {
+                            branches.insert(branch.to_owned());
+                        }
+                    }
+                    None => cleanup.failed(format!(
+                        "a reference under {prefix} names no branch: {reference}"
+                    )),
+                }
+            }
         }
         branches
     }

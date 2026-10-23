@@ -435,7 +435,9 @@ mod unix {
     /// each pull request's `state`, `head` and `title`, `branches/<name>` each branch, and
     /// `close-error` / `delete-error`, when present, are what a close or a delete is refused
     /// with — doing what it was asked first only where `close-takes` / `delete-takes` is
-    /// there, as GitHub sometimes does behind its own failure.
+    /// there, as GitHub sometimes does behind its own failure — and `malformed`, when
+    /// present, adds a pull request naming no title and a reference naming no branch to
+    /// every listing.
     const STATE_ENV: &str = "ONEPIPELINE_SMOKE_GH_STATE";
 
     /// The cleanup's `gh` stand-in: one fixed program answering the five calls
@@ -454,6 +456,7 @@ case "$1 $2" in
       printf '%s{{"number":%s,"title":"%s"}}' "$sep" "$(basename "$d")" "$(cat "$d/title")"
       sep=,
     done
+    [ -f "$s/malformed" ] && printf '%s{{"number":8}}' "$sep"
     printf ']\n' ;;
   'pr view')
     d="$s/pulls/$3"
@@ -482,6 +485,7 @@ case "$1 $2" in
         for f in $(cd "$s/branches" && find . -type f | sed 's|^\./||'); do
           case "$f" in "$p"*) printf '%s{{"ref":"refs/heads/%s"}}' "$sep" "$f"; sep=, ;; esac
         done
+        [ -f "$s/malformed" ] && printf '%s{{"object":{{}}}}' "$sep"
         printf ']\n' ;;
     esac ;;
   *) echo "the cleanup stand-in was asked something it does not play: $*" >&2; exit 2 ;;
@@ -607,6 +611,33 @@ esac
                 failures.iter().any(|failure| failure.contains(found)),
                 "a refusal that answers about the request fails the cleanup with {found:?}: \
                  {failures:#?}"
+            );
+        }
+    }
+
+    /// A listing entry the cleanup cannot read fails it naming the entry, rather than reading
+    /// as a pull request without the stamp or a branch that is gone: an open pull request
+    /// naming no title, and a reference under the run's prefix naming no branch, each fail a
+    /// cleanup whose close and delete both happened.
+    ///
+    /// Its own test, and so its own process under nextest: `PATH` is process-global.
+    #[test]
+    fn a_listing_entry_naming_nothing_fails_the_cleanup_naming_it() {
+        let scratch = scratch();
+        let went_wrong = "API call failed: GraphQL: Something went wrong while executing your \
+                          query on 2026-10-23T02:50:52Z.";
+
+        let state = cleanup_repository(&scratch.0, "malformed", went_wrong, (true, true));
+        fs::write(state.join("malformed"), "").expect("the marker");
+        let (observed, failures) = clean();
+        for found in [
+            r#"an open pull request names no title or number: {"number":8}"#,
+            r#"a reference under run-x/ names no branch: {"object":{}}"#,
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(found)),
+                "an unreadable listing entry fails the cleanup with {found:?}: {failures:#?} \
+                 (observed {observed:#?})"
             );
         }
     }
