@@ -54,10 +54,39 @@ fn main() -> ExitCode {
         let [_, pid_file] = args.as_slice() else {
             return fake::refuse("late-child takes exactly one pid file");
         };
-        let staged = format!("{pid_file}.partial");
-        std::fs::write(&staged, format!("{}\n", std::process::id()))
-            .and_then(|()| std::fs::rename(&staged, pid_file))
-            .unwrap_or_else(|error| fake::fail(&format!("cannot record the late child: {error}")));
+        record_own_pid(std::path::Path::new(pid_file));
+        loop {
+            std::thread::park();
+        }
+    }
+    // The pair `turn.late-orphan` asks for: a parent that exits once
+    // `turn.late-parent.exit` is written, and under it a spawner that outlives
+    // it and starts a late child once `turn.late-spawn` is.
+    if args.first().map(String::as_str) == Some("late-parent") {
+        let [_, dir] = args.as_slice() else {
+            return fake::refuse("late-parent takes exactly one script directory");
+        };
+        let dir = std::path::Path::new(dir);
+        record_own_pid(&dir.join("turn.late-parent.pid"));
+        // Not waited on: this process exits and leaves it to whatever adopts it.
+        #[allow(clippy::zombie_processes)]
+        start_self(&["late-spawner", &dir.to_string_lossy()]);
+        fake::wait_for(&dir.join("turn.late-spawner.pid"));
+        fake::wait_for(&dir.join("turn.late-parent.exit"));
+        return ExitCode::SUCCESS;
+    }
+    if args.first().map(String::as_str) == Some("late-spawner") {
+        let [_, dir] = args.as_slice() else {
+            return fake::refuse("late-spawner takes exactly one script directory");
+        };
+        let dir = std::path::Path::new(dir);
+        record_own_pid(&dir.join("turn.late-spawner.pid"));
+        fake::wait_for(&dir.join("turn.late-spawn"));
+        let pid_file = dir.join("turn.late-child.pid");
+        // Not waited on: it runs until whatever ends the dispatch ends it.
+        #[allow(clippy::zombie_processes)]
+        start_self(&["late-child", &pid_file.to_string_lossy()]);
+        fake::wait_for(&pid_file);
         loop {
             std::thread::park();
         }
@@ -408,6 +437,18 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
     // holding one node in flight must not also hold another node's turn the
     // engine dispatches again after a failed publication.
     if !observing && dir.join("turn.hold").exists() && held_here(dir, &prompt) {
+        // `turn.late-orphan` names a task, and that task's held turn starts a
+        // `late-parent` and the `late-spawner` under it before it holds: a
+        // process whose parent a journey can end and which it can then have
+        // start another, as a member handed to `init` mid-stop would.
+        if fake::node_script(dir, "turn", "late-orphan")
+            .is_some_and(|what| what_the_task_says(&prompt) == what)
+        {
+            // Not waited on: it exits when the journey says, and nothing reaps it.
+            #[allow(clippy::zombie_processes)]
+            start_self(&["late-parent", &dir.to_string_lossy()]);
+            fake::wait_for(&dir.join("turn.late-spawner.pid"));
+        }
         fake::wait_for(&dir.join("turn.go"));
         // `turn.late-child` names a task, and that task's released turn starts a
         // process of its own and records its pid in `turn.late-child.pid`: a
@@ -417,19 +458,9 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             .is_some_and(|what| what_the_task_says(&prompt) == what)
         {
             let pid_file = dir.join("turn.late-child.pid");
-            let exe = std::env::current_exe()
-                .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
             // Not waited on: it runs until whatever ends the dispatch ends it.
             #[allow(clippy::zombie_processes)]
-            std::process::Command::new(exe)
-                .args(["late-child", &pid_file.to_string_lossy()])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .unwrap_or_else(|error| {
-                    fake::fail(&format!("cannot start the late child: {error}"))
-                });
+            start_self(&["late-child", &pid_file.to_string_lossy()]);
             fake::wait_for(&pid_file);
         }
         if streaming {
@@ -818,6 +849,28 @@ fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
         });
     }
     answer
+}
+
+/// Start this double again with `args`, its standard streams on nothing.
+fn start_self(args: &[&str]) -> std::process::Child {
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));
+    std::process::Command::new(exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap_or_else(|error| fake::fail(&format!("cannot start {args:?}: {error}")))
+}
+
+/// Write this process's pid to `path` whole, under a temporary name renamed
+/// into place, so a reader polling for it never reads half of one.
+fn record_own_pid(path: &std::path::Path) {
+    let staged = path.with_extension("partial");
+    std::fs::write(&staged, format!("{}\n", std::process::id()))
+        .and_then(|()| std::fs::rename(&staged, path))
+        .unwrap_or_else(|error| fake::fail(&format!("cannot record a pid: {error}")));
 }
 
 /// Whether `turn.hold` holds this turn: every worker turn, or — where `turn.hold-what`

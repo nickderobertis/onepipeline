@@ -4186,6 +4186,82 @@ fn a_stop_ends_a_process_its_dispatch_starts_after_the_stop_has_listed_the_tree(
     );
 }
 
+/// A stop ends what a member of its run starts after the stop has listed the
+/// tree, even where that member's parent exited in between and handed it to
+/// `init`.
+///
+/// The member is in the tree the stop listed, so it is aimed at; but by the
+/// time the stop lists again, no walk from the run's roots reaches it any more,
+/// and a teardown that walked only from the roots would miss what it started.
+/// Held rather than raced, at the stop's listing, so the parent's exit and the
+/// member's new process both fall between the listing and the signals on any
+/// host.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_what_a_member_starts_after_its_parent_exits_mid_stop() {
+    let world = World::new("driver-stop-late-orphan");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-orphan", "Do late.");
+    let run = "lateorphan";
+    let path = world.plan(run, &plan_of(run, vec![agent("late", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    let pid_in = |name: &str| -> u32 {
+        std::fs::read_to_string(world.fakes.join(name))
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} holds no pid: {error}"))
+    };
+    world.until("the member to be running under its parent", |world| {
+        world.fakes.join("turn.late-spawner.pid").is_file()
+    });
+    let (parent, member) = (
+        pid_in("turn.late-parent.pid"),
+        pid_in("turn.late-spawner.pid"),
+    );
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // parent exits and the member starts its process on is the property, and no user-facing
+    // input can place it. The failpoint only orders the real binaries; the launch, the stop,
+    // the dispatch and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop lateorphan"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.late-parent.exit");
+        world.until("the member's parent to exit", |_| process_ended(parent));
+        world.release("turn.late-spawn");
+        world.until("the member to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let started = [member, pid_in("turn.late-child.pid")];
+    let left: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    // Ended here by the pids they recorded, before anything is asserted: once
+    // their parents are gone nothing else on this host reaches them.
+    for pid in &left {
+        end_process(*pid);
+    }
+    stopped.exited(0);
+    assert!(
+        left.is_empty(),
+        "pids {left:?} of {started:?} — the member handed to `init` and what it started after \
+         the stop listed the tree — were still running once the stop reported success"
+    );
+}
+
 /// A stop whose host stops listing once it has frozen the tree still ends that
 /// tree, and leaves none of it frozen.
 ///
