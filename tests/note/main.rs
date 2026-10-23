@@ -2875,10 +2875,12 @@ fn an_envelope_is_answered_as_its_note_is_queued_and_the_receiver_takes_its_note
         !world.run(&["status", run]).stdout.contains("inbox:")
     });
     assert!(inbox_reading(&world, run).is_empty());
-    assert!(
-        sidecar_of(&world, run).is_empty(),
-        "deliveries.json still lists a taken note"
-    );
+    // `status` reads a note the journal answers as answered, and the driver
+    // rewrites its sidecar only after journalling, so the sidecar may still list
+    // the taken notes when `status` has dropped them: it is waited on, not read once.
+    world.until("deliveries.json to list neither taken note", |world| {
+        sidecar_of(world, run).is_empty()
+    });
     let status = world.run(&["status", run]);
     status.exited(0);
     for (id, index) in [(first_id, 1), (second_id, 0)] {
