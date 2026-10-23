@@ -212,16 +212,22 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     )
     .expect("the checkpoint is JSON");
     assert_eq!(earlier["schema_version"], json!(14), "{earlier}");
-    let activity = earlier["state"]["activity"][NODE]
-        .as_object_mut()
-        .unwrap_or_else(|| panic!("the checkpoint folded no activity for {NODE}"));
+    let doing = &mut earlier["state"]["activity"][NODE]["doing"];
     assert!(
-        activity.remove("transcript").is_some(),
-        "the checkpoint does not keep the reference it folded: {activity:?}"
+        doing["activity"]["history_id"].is_string(),
+        "the checkpoint does not keep the reference it folded: {doing}"
     );
-    activity.insert("doing".into(), json!("bash"));
+    // llmlint: ignore-block[tests_mirror_real_usage] a schema-13 checkpoint is one only
+    // the build before this change wrote, which no invocation of this build can produce
+    // and which this suite cannot run; the document is this run's own checkpoint with
+    // exactly the two things that build wrote differently — its version, and its fold of
+    // the referenced call as the copy-era tool name — so what the compiled binary is
+    // asked is the one question the version bump answers, as `checkpoint.rs`'s journeys
+    // ask it of the other states a cache can be left in.
+    *doing = json!("bash");
     earlier["schema_version"] = json!(13);
     std::fs::write(&checkpoint, earlier.to_string()).expect("the earlier checkpoint is laid down");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let status = world.run(&["status", run]);
     status.exited(0);
     assert!(

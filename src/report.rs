@@ -893,7 +893,7 @@ impl ActivityText {
     /// history file a reference names, or the bounded copy a record without
     /// one carries, read exactly as [`of`](Self::of) reads it.
     pub(crate) fn relayed(payload: &serde_json::Map<String, Value>) -> Self {
-        use crate::views::transcript::{of_record, Text};
+        use crate::views::transcript::{of_record, Text, ToolKind};
         let kind = payload
             .get("kind")
             .and_then(Value::as_str)
@@ -914,10 +914,10 @@ impl ActivityText {
                     truncated: Truncation::Whole,
                 },
                 Text::Tool {
-                    ref kind,
+                    kind: ToolKind::Result,
                     ref output,
                     ..
-                } if kind == TOOL_RESULT => Self::Returned {
+                } => Self::Returned {
                     output: output.clone().unwrap_or_default(),
                     truncated: Truncation::Whole,
                 },

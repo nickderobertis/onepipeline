@@ -1814,6 +1814,80 @@ mod tests {
         turn_on(seq, at, role, turn, origin, "do it")
     }
 
+    /// A worker turn whose record references its history confirms a carried
+    /// note only off the prompt that history holds: one whose referenced file is
+    /// gone, or whose prompt cannot be read, confirms nothing — and one whose
+    /// file holds the note's text past the bound a copy was cut to confirms it.
+    #[test]
+    fn a_referenced_prompt_that_cannot_be_read_confirms_no_note() {
+        use oneharness_core::io::history::HistoryWriter;
+        let root = std::env::temp_dir().join(format!("onepipeline-note-ref-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("a project directory");
+        let writer = HistoryWriter::open(
+            &root.join("store"),
+            &project,
+            "worker-skill",
+            oneharness_core::domain::history::HistoryLabels::default(),
+        )
+        .expect("a history session opens");
+        let identity = "claude-code".parse().expect("a harness identity");
+        let prompt = format!(
+            "{}The manager says: stop re-running the tier.",
+            "Read the whole log first.\n".repeat(200)
+        );
+        assert!(prompt
+            .find("stop re-running")
+            .is_some_and(|at| at > crate::event::MAX_PAYLOAD_TEXT_BYTES));
+        let run_id = writer.begin_harness_run(&identity, &prompt);
+        let begun = serde_json::to_value(writer.run_begun(&identity, run_id)).expect("serializes");
+        let reference = |session: &str| {
+            json!({
+                "history_dir": begun["history_dir"],
+                "history_project": begun["history_project"],
+                "history_session": session,
+                "history_id": run_id.to_string(),
+            })
+        };
+        let referencing = |seq: u64, at: u64, turn: u64, reference: Value| {
+            let mut opened = turn_on(seq, at, "assistant", turn, Some("supervisor"), "");
+            opened.payload.remove("instruction");
+            opened.payload.insert("transcript".into(), reference);
+            opened
+        };
+
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(
+            recorded(
+                "stop re-running the tier",
+                Reached::Carried { reason: None },
+            ),
+            5_000,
+            None,
+        );
+        let gone = referencing(1, 5_100, 2, reference("a-session-never-written"));
+        assert!(
+            watch.observe(&gone).is_empty(),
+            "a turn whose referenced history is gone confirmed a note"
+        );
+        let session = begun["history_session"].as_str().expect("a session");
+        std::fs::write(writer.path(), "not a history line\n").expect("the history is corrupted");
+        let corrupt = referencing(2, 5_200, 3, reference(session));
+        assert!(
+            watch.observe(&corrupt).is_empty(),
+            "a turn whose referenced prompt cannot be read confirmed a note"
+        );
+        let _ = std::fs::remove_file(writer.path());
+        let rewritten = writer.begin_harness_run(&identity, &prompt);
+        let mut whole = reference(session);
+        whole["history_id"] = json!(rewritten.to_string());
+        let shown = watch.observe(&referencing(3, 5_300, 4, whole));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence, Evidence::InstructionText);
+    }
+
     /// The same, opening on `instruction`.
     fn turn_on(
         seq: u64,

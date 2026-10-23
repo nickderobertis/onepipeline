@@ -1713,16 +1713,18 @@ mod tests {
             activity: BTreeMap::from([(
                 "build".to_string(),
                 crate::projection::NodeActivity {
-                    transcript: Some(crate::views::transcript::TranscriptRef::Activity(
-                        serde_json::from_value(json!({
-                            "history_dir": "/state/oneharness/history",
-                            "history_project": "project",
-                            "history_session": "session",
-                            "history_id": "01a12345-6789-7000-8000-0123456789ab",
-                            "index": 0,
-                            "tool_call_id": "call-1",
-                        }))
-                        .expect("a reference"),
+                    doing: Some(crate::projection::Doing::Referenced(
+                        crate::views::transcript::TranscriptRef::Activity(
+                            serde_json::from_value(json!({
+                                "history_dir": "/state/oneharness/history",
+                                "history_project": "project",
+                                "history_session": "session",
+                                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+                                "index": 0,
+                                "tool_call_id": "call-1",
+                            }))
+                            .expect("a reference"),
+                        ),
                     )),
                     ..crate::projection::NodeActivity::default()
                 },

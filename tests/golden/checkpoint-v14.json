@@ -11,7 +11,7 @@
     "streams": {
       "golden-host-1": 41
     },
-    "digest": "f3440f898ec35af7cbe623a756bf15cb"
+    "digest": "11f724cf9b09b2432b259d93ba5e4f82"
   },
   "state": {
     "graph": {
@@ -82,8 +82,7 @@
     "superseded": {},
     "activity": {
       "build": {
-        "doing": null,
-        "transcript": {
+        "doing": {
           "activity": {
             "history_dir": "/state/oneharness/history",
             "history_project": "project",

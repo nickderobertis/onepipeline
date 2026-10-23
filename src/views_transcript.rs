@@ -62,8 +62,8 @@ pub enum Text {
     Reasoning(String),
     /// A tool call, or the observation that answered one.
     Tool {
-        /// `tool_call` or `tool_result`.
-        kind: String,
+        /// Which of the two it is.
+        kind: ToolKind,
         /// The tool, where the harness named one.
         name: Option<String>,
         /// The call's input as the harness recorded it: a structured value, or
@@ -72,6 +72,31 @@ pub enum Text {
         /// What the tool returned, where the entry carries it.
         output: Option<String>,
     },
+}
+
+/// Which half of a tool exchange an entry is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[non_exhaustive]
+pub enum ToolKind {
+    /// `tool_call`: the model invoked a tool.
+    Call,
+    /// `tool_result`: the observation returned to it.
+    Result,
+    /// A kind oneharness added after this build, kept as it spelled it: its
+    /// `kind` is an open vocabulary, and an entry of a new kind is still a
+    /// tool's entry to show rather than a reason to show nothing.
+    Other(String),
+}
+
+impl ToolKind {
+    fn of(kind: &str) -> Self {
+        match kind {
+            "tool_call" => Self::Call,
+            "tool_result" => Self::Result,
+            other => Self::Other(other.to_string()),
+        }
+    }
 }
 
 /// One entry's content, whole, and one line describing it.
@@ -153,70 +178,86 @@ impl TranscriptRef {
     /// [`Unresolved`] with [`Why::Unreadable`] for a `transcript` that is not
     /// the shape `oneagentgraph` writes.
     pub fn of(kind: &str, payload: &Map<String, Value>) -> Option<Result<Self, Unresolved>> {
-        let reference = payload.get("transcript");
-        let malformed = |reference: &Value| Unresolved {
-            path: address(reference),
+        if !matches!(kind, "turn-started" | "turn-message" | "turn-activity") {
+            return None;
+        }
+        Some(match payload.get("transcript") {
+            Some(reference) => {
+                let read = match kind {
+                    "turn-started" => {
+                        serde_json::from_value(reference.clone()).map(Self::Instruction)
+                    }
+                    "turn-message" => serde_json::from_value(reference.clone()).map(Self::Message),
+                    _ => serde_json::from_value(reference.clone()).map(Self::Activity),
+                };
+                read.map_err(|_| Unresolved {
+                    path: address(reference),
+                    why: Why::Unreadable,
+                })
+            }
+            None => Self::copy(kind, payload),
+        })
+    }
+
+    /// A record's bounded copy, held to the shape its producer writes: every
+    /// text a string where present, every flag a boolean. A copy that is not is
+    /// unreadable rather than coerced — read as text, an object would render as
+    /// though the producer had said it, and a flag read as `false` would claim a
+    /// copy whole that nobody said was.
+    fn copy(kind: &str, payload: &Map<String, Value>) -> Result<Self, Unresolved> {
+        let unreadable = || Unresolved {
+            path: PathBuf::from(format!("<{kind} copy>")),
             why: Why::Unreadable,
         };
-        let string = |key: &str| match payload.get(key) {
-            Some(Value::String(text)) => text.clone(),
-            Some(Value::Null) | None => String::new(),
-            Some(other) => other.to_string(),
+        let text = |key: &str| match payload.get(key) {
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(Value::Null) | None => Ok(None),
+            Some(_) => Err(unreadable()),
         };
-        let flag = |key: &str| payload.get(key).and_then(Value::as_bool) == Some(true);
-        Some(match kind {
-            "turn-started" => match reference {
-                Some(reference) => serde_json::from_value(reference.clone())
-                    .map(Self::Instruction)
-                    .map_err(|_| malformed(reference)),
-                None => Ok(Self::Copy {
-                    text: Text::Instruction(string("instruction")),
-                    cut: flag("instruction_truncated"),
-                }),
+        let flag = |key: &str| match payload.get(key) {
+            Some(Value::Bool(flag)) => Ok(*flag),
+            Some(Value::Null) | None => Ok(false),
+            Some(_) => Err(unreadable()),
+        };
+        Ok(match kind {
+            "turn-started" => Self::Copy {
+                text: Text::Instruction(text("instruction")?.unwrap_or_default()),
+                cut: flag("instruction_truncated")?,
             },
-            "turn-message" => match reference {
-                Some(reference) => serde_json::from_value(reference.clone())
-                    .map(Self::Message)
-                    .map_err(|_| malformed(reference)),
-                None => Ok(Self::Copy {
-                    text: Text::Message(string("text")),
-                    cut: flag("truncated"),
-                }),
+            "turn-message" => Self::Copy {
+                text: Text::Message(text("text")?.unwrap_or_default()),
+                cut: flag("truncated")?,
             },
-            "turn-activity" => match reference {
-                Some(reference) => serde_json::from_value(reference.clone())
-                    .map(Self::Activity)
-                    .map_err(|_| malformed(reference)),
-                None => {
-                    let activity = string("kind");
-                    let output = payload
-                        .get("output")
-                        .filter(|value| !value.is_null())
-                        .map(|_| string("output"));
-                    Ok(Self::Copy {
-                        cut: flag("output_truncated")
-                            || (activity == "tool_call" && flag("truncated")),
-                        text: match activity.as_str() {
-                            "message" => Text::Message(output.unwrap_or_default()),
-                            "reasoning" => Text::Reasoning(output.unwrap_or_default()),
-                            _ => Text::Tool {
-                                name: payload
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .map(str::to_string),
-                                input: payload
-                                    .get("detail")
-                                    .and_then(Value::as_str)
+            _ => {
+                let activity = text("kind")?.ok_or_else(unreadable)?;
+                let output = text("output")?;
+                let cut = flag("output_truncated")?;
+                let detail_cut = flag("truncated")?;
+                match activity.as_str() {
+                    "message" => Self::Copy {
+                        text: Text::Message(output.unwrap_or_default()),
+                        cut,
+                    },
+                    "reasoning" => Self::Copy {
+                        text: Text::Reasoning(output.unwrap_or_default()),
+                        cut,
+                    },
+                    _ => {
+                        let kind = ToolKind::of(&activity);
+                        Self::Copy {
+                            cut: cut || (kind == ToolKind::Call && detail_cut),
+                            text: Text::Tool {
+                                name: text("name")?,
+                                input: text("detail")?
                                     .filter(|detail| !detail.is_empty())
-                                    .map(|detail| Value::String(detail.to_string())),
+                                    .map(Value::String),
                                 output,
-                                kind: activity,
+                                kind,
                             },
-                        },
-                    })
+                        }
+                    }
                 }
-            },
-            _ => return None,
+            }
         })
     }
 
@@ -296,56 +337,68 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
             Err(_) => return Err(unresolved(Why::Unreadable)),
         }
         // The last line of a file still being written may be half of one: it
-        // is not an entry yet, and not a reason to call the file unreadable.
-        let complete = line.ends_with('\n');
+        // is not an entry yet, and not a reason to call the file unreadable —
+        // nor one to read, however much of it happens to parse.
+        if !line.ends_with('\n') {
+            break;
+        }
         let Ok(entry) = serde_json::from_str::<Value>(line.trim_end()) else {
-            unreadable |= complete;
+            unreadable = true;
             continue;
         };
-        let text = |key: &str| entry.get(key).and_then(Value::as_str);
-        match (reference, text("type")) {
+        let field = |key: &str| entry.get(key).and_then(Value::as_str);
+        // A text an entry has to carry: a string, or the entry is unreadable.
+        // `null` only where the history schema allows it — a run that closed
+        // without saying anything.
+        let carried = |key: &str, nullable: bool| match entry.get(key) {
+            Some(Value::String(text)) => Ok(text.clone()),
+            Some(Value::Null) if nullable => Ok(String::new()),
+            _ => Err(unresolved(Why::Unreadable)),
+        };
+        match (reference, field("type")) {
             (TranscriptRef::Instruction(_), Some("run-started"))
-                if text("history_id") == Some(&history_id) =>
+                if field("history_id") == Some(&history_id) =>
             {
-                if let Some(prompt) = text("prompt") {
-                    return Ok(described(Text::Instruction(prompt.to_string())));
-                }
+                return Ok(described(Text::Instruction(carried("prompt", false)?)));
             }
             // A closing line carries the prompt too, and is the only line that
             // does in a file written before openings were.
             (TranscriptRef::Instruction(_), Some("run"))
-                if text("history_id") == Some(&history_id) =>
+                if field("history_id") == Some(&history_id) =>
             {
-                prompt_at_close = text("prompt").map(str::to_string);
+                prompt_at_close = Some(carried("prompt", false)?);
             }
-            (TranscriptRef::Message(_), Some("run")) if text("history_id") == Some(&history_id) => {
-                return Ok(described(Text::Message(
-                    text("text").unwrap_or_default().to_string(),
-                )));
+            (TranscriptRef::Message(_), Some("run"))
+                if field("history_id") == Some(&history_id) =>
+            {
+                return Ok(described(Text::Message(carried("text", true)?)));
             }
-            (TranscriptRef::Activity(_), Some("event")) if text("run_id") == Some(&history_id) => {
+            (TranscriptRef::Activity(_), Some("event")) if field("run_id") == Some(&history_id) => {
                 let Some(wanted) = index else { continue };
-                let event = entry.get("event").unwrap_or(&Value::Null);
-                if event.get("index").and_then(Value::as_u64) != Some(wanted.index) {
+                let raw = entry.get("event").unwrap_or(&Value::Null);
+                if raw.get("index").and_then(Value::as_u64) != Some(wanted.index) {
                     continue;
                 }
-                let field = |key: &str| event.get(key).and_then(Value::as_str);
-                if let (Some(expected), Some(found)) =
-                    (wanted.tool_call_id.as_deref(), field("tool_call_id"))
-                {
+                // Read through oneharness's own event type, so a field of the
+                // wrong type is an unreadable entry rather than empty content.
+                let event: oneharness_core::domain::events::ActionEvent =
+                    serde_json::from_value(raw.clone()).map_err(|_| unresolved(Why::Unreadable))?;
+                if let (Some(expected), Some(found)) = (
+                    wanted.tool_call_id.as_deref(),
+                    event.tool_call_id.as_deref(),
+                ) {
                     if expected != found {
                         continue;
                     }
                 }
-                let output = field("output").map(str::to_string);
-                return Ok(described(match field("kind").unwrap_or_default() {
-                    "message" => Text::Message(output.unwrap_or_default()),
-                    "reasoning" => Text::Reasoning(output.unwrap_or_default()),
+                return Ok(described(match event.kind.as_str() {
+                    "message" => Text::Message(event.output.unwrap_or_default()),
+                    "reasoning" => Text::Reasoning(event.output.unwrap_or_default()),
                     kind => Text::Tool {
-                        kind: kind.to_string(),
-                        name: field("name").map(str::to_string),
-                        input: event.get("input").filter(|input| !input.is_null()).cloned(),
-                        output,
+                        kind: ToolKind::of(kind),
+                        name: event.name,
+                        input: event.input.filter(|input| !input.is_null()),
+                        output: event.output,
                     },
                 }));
             }
@@ -423,7 +476,7 @@ fn describe(text: &Text) -> String {
             input,
             output,
         } => {
-            if kind == "tool_result" {
+            if *kind == ToolKind::Result {
                 first_line(output.as_deref().unwrap_or_default()).to_string()
             } else {
                 describe_call(name.as_deref(), input.as_ref())
@@ -772,7 +825,7 @@ mod tests {
         );
         let ran = resolved("turn-activity", &activity(recorded(RAN), 0));
         assert!(
-            matches!(&ran.text, Text::Tool { kind, name, .. } if kind == "tool_call" && name.as_deref() == Some("Bash")),
+            matches!(&ran.text, Text::Tool { kind: ToolKind::Call, name, .. } if name.as_deref() == Some("Bash")),
             "index 0 of the candidate that ran resolved to another candidate's entry: {ran:?}"
         );
     }
@@ -1130,5 +1183,133 @@ mod tests {
         assert_eq!(result.description, "tail of it");
 
         assert!(of_record("turn-completed", &Map::new()).is_none());
+    }
+
+    /// A reference whose `tool_call_id` disagrees with the entry at its index
+    /// names a different call, and is answered as a missing entry rather than as
+    /// that call.
+    #[test]
+    fn a_conflicting_tool_call_id_is_not_the_entry_the_reference_names() {
+        let written = Written::new("call-id", "## What\ncall it");
+        written.event(
+            0,
+            "tool_call",
+            Some("Bash"),
+            Some(json!({"command": "just check"})),
+            None,
+        );
+        let mut agreeing = written.reference.clone();
+        agreeing["tool_call_id"] = json!("call-0");
+        assert_eq!(
+            resolved("turn-activity", &activity(agreeing, 0)).description,
+            "just check"
+        );
+        let mut conflicting = written.reference.clone();
+        conflicting["tool_call_id"] = json!("call-from-another-turn");
+        let missing = unresolved("turn-activity", &activity(conflicting, 0));
+        assert_eq!(missing.why, Why::MissingEntry);
+    }
+
+    /// A command recorded as an argv list: the harness's shell wrapper taken
+    /// off, and any other argv joined as it would be typed.
+    #[test]
+    fn an_argv_command_is_described_by_the_command_it_ran() {
+        let written = Written::new("argv", "## What\nrun it");
+        written.event(
+            0,
+            "tool_call",
+            Some("exec_command"),
+            Some(json!({"command": ["/bin/bash", "-lc", "cargo test --workspace\necho done"]})),
+            None,
+        );
+        written.event(
+            1,
+            "tool_call",
+            Some("exec_command"),
+            Some(json!({"command": ["git", "status", "--short"]})),
+            None,
+        );
+        written.event(
+            2,
+            "tool_call",
+            Some("command_execution"),
+            Some(json!("/usr/bin/bash -lc 'just gate'")),
+            None,
+        );
+        let wrapped = resolved("turn-activity", &activity(written.reference.clone(), 0));
+        assert_eq!(wrapped.description, "cargo test --workspace");
+        let plain = resolved("turn-activity", &activity(written.reference.clone(), 1));
+        assert_eq!(plain.description, "git status --short");
+        let string = resolved("turn-activity", &activity(written.reference.clone(), 2));
+        assert_eq!(string.description, "just gate");
+    }
+
+    /// A history entry whose fields are not the types oneharness writes is
+    /// unreadable, never empty content; and a last line still being written is
+    /// not read even where what has arrived of it parses.
+    #[test]
+    fn a_wrongly_typed_entry_is_unreadable_and_an_unterminated_line_is_not_read() {
+        let written = Written::new("typed", "## What\ntype it");
+        let path = written.writer.path().to_path_buf();
+        let id = written.run_id.to_string();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("the session file");
+        let bad_event = json!({"type": "event", "run_id": id, "event": {"kind": 7, "index": 0}});
+        let bad_close = json!({"type": "run", "history_id": id, "text": {"not": "text"}});
+        let unterminated = json!({"type": "event", "run_id": id, "event": {
+            "kind": "tool_call", "name": "Bash", "input": {"command": "half written"},
+            "output": null, "index": 1, "tool_call_id": null, "started_at": null,
+            "finished_at": null, "duration_ms": null, "status": null}});
+        std::io::Write::write_all(
+            &mut file,
+            format!("{bad_event}\n{bad_close}\n{unterminated}").as_bytes(),
+        )
+        .expect("the entries are written");
+
+        let event = unresolved("turn-activity", &activity(written.reference.clone(), 0));
+        assert_eq!(
+            event,
+            Unresolved {
+                path: path.clone(),
+                why: Why::Unreadable
+            }
+        );
+        let message = unresolved("turn-message", &record(written.reference.clone(), &[]));
+        assert_eq!(message.why, Why::Unreadable);
+        let pending = unresolved("turn-activity", &activity(written.reference.clone(), 1));
+        assert_eq!(
+            pending.why,
+            Why::MissingEntry,
+            "an unterminated line was read as an entry"
+        );
+    }
+
+    /// A copy whose text is not a string, or whose cut flag is not a boolean,
+    /// is unreadable rather than coerced into a claim nobody made.
+    #[test]
+    fn a_malformed_copy_is_unreadable_rather_than_coerced() {
+        let mut object_text = Map::new();
+        object_text.insert("instruction".into(), json!({"an": "object"}));
+        assert_eq!(
+            unresolved("turn-started", &object_text).why,
+            Why::Unreadable
+        );
+
+        let mut odd_flag = Map::new();
+        odd_flag.insert("kind".into(), json!("tool_result"));
+        odd_flag.insert("output".into(), json!("the tail"));
+        odd_flag.insert("output_truncated".into(), json!("yes"));
+        let odd = unresolved("turn-activity", &odd_flag);
+        assert_eq!(odd.why, Why::Unreadable);
+        assert_eq!(
+            odd.to_string(),
+            "transcript unavailable: <turn-activity copy>: unreadable"
+        );
+
+        let mut kindless = Map::new();
+        kindless.insert("output".into(), json!("said"));
+        assert_eq!(unresolved("turn-activity", &kindless).why, Why::Unreadable);
     }
 }

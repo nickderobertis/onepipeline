@@ -569,15 +569,7 @@ pub struct NodeActivity {
     /// has recorded something without naming a tool is not a dispatch doing
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
-    pub doing: Option<String>,
-    /// The last `turn-activity` this node's dispatch recorded, where it
-    /// referenced its history rather than carrying a copy: what it is doing is
-    /// that reference's description, read when the readout is drawn rather than
-    /// when the record is folded — a fold reads no history file, so a state
-    /// resumed from a checkpoint never carries an answer the file has since
-    /// changed. Set in place of [`doing`](Self::doing), never beside it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<crate::views::transcript::TranscriptRef>,
+    pub doing: Option<Doing>,
     /// What this node's dispatch has done, once it has done anything.
     ///
     /// Named for progress rather than for events because a heartbeat is an event
@@ -590,6 +582,36 @@ pub struct NodeActivity {
     /// Held apart from [`progress`](Self::progress) because the two answer
     /// opposite questions, and their union answers neither.
     pub last_heartbeat_at: Option<u64>,
+}
+
+/// What a node's dispatch last said it was doing: words read off the record,
+/// or the reference whose description says it.
+///
+/// One value rather than a text beside an optional reference, because the two
+/// are never both the answer. Serialized as the text itself, or as the
+/// reference, so a checkpoint carries whichever the record did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Doing {
+    /// Words the record carried, or a step this crate named.
+    Said(String),
+    /// The last `turn-activity` this dispatch recorded, where it referenced its
+    /// history rather than carrying a copy: described when the readout is drawn
+    /// rather than when the record is folded — a fold reads no history file,
+    /// so a state resumed from a checkpoint never carries an answer the file
+    /// has since changed.
+    Referenced(crate::views::transcript::TranscriptRef),
+}
+
+impl Doing {
+    /// The words, where the record carried words.
+    #[must_use]
+    pub fn said(&self) -> Option<&str> {
+        match self {
+            Self::Said(said) => Some(said),
+            Self::Referenced(_) => None,
+        }
+    }
 }
 
 /// What one node's dispatch has done that this build can date: how many
@@ -2391,7 +2413,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // end to end by `tests/e2e/views.rs`.
         if !crate::vcs::is_session_opened(&event.kind) {
             if let Some(step) = crate::vcs::usable(&event.kind.0) {
-                activity.doing = Some(format!("publication {step}"));
+                activity.doing = Some(Doing::Said(format!("publication {step}")));
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         return;
@@ -2415,14 +2437,8 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             return;
         }
         match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
-            Some(Ok(reference)) => {
-                activity.transcript = Some(reference);
-                activity.doing = None;
-            }
-            Some(Err(unresolved)) => {
-                activity.transcript = None;
-                activity.doing = Some(unresolved.to_string());
-            }
+            Some(Ok(reference)) => activity.doing = Some(Doing::Referenced(reference)),
+            Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
             None => {}
         }
         return;
@@ -2433,8 +2449,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
     // running the last one.
     if let Some(voice) = crate::report::Voice::of(text("kind")) {
         if let Some(said) = voice.line(text("output")) {
-            activity.doing = Some(said);
-            activity.transcript = None;
+            activity.doing = Some(Doing::Said(said));
         }
         return;
     }
@@ -2453,8 +2468,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .collect::<Vec<_>>()
         .join(" ");
     if !summary.is_empty() {
-        activity.doing = Some(summary);
-        activity.transcript = None;
+        activity.doing = Some(Doing::Said(summary));
     }
 }
 
@@ -4122,7 +4136,10 @@ mod tests {
         ]);
 
         let seen = &state.activity["build"];
-        assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Read src/engine.rs")
+        );
         assert_eq!(
             seen.progress.expect("the activities counted").events(),
             2,
@@ -4270,7 +4287,7 @@ mod tests {
 
         let seen = &state.activity["build"];
         assert_eq!(
-            seen.doing.as_deref(),
+            seen.doing.as_ref().and_then(Doing::said),
             Some("publication push"),
             "a kind carrying a newline reached the line a supervisor reads"
         );
@@ -4330,7 +4347,10 @@ mod tests {
             step(3, closed),
         ]);
         assert_eq!(
-            after_closing.activity["build"].doing.as_deref(),
+            after_closing.activity["build"]
+                .doing
+                .as_ref()
+                .and_then(Doing::said),
             Some("publication session-closed"),
             "the last step of a publication was read as the bracket around it"
         );
@@ -4412,7 +4432,7 @@ mod tests {
 
         let state = fold(&[named, nameless]);
         assert_eq!(
-            state.activity["build"].doing.as_deref(),
+            state.activity["build"].doing.as_ref().and_then(Doing::said),
             Some("Bash just check")
         );
         assert_eq!(
@@ -4491,7 +4511,10 @@ mod tests {
         );
         // And it does not overwrite what the node was last seen doing: a turn
         // that is wedged is still wedged doing something.
-        assert_eq!(seen.doing.as_deref(), Some("Bash just check"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Bash just check")
+        );
     }
 
     /// A cancel of a *running* node leaves a dispatch behind it; a cancel of one

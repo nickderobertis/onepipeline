@@ -4123,15 +4123,14 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     // A reference is described now rather than when it was folded: the one
     // line its resolver gives, or the diagnostic naming the file it could not
     // read.
-    let referenced =
-        activity
-            .transcript
-            .as_ref()
-            .map(|reference| match transcript::resolve(reference) {
-                Ok(resolved) => one_line(&resolved.description),
-                Err(unresolved) => one_line(&unresolved.to_string()),
-            });
-    match referenced.as_ref().or(activity.doing.as_ref()) {
+    let doing = activity.doing.as_ref().map(|doing| match doing {
+        crate::projection::Doing::Said(said) => said.clone(),
+        crate::projection::Doing::Referenced(reference) => match transcript::resolve(reference) {
+            Ok(resolved) => one_line(&resolved.description),
+            Err(unresolved) => one_line(&unresolved.to_string()),
+        },
+    });
+    match doing {
         Some(doing) => format!("now {doing} ({counted})"),
         // Absent rather than guessed: the dispatch has recorded something and
         // has not named a tool, so the count and the age are the whole of what
@@ -8186,7 +8185,6 @@ mod tests {
             doing: None,
             progress: recorded(3, sys::now_millis()),
             last_heartbeat_at: None,
-            transcript: None,
         });
         assert_eq!(rendered, "3 event(s), 0s ago");
         assert!(!rendered.contains("now"), "{rendered}");
@@ -8198,10 +8196,9 @@ mod tests {
     fn a_heartbeat_is_reported_beside_the_age_of_the_work_rather_than_as_work() {
         let now = sys::now_millis();
         let rendered = working(&crate::projection::NodeActivity {
-            doing: Some("Bash red-green.sh".into()),
+            doing: Some(crate::projection::Doing::Said("Bash red-green.sh".into())),
             progress: recorded(4, now - 600_000),
             last_heartbeat_at: Some(now),
-            transcript: None,
         });
         assert!(
             rendered.contains("4 event(s), 10m00s ago"),
@@ -8222,7 +8219,6 @@ mod tests {
             doing: None,
             progress: None,
             last_heartbeat_at: Some(sys::now_millis()),
-            transcript: None,
         });
         assert_eq!(rendered, "nothing recorded yet; alive 0s ago");
     }
