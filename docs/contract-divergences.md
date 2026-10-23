@@ -12612,7 +12612,9 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    worker of its own, and a dispatch or a publication starts only once the store holds the
    write naming it, with the claim asked again after that. So a node whose fence write did not
    land is not dispatched until one does. A refused write is reported and retried every five
-   seconds, and it is made inside a wait the store asked for too. Snapshots that arrive while
+   seconds. Inside a wait the store asked for, a write that names a node the store is not
+   known to hold is still made, because a start waits on it. A write that only lets go of
+   nodes waits for the wait to pass. Snapshots that arrive while
    a write is in flight are coalesced into the newest, so at most one write is pending and
    none carries a state older than one already written. Settlement never waits on the fence.
    This is a change for a run whose store is unreachable or refuses the fence: work already
@@ -12649,7 +12651,9 @@ driver's work. Entry 128's wording, and the contract's, are unchanged until this
    its run's ownership lock found free, as before, or, for a run this runs root does not
    hold, its claim's pid dead. A host shutdown records the dispatches it stopped on the
    store too: after its `dispatch-stopped` records it takes every one that ended, gracefully
-   or killed, off the run's fence; one that would not go stays fenced. `adopt` after a host
+   or killed, off the run's fence; one that would not go stays fenced. Where it watched the
+   run's whole process tree end, its driver with it, it lets go of every node the fence
+   names, including a dispatch the driver had fenced but not yet started. `adopt` after a host
    shutdown, or after the driver's process died, resumes those nodes onto their recorded
    branches at once. A renamed directory does not release its launch record's run id:
    minting reserves it, so no successor reads a live displaced driver's claim as its own.

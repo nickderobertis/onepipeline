@@ -806,6 +806,7 @@ impl ClaimWatch {
             project: project.clone(),
             run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
+            run_dir: paths.dir.clone(),
             seen: std::sync::Arc::clone(&seen),
             lease: lease.clone(),
             fence_refused: None,
@@ -1036,6 +1037,8 @@ struct FenceWriter {
     run: String,
     host: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The run's own directory, where the store's request to be left alone is kept.
+    run_dir: std::path::PathBuf,
     seen: std::sync::Arc<std::sync::Mutex<Seen>>,
     lease: Lease,
     fence_refused: Option<Instant>,
@@ -1089,12 +1092,18 @@ impl FenceWriter {
     /// waits for the write naming it to land; one the store refused is reported and retried.
     ///
     /// Written only where it differs from what the store is known to hold, and bounded by
-    /// [`CLAIM_READ_DEADLINE`]. It is made inside a wait the store asked for too: a start
-    /// waits on it, and the store's wait is about the write-back's own traffic. A superseded
-    /// driver reads before it clears, and clears only a fence of its own.
+    /// [`CLAIM_READ_DEADLINE`]. Inside a wait the store asked for, only a write naming a node
+    /// the store is not known to hold is made, since a start waits on it; one that only lets
+    /// go waits for the wait to pass. A superseded driver reads before it clears, and clears
+    /// only a fence of its own.
     fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
-        if self.fenced().as_ref() == Some(nodes) {
+        let known = self.fenced();
+        if known.as_ref() == Some(nodes) {
             return true;
+        }
+        let names_more = known.map_or(!nodes.is_empty(), |known| !nodes.is_subset(&known));
+        if !names_more && crate::writeback::store_asked_to_wait(&self.run_dir) {
+            return false;
         }
         // A write the store refused is made again when its retry is due, and not on whatever
         // pass something else woke first.
@@ -2183,23 +2192,27 @@ pub(crate) fn release_left_standing(
 
 /// Take the dispatches a host shutdown stopped off this run's fence on its project: they are
 /// no longer running, so a run taking the project over waits on none of them — the store
-/// records them stopped, and the adopter resumes each onto its recorded branch at once.
+/// records them stopped, and the adopter resumes each onto its recorded branch at once. Where
+/// `tree_gone`, the shutdown watched the run's whole process tree end, its driver with it, so
+/// every node the fence names is let go.
 ///
 /// Read first, and written only where the fence still names this run on this host; nodes
 /// it names that were not `stopped` — a settlement not yet on the store, a dispatch that
-/// would not go — stay. Each call bounded by [`CLAIM_READ_DEADLINE`], not made inside a wait
-/// the store asked for, and best effort: what could not be done is said on standard error,
-/// and an adopter then waits for the fence as it would for a driver that died.
+/// would not go — stay unless the tree is gone. Each call bounded by [`CLAIM_READ_DEADLINE`],
+/// not made inside a wait the store asked for, and best effort: what could not be done is said
+/// on standard error, and an adopter then waits for the fence as it would for a driver that
+/// died.
 pub(crate) fn release_stopped(
     paths: &crate::ledger::RunPaths,
     launch: &crate::ledger::LaunchRecord,
     stopped: &std::collections::BTreeSet<String>,
+    tree_gone: bool,
     term_scope: &[String],
 ) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
     };
-    if stopped.is_empty() || crate::writeback::store_asked_to_wait(&paths.dir) {
+    if (stopped.is_empty() && !tree_gone) || crate::writeback::store_asked_to_wait(&paths.dir) {
         return;
     }
     let run = crate::publicid::on_store(launch);
@@ -2211,8 +2224,11 @@ pub(crate) fn release_stopped(
             let Some(fenced) = fence_on(&run, &host, &project, &metadata) else {
                 return Ok(());
             };
-            let left: std::collections::BTreeSet<String> =
-                fenced.difference(stopped).cloned().collect();
+            let left: std::collections::BTreeSet<String> = if tree_gone {
+                std::collections::BTreeSet::new()
+            } else {
+                fenced.difference(stopped).cloned().collect()
+            };
             if left == fenced {
                 return Ok(());
             }

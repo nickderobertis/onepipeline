@@ -665,7 +665,10 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     }
 
     // The dispatches that stopped are recorded stopped on the project's store too, so a run
-    // taking the project over waits on none of them; one that would not go stays fenced.
+    // taking the project over waits on none of them; one that would not go stays fenced. A
+    // teardown this host watched end the run's whole tree, its driver with it, leaves nothing
+    // of the run running: every node its fence names is let go, a dispatch the driver had
+    // fenced and not yet started among them.
     crate::continuation::release_stopped(
         paths,
         &view.launch,
@@ -674,6 +677,10 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
             .filter(|stopped| stopped.ended != DispatchEnding::StillRunning)
             .map(|stopped| stopped.node.clone())
             .collect(),
+        matches!(
+            teardown,
+            crate::journal::StopTeardown::Signalled | crate::journal::StopTeardown::NothingToStop
+        ),
         &crate::boundary::of_run(&crate::boundary::plan_now(&view.state)).scope,
     );
 
