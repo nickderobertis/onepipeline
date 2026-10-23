@@ -458,14 +458,19 @@ fn a_heartbeat_does_not_wake_a_watch_and_a_settlement_does() {
 /// Append one relayed record straight to a run's journal, as a driver's relay
 /// would have: a sibling's own stream and stamp.
 fn relayed(world: &World, run: &str, kind: &str, node: &str, seq: u64, ts: &str) {
+    relayed_from(world, run, "older-graph", kind, node, seq, ts);
+}
+
+/// [`relayed`], from the graph run `graph`: its stream and its member's labels.
+fn relayed_from(world: &World, run: &str, graph: &str, kind: &str, node: &str, seq: u64, ts: &str) {
     let record = json!({
         "v": 2,
         "ts": ts,
-        "stream": "older-graph-1",
+        "stream": format!("{graph}-1"),
         "seq": seq,
         "source": "agentgraph",
         "kind": kind,
-        "labels": {"run_id": "older-graph", "node": node, "member": "worker"},
+        "labels": {"run_id": graph, "node": node, "member": "worker"},
         "payload": {"kind": "tool_use", "name": "Bash", "detail": format!("relayed late {seq}")},
         "artifacts": [],
     });
@@ -644,13 +649,61 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
         );
     }
 
-    a_held_member(&world, "next", true);
+    // Held quiet, beating and doing nothing more, so every event its line counts
+    // is one the journey can name.
+    a_held_member(&world, "next", false);
     world.run(&["adopt", run, "--detach"]).exited(0);
-    world.until("the ready node to be dispatched and working", |world| {
-        past(world, run, at, "turn-activity")
-            .iter()
-            .any(|record| record["labels"]["node"] == "next")
-    });
+    world.until(
+        "the ready node to be dispatched and its turn open",
+        |world| {
+            past(world, run, at, "turn-started")
+                .iter()
+                .any(|record| record["labels"]["node"] == "next")
+        },
+    );
+    let graph = past(&world, run, at, "turn-started")
+        .into_iter()
+        .find(|record| record["labels"]["node"] == "next")
+        .and_then(|record| record["labels"]["run_id"].as_str().map(str::to_owned))
+        .expect("the running node's graph run");
+
+    // Worker events of the running node arrive in the tail stamped before every
+    // record the checkpoint covers, and are folded for it all the same: its line
+    // counts exactly them more, and names what the last of them was doing.
+    let events_of_next = |world: &World| -> u64 {
+        let text = world.run(&["status", run]);
+        text.exited(0);
+        text.stdout
+            .lines()
+            .find(|line| line.starts_with("  next: running for"))
+            .and_then(|line| line.split(" event(s)").next())
+            .and_then(|head| head.rsplit(['(', ' ']).next())
+            .and_then(|count| count.parse().ok())
+            .unwrap_or_else(|| panic!("no event count for the running node in:\n{}", text.stdout))
+    };
+    let before = events_of_next(&world);
+    for seq in 0..3 {
+        relayed_from(
+            &world,
+            run,
+            &graph,
+            "turn-activity",
+            "next",
+            seq,
+            "2000-01-01T00:00:00.000Z",
+        );
+    }
+    assert_eq!(
+        events_of_next(&world),
+        before + 3,
+        "the earlier-stamped events were not folded for the running node"
+    );
+    let text = world.run(&["status", run]);
+    assert!(
+        text.stdout.contains("now Bash relayed late 2"),
+        "the running node's line does not name the last of them:\n{}",
+        text.stdout
+    );
 
     let replied = world.run_with_stdin(
         &["reply", run],
@@ -762,6 +815,18 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
             .any(|(node, _)| node == "first" || node == "spare"),
         "a node settled done is listed unsettled: {unsettled:?}"
     );
+
+    // And the running node's transcript shows their tool calls. Unreported, as the
+    // whole read of its own it keeps is.
+    let transcript = unreported(&world, &["transcript", run, "next"]);
+    transcript.exited(0);
+    for seq in 0..3 {
+        assert!(
+            transcript.stdout.contains(&format!("relayed late {seq}")),
+            "the transcript does not show the earlier-stamped tool call {seq}:\n{}",
+            transcript.stdout
+        );
+    }
 
     // Every read the binary reported making of the journal since the overwrite —
     // the adopting driver's passes, appends and attached render, every `reply`,
