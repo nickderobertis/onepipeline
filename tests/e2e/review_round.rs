@@ -768,6 +768,9 @@ pub(crate) fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
     .expect("the committed reporter runs")
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this is the journey this
+// node makes reliable, and `.config/nextest.toml` already gives it the whole e2e group while it
+// runs. Moving it out of `onepipeline-e2e` is left to the re-plan of this repository's test tiers.
 #[test]
 fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let world = World::new("review-round")
@@ -1149,6 +1152,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         assert!(detail.contains(part), "the detail lacks {part:?}: {detail}");
     }
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The most `git` processes the round's commands may start, from the launch through
 /// the second pass.
@@ -1500,6 +1504,10 @@ impl CloneReads {
     }
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these two journeys are
+// the busy round's regression proofs of the onevcs this crate links, and each costs 4-9 s. A
+// tier of their own would still depend on all of src/** through the harness, which builds the
+// onepipeline binary, and placing them is left to the re-plan of this repository's test tiers.
 /// On macOS the busy round's stack-base close was refused for a process working inside
 /// that session's clone: a `git` an `onevcs` landing-status read had started there. This
 /// is that ordering on any platform, against the `onevcs` this crate links: a real
@@ -1635,6 +1643,7 @@ fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
 
 /// How long the second read waits for any lock before saying which one it waited on.
 const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
 /// last pass's ledger and every other figure the smallest a phase can carry.

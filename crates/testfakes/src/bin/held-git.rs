@@ -3,12 +3,16 @@
 //!
 //! **Not a double for anything in this stack**: every invocation runs the real `git`
 //! that `HELD_GIT_REAL` names, with its argv, environment, directory and exit code
-//! untouched. What it adds is one pause. The first invocation started with
+//! untouched once it runs. What it adds is one pause. The first invocation started with
 //! `HELD_GIT_HOLD` set whose working directory is `HELD_GIT_CLONE` writes its pid to
 //! `HELD_GIT_DIR/inside` and waits for `HELD_GIT_DIR/release` before running `git`, so
 //! a journey can hold a real `onevcs` read with a `git` child inside a session's clone
 //! for as long as it needs. A compiled program rather than a shell script, so the same
 //! pause holds on Windows, where a `git` on `PATH` must be an executable.
+//!
+//! Exits 70 without running `git` when its own setup fails: no `HELD_GIT_REAL`, a hold
+//! missing `HELD_GIT_CLONE` or `HELD_GIT_DIR`, a pause file it cannot write, or a `git`
+//! that does not start. A `git` killed by a signal, which has no exit code, exits 1.
 
 // llmlint: ignore-file[new_code_lands_in_a_project] `crates/testfakes` has no `project.json`
 // of its own, like every double beside this file: its files are inputs of the
