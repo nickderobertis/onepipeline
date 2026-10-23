@@ -600,7 +600,31 @@ pub enum Doing {
     /// rather than when the record is folded — a fold reads no history file,
     /// so a state resumed from a checkpoint never carries an answer the file
     /// has since changed.
-    Referenced(crate::views::transcript::TranscriptRef),
+    Referenced(ActivityReference),
+}
+
+/// A `turn-activity`'s reference into its history, and nothing else: a copy, or
+/// a reference of another kind, is not what a dispatch's last activity can be.
+///
+/// Serialized as `{"activity": …}`, the spelling the same reference has as a
+/// [`crate::views::transcript::TranscriptRef`], so a checkpoint reads the same
+/// either way — and one naming anything else is refused rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityReference {
+    activity: oneagentgraph::event::ActivityTranscript,
+}
+
+impl ActivityReference {
+    /// Wrap the reference a `turn-activity` carried.
+    pub fn new(activity: oneagentgraph::event::ActivityTranscript) -> Self {
+        Self { activity }
+    }
+
+    /// The reference, as the resolver reads one.
+    pub fn transcript(&self) -> crate::views::transcript::TranscriptRef {
+        crate::views::transcript::TranscriptRef::Activity(self.activity.clone())
+    }
 }
 
 impl Doing {
@@ -2436,11 +2460,15 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         if text("kind") == crate::report::TOOL_RESULT {
             return;
         }
+        // An activity's `transcript` reads as an activity reference or not at
+        // all, so no other answer reaches the last arm.
         match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
-            Some(Ok(reference)) => activity.doing = Some(Doing::Referenced(reference)),
+            Some(Ok(crate::views::transcript::TranscriptRef::Activity(reference))) => {
+                activity.doing = Some(Doing::Referenced(ActivityReference::new(reference)));
+            }
             // llmlint: ignore[changed_behavior_has_e2e] a `transcript` that is not a reference is a record no producer in this stack writes — the linked sibling serializes it from its own typed `ActivityTranscript` — so only a store something wearing a producer's clothes left behind reaches this, the ground `fold_refusal` suppresses its own `None` half on; the diagnostic it renders is the resolver's, held by `views::transcript`'s `unreadable_history_names_the_file_and_says_so`.
             Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
-            None => {}
+            Some(Ok(_)) | None => {}
         }
         return;
     }
@@ -4105,6 +4133,44 @@ mod tests {
                 .events(),
             1
         );
+    }
+
+    /// A dispatch's last activity is an activity reference or words, and a
+    /// checkpoint naming anything else — a copy, or a turn's instruction — is
+    /// refused rather than read back as a reference it cannot be.
+    #[test]
+    fn a_referenced_doing_holds_an_activity_reference_and_nothing_else() {
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 0,
+            "tool_call_id": "call-1",
+        });
+        let doing = Doing::Referenced(ActivityReference::new(
+            serde_json::from_value(reference.clone()).expect("a reference"),
+        ));
+        let written = serde_json::to_value(&doing).expect("a doing serializes");
+        assert_eq!(written, json!({"activity": reference}));
+        assert_eq!(
+            serde_json::from_value::<Doing>(written).expect("an activity reference reads"),
+            doing
+        );
+        for other in [
+            json!({"copy": {"text": {"message": "copied"}, "cut": false}}),
+            json!({"instruction": {
+                "history_dir": "/state/oneharness/history",
+                "history_project": "project",
+                "history_session": "session",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            }}),
+        ] {
+            assert!(
+                serde_json::from_value::<Doing>(other.clone()).is_err(),
+                "a checkpoint read {other} as what a dispatch was doing"
+            );
+        }
     }
 
     /// The readout an operator decides between cancel, retry, and wait on. A

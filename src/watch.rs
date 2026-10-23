@@ -1528,37 +1528,45 @@ enum ResolvedText {
 
 impl ResolvedRecord {
     fn of(event: &Envelope) -> Option<Self> {
-        use views::transcript::Text;
         if !referenced(event) {
             return None;
         }
-        Some(
-            match views::transcript::of_record(&event.kind.0, &event.payload)? {
-                Ok(resolved) => Self::Resolved {
-                    text: match &resolved.text {
-                        Text::Instruction(said) => ResolvedText::Instruction {
-                            instruction: said.clone(),
-                        },
-                        Text::Message(said) => ResolvedText::Message {
-                            message: said.clone(),
-                        },
-                        Text::Reasoning(said) => ResolvedText::Reasoning {
-                            reasoning: said.clone(),
-                        },
-                        Text::Tool { output, .. } => ResolvedText::Tool {
-                            input: resolved.text.input_text(),
-                            output: output.clone(),
-                        },
+        views::transcript::of_record(&event.kind.0, &event.payload).map(Self::from)
+    }
+}
+
+impl From<std::result::Result<views::transcript::Resolved, views::transcript::Unresolved>>
+    for ResolvedRecord
+{
+    fn from(
+        resolution: std::result::Result<views::transcript::Resolved, views::transcript::Unresolved>,
+    ) -> Self {
+        use views::transcript::Text;
+        match resolution {
+            Ok(resolved) => Self::Resolved {
+                text: match &resolved.text {
+                    Text::Instruction(said) => ResolvedText::Instruction {
+                        instruction: said.clone(),
                     },
-                    description: resolved.description,
+                    Text::Message(said) => ResolvedText::Message {
+                        message: said.clone(),
+                    },
+                    Text::Reasoning(said) => ResolvedText::Reasoning {
+                        reasoning: said.clone(),
+                    },
+                    Text::Tool { output, .. } => ResolvedText::Tool {
+                        input: resolved.text.input_text(),
+                        output: output.clone(),
+                    },
                 },
-                Err(unresolved) => Self::Unavailable {
-                    unavailable: unresolved.to_string(),
-                    path: unresolved.path.display().to_string(),
-                    why: unresolved.why,
-                },
+                description: resolved.description,
             },
-        )
+            Err(unresolved) => Self::Unavailable {
+                unavailable: unresolved.to_string(),
+                path: unresolved.path.display().to_string(),
+                why: unresolved.why,
+            },
+        }
     }
 }
 
@@ -1746,6 +1754,53 @@ pub(crate) fn unread_phrase(unread: &Unread) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contract's `watch-transcript` example is what this serializer writes:
+    /// each record's `transcript` object is the one [`ResolvedRecord`] makes of
+    /// the resolution it shows, so a field this file renames or adds fails here
+    /// rather than leaving the document describing a record nobody writes.
+    #[test]
+    fn the_contracts_watch_transcript_example_is_what_the_machine_record_writes() {
+        use views::transcript::{Resolved, Text, ToolKind, Unresolved, Why};
+        let contract = include_str!("../docs/contract.md");
+        let (_, after) = contract
+            .split_once("```json watch-transcript\n")
+            .expect("the contract carries a watch-transcript example");
+        let (block, _) = after.split_once("```").expect("the example is closed");
+        let example: Vec<serde_json::Value> =
+            serde_json::from_str(block).expect("the example parses");
+        let written = [
+            Ok(Resolved {
+                text: Text::Tool {
+                    kind: ToolKind::Call,
+                    name: Some("bash".into()),
+                    input: Some(
+                        serde_json::json!({"command": "cargo nextest run --workspace\necho done"}),
+                    ),
+                    output: None,
+                },
+                description: "cargo nextest run --workspace".into(),
+                cut: false,
+            }),
+            Ok(Resolved {
+                text: Text::Instruction("## What\nthe whole prompt".into()),
+                description: "## What".into(),
+                cut: false,
+            }),
+            Err(Unresolved {
+                path: "/state/oneharness/history/project/session.jsonl".into(),
+                why: Why::MissingFile,
+            }),
+        ]
+        .into_iter()
+        .map(|resolution| {
+            serde_json::to_value(ResolvedRecord::from(resolution)).expect("a record serializes")
+        })
+        .collect::<Vec<_>>();
+        let shown: Vec<&serde_json::Value> =
+            example.iter().map(|record| &record["transcript"]).collect();
+        assert_eq!(shown, written.iter().collect::<Vec<_>>());
+    }
 
     /// A wait reads what it follows once per change it reports, and never across
     /// a wait that reports none — over the bus's memory transport, where a change

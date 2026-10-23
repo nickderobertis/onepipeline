@@ -4125,10 +4125,12 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
     // read.
     let doing = activity.doing.as_ref().map(|doing| match doing {
         crate::projection::Doing::Said(said) => said.clone(),
-        crate::projection::Doing::Referenced(reference) => match transcript::resolve(reference) {
-            Ok(resolved) => one_line(&voiced(&resolved)),
-            Err(unresolved) => one_line(&unresolved.to_string()),
-        },
+        crate::projection::Doing::Referenced(reference) => {
+            match transcript::resolve(&reference.transcript()) {
+                Ok(resolved) => one_line(&voiced(&resolved)),
+                Err(unresolved) => one_line(&unresolved.to_string()),
+            }
+        }
     });
     match doing {
         Some(doing) => format!("now {doing} ({counted})"),

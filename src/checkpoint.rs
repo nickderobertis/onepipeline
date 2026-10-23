@@ -1714,7 +1714,7 @@ mod tests {
                 "build".to_string(),
                 crate::projection::NodeActivity {
                     doing: Some(crate::projection::Doing::Referenced(
-                        crate::views::transcript::TranscriptRef::Activity(
+                        crate::projection::ActivityReference::new(
                             serde_json::from_value(json!({
                                 "history_dir": "/state/oneharness/history",
                                 "history_project": "project",
