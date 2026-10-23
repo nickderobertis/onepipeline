@@ -1938,20 +1938,22 @@ fn three_managers_landing_at_once_are_each_supervised_alone() {
     );
 }
 
-/// A landing reads the manager's own checkout without writing its index: what it
-/// reads there takes none of git's optional locks, so a second landing's
-/// `git merge` in that checkout never meets an `index.lock` this one took.
+/// What a landing held at its publishing push has left of a checkout whose index
+/// was stale when it started — a tracked file's stat no longer what the index
+/// recorded, its content unchanged — which is exactly the state a `git status`
+/// refreshes by rewriting the index through `index.lock`. Answers whether the
+/// index was still stale and still byte for byte what it was while the landing
+/// was held, having read the checkout and written nothing to it yet. Released,
+/// the landing fast-forwards the checkout, a write of its own, and lands.
 ///
-/// The checkout's index is left stale — a tracked file's stat no longer what the
-/// index recorded, its content unchanged — which is exactly the state a
-/// `git status` refreshes by rewriting the index through `index.lock`. Held at
-/// its publishing push, the landing has read the checkout and written nothing to
-/// it yet, and the index is byte for byte what it was: it was never locked,
-/// because it was never written. Released, the landing fast-forwards the
-/// checkout, a write of its own, and lands.
-#[test]
-fn a_landing_reads_the_managers_checkout_without_taking_its_index_lock() {
-    let (world, repository, held) = held_world("ml-index", "local-direct");
+/// `optional_locks` is the `GIT_OPTIONAL_LOCKS` the operator gave the landing, if
+/// any.
+fn a_held_landing_over_a_stale_index(name: &str, optional_locks: Option<&str>) -> (bool, bool) {
+    let (world, repository, held) = held_world(name, "local-direct");
+    let world = match optional_locks {
+        Some(value) => world.with_env("GIT_OPTIONAL_LOCKS", value),
+        None => world,
+    };
     branch_with_work(&world, &repository, BRANCH, "widget.txt");
     let checkout = &repository.checkout;
     let readme = std::fs::OpenOptions::new()
@@ -1964,8 +1966,8 @@ fn a_landing_reads_the_managers_checkout_without_taking_its_index_lock() {
     drop(readme);
     // `diff-files` compares the index's stat data with the tree's and writes
     // nothing, so it reads the staleness without curing it.
-    let stale = || git(&world, checkout, &["diff-files", "--name-only"]);
-    assert_eq!(stale(), "README.md\n", "the index was not left stale");
+    let stale = || git(&world, checkout, &["diff-files", "--name-only"]) == "README.md\n";
+    assert!(stale(), "the index was not left stale");
     let index = checkout.join(".git").join("index");
     let before = std::fs::read(&index).expect("the index is read");
 
@@ -1985,19 +1987,40 @@ fn a_landing_reads_the_managers_checkout_without_taking_its_index_lock() {
         ended.is_none(),
         "the landing ended {ended:?} before its push"
     );
-
-    assert_eq!(
-        stale(),
-        "README.md\n",
-        "the landing refreshed the checkout's index"
-    );
-    assert!(
-        std::fs::read(&index).expect("the index is read again") == before,
-        "the landing rewrote the checkout's index, which git does only under index.lock"
-    );
+    let still_stale = stale();
+    let untouched = std::fs::read(&index).expect("the index is read again") == before;
     held.release();
     let (code, _, said) = landing.ended();
     assert_eq!(code, EXIT_SUCCESS, "{said}");
+    (still_stale, untouched)
+}
+
+/// A landing reads the manager's own checkout without writing its index: what it
+/// reads there takes none of git's optional locks, so a second landing's
+/// `git merge` in that checkout never meets an `index.lock` this one took. Held at
+/// its push, the index it found stale is still stale and byte for byte what it
+/// was: it was never locked, because it was never written.
+#[test]
+fn a_landing_reads_the_managers_checkout_without_taking_its_index_lock() {
+    let (still_stale, untouched) = a_held_landing_over_a_stale_index("ml-index", None);
+    assert!(still_stale, "the landing refreshed the checkout's index");
+    assert!(
+        untouched,
+        "the landing rewrote the checkout's index, which git does only under index.lock"
+    );
+}
+
+/// An operator who asks git for its optional locks keeps them: the landing's
+/// reads refresh the stale index as git does by default, so the value the
+/// landing was given reached the git it runs rather than being replaced.
+#[test]
+fn an_operators_own_optional_locks_setting_is_kept() {
+    let (still_stale, untouched) = a_held_landing_over_a_stale_index("ml-index-kept", Some("1"));
+    assert!(
+        !still_stale && !untouched,
+        "the landing left the index unrefreshed (stale {still_stale}, untouched {untouched}): \
+         the operator's GIT_OPTIONAL_LOCKS=1 did not reach its git"
+    );
 }
 
 /// An integration train records its own local progress — the lock, the gate's
