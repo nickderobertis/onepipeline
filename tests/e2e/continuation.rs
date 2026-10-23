@@ -2038,6 +2038,20 @@ fn a_takeover_waits_until_a_fence_it_cannot_read_is_cleared(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run past a fence it could not read"
     );
+    // The all-runs status on the adopter's host says what it waits on and how to release it.
+    let status = successor.run(&["status"]);
+    status.exited(0);
+    assert!(
+        status.stdout.lines().any(|line| {
+            line.starts_with(&format!(
+                "takeover of {project} by run '{run}' waiting since "
+            )) && line.contains("its fence, which cannot be read (")
+                && line.contains("is not a driver's publications")
+                && line.contains("clearing the project's `onepipeline.publishing` key")
+        }),
+        "the all-runs status does not say the takeover waits on an unreadable fence:\n{}",
+        status.stdout
+    );
     restate_publishing(&world, &project, Value::Null);
     let said = launched_over(taking);
     assert!(
