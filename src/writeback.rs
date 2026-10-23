@@ -7681,8 +7681,8 @@ mod tests {
     }
 
     /// The image-carrying step's rewrite of a created task's shadow document — `local-md`'s
-    /// `write_task_with_assets`, carrying no answers — stopped part-way at each byte of that
-    /// document: a reader reading the shadow at that moment, with the write frozen incomplete,
+    /// `write_task_with_assets`, carrying no answers — stopped part-way at each byte of the
+    /// document it writes: a reader reading the shadow at that moment, with the write frozen incomplete,
     /// reads the document `write_shadow` published, whole, because the store writes the
     /// replacement beside it and renames it into place. The step says it failed, and once the
     /// limit is lifted the next step lands.
@@ -7697,7 +7697,10 @@ mod tests {
         let path = shadow_task(&fixture, "design");
         write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
         let whole = std::fs::read_to_string(&path).expect("the published document reads");
-        for limit in 0..whole.len() {
+        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let rewritten = std::fs::read_to_string(&path).expect("the rewritten document reads");
+        for limit in 0..rewritten.len() {
             write_shadow(&fixture.snapshot, &created, &fixture.ends)
                 .expect("the shadow is written");
             let stopped = {
@@ -7718,6 +7721,7 @@ mod tests {
         }
         super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
             .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rewritten);
         let (front, content) = written(&path);
         assert_eq!(front["metadata"]["onepipeline.id"], "design");
         let published = whole.split_once("\n---\n").expect("a whole document").1;
