@@ -3571,6 +3571,36 @@ impl Rendezvous {
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
         Arrival::of(stream)
     }
+
+    /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
+    /// end, a process that never reaches the failpoint fails naming `what` it was waiting
+    /// for, and `seen` — what the journey can say of where things stood — rather than
+    /// blocking until the runner's timeout names only the test.
+    pub fn arrived_within(&self, what: &str, seen: impl FnOnce() -> String) -> Arrival {
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let mut connected = None;
+        let arrived = waited(|| match self.listener.accept() {
+            Ok((stream, _)) => {
+                connected = Some(stream);
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+            Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
+        });
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener blocks again");
+        let Some(stream) = connected.filter(|_| arrived) else {
+            panic!("timed out waiting for {what}; {}", seen());
+        };
+        // Windows hands an accepted socket the listener's mode; the handshake reads blocking.
+        stream
+            .set_nonblocking(false)
+            .expect("the connection blocks");
+        Arrival::of(stream)
+    }
 }
 
 impl Arrival {
