@@ -47,6 +47,9 @@
 //!   read or the targeted update answers that the store holds no such item, with no failure
 //!   beside it, for as long as the file is there: what a hosted destination answers for a
 //!   board or an issue somebody deleted.
+//! * `<key>.get_project.without` — every project read is **served** by the real store and
+//!   answered with the project metadata key the file holds left out, for as long as the file
+//!   is there: a board that holds what was written to it and reads back without it.
 //! * `<key>.<method>.malformed` — every call of that method is **served** by the real store,
 //!   so a write it carries is applied, and then answered with a result the plugin protocol
 //!   does not give that method: a plugin that stored what it was asked to and then answered
@@ -421,6 +424,18 @@ impl Scripted {
         }
         if let Some(key) = handle(&self.scenario("task.key"))? {
             keyed(method, &mut answered, &key);
+        }
+        if method == "get_project" {
+            if let Some(key) = handle(&self.scenario("get_project.without"))? {
+                if let Some(metadata) = answered
+                    .get_mut("result")
+                    .and_then(|result| result.get_mut("project"))
+                    .and_then(|project| project.get_mut("metadata"))
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove(key.trim());
+                }
+            }
         }
         // Ending a command clears what the source held for it and sends nothing to a hosted
         // destination, so, like `metering`, it is never charged.

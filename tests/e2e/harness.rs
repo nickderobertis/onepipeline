@@ -3118,6 +3118,20 @@ impl World {
         );
     }
 
+    /// The scripted store writes the project metadata `key` to the real store again.
+    pub fn store_stops_refusing_key(&self, key: &str) {
+        self.unscript(&format!(
+            "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+            onepipeline_testfakes::segment(key)
+        ));
+    }
+
+    /// Have the scripted store answer every project read without the project metadata `key`,
+    /// which it still holds: a board that reads back without what was written to it.
+    pub fn store_reads_without_key(&self, key: &str) {
+        self.script(&format!("{SCRIPTED_KEY}.get_project.without"), key);
+    }
+
     /// The same, for the next call of `method` alone.
     pub fn store_refuses_once(&self, method: &str, error: &Value) {
         self.script(

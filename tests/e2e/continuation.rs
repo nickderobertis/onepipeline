@@ -2351,8 +2351,10 @@ enum ClaimAnswer {
     TimesOut,
     /// Every read is refused as rate limited.
     RateLimited,
-    /// Every read answers, and finds no claim on the project.
+    /// Every write of the claim is refused, so every read finds none on the project.
     NoClaim,
+    /// The claim lands, and every read from then on answers without it.
+    ClaimGone,
 }
 
 /// A claim read that fails ends no dispatch: with `x` in flight for longer than the lapse the
@@ -2381,6 +2383,14 @@ fn a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication() {
 #[test]
 fn a_claim_read_finding_no_claim_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-no-claim", ClaimAnswer::NoClaim);
+}
+
+/// The same once the claim has landed: a board that reads back without the claim this
+/// driver landed on it ends no dispatch, keeps none from starting, and lets the publication
+/// go ahead.
+#[test]
+fn a_claim_read_finding_its_landed_claim_gone_ends_no_dispatch_and_publishes() {
+    a_claim_read_answering("claim-read-claim-gone", ClaimAnswer::ClaimGone);
 }
 
 /// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
@@ -2448,6 +2458,12 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             None
         }
         ClaimAnswer::NoClaim => None,
+        ClaimAnswer::ClaimGone => {
+            world.store_reads_without_key("onepipeline.driver");
+            // The board still holds the claim; it is only read back without it.
+            assert_eq!(stored_claim(&world, &project)["run"], run);
+            None
+        }
     };
     // `x` runs well past the old lapse, and nothing ends it.
     std::thread::sleep(lapsed + Duration::from_secs(6));
@@ -2478,7 +2494,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
             .any(|event| event["labels"]["node"] == "z")
     };
     match (answer, held) {
-        (ClaimAnswer::NoClaim, _) => {
+        (ClaimAnswer::NoClaim | ClaimAnswer::ClaimGone, _) => {
             beside.release();
             world.until("z to settle", z_settled);
         }
@@ -2675,6 +2691,72 @@ fn a_publication_soon_after_the_last_replaces_its_fence_in_one_write() {
             "{node}"
         );
     }
+    assert_eq!(stored_publishing(&world, &project), Value::Null);
+    one_change_request_per_branch(&world);
+}
+
+/// A fence left naming a settled publication whose clear the store refuses — asking the
+/// driver to wait, as a rate limit does — stays standing, and is cleared once the store takes
+/// writes again, while the driver goes on driving; the run then settles with no fence left.
+#[test]
+fn a_lingering_fence_whose_clear_the_store_defers_is_cleared_once_it_takes_writes() {
+    let world = takeover_world("fence-linger-deferred", 300).through_scripted_source();
+    world.script("first.work", "first's change\n");
+    world.script("hold.wait", "hold");
+    let run = "deferred";
+    let project = author(
+        &world,
+        run,
+        vec![lifecycle("first", &[]), agent("hold", &[])],
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("first's publication to open its change request", |world| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["kind"] == "change-opened" && event["labels"]["node"] == "first")
+    });
+    // Refused from inside the publication's linger, so the clear is the write refused.
+    world.store_refuses_key(
+        "onepipeline.publishing",
+        &json!({"kind": "rate-limited", "retry_after_seconds": 3,
+                "message": "You have exceeded a secondary rate limit"}),
+    );
+    world.until("first to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "first")
+    });
+    world.until_run_file_holds(
+        run,
+        "driver.log",
+        "could not write its publications under way",
+    );
+    assert_eq!(
+        stored_publishing(&world, &project)["nodes"],
+        json!(["first"]),
+        "the fence was cleared through a refusal"
+    );
+    world.store_stops_refusing_key("onepipeline.publishing");
+    world.until("the deferred clear to land while hold runs", |world| {
+        stored_publishing(world, &project).is_null()
+    });
+    assert!(
+        !world.run_file(run, "result.json").is_file(),
+        "the run ended before the fence was cleared"
+    );
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    assert_eq!(
+        settled(&world, run, "first")["outcome"],
+        "change-review-draft"
+    );
     assert_eq!(stored_publishing(&world, &project), Value::Null);
     one_change_request_per_branch(&world);
 }
