@@ -1491,12 +1491,11 @@ enum Record<'a> {
 #[derive(Debug, serde::Serialize)]
 #[serde(untagged)]
 enum ResolvedRecord {
-    /// The description, and the whole text under the field naming what it is:
-    /// `instruction`, `message`, `reasoning`, or a tool's `input` and `output`.
+    /// The description, and the whole text under the field naming what it is.
     Resolved {
         description: String,
         #[serde(flatten)]
-        text: serde_json::Map<String, serde_json::Value>,
+        text: ResolvedText,
     },
     /// The file the reference names, why it was not read, and the line every
     /// view renders that as.
@@ -1504,6 +1503,26 @@ enum ResolvedRecord {
         unavailable: String,
         path: String,
         why: views::transcript::Why,
+    },
+}
+
+/// The whole text a reference resolved to, under the one field (or, for a
+/// tool, the two) naming what it is.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ResolvedText {
+    Instruction {
+        instruction: String,
+    },
+    Message {
+        message: String,
+    },
+    Reasoning {
+        reasoning: String,
+    },
+    Tool {
+        input: Option<String>,
+        output: Option<String>,
     },
 }
 
@@ -1515,28 +1534,24 @@ impl ResolvedRecord {
         }
         Some(
             match views::transcript::of_record(&event.kind.0, &event.payload)? {
-                Ok(resolved) => {
-                    let mut text = serde_json::Map::new();
-                    match &resolved.text {
-                        Text::Instruction(said) => {
-                            text.insert("instruction".into(), said.clone().into());
-                        }
-                        Text::Message(said) => {
-                            text.insert("message".into(), said.clone().into());
-                        }
-                        Text::Reasoning(said) => {
-                            text.insert("reasoning".into(), said.clone().into());
-                        }
-                        Text::Tool { output, .. } => {
-                            text.insert("input".into(), resolved.text.input_text().into());
-                            text.insert("output".into(), output.clone().into());
-                        }
-                    }
-                    Self::Resolved {
-                        description: resolved.description,
-                        text,
-                    }
-                }
+                Ok(resolved) => Self::Resolved {
+                    text: match &resolved.text {
+                        Text::Instruction(said) => ResolvedText::Instruction {
+                            instruction: said.clone(),
+                        },
+                        Text::Message(said) => ResolvedText::Message {
+                            message: said.clone(),
+                        },
+                        Text::Reasoning(said) => ResolvedText::Reasoning {
+                            reasoning: said.clone(),
+                        },
+                        Text::Tool { output, .. } => ResolvedText::Tool {
+                            input: resolved.text.input_text(),
+                            output: output.clone(),
+                        },
+                    },
+                    description: resolved.description,
+                },
                 Err(unresolved) => Self::Unavailable {
                     unavailable: unresolved.to_string(),
                     path: unresolved.path.display().to_string(),
