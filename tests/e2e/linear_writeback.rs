@@ -1856,9 +1856,7 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
             && !world.events_of(name, "driver-exited").is_empty()
     });
 
-    // Each write of the issue's status, in the order the double took it, by the request's
-    // place in the log and the state it set: the last one is the write that left the status
-    // this assertion saw.
+    // So a failure names the write that left the status it saw.
     let status_writes: Vec<(usize, Option<String>)> = linear
         .log()
         .iter()
