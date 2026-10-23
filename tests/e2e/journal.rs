@@ -948,7 +948,8 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
 
 /// A process appending to a run's journal is admitted while the run's driver holds
 /// the journal open inside an append of its own — and the driver writes after that
-/// record rather than over it, and folds it.
+/// record rather than over it, and folds it. Appenders of this binary started while
+/// the driver holds it wait their turn, succeed, and keep their records.
 ///
 /// Every appender of this binary holds the journal across the tail heal, the record
 /// and its append receipt. On Unix that hold is `flock`, which a process that does
@@ -1011,10 +1012,21 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
         assert!(open, "the held driver does not have the journal open");
     }
 
+    const APPENDERS: usize = 8;
     const FOREIGN: usize = 40;
+    let mut appenders: Vec<_> = (0..APPENDERS)
+        .map(|n| {
+            let message = format!("appender {n} was here");
+            world
+                .cmd(&["surface", run, "--kind", "check-in", "--message", &message])
+                .spawn()
+                .expect("the binary starts")
+        })
+        .collect();
     // llmlint: ignore-block[tests_mirror_real_usage] the appender under test is a process
     // that is *not* this binary: no verb writes a record this build cannot read, and the
-    // property is precisely that a writer outside the binary's lock is admitted.
+    // property is precisely that a writer outside the binary's lock is admitted. The
+    // driver, its fold and the binary's own appenders racing it are all real.
     for seq in 0..FOREIGN {
         let record = json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":seq, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
         std::fs::OpenOptions::new()
@@ -1026,6 +1038,12 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
     }
     // llmlint: ignore-end[tests_mirror_real_usage]
     appending.release();
+    for appender in &mut appenders {
+        assert!(
+            appender.wait().expect("the appender ran").success(),
+            "an appender refused"
+        );
+    }
     world.until("the driver to release its ending", |world| {
         world.run_file(run, "result.json").is_file() && !world.run_file(run, "owner.lock").exists()
     });
@@ -1057,6 +1075,18 @@ fn a_held_drivers_journal_takes_another_process_append_and_the_driver_folds_it()
         foreign.iter().all(|(at, _)| *at < settled),
         "the held settlement was not written after what was appended under it"
     );
+    let messages: Vec<&str> = records
+        .iter()
+        .filter(|record| record["kind"] == "planner-surface-queued")
+        .filter_map(|record| record["payload"]["message"].as_str())
+        .collect();
+    for n in 0..APPENDERS {
+        let mine = format!("appender {n} was here");
+        assert!(
+            messages.contains(&mine.as_str()),
+            "{mine} is gone: {messages:?}"
+        );
+    }
     assert!(
         world.events_of(run, "scratch-removed").is_empty(),
         "the driver removed scratch over a record it could not read"
