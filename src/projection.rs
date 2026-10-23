@@ -396,6 +396,12 @@ pub struct RunState {
     /// was spent on. See [`board_settlements`](Self::board_settlements).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(crate) settled_clean: BTreeSet<String>,
+    /// The run-end hook's marker the epoch the run is now in carries, if it carries
+    /// one: what [`crate::hooks::adoption_starts_epoch`] asks, folded as each
+    /// record arrives by the one rule [`crate::hooks`] reads a journal by, so an
+    /// adoption decides it without walking the run's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook_marker: Option<crate::hooks::FiredOver>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -1249,6 +1255,13 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    let marked = crate::hooks::Marked::before(state, event);
+    fold_record(state, event);
+    marked.after(state, event);
+}
+
+/// [`fold_one`], short of the run-end hook's marker it keeps beside the fold.
+fn fold_record(state: &mut RunState, event: &Envelope) {
     #[cfg(test)]
     crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
@@ -1280,6 +1293,20 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         fold_session(state, event);
         fold_landing_commit(state, event);
         fold_push(state, event);
+        // A landing that closes issues, kept whole for the closure watch a driver
+        // starts on its first pass: it is owed until a `landing-closures` names it,
+        // and a run holds one per landing. Kept on what the record says of itself;
+        // the watch reads its `closes` through `onevcs`'s own reader when it takes it.
+        if event.labels.node.is_some()
+            && crate::vcs::is_landing(&event.kind)
+            && event
+                .payload
+                .get("closes")
+                .and_then(Value::as_array)
+                .is_some_and(|closes| !closes.is_empty())
+        {
+            state.recalled.push(event.clone());
+        }
         return;
     }
     // This library's own record, at an envelope schema this build does not know.
@@ -2205,8 +2232,9 @@ fn fold_recall(state: &mut RunState, event: &Envelope) {
 /// Whether [`RunState::recalled`] keeps one of this crate's records whole.
 ///
 /// Every kind here is one a run writes a handful of — a release told or arrived,
-/// a landing's supersessions, a shutdown and what it stopped, an adoption, a
-/// refusal, a continuation off the store, a scratch ending — or, for a dispatch,
+/// a landing's supersessions, a shutdown and what it stopped, an adoption or a
+/// takeover, a refusal, a continuation off the store, a scratch ending, a
+/// landing's closures, the run's home's status — or, for a dispatch,
 /// one of a node some note was ever written for, whose notes reset there.
 /// Commits are kept by [`fold_commit`], which reads their operations once.
 fn recalled_whole(state: &RunState, event: &Envelope) -> bool {
@@ -2220,7 +2248,10 @@ fn recalled_whole(state: &RunState, event: &Envelope) -> bool {
             | K::DispatchStopped
             | K::HostShutdown
             | K::ScratchRemoved
-            | K::ScratchRetained,
+            | K::ScratchRetained
+            | K::LandingClosures
+            | K::DriverTakenOver
+            | K::HomeStatus,
         ) => true,
         Some(K::EditRejected) => event.payload.contains_key("envelope"),
         Some(K::NodeSettled) => event.payload.contains_key("continued"),

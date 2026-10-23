@@ -545,8 +545,7 @@ fn fired(paths: &RunPaths) -> bool {
 /// an epoch. A fold that has lost a record retires nothing, for the reason
 /// [`fired`] gives an edit beside one.
 pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
-    let standing = epochs(&journal::read(&paths.journal()));
-    if !state.strict || standing.marker != Some(FiredOver::Live) {
+    if !state.strict || state.hook_marker != Some(FiredOver::Live) {
         return false;
     }
     let statuses = state.statuses();
@@ -569,8 +568,9 @@ struct Epochs {
 
 /// What the graph was at when a standing marker was fired, which is what
 /// [`adoption_starts_epoch`] asks of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FiredOver {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FiredOver {
     /// Work was left that could still move: the hook fired over a run that had
     /// not ended, which only an adoption then carries on.
     Live,
@@ -579,40 +579,65 @@ enum FiredOver {
 }
 
 /// Walk a journal the way [`fired`] reads it — the one rule, so the epoch
-/// `results` labels a record with is the epoch the marker was held against.
+/// `results` labels a record with is the epoch the marker was held against. The
+/// rule is [`Marked`]'s, which every fold applies to [`RunState::hook_marker`];
+/// this walk only notes where each marker it held was retired.
 fn epochs(events: &[Envelope]) -> Epochs {
     let mut state = RunState {
         strict: true,
         ..RunState::default()
     };
-    let mut marker = None;
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
-        let kind = PipelineKind::from_wire(&event.kind);
-        // The ending in front of an edit arriving while a marker stands, and
-        // nothing otherwise: an edit that found the run live changed no ending,
-        // whatever it left behind.
-        let before = (kind == Some(PipelineKind::EditCommitted) && marker.is_some())
-            .then(|| ending(&state))
-            .flatten();
+        let standing = state.hook_marker.is_some();
         crate::projection::fold_one(&mut state, event);
+        if standing && state.hook_marker.is_none() {
+            ended_by.push(at);
+        }
+    }
+    Epochs {
+        marker: state.hook_marker,
+        ended_by,
+    }
+}
+
+/// The run-end hook's marker across one record a fold takes: what the graph's
+/// ending was in front of it, taken before the record is folded, and the marker
+/// the record leaves standing, decided once it is.
+pub(crate) struct Marked {
+    /// The ending in front of an edit arriving while a marker stands, and nothing
+    /// otherwise: an edit that found the run live changed no ending, whatever it
+    /// left behind.
+    before: Option<Ended>,
+}
+
+impl Marked {
+    /// What the marker rule needs of `state` before `event` is folded into it.
+    pub(crate) fn before(state: &RunState, event: &Envelope) -> Self {
+        let edit = PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditCommitted);
+        Self {
+            before: (edit && state.hook_marker.is_some())
+                .then(|| ending(state))
+                .flatten(),
+        }
+    }
+
+    /// Leave on `state`, now holding `event`, the marker the record leaves standing.
+    pub(crate) fn after(self, state: &mut RunState, event: &Envelope) {
+        let kind = PipelineKind::from_wire(&event.kind);
         // An adoption that started an epoch says so on its own record: it was
         // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
         // and is read back rather than derived a second time.
         let adopted_live = kind == Some(PipelineKind::DriverAdopted)
-            && marker.is_some()
+            && state.hook_marker.is_some()
             && journal::starts_hook_epoch(&event.payload);
-        match before {
-            Some(before) if state.strict && ending(&state) != Some(before) => {
-                marker = None;
-                ended_by.push(at);
+        match self.before {
+            Some(before) if state.strict && ending(state) != Some(before) => {
+                state.hook_marker = None;
             }
-            _ if adopted_live => {
-                marker = None;
-                ended_by.push(at);
-            }
+            _ if adopted_live => state.hook_marker = None,
             _ if kind == Some(PipelineKind::RunHookFired) => {
-                marker = Some(if ending(&state).is_none() {
+                state.hook_marker = Some(if ending(state).is_none() {
                     FiredOver::Live
                 } else {
                     FiredOver::Ended
@@ -621,7 +646,6 @@ fn epochs(events: &[Envelope]) -> Epochs {
             _ => {}
         }
     }
-    Epochs { marker, ended_by }
 }
 
 /// The two ways a graph has ended, as the epoch rule tells them apart: which hook
@@ -1251,8 +1275,12 @@ mod tests {
                 .expect("the record is written");
         }
 
+        // The run as its fold holds it, marker and all: what an adoption decides by.
+        let folded = crate::projection::fold(&journal::read(&paths.journal()));
+        assert_eq!(folded.hook_marker, Some(FiredOver::Live));
         let strict = RunState {
             strict: true,
+            hook_marker: folded.hook_marker,
             ..build.clone()
         };
         assert!(
@@ -1261,6 +1289,7 @@ mod tests {
         );
         let lossy = RunState {
             strict: false,
+            hook_marker: folded.hook_marker,
             ..build
         };
         assert!(

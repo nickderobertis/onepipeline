@@ -1821,7 +1821,7 @@ fn converge(
         // Every landing the journal relayed, a readjustment found, or a catch-up reads off the
         // run's sessions, handed to the write-back's closure thread: none of it waits here.
         if let Some(writeback) = &writeback {
-            closures.pass(paths, state, writeback);
+            closures.pass(paths, state, state.read_through(), writeback);
         }
         // One hold, beside the decision points rather than in place of them: a
         // node a person is holding and a node a release is holding are both nodes
@@ -3025,6 +3025,7 @@ impl InPass {
     fn take_handed(&self) -> Vec<crate::channel::Claimed> {
         std::mem::take(&mut self.state().handed)
     }
+
 
     /// Whether nothing applied here is waiting for the loop to fold it, and
     /// nothing claimed here is waiting for the loop to judge it.

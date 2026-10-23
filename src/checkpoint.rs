@@ -1974,6 +1974,7 @@ mod tests {
                 serde_json::Map::from_iter([("status".to_string(), json!("done"))]),
             )]),
             settled_clean: std::collections::BTreeSet::from(["ship".to_string()]),
+            hook_marker: Some(crate::hooks::FiredOver::Live),
             // Written only for a node whose last activity referenced its history,
             // and pinned for the same reason.
             activity: BTreeMap::from([(

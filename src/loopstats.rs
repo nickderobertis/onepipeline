@@ -12,7 +12,9 @@
 //! The counts are per **process**, and a journey takes a delta across an
 //! interval rather than an absolute.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use serde_json::json;
 
@@ -112,6 +114,64 @@ pub(crate) fn store_read(bytes: u64) {
 
 pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
+}
+
+/// The environment variable asking a process to report **where** it read a run's
+/// journal: a file it appends one line to per read of an `events.jsonl` —
+/// `{"pid", "journal", "offset", "bytes"}` — the byte the read began at and how
+/// many it took.
+///
+/// [`STORE_BYTES`] says how much a process read, which cannot say what a journey
+/// over a checkpointed run asks: whether any read reached back into the history
+/// the checkpoint covers, and whether a rebuild read the journal once or twice.
+/// Every process reports, the verbs as well as a driver, and appends rather than
+/// rewrites, so the several processes one journey starts share the file. Absent,
+/// which is every run outside this repository's own journeys, nothing is opened.
+pub(crate) const JOURNAL_READS_ENV: &str = "ONEPIPELINE_JOURNAL_READS";
+
+/// Where this process reports its journal reads, read once.
+fn journal_reads_file() -> Option<&'static Path> {
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        std::env::var_os(JOURNAL_READS_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
+    .as_deref()
+}
+
+/// Report one read of a run's journal: `bytes` of it from `offset`.
+///
+/// A line that cannot be written is said on standard error rather than handed
+/// back: the read it reports has already happened and succeeded, and the journey
+/// that asked counts lines, so a missing one fails it there.
+pub(crate) fn journal_read(path: &Path, offset: u64, bytes: u64) {
+    let Some(report) = journal_reads_file() else {
+        return;
+    };
+    if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
+        return;
+    }
+    let line = json!({
+        "pid": std::process::id(),
+        "journal": path.to_string_lossy(),
+        "offset": offset,
+        "bytes": bytes,
+    });
+    // One write of one short line to a file opened for appending, so the lines the
+    // several processes of one journey write land whole and never interleaved —
+    // and through no ledger reader, whose own reads would count into the totals.
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()));
+    if let Err(error) = written {
+        eprintln!(
+            "onepipeline: cannot report a journal read to {}: {error}",
+            report.display()
+        );
+    }
 }
 
 /// What this thread's account stands at, for the checks that hold a bounded read

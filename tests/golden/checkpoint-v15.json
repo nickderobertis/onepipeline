@@ -91,6 +91,7 @@
     "settled_clean": [
       "ship"
     ],
+    "hook_marker": "live",
     "completion_requests": [],
     "surfaces_queued": 0,
     "surfaces_read": 0,

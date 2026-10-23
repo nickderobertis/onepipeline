@@ -41,6 +41,60 @@ fn release_the_pass(seam: &Path) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// The variable asking every process the binary starts to report where it read a
+/// run's journal, one line per read; see `loopstats::JOURNAL_READS_ENV`.
+const JOURNAL_READS_ENV: &str = "ONEPIPELINE_JOURNAL_READS";
+
+/// A world whose every `onepipeline` process reports its journal reads into one
+/// file of the world's own.
+fn reporting_reads(name: &str) -> World {
+    let world = World::new(name);
+    let file = world.root.join("journal-reads.jsonl");
+    world.with_env(JOURNAL_READS_ENV, &file.to_string_lossy())
+}
+
+/// One read of a run's journal, as the process that made it reported it.
+#[derive(Debug, Clone, Copy)]
+struct JournalRead {
+    pid: u64,
+    offset: u64,
+    bytes: u64,
+}
+
+/// Every read of `run`'s journal reported since the report was last cleared.
+fn journal_reads(world: &World, run: &str) -> Vec<JournalRead> {
+    let journal = format!("{}{}events.jsonl", run, std::path::MAIN_SEPARATOR);
+    std::fs::read_to_string(world.root.join("journal-reads.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("a whole report line"))
+        .filter(|read| {
+            read["journal"]
+                .as_str()
+                .is_some_and(|path| path.ends_with(&journal))
+        })
+        .map(|read| JournalRead {
+            pid: read["pid"].as_u64().expect("a pid"),
+            offset: read["offset"].as_u64().expect("an offset"),
+            bytes: read["bytes"].as_u64().expect("a length"),
+        })
+        .collect()
+}
+
+/// Start the read report afresh: what was read before this is not what a journey
+/// asks about.
+fn clear_journal_reads(world: &World) {
+    let _ = std::fs::remove_file(world.root.join("journal-reads.jsonl"));
+}
+
+/// The command `args` runs, without reporting its reads: for the verbs that keep a
+/// whole-journal read of their own (`transcript`, `results`, `monitor`).
+fn unreported(world: &World, args: &[&str]) -> crate::harness::Run {
+    let mut command = world.cmd(args);
+    command.env_remove(JOURNAL_READS_ENV);
+    world.run_on(command, &args.join(" "))
+}
+
 /// One node held running, beating every 100 ms — and, where `works`, emitting a
 /// `turn-activity` with every beat.
 fn a_held_member(world: &World, node: &str, works: bool) {
@@ -559,7 +613,7 @@ fn tasks_handed(world: &World, node: &str) -> Vec<String> {
 /// and an armed `watch` ends on a settlement.
 #[test]
 fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
-    let world = World::new("scaling-overwritten");
+    let world = reporting_reads("scaling-overwritten");
     let run = "overwritten";
     world.script("hold.wait", "hold");
     let project = stopped_with(
@@ -578,6 +632,7 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     );
     world.release("hold.go");
     let at = overwrite_what_is_covered(&world, run);
+    clear_journal_reads(&world);
     for seq in 0..3 {
         relayed(
             &world,
@@ -692,7 +747,9 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
 
     // The reading lists what the run has not settled, each with its settlement,
     // once the driver that adopted it is stopped.
-    world.run(&["stop", run, "--force"]).exited(0);
+    // Unreported: what `stop` reads for a run's scratch and its run-end hook is the
+    // run's ending, once, and not a pass, an append, a view or a reply.
+    unreported(&world, &["stop", run, "--force"]).exited(0);
     world.until("the adopted driver's stop to be recorded", |world| {
         !past(world, run, at, "run-stopped").is_empty()
     });
@@ -706,6 +763,24 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
         "a node settled done is listed unsettled: {unsettled:?}"
     );
 
+    // Every read the binary reported making of the journal since the overwrite —
+    // the adopting driver's passes, appends and attached render, every `reply`,
+    // `status` and the `watch` — began at or past the byte the checkpoint covers.
+    let reads = journal_reads(&world, run);
+    let readers: std::collections::BTreeSet<u64> = reads.iter().map(|read| read.pid).collect();
+    assert!(
+        readers.len() >= 5,
+        "fewer processes reported reading the journal than the driver and the verbs: {reads:?}"
+    );
+    let reached: Vec<&JournalRead> = reads
+        .iter()
+        .filter(|read| read.offset < at as u64)
+        .collect();
+    assert!(
+        reached.is_empty(),
+        "a read reached the {at} covered bytes: {reached:?}"
+    );
+
     let store = std::fs::read(world.run_file(run, "events.jsonl")).expect("the journal");
     assert!(
         store[..at].iter().all(|byte| *byte == b'#'),
@@ -713,12 +788,32 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     );
 }
 
+/// How many bytes of a journal's first `length` the reads took, counted with every
+/// overlap: a rebuild that streams the journal once takes `length`, and one that read
+/// it again, or went back over it, takes more.
+fn read_within(reads: &[JournalRead], length: u64) -> u64 {
+    reads
+        .iter()
+        .filter(|read| read.offset < length)
+        .map(|read| (read.offset + read.bytes).min(length) - read.offset)
+        .sum()
+}
+
+/// The run's journal length now.
+fn journal_length(world: &World, run: &str) -> u64 {
+    std::fs::metadata(world.run_file(run, "events.jsonl"))
+        .expect("the journal")
+        .len()
+}
+
 /// Every read a run can be given — with its checkpoint, with none, and with one an
 /// earlier build wrote — recovers the same nodes, settlements and dispatch evidence,
-/// and a rebuilt checkpoint carries this build's schema.
+/// and a rebuilt checkpoint carries this build's schema. Only the two that must
+/// rebuild read what the checkpoint covers, and each, the driver's included, reads
+/// the journal it rebuilds from once, as the binary reports its reads.
 #[test]
 fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
-    let world = World::new("scaling-rebuild");
+    let world = reporting_reads("scaling-rebuild");
     let run = "rebuilt";
     a_held_member(&world, "worked", true);
     world.script("broke.fail", "");
@@ -791,36 +886,71 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
             "{node} did not settle {status}: {settled:?}"
         );
     }
+    // `status --json` reported, and `transcript` — which keeps a whole read of its own
+    // — not: what a rebuild reads is the first one's.
     let read = |world: &World| {
         let reading = world.run(&["status", run, "--json"]);
         reading.exited(0);
-        let transcript = world.run(&["transcript", run, "worked"]);
+        let transcript = unreported(world, &["transcript", run, "worked"]);
         transcript.exited(0);
         (reading.json(), transcript.stdout.clone())
     };
+    // Read and reported once rebuilt, the reads that rebuild in front of it.
+    let rebuilt_once = |world: &World, case: &str, length: u64| {
+        let reads = journal_reads(world, run);
+        assert!(
+            !reads.is_empty(),
+            "{case}: no read of the journal was reported"
+        );
+        let took = read_within(&reads, length);
+        assert!(
+            took <= length,
+            "{case}: the rebuild read {took} bytes of a {length}-byte journal: {reads:?}"
+        );
+    };
+    clear_journal_reads(&world);
+    let at = world.run_json(run, "checkpoint.json")["coverage"]["bytes"]
+        .as_u64()
+        .expect("a coverage");
     let (nodes, evidence) = read(&world);
     assert!(evidence.contains("tick 1"), "no tool call in:\n{evidence}");
+    let behind: Vec<JournalRead> = journal_reads(&world, run)
+        .into_iter()
+        .filter(|read| read.offset < at)
+        .collect();
+    assert!(
+        behind.is_empty(),
+        "a read with a valid checkpoint went back over the {at} bytes it covers: {behind:?}"
+    );
 
     // llmlint: ignore-block[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
     let checkpoint = world.run_file(run, "checkpoint.json");
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted");
     // llmlint: ignore-end[tests_mirror_real_usage]
+    clear_journal_reads(&world);
+    let length = journal_length(&world, run);
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
         json!(14)
     );
+    rebuilt_once(&world, "a deleted checkpoint", length);
 
     as_schema_13(&world, run);
+    clear_journal_reads(&world);
+    let length = journal_length(&world, run);
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
         json!(14)
     );
+    rebuilt_once(&world, "a schema-13 checkpoint", length);
 
     // And the driver rebuilds where it must, and drives what is left.
     // llmlint: ignore[tests_mirror_real_usage] the criterion's second case is a run with its checkpoint deleted, which the checkpoint is documented as safe to be; no verb deletes it.
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted again");
+    clear_journal_reads(&world);
+    let length = journal_length(&world, run);
     world.run(&["adopt", run, "--detach"]).exited(0);
     world.release("last.go");
     world.until("the last node to settle", |world| {
@@ -832,6 +962,33 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
         json!(14)
+    );
+    // Every process the adoption started — the verb and the driver, its passes and its
+    // attached render — together read the history the rebuild folded once: one read
+    // from the journal's first byte, and every other read resuming past it. What they
+    // each take again is the trailing instant the rebuilt checkpoint holds back, which
+    // the next arrival can still sort in front of, and not history.
+    let reads = journal_reads(&world, run);
+    let from_the_start: Vec<&JournalRead> = reads.iter().filter(|read| read.offset == 0).collect();
+    assert_eq!(
+        from_the_start.len(),
+        1,
+        "an adoption with no checkpoint read its journal from the start other than once: {reads:?}"
+    );
+    let resumed = reads
+        .iter()
+        .filter(|read| read.offset > 0)
+        .map(|read| read.offset)
+        .min()
+        .expect("the driver read what was appended past the rebuild");
+    assert!(
+        resumed <= length && from_the_start[0].bytes <= length,
+        "the rebuild read past the {length}-byte journal it found: {reads:?}"
+    );
+    assert_eq!(
+        read_within(&reads, resumed),
+        resumed,
+        "an adoption with no checkpoint read the history it rebuilt from more than once: {reads:?}"
     );
     let (_, evidence_after) = read(&world);
     assert_eq!(evidence_after, evidence);
@@ -1275,3 +1432,4 @@ fn what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_
     let _ = settling.wait();
     world.release("build.go");
 }
+

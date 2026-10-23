@@ -1404,9 +1404,11 @@ pub(crate) fn release_left_standing(
     }
 }
 
-/// The claim this run's `start --take-over` passed, off its own `driver-taken-over`.
+/// The claim this run's `start --take-over` passed, off its own `driver-taken-over` — among
+/// the records the run's fold keeps whole, so an adoption reads none of its history for it.
 fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
-    crate::journal::read(&paths.journal())
+    crate::checkpoint::current(paths)
+        .recalled
         .into_iter()
         .filter(|event| {
             event.source == crate::event::Source::Pipeline

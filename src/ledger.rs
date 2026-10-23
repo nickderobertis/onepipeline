@@ -2059,6 +2059,7 @@ pub fn read_records(path: &Path) -> Vec<Record> {
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
     counted(bytes.len(), ());
+    crate::loopstats::journal_read(path, 0, bytes.len() as u64);
     #[cfg(test)]
     crate::readprobe::read(path, 0, bytes.len() as u64);
     records_of(&bytes, 0)
@@ -2181,6 +2182,7 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
             }
         }
     }
+    crate::loopstats::journal_read(path, from, start - from);
     #[cfg(test)]
     crate::readprobe::read(path, from, start - from);
     counted(usize::try_from(start - from).unwrap_or(usize::MAX), lines)
@@ -2231,6 +2233,7 @@ pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
     let want = usize::try_from(len).ok()?;
     let mut bytes = vec![0u8; want];
     file.read_exact(&mut bytes).ok()?;
+    crate::loopstats::journal_read(path, from, len);
     #[cfg(test)]
     crate::readprobe::read(path, from, len);
     Some(counted(bytes.len(), bytes))
