@@ -26,6 +26,9 @@ use serde_json::Value;
 
 const NODE: &str = "work";
 
+/// How a supervisor's brief opens, which its resolved prompt starts with.
+const SUPERVISOR_BRIEF: &str = "You are the simulated USER and completion supervisor";
+
 fn relayed(world: &World, run: &str, kind: EventKind) -> Vec<Value> {
     world
         .journal(run)
@@ -304,9 +307,7 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
     // dispatch has no counterpart for, and getting the party wrong is invisible
     // to every reader that only counts messages.
     assert_eq!(asked_again.role, Party::User.as_str(), "{spoken:?}");
-    // Its whole text: a reference resolves to the closing text of the judge's
-    // own session, which is the decision it answered with — the ask inside it.
-    assert!(said(&spoken[1]).contains(ask), "{spoken:?}");
+    assert_eq!(said(&spoken[1]), ask, "{spoken:?}");
     assert!(!content(&spoken[1]).cut, "{spoken:?}");
 
     // And the turn it produced: the same party as the first, a turn later.
@@ -323,31 +324,38 @@ fn a_real_supervised_conversation_relays_what_each_party_said() {
         .iter()
         .map(|event| payload(event, EventKind::TurnStarted))
         .collect();
-    // Each resolves to the whole prompt that party's turn was opened on, so
-    // what is held is that it carries what that party was answering: a
-    // supervisor's prompt carries the agent's reply among the rest of its
-    // brief.
+    // The worker's openings resolve to exactly the prompt it was handed: the
+    // node's task, then the supervisor's words. A supervisor's opening
+    // references the judge's own session, whose prompt is its whole brief with
+    // the agent's reply rendered into it, so that is what it is held to carry.
     let instructions: Vec<(&str, String)> = openings
         .iter()
         .zip(&opened)
         .map(|(opening, event)| (opening.role.as_str(), said(event)))
         .collect();
-    let answering = [
-        (Party::Assistant.as_str(), task.as_str()),
-        (Party::User.as_str(), ANSWERED),
-        (Party::Assistant.as_str(), ask),
-        (Party::User.as_str(), ANSWERED),
-    ];
-    assert!(
-        instructions.len() == answering.len()
-            && instructions
-                .iter()
-                .zip(answering)
-                .all(
-                    |((role, prompt), (party, answers))| *role == party && prompt.contains(answers)
-                ),
-        "the conversation's turns did not open on what each party was answering: {opened:?}"
+    let [(first, task_prompt), (supervised, judged), (second, asked), (again, judged_again)] =
+        &instructions[..]
+    else {
+        panic!(
+            "the conversation opened {} turns, not four: {opened:?}",
+            instructions.len()
+        );
+    };
+    assert_eq!(
+        [(*first, task_prompt.as_str()), (*second, asked.as_str())],
+        [
+            (Party::Assistant.as_str(), task.as_str()),
+            (Party::Assistant.as_str(), ask)
+        ],
+        "the worker's turns did not open on what it was handed: {opened:?}"
     );
+    for (role, prompt) in [(supervised, judged), (again, judged_again)] {
+        assert_eq!(*role, Party::User.as_str(), "{opened:?}");
+        assert!(
+            prompt.contains(SUPERVISOR_BRIEF) && prompt.contains(ANSWERED),
+            "a supervisor turn did not open on its brief over the agent's reply: {prompt}"
+        );
+    }
     assert!(opened.iter().all(|event| !content(event).cut), "{opened:?}");
 
     // Every turn closed on its own account, on both sides. Asserted as the whole

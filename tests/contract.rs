@@ -11744,6 +11744,8 @@ fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_s
             "`views::transcript::of_record(kind, payload)`",
             "`TranscriptRef::Instruction`",
             "`TranscriptRef::Message`",
+            "`TranscriptRef::Decision`",
+            "`parse_supervisor`",
             "`TranscriptRef::Activity`",
             "`TranscriptRef::Copy { text, cut }`",
             "`Text::Tool { kind, name, input, output }`",

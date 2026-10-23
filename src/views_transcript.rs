@@ -38,6 +38,11 @@ pub enum TranscriptRef {
     Instruction(Transcript),
     /// A `turn-message`'s reference: the candidate's closing text.
     Message(Transcript),
+    /// A supervisor's `turn-message` (`role: user`): the next instruction its
+    /// decision carried. The candidate's closing text is the whole decision
+    /// document onejudge parsed, and what the supervisor *said* is the
+    /// `message` that decision handed the agent — the text a copy carried.
+    Decision(Transcript),
     /// A `turn-activity`'s reference: one event of the candidate.
     Activity(ActivityTranscript),
     /// A record carrying a bounded copy and no reference.
@@ -187,6 +192,11 @@ impl TranscriptRef {
                     "turn-started" => {
                         serde_json::from_value(reference.clone()).map(Self::Instruction)
                     }
+                    "turn-message"
+                        if payload.get("role").and_then(Value::as_str) == Some("user") =>
+                    {
+                        serde_json::from_value(reference.clone()).map(Self::Decision)
+                    }
                     "turn-message" => serde_json::from_value(reference.clone()).map(Self::Message),
                     _ => serde_json::from_value(reference.clone()).map(Self::Activity),
                 };
@@ -305,7 +315,9 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
                 cut: *cut,
             })
         }
-        TranscriptRef::Instruction(location) | TranscriptRef::Message(location) => (location, None),
+        TranscriptRef::Instruction(location)
+        | TranscriptRef::Message(location)
+        | TranscriptRef::Decision(location) => (location, None),
         TranscriptRef::Activity(activity) => (&activity.location, Some(activity)),
     };
     let path = PathBuf::from(&location.history_dir)
@@ -388,6 +400,19 @@ pub fn resolve(reference: &TranscriptRef) -> Result<Resolved, Unresolved> {
                 if field("history_id") == Some(&history_id) =>
             {
                 return Ok(described(Text::Message(carried("text", true)?)));
+            }
+            // Read by onejudge's own parser, the one that handed the agent this
+            // message: only a decision to continue carries one, so any other
+            // answer is no message this record could have been.
+            (TranscriptRef::Decision(_), Some("run"))
+                if field("history_id") == Some(&history_id) =>
+            {
+                return match onejudge::parse_supervisor(&carried("text", true)?) {
+                    onejudge::SupervisorOutcome::Continue { message, .. } => {
+                        Ok(described(Text::Message(message)))
+                    }
+                    _ => Err(unresolved(Why::Unreadable)),
+                };
             }
             (TranscriptRef::Activity(_), Some("event")) if field("run_id") == Some(&history_id) => {
                 let Some(wanted) = index else { continue };
@@ -1367,5 +1392,52 @@ mod tests {
         let mut kindless = Map::new();
         kindless.insert("output".into(), json!("said"));
         assert_eq!(unresolved("turn-activity", &kindless).why, Why::Unreadable);
+    }
+
+    /// A supervisor's message is the instruction its decision handed the agent,
+    /// read by onejudge's own parser — never the decision document around it —
+    /// and a decision that carried no instruction is no message at all.
+    #[test]
+    fn a_supervisors_message_resolves_to_the_instruction_its_decision_carried() {
+        let decide = |name: &str, decision: Value| {
+            let written =
+                Written::new(name, "You are the simulated USER and completion supervisor");
+            let closing = json!({"type": "run", "history_id": written.run_id.to_string(),
+                "text": decision.to_string()});
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(written.writer.path())
+                .expect("the session file");
+            std::io::Write::write_all(&mut file, format!("{closing}\n").as_bytes())
+                .expect("the closing line is written");
+            written
+        };
+        let asked = decide(
+            "decision",
+            json!({"completion": false, "message": "Run the check again.\nThen report it.",
+                "reason": "not there yet"}),
+        );
+        let said = resolved(
+            "turn-message",
+            &record(asked.reference.clone(), &[("role", json!("user"))]),
+        );
+        assert_eq!(
+            said.text,
+            Text::Message("Run the check again.\nThen report it.".into())
+        );
+        assert_eq!(said.description, "Run the check again.");
+        // The same session read as an assistant's words is its whole closing text.
+        let whole = resolved(
+            "turn-message",
+            &record(asked.reference.clone(), &[("role", json!("assistant"))]),
+        );
+        assert!(matches!(&whole.text, Text::Message(text) if text.contains("\"completion\"")));
+
+        let completed = decide("completed", json!({"completion": true, "reason": "done"}));
+        let none = unresolved(
+            "turn-message",
+            &record(completed.reference.clone(), &[("role", json!("user"))]),
+        );
+        assert_eq!(none.why, Why::Unreadable);
     }
 }
