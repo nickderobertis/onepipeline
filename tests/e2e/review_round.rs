@@ -777,9 +777,15 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// Linux the round went from 11,400–11,700 to 15,100–15,200, chiefly `rev-parse
 /// --is-inside-work-tree` and `show-ref --verify`, and none of it from the engine. The
 /// bound follows it, still below what the round cost before, and comes back down once
-/// those reads cost near what they did.
-#[cfg(unix)]
+/// `onevcs` makes those reads cost near what they did.
+#[cfg(all(unix, not(target_os = "macos")))]
 const GIT_STARTS: usize = 17_000;
+
+/// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
+/// on `onevcs` 0.56.9 one run counted 18,200 beside the whole suite and 15,771–16,999
+/// alone. It comes back down with the other once those `--git-dir` reads do.
+#[cfg(target_os = "macos")]
+const GIT_STARTS: usize = 20_000;
 
 /// Hold the round to [`GIT_STARTS`].
 ///
