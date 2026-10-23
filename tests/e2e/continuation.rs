@@ -2561,6 +2561,82 @@ fn a_running_driver_reads_its_claim_only_immediately_before_a_publication() {
     );
 }
 
+/// A publication starting soon after the last one settled replaces the fence in one write
+/// rather than one clearing it and one naming the next, as a restack's drafts do one after
+/// the other; a fence left naming a settled publication is still cleared once its linger has
+/// passed while the driver goes on dispatching, and a closeout leaves none.
+#[test]
+fn a_publication_soon_after_the_last_replaces_its_fence_in_one_write() {
+    let world = takeover_world("fence-linger", 300).through_scripted_source();
+    for id in ["first", "second", "third"] {
+        world.script(&format!("{id}.work"), &format!("{id}'s change\n"));
+    }
+    world.script("second.wait", "hold");
+    world.script("third.wait", "hold");
+    let run = "linger";
+    let project = author(
+        &world,
+        run,
+        vec![
+            lifecycle("first", &[]),
+            lifecycle("second", &[]),
+            lifecycle("third", &[]),
+        ],
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let has_settled = |world: &World, node: &str| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == node)
+    };
+    let opened = |world: &World, node: &str| {
+        world
+            .journal(run)
+            .iter()
+            .any(|event| event["kind"] == "change-opened" && event["labels"]["node"] == node)
+    };
+    world.until("first's publication to open its change request", |world| {
+        opened(world, "first")
+    });
+    let fenced_first = world.store_asked("set_project_metadata");
+    world.until("first to settle and second to be dispatched", |world| {
+        has_settled(world, "first") && dispatched(world, run).contains(&"second".to_owned())
+    });
+    world.release("second.go");
+    world.until("second's publication to open its change request", |world| {
+        opened(world, "second")
+    });
+    let writes = world.store_asked("set_project_metadata") - fenced_first;
+    assert_eq!(
+        writes, 1,
+        "between first's publication and second's the project was written {writes} times, \
+         where one write naming second replaces the fence naming first"
+    );
+
+    world.until("second to settle and third to be dispatched", |world| {
+        has_settled(world, "second") && dispatched(world, run).contains(&"third".to_owned())
+    });
+    world.until("the fence to be cleared while third runs", |world| {
+        stored_publishing(world, &project).is_null()
+    });
+    world.release("third.go");
+    world.until("the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    for node in ["first", "second", "third"] {
+        assert_eq!(
+            settled(&world, run, node)["outcome"],
+            "change-review-draft",
+            "{node}"
+        );
+    }
+    assert_eq!(stored_publishing(&world, &project), Value::Null);
+    one_change_request_per_branch(&world);
+}
+
 /// Two cold hosts continue one project whose nodes hold open drafts, launched at the same
 /// moment over the one store: at least one launches, neither opens a change request, and
 /// each draft is still the only one for its branch and still a draft. The claim is not

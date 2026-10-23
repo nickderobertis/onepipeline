@@ -125,6 +125,12 @@ const TAKEOVER_POLL_MAX: Duration = Duration::from_secs(30);
 /// and reads the claim again before a publication after a read that was not answered.
 const FENCE_RETRY: Duration = Duration::from_secs(5);
 
+/// How long a driver whose last publication has settled leaves its fence naming it before it
+/// clears it: a publication starting inside that time replaces the fence in one write, rather
+/// than one clearing it and one naming the next — as each draft of a restack does, one after
+/// the other.
+const FENCE_LINGER: Duration = Duration::from_secs(10);
+
 /// The test failpoint met before each read a takeover makes once its wait has passed, so a
 /// journey can hold that read until the displaced driver has got where it needs it.
 const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
@@ -710,6 +716,9 @@ pub(crate) struct ClaimWatch {
     fenced: Option<std::collections::BTreeSet<String>>,
     /// When the store last refused that write, so the loop wakes to write it again.
     fence_refused: Option<Instant>,
+    /// When this driver's last publication under way settled, while the fence still names
+    /// it: cleared once [`FENCE_LINGER`] has passed, unless a publication replaces it first.
+    lingering: Option<Instant>,
     /// When the read before a publication last went unanswered, so the loop wakes to read
     /// again.
     read_unanswered: Option<Instant>,
@@ -774,6 +783,7 @@ impl ClaimWatch {
             // A launch minted its run, so nothing on the store names its publications yet.
             fenced: launched.then(std::collections::BTreeSet::new),
             fence_refused: None,
+            lingering: None,
             read_unanswered: None,
             term_scope,
         })
@@ -911,15 +921,49 @@ impl ClaimWatch {
         !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
     }
 
-    /// How long until a write of this driver's publications the store refused, or a read
-    /// before a publication it did not answer, is due again.
+    /// How long until a write of this driver's publications the store refused, a read
+    /// before a publication it did not answer, or the clearing of a fence left naming a
+    /// settled publication, is due again.
     pub(crate) fn until_fence_retry(&self) -> Duration {
-        [self.fence_refused, self.read_unanswered]
-            .into_iter()
-            .flatten()
-            .map(|at| (at + FENCE_RETRY).saturating_duration_since(Instant::now()))
-            .min()
-            .unwrap_or(Duration::MAX)
+        [
+            self.fence_refused.map(|at| at + FENCE_RETRY),
+            self.read_unanswered.map(|at| at + FENCE_RETRY),
+            self.lingering.map(|at| at + FENCE_LINGER),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|due| due.saturating_duration_since(Instant::now()))
+        .min()
+        .unwrap_or(Duration::MAX)
+    }
+
+    /// [`ClaimWatch::fence`], except that a driver still driving whose fence would go from
+    /// naming publications to naming none leaves it standing for [`FENCE_LINGER`] first: a
+    /// fence naming a publication that has settled only holds a takeover a little longer.
+    pub(crate) fn fence_lingering(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+        let standing = self
+            .fenced
+            .as_ref()
+            .is_some_and(|fenced| !fenced.is_empty());
+        if nodes.is_empty() && standing && self.standing == Standing::Driving {
+            let since = *self.lingering.get_or_insert_with(Instant::now);
+            if since.elapsed() < FENCE_LINGER {
+                return true;
+            }
+        }
+        let landed = self.fence(nodes);
+        if !landed && self.lingering.is_some() {
+            // Not written inside a wait the store asked for: tried again a linger later.
+            self.lingering = Some(Instant::now());
+        }
+        landed
+    }
+
+    /// Clear a fence left naming a settled publication now, where one is: no pass follows.
+    pub(crate) fn clear_lingering(&mut self) {
+        if self.lingering.is_some() {
+            self.fence(&std::collections::BTreeSet::new());
+        }
     }
 
     /// The nodes `metadata`'s [`PUBLISHING_KEY`] names as this driver's: none where it is
@@ -947,6 +991,7 @@ impl ClaimWatch {
     /// driver reads before it clears, and clears only a fence of its own.
     pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
         if self.fenced.as_ref() == Some(nodes) {
+            self.lingering = None;
             return true;
         }
         if crate::writeback::store_asked_to_wait(&self.run_dir) {
@@ -1004,6 +1049,7 @@ impl ClaimWatch {
             Ok(()) => {
                 self.fenced = Some(nodes.clone());
                 self.fence_refused = None;
+                self.lingering = None;
                 true
             }
             Err(why) => {
@@ -1016,6 +1062,7 @@ impl ClaimWatch {
                 // What the store holds now is not known: the write may yet land.
                 self.fenced = None;
                 self.fence_refused = Some(Instant::now());
+                self.lingering = None;
                 false
             }
         }
@@ -1825,6 +1872,7 @@ mod tests {
         );
         assert_eq!(block["publishing_key"], json!(PUBLISHING_KEY));
         assert_eq!(block["fence_retry_seconds"], json!(FENCE_RETRY.as_secs()));
+        assert_eq!(block["fence_linger_seconds"], json!(FENCE_LINGER.as_secs()));
         let fenced = BTreeMap::from([(PUBLISHING_KEY.to_owned(), block["publishing"].clone())]);
         assert!(publishing_of("p", &fenced)
             .expect("the fence reads")

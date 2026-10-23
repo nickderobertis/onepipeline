@@ -1880,7 +1880,7 @@ fn converge(
             let mut nodes = publishing.clone();
             nodes.extend(unlanded.iter().cloned());
             nodes.extend(starting.iter().map(|due| due.node.clone()));
-            watch.fence(&nodes)
+            watch.fence_lingering(&nodes)
         });
         let before = match claims.as_mut() {
             Some(watch) if fenced && !starting.is_empty() => watch.before_publishing(),
@@ -2697,6 +2697,9 @@ fn converge(
             nodes.extend(unlanded.iter().cloned());
             watch.fence(&nodes);
         }
+    }
+    if let Some(watch) = claims.as_mut() {
+        watch.clear_lingering();
     }
     // A landing the last pass settled is told to `onevcs` before the driver
     // lets go, since no pass follows it.

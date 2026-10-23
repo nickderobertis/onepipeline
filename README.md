@@ -237,7 +237,8 @@ limited or finds no claim ends nothing. Before a publication starts, the driver 
 on the project (`onepipeline.publishing`), and only then reads the claim. A read naming
 another run withholds the publication and stops the driver. A read that was not answered
 holds that one publication until a later read is. Once the publication has finished, the
-name is cleared. So a takeover waits rather than every driver: `start --take-over` writes
+name is cleared — ten seconds later where it was the last, so the next draft of a restack
+replaces it in one write. So a takeover waits rather than every driver: `start --take-over` writes
 its claim, and starts nothing until the driver it displaced has stopped and acknowledged
 that on the claim, which that driver does once it has read the takeover at a publication,
 its closeout or its stop. Where it does not, the takeover starts once *that driver's*

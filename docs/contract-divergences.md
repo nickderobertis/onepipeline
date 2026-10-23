@@ -11526,8 +11526,13 @@ regardless of its answer would let a displaced driver publish beside its adopter
 `onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose publications
 are under way — and reads the claim only once that write has landed. Once a publication has
 settled, and its settlement has landed (entry 129), it writes the key again without that
-node, `null` for none. A write the store refuses starts nothing, and is made again five
-seconds later. A superseded driver reads the key before it clears it, and clears only its
+node. Where that would leave the key naming none, a driver still driving leaves it standing
+for ten seconds first, and then writes `null`. A publication starting inside that time
+replaces the key in one write, as each draft of a restack does after the one below it, so a
+review round does not pay one write clearing the fence and one naming the next. A fence
+left naming a settled publication only holds a takeover up to ten seconds longer. A
+superseded driver clears at once, and a closeout clears before its release. A write the
+store refuses starts nothing, and is made again five seconds later. A superseded driver reads the key before it clears it, and clears only its
 own.
 
 A driver the read **supersedes** starts nothing more. A dispatch in flight settles
@@ -11625,8 +11630,9 @@ the same moment both launch, the later claim winning; the other driver stops at 
 read, now its next publication's, and acknowledges as it lets go. The fence is not atomic
 either: a write of it the store refused may still land later, over a newer one, and a
 superseded driver's read and clear are two calls. Each costs a store write before a pass's
-publications start and one once they have settled, which the comparable plan's record
-counts. The acknowledgement is written over the claim without a read beside it: a third
+publications start and one once they have settled, the second saved where another
+publication starts inside the ten seconds, which the comparable plan's record and the busy
+review round count. The acknowledgement is written over the claim without a read beside it: a third
 launch's claim written in that instant is replaced, and that launch is then refused at
 its next look, which is the safe end of that race.
 
@@ -11654,6 +11660,7 @@ its next look, which is the safe end of that race.
   "publishing_key": "onepipeline.publishing",
   "publishing": {"run": "drafts", "host": "builder", "nodes": ["x"], "at": "2026-10-16T09:40:12.090Z"},
   "fence_retry_seconds": 5,
+  "fence_linger_seconds": 10,
   "bundle_versions": {"events": "1.6.0"},
   "retired": ["ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", "ONEPIPELINE_TEST_CLAIM_READ_GATE"],
   "loop_stats_count": "claim_reads"
@@ -11698,6 +11705,9 @@ seam shared by every host, with two real drivers on two hosts:
   `a_takeover_finding_a_fence_naming_no_publication_waits_until_it_is_cleared` and
   `a_superseded_driver_whose_read_before_clearing_its_fence_fails_still_hands_over` drive
   the fence's failures;
+  `a_publication_soon_after_the_last_replaces_its_fence_in_one_write` counts one store write
+  between two publications one after the other, and shows the fence cleared once its linger
+  has passed while the driver goes on dispatching, and none left after the closeout;
 - the acknowledgement: `a_takeover_of_a_driver_with_nothing_to_publish_starts_on_the_acknowledgement_its_closeout_writes`,
   `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`,
   `a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement`,
