@@ -12108,11 +12108,16 @@ a driver taking such a hold up — the launch's own, or an adopting one — read
 interval later, and the backoff doubles from the re-reads that follow, so a source that never
 answers is re-read 1, 2, 4, 8 and 16 intervals apart and then every 30. No source is read on
 a fixed interval. A pass re-reads, in node-id order and off the loop's
-thread, every held node whose every source is due, through the store configured from the
-launch directory, and stops asking a source the moment it refuses again: a node held on it
-not yet read keeps its hold, restated with that refusal, so one pass costs a source that still
-cannot answer one store operation however many nodes it holds. A source due whose every node
-waits on another source too is read with that one. A node held only for a `missing`
+thread, every held node one of whose sources is due and none of whose sources still waits out
+a provider's reset, through the store configured from the launch directory, and stops asking a
+source the moment it refuses again: a node held on it not yet read keeps its hold, restated
+with that refusal, so one pass costs a source that still cannot answer one store operation
+however many nodes it holds. A node's read asks every source it is held on, because the store
+cannot leave one source out of a dependency read: a source waiting out a reset is asked by no
+pass before that reset plus one second, a source due whose every node waits on such a reset is
+next read with it, at that reset plus one second, and sources held only by backoff fall due
+on their own schedules, independently of each other; the block's `reread_passes` are three
+such passes, each driven through the schedule. A node held only for a `missing`
 prerequisite is read once an interval. A re-read that asks every source and resolves no
 prerequisite the run's graph does not already give the node clears the hold. One that resolves
 such a prerequisite keeps the node held with it in `missing`, because starting the node then
@@ -12182,7 +12187,15 @@ reads unchanged; and authentication and prerequisite holds behave as above.
   "default_poll_seconds": 60,
   "backoff_cap_intervals": 30,
   "after_reset_ms": 1000,
-  "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
+  "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS",
+  "reread_passes": [
+    {"held": {"joint": ["archive", "vault"]}, "due": ["archive"], "awaiting_reset": [],
+     "asks": ["archive"], "asked": ["joint"], "read_at_reset": []},
+    {"held": {"joint": ["archive", "vault"]}, "due": ["archive"], "awaiting_reset": ["vault"],
+     "asks": [], "asked": [], "read_at_reset": ["archive"]},
+    {"held": {"alpha": ["archive"], "joint": ["archive", "vault"]}, "due": ["archive"], "awaiting_reset": ["vault"],
+     "asks": ["archive"], "asked": ["alpha"], "read_at_reset": []}
+  ]
 }
 ```
 

@@ -1269,6 +1269,67 @@ mod tests {
         assert_eq!(json!(surface.source), block["surface"]["source"]);
         assert_eq!(block["surface"]["workstream"], "the held node");
         assert_eq!(surface.workstream.as_deref(), Some("build"));
+
+        // Each pass the entry works through asks what it says: a node is asked about when one
+        // of its sources is due and none waits out a reset, and a due source held back by a
+        // reset alone is read with its nodes at that reset.
+        let names = |value: &Value| -> BTreeSet<String> {
+            value
+                .as_array()
+                .expect("a list of names")
+                .iter()
+                .map(|name| name.as_str().expect("a name").to_owned())
+                .collect()
+        };
+        let _held = crate::vcs::scratch_home_held();
+        let now = crate::sys::now_millis();
+        for example in block["reread_passes"]
+            .as_array()
+            .expect("entry 131's passes")
+        {
+            let (due, awaiting) = (names(&example["due"]), names(&example["awaiting_reset"]));
+            let source = |name: &String| Unanswered {
+                who: Unasked::Source {
+                    source: onetaskgraph_plugin_api::SourceName::new(name).expect("a source name"),
+                    cause: SourceCause::RateLimited {
+                        retry_at_ms: awaiting.contains(name).then_some(now + 600_000),
+                    },
+                },
+                reason: "rate limited".to_owned(),
+            };
+            let payloads: BTreeMap<String, Vec<Value>> = example["held"]
+                .as_object()
+                .expect("held nodes")
+                .iter()
+                .map(|(node, on)| {
+                    let hold = SourceHold::new(names(on).iter().map(source).collect(), Vec::new())
+                        .expect("a hold");
+                    (node.clone(), vec![hold.payload()])
+                })
+                .collect();
+            let mut holds = SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p");
+            for (name, scheduled) in &mut holds.schedule {
+                if !awaiting.contains(name) {
+                    scheduled.at_ms = if due.contains(name) {
+                        now
+                    } else {
+                        now + 60_000
+                    };
+                }
+            }
+            let pass = holds.due(now);
+            assert_eq!(pass.sources, names(&example["asks"]), "{example}");
+            assert_eq!(
+                pass.asked.keys().cloned().collect::<BTreeSet<_>>(),
+                names(&example["asked"]),
+                "{example}"
+            );
+            assert_eq!(
+                pass.later.keys().cloned().collect::<BTreeSet<_>>(),
+                names(&example["read_at_reset"]),
+                "{example}"
+            );
+        }
     }
 
     /// A re-read clears the hold only where it asked every source and found no prerequisite

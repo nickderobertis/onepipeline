@@ -1342,6 +1342,11 @@ fn assert_spaced(passes: &[u64], answers: &[u64], expected: &[u64]) {
 /// apart, then 30 and 30 — the cap — and never more often; each pass asks it once however
 /// many nodes it holds; and once it answers a read, its backoff starts again from one
 /// interval for the node it still holds.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this ~95s journey (91 intervals)
+// is the task's own placement: the task names this file of the e2e binary, run by
+// `onepipeline-e2e`'s `test` target, as where the hold loop's journeys live. What it drives is the compiled `onepipeline` binary, whose inputs are the
+// whole crate, so no narrower edge reaches what it tests; its wait is the schedule under test
+// at a one-second interval, not a cost a smaller workload could shed.
 #[test]
 fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty_intervals() {
     let world = with_tracker(World::new("store-hold-backoff"), "vault");
@@ -1644,6 +1649,12 @@ fn by_kind<'a>(operations: impl IntoIterator<Item = &'a Value>) -> BTreeMap<Stri
 /// source is read again once at its reset and then on its backoff — 1, 3, 7 and 15 intervals
 /// later — each pass asking it once for the three nodes it holds; the next falls after the
 /// hour. What it asked for is the budget's telemetry.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this ~60s compressed hour
+// is the task's own placement: its journeys live in this e2e binary, run by
+// `onepipeline-e2e`'s `test` target, whose outputs the root `budgets` target reads as this
+// budget's telemetry. What it drives is the compiled `onepipeline` binary, whose inputs are the
+// whole crate, so no narrower edge reaches what it tests; its wait is the schedule under test
+// at a one-second interval, not a cost a smaller workload could shed.
 #[test]
 fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_more() {
     let world = with_tracker(World::new("store-hold-hour"), "vault");
@@ -2233,6 +2244,7 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     world.until("design to be dispatched", |world| {
         dispatched(world, name).iter().any(|node| node == "design")
     });
+    // llmlint: ignore[tests_mirror_real_usage] what a user meets here is a run directory whose telemetry file cannot be appended — a full disk, a permission change, a file locked away — and no interface of this crate makes one; a directory in its place is the portable way to put the real binary in that state, and everything after it — the dispatch, the settlement, its write-back — is the real binary's, asserted from what it wrote.
     // The file's name taken by a directory, which no append opens.
     let telemetry = world.run_file(name, "store-operations.jsonl");
     let _ = std::fs::remove_file(&telemetry);
@@ -2683,6 +2695,7 @@ fn a_schedule_that_cannot_be_kept_beside_the_record_leaves_the_hold_and_its_read
     world.until("the driver to record the schedule", |world| {
         source_schedule(world, name, "vault").is_object()
     });
+    // llmlint: ignore[tests_mirror_real_usage] what a user meets here is a run directory whose schedule file can be neither written nor read — a full disk, a permission change — and no interface of this crate makes one; a directory in its place is the portable way to put the real driver in that state, and its re-reads and `status` after it, and once the file is freed, are the real binary's.
     // The file's name taken by a directory: nothing can write it, nor read it as a file.
     let file = world.run_file(name, "source-schedule.json");
     std::fs::remove_file(&file).expect("the schedule is removed");
