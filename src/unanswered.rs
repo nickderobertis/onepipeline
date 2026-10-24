@@ -191,7 +191,13 @@ impl SourceHold {
     /// What holds the node, on one line, as a view says it: each source, why it could not
     /// answer, and when it is read again — and that nothing times the hold out.
     pub(crate) fn describe(&self) -> String {
-        let said = self.said(&|_| None);
+        self.describe_scheduled(None)
+    }
+
+    /// [`describe`](Self::describe), saying of a backing-off source the next read `schedule`
+    /// — the driver's [`SCHEDULE_FILE`] — gives it, where it gives one.
+    pub(crate) fn describe_scheduled(&self, schedule: Option<&BTreeMap<String, Due>>) -> String {
+        let said = self.said(&|unasked| Next::of(schedule, unasked));
         if self
             .unanswered
             .iter()
@@ -204,7 +210,7 @@ impl SourceHold {
     }
 
     /// What holds the node, saying of each source the backoff wait `wait` gives it.
-    fn said(&self, wait: &dyn Fn(&Unanswered) -> Option<u64>) -> String {
+    fn said(&self, wait: &dyn Fn(&Unanswered) -> Next) -> String {
         let mut said: Vec<String> = self
             .unanswered
             .iter()
@@ -266,11 +272,38 @@ fn what(source: &str, cause: Cause) -> String {
     }
 }
 
+/// What the one saying when a source is read again knows of its backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// Nothing: the backoff's first interval and its cap are what it can say.
+    Unknown,
+    /// The wait its schedule last chose, in seconds from when it last did not answer.
+    In(u64),
+    /// That wait, and the instant it ends at.
+    At { wait: u64, at_ms: u64 },
+}
+
+impl Next {
+    /// What `schedule` says of `unasked`'s source.
+    fn of(schedule: Option<&BTreeMap<String, Due>>, unasked: &Unanswered) -> Self {
+        match schedule.and_then(|schedule| schedule.get(&unasked.name())) {
+            Some(Due {
+                at_ms,
+                wait: Some(wait),
+                ..
+            }) => Self::At {
+                wait: *wait,
+                at_ms: *at_ms,
+            },
+            _ => Self::Unknown,
+        }
+    }
+}
+
 /// When `unasked` is read again: one second after the reset its provider gave, or on its
-/// backoff — `wait` seconds from when it last did not answer, where the one saying it holds
-/// the source's schedule, and from the backoff's first interval where it does not. `subject`
-/// is what the sentence calls the source: `it`, or its quoted name beside another's.
-fn when(unasked: &Unanswered, wait: Option<u64>, subject: &str) -> String {
+/// backoff as `next` knows it. `subject` is what the sentence calls the source: `it`, or its
+/// quoted name beside another's.
+fn when(unasked: &Unanswered, next: Next, subject: &str) -> String {
     let poll = poll_seconds();
     let cap = poll.saturating_mul(BACKOFF_CAP_INTERVALS);
     if let Some(at) = unasked.retry_at_ms() {
@@ -284,12 +317,18 @@ fn when(unasked: &Unanswered, wait: Option<u64>, subject: &str) -> String {
     } else {
         ""
     };
-    match wait {
-        Some(wait) => format!(
+    match next {
+        Next::In(wait) => format!(
             "{given}{subject} is read again in {wait}s, the wait doubling each time it still \
              does not answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll intervals)"
         ),
-        None => format!(
+        Next::At { wait, at_ms } => format!(
+            "{given}{subject} is read again at {}, {wait}s after it last did not answer, the \
+             wait doubling each time it still does not answer, up to {cap}s \
+             ({BACKOFF_CAP_INTERVALS} poll intervals)",
+            utc(at_ms)
+        ),
+        Next::Unknown => format!(
             "{given}{subject} is read again on a backoff starting at {poll}s, the wait doubling \
              each time it still does not answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll \
              intervals)"
@@ -349,7 +388,7 @@ pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
         return None;
     }
     // A launch's first re-read of a source that named no reset is one interval out.
-    let first = Some(poll_seconds());
+    let first = Next::In(poll_seconds());
     Some(
         by_source
             .into_values()
@@ -397,16 +436,44 @@ pub(crate) fn hold_after(deps: &[String], reread: &Reread) -> Option<SourceHold>
     SourceHold::new(reread.unanswered.clone(), missing)
 }
 
-/// When one source is next read, and how far its backoff has grown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Due {
+/// When one source is next read, and how far its backoff has grown: one entry of
+/// [`SCHEDULE_FILE`], by these names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Due {
     /// The epoch milliseconds it is next read at.
+    #[serde(rename = "next_read_ms")]
     at_ms: u64,
     /// How many re-reads in a row it has not answered with no reset named, which is how many
     /// times its backoff has doubled.
     backoffs: u32,
     /// The wait its schedule last chose, in seconds; `None` where a reset decided it.
+    #[serde(rename = "wait_seconds")]
     wait: Option<u64>,
+}
+
+/// The file, in a run's directory, the driver keeps each held source's schedule in: what a
+/// view in another process says a source's next read by, since the journal records a hold's
+/// reset but not its backoff. Telemetry beside the record, not a field of it (entry 131).
+pub(crate) const SCHEDULE_FILE: &str = "source-schedule.json";
+
+/// The schema [`SCHEDULE_FILE`] is written at; a file in any other is not read.
+const SCHEDULE_SCHEMA_VERSION: u32 = 1;
+
+/// [`SCHEDULE_FILE`] as it is written.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleFile {
+    schema_version: u32,
+    sources: BTreeMap<String, Due>,
+}
+
+/// Each held source's schedule the driver of the run in `run_dir` last wrote, or `None` for a
+/// run no driver of this build has scheduled, and for a file that does not read whole.
+pub(crate) fn schedule_of(run_dir: &std::path::Path) -> Option<BTreeMap<String, Due>> {
+    let text = std::fs::read_to_string(run_dir.join(SCHEDULE_FILE)).ok()?;
+    let file: ScheduleFile = serde_json::from_str(&text).ok()?;
+    (file.schema_version == SCHEDULE_SCHEMA_VERSION).then_some(file.sources)
 }
 
 impl Due {
@@ -475,6 +542,9 @@ pub(crate) struct SourceHolds {
     missing_at: u64,
     poll: u64,
     surfaced: crate::release::Resurfacing,
+    /// The run directory [`SCHEDULE_FILE`] is kept in, and the schedule last written there:
+    /// `None` for holds no view reads, which a unit test makes.
+    recorded: Option<(std::path::PathBuf, Option<BTreeMap<String, Due>>)>,
 }
 
 impl SourceHolds {
@@ -527,6 +597,42 @@ impl SourceHolds {
             missing_at: now.saturating_add(poll.saturating_mul(1_000)),
             poll,
             surfaced: crate::release::Resurfacing::new(),
+            recorded: None,
+        }
+    }
+
+    /// These holds, keeping their schedule in `run_dir`'s [`SCHEDULE_FILE`] from now on.
+    pub(crate) fn recorded_in(mut self, run_dir: &std::path::Path) -> Self {
+        self.recorded = Some((run_dir.to_path_buf(), None));
+        self.record();
+        self
+    }
+
+    /// Write the schedule where a view reads it, where it differs from what was last written:
+    /// whole, staged beside the file and renamed over it, so a reader never meets half of
+    /// one. A write that fails is left to the next change, and a view falls back to the
+    /// backoff's first interval meanwhile.
+    fn record(&mut self) {
+        let Some((dir, written)) = &mut self.recorded else {
+            return;
+        };
+        if written.as_ref() == Some(&self.schedule) {
+            return;
+        }
+        let file = ScheduleFile {
+            schema_version: SCHEDULE_SCHEMA_VERSION,
+            sources: self.schedule.clone(),
+        };
+        let Ok(text) = serde_json::to_string(&file) else {
+            return;
+        };
+        let staged = dir.join(format!(".{SCHEDULE_FILE}.{}", std::process::id()));
+        let landed = std::fs::write(&staged, text)
+            .and_then(|()| std::fs::rename(&staged, dir.join(SCHEDULE_FILE)));
+        if landed.is_ok() {
+            *written = Some(self.schedule.clone());
+        } else {
+            let _ = std::fs::remove_file(&staged);
         }
     }
 
@@ -541,6 +647,7 @@ impl SourceHolds {
             .map(Unanswered::name)
             .collect();
         self.schedule.retain(|source, _| named.contains(source));
+        self.record();
     }
 
     /// Take up what a finished re-read answered, and say whether it changed a hold.
@@ -578,6 +685,7 @@ impl SourceHolds {
                     }
                 }
                 self.missing_at = now.saturating_add(self.poll.saturating_mul(1_000));
+                self.record();
                 return false;
             }
         };
@@ -745,6 +853,7 @@ impl SourceHolds {
                     scheduled.at_ms = with.max(now.saturating_add(1));
                 }
             }
+            self.record();
             return;
         }
         let nodes = nodes();
@@ -790,8 +899,8 @@ impl SourceHolds {
     }
 
     /// The wait `unasked`'s source's backoff last chose, as the surface says it.
-    fn wait(&self, unasked: &Unanswered) -> Option<u64> {
-        Some(
+    fn wait(&self, unasked: &Unanswered) -> Next {
+        Next::In(
             self.schedule
                 .get(&unasked.name())
                 .and_then(|scheduled| scheduled.wait)
@@ -825,11 +934,7 @@ impl SourceHolds {
 
 /// The surface a held node's wait raises, saying of each source the backoff wait `wait`
 /// gives it.
-fn wait_surface(
-    node: &str,
-    hold: &SourceHold,
-    wait: &dyn Fn(&Unanswered) -> Option<u64>,
-) -> Surface {
+fn wait_surface(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Next) -> Surface {
     let message = if hold
         .unanswered
         .iter()
@@ -860,7 +965,7 @@ fn wait_surface(
 /// `the_launch_status_and_source_wait_name_the_source_its_cause_and_its_next_read` (rate limit
 /// and credential), `a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is`
 /// and `an_edge_into_a_tracker_configured_nowhere_holds_its_node_until_it_is_configured`.
-fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u64>) -> String {
+fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Next) -> String {
     if hold.unanswered.is_empty() {
         return format!(
             "node '{node}' is held: {}, so starting it now would start it before that \
@@ -1120,7 +1225,7 @@ mod tests {
         let surface = wait_surface(
             "build",
             &SourceHold::of_payload(&block["hold"]).expect("reads"),
-            &|_| None,
+            &|_| Next::Unknown,
         );
         assert_eq!(surface.kind, WAIT_SURFACE_KIND);
         assert_eq!(json!(surface.blocking), block["surface"]["blocking"]);
@@ -1319,6 +1424,55 @@ mod tests {
         std::env::remove_var(POLL_ENV);
     }
 
+    /// The driver keeps each source's schedule where a view in another process reads it,
+    /// rewritten as it changes; the held line then names a backing-off source's next read and
+    /// the wait it ends, and a file in another schema, or none, leaves the backoff's first
+    /// interval to say.
+    #[test]
+    fn a_held_line_names_the_next_read_the_driver_recorded() {
+        let _held = crate::vcs::scratch_home_held();
+        std::env::set_var(POLL_ENV, "10");
+        let dir = std::env::temp_dir().join(format!("source-schedule-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let hold = SourceHold::new(vec![limited(None)], Vec::new()).expect("a hold");
+        let payloads: BTreeMap<String, Vec<Value>> =
+            [("alpha".to_owned(), vec![hold.payload()])].into();
+        let mut holds =
+            SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p").recorded_in(&dir);
+        assert_eq!(schedule_of(&dir).as_ref(), Some(&holds.schedule));
+        holds.schedule.insert(
+            "vault".to_owned(),
+            Due {
+                at_ms: 1_777_895_400_000,
+                backoffs: 3,
+                wait: Some(80),
+            },
+        );
+        holds.record();
+        let schedule = schedule_of(&dir).expect("the schedule reads back");
+        assert_eq!(
+            hold.describe_scheduled(Some(&schedule)),
+            "source 'vault', declared private, is rate limited, so it could not be asked what \
+             it records of this task: rate limited; no reset time was given, so it is read \
+             again at 2026-05-04 11:50:00 UTC, 80s after it last did not answer, the wait \
+             doubling each time it still does not answer, up to 300s (30 poll intervals); \
+             nothing times this out"
+        );
+        std::fs::write(
+            dir.join(SCHEDULE_FILE),
+            json!({"schema_version": 2, "sources": {}}).to_string(),
+        )
+        .expect("a file of another schema");
+        assert_eq!(schedule_of(&dir), None);
+        assert_eq!(
+            hold.describe_scheduled(schedule_of(&dir).as_ref()),
+            hold.describe()
+        );
+        assert!(hold.describe().contains("on a backoff starting at 10s"));
+        std::fs::remove_dir_all(&dir).expect("the run directory is removed");
+        std::env::remove_var(POLL_ENV);
+    }
+
     /// The launch notice names the source, its cause and its next read, in one line with no
     /// run of spaces in it; a rate-limited hold asks for no credential, and an
     /// authentication one does.
@@ -1338,14 +1492,14 @@ mod tests {
              loads, and each of those nodes is held, never dispatched; it is read again at \
              2026-05-04 11:50:00 UTC, the reset the provider gave. Nothing times this out."
         );
-        let limited_surface = wait_surface("changelog", &held["changelog"], &|_| Some(60));
+        let limited_surface = wait_surface("changelog", &held["changelog"], &|_| Next::In(60));
         assert!(
             !limited_surface.message.contains("credential"),
             "{}",
             limited_surface.message
         );
         let auth = SourceHold::new(vec![vault("no token")], Vec::new()).expect("a hold");
-        let auth_surface = wait_surface("changelog", &auth, &|_| Some(120));
+        let auth_surface = wait_surface("changelog", &auth, &|_| Next::In(120));
         assert!(
             auth_surface
                 .message

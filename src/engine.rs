@@ -1586,7 +1586,8 @@ fn converge(
     // source answers.
     crate::storeops::attach(&paths.dir);
     let mut sources =
-        crate::unanswered::SourceHolds::of_run(&state.holds, &launch.dir, &launch.project);
+        crate::unanswered::SourceHolds::of_run(&state.holds, &launch.dir, &launch.project)
+            .recorded_in(&paths.dir);
     let mut stacking = StackingPlacement::of(&state.graph);
     // The pool-maintenance schedule the launch named, if it named one: what
     // this driver sweeps on an idle pass, paced in memory and decided on disk by

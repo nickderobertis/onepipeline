@@ -4213,7 +4213,13 @@ fn held_for_source(view: &RunView, id: &str) -> Option<String> {
         .get(id)?
         .iter()
         .find_map(crate::engine::source_held)?;
-    Some(format!("held — {}", one_line(&hold.describe())))
+    // A backing-off source's next read is the driver's to know, which it keeps beside the
+    // record; a run it never scheduled reads the backoff's first interval instead.
+    let schedule = crate::unanswered::schedule_of(&view.paths.dir);
+    Some(format!(
+        "held — {}",
+        one_line(&hold.describe_scheduled(schedule.as_ref()))
+    ))
 }
 
 /// The kinds of hold a run records a node under, in the words its `node-held`

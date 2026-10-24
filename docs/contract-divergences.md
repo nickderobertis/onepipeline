@@ -12128,8 +12128,19 @@ reason or the missing prerequisite, when it is read again — the reset as a UTC
 provider gave one, otherwise the backoff's next wait in seconds — what else would clear it,
 chosen by `cause` (a credential for `auth`, reachability for `unavailable`, configuring the
 tracker for `unconfigured`, and nothing for `rate-limited`, which is waited out), and that
-nothing times it out. `status` renders the hold on the node's line, naming the reset or the
-backoff's first interval and cap.
+nothing times it out. `status` renders the hold on the node's line, naming the reset, or the
+backoff's next read as a UTC time and the wait it ends.
+
+**The schedule beside the record — telemetry, not a field of it.** A backoff's next read is
+not in the journal: `retry_at_ms` is a provider's reset alone, and a pass that changes no hold
+journals nothing. So the driver keeps each held source's schedule in the run directory's
+`source-schedule.json`, beside `writeback-wait.json`, rewritten whole — staged and renamed —
+whenever it changes: `{"schema_version": 1, "sources": {"<source>": {"next_read_ms",
+"backoffs", "wait_seconds"}}}`, `wait_seconds` `null` where a reset decided the read. Views
+read it for a held source with no reset; where it is absent — a run no driver of this build
+scheduled — unreadable, or of another schema, they say the backoff's first interval and cap
+instead. The hold record above, and what the read API reads of it, are unchanged by it.
+*Recorded on the ruling of the manager of this run's `engine` node.*
 
 Driven end to end by `tests/e2e/store.rs` against local Markdown plans and a private
 `scripted-source`: a plan whose records name no private item launches holding nothing while

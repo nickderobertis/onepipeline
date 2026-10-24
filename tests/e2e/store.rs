@@ -1098,6 +1098,15 @@ fn first_held_for_source(world: &World, run: &str, node: &str) -> Option<Value> 
         })
 }
 
+/// The schedule `run`'s driver recorded for `source` beside the run's record, or `null` where
+/// it has recorded none yet.
+fn source_schedule(world: &World, run: &str, source: &str) -> Value {
+    std::fs::read_to_string(world.run_file(run, "source-schedule.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .map_or(Value::Null, |file| file["sources"][source].clone())
+}
+
 /// The epoch milliseconds now, as the engine and the scripted source stamp them.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1385,6 +1394,32 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
             "the source was asked other than once between the re-reads at {window:?}: {reads:?}"
         );
     }
+    // With the backoff at its cap, `status` names the read the driver scheduled after the
+    // eighth refusal — thirty intervals out — and not the backoff's first interval.
+    world.until("the eighth refusal's schedule to be recorded", |world| {
+        source_schedule(world, name, "vault")["backoffs"] == 8
+    });
+    let scheduled = source_schedule(&world, name, "vault");
+    assert_eq!(scheduled["wait_seconds"], 30, "{scheduled}");
+    let next_read = scheduled["next_read_ms"].as_u64().expect("a next read");
+    assert!(
+        (passes[7] + 30_000..passes[7] + 32_500).contains(&next_read),
+        "the next read {next_read} is not thirty intervals after the eighth re-read {}",
+        passes[7]
+    );
+    let status = world.run(&["status", name, "--no-providers"]);
+    status.exited(0);
+    assert_eq!(
+        line_of(&status.stdout, "alpha: held"),
+        format!(
+            "alpha: held — source 'vault', declared private, is rate limited, so it could not be \
+             asked what it records of this task: the source rate-limited the request: the \
+             provider's quota for this token is spent; no reset time was given, so it is read \
+             again at {}, 30s after it last did not answer, the wait doubling each time it still \
+             does not answer, up to 30s (30 poll intervals); nothing times this out",
+            utc(next_read)
+        )
+    );
 
     // The source answers for alpha's item, and still refuses beta's: alpha is released, and the
     // backoff for beta starts again from one interval.
@@ -2051,6 +2086,10 @@ fn the_launch_status_and_source_wait_name_the_source_its_cause_and_its_next_read
         )
     );
     assert!(!message.contains("credential"), "{message}");
+    // The driver's first read of the hold, an interval after it took it up, as it recorded it.
+    let next_read = source_schedule(&world, &name, "vault")["next_read_ms"]
+        .as_u64()
+        .expect("the driver recorded the source's next read");
     let status = world.run(&["status", &name, "--no-providers"]);
     status.exited(0);
     assert_eq!(
@@ -2058,8 +2097,9 @@ fn the_launch_status_and_source_wait_name_the_source_its_cause_and_its_next_read
         format!(
             "changelog: held — source 'vault', declared private, is rate limited, so it could \
              not be asked what it records of this task: {reason}; no reset time was given, so it \
-             is read again on a backoff starting at 60s, the wait doubling each time it still \
-             does not answer, up to 1800s (30 poll intervals); nothing times this out"
+             is read again at {}, 60s after it last did not answer, the wait doubling each time \
+             it still does not answer, up to 1800s (30 poll intervals); nothing times this out",
+            utc(next_read)
         )
     );
     world.until("service-fix to be dispatched", |world| {
