@@ -1856,7 +1856,29 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
             && !world.events_of(name, "driver-exited").is_empty()
     });
 
-    assert_eq!(linear.state_of(&only), "Done");
+    // So a failure names the write that left the status it saw.
+    let status_writes: Vec<(usize, Option<String>)> = linear
+        .log()
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::IssueUpdate && request.variables["id"] == only.as_str()
+        })
+        .filter_map(|(at, request)| {
+            request.variables["input"]["stateId"]
+                .as_str()
+                .map(|state| (at, linear.state_named(state)))
+        })
+        .collect();
+    assert_eq!(
+        linear.state_of(&only),
+        "Done",
+        "the issue's status writes, as (request, state set), the last of which left the status seen: {status_writes:?}. A projection's write comes from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate, and a landing's closure from writeback::closer; the journal says which ran. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
+        linear.log(),
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .unwrap_or_default(),
+        world.journal(name),
+    );
     assert_eq!(linear.project_status(), "Completed");
     let log = linear.log();
     let written: Vec<usize> = log

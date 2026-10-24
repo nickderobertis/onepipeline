@@ -1068,7 +1068,13 @@ fn the_backfill_verb_answers_and_records_from_the_journal_alone() {
 #[cfg(unix)]
 #[test]
 fn the_backfill_verb_refuses_to_record_a_run_a_driver_is_driving() {
-    let world = World::new("retirement-backfill-driven");
+    // llmlint: ignore-block[tests_mirror_real_usage] the ordering gate holds the real
+    // driver after its result is written and before its ownership lock is released;
+    // no CLI input can force that scheduling window. All assertions drive the CLI.
+    let release = crate::harness::Rendezvous::failpoint();
+    let world = World::new("retirement-backfill-driven")
+        .with_env("ONEPIPELINE_TEST_RELEASE_GATE", &release.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     world.repository("local-direct", &[]);
     let run = "driven";
     let pid = first_attempt_beside_a_hold(&world, run);
@@ -1093,6 +1099,24 @@ fn the_backfill_verb_refuses_to_record_a_run_a_driver_is_driving() {
     world.release("hold.go");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()
+    });
+    let held = release.arrived();
+    assert_eq!(held.pid, pid, "the run's driver reached its release");
+    // A result is written before the driver releases ownership. Recording is
+    // still refused in that window, just as it was while the node was held.
+    let before = std::fs::read_to_string(&journal).expect("the journal reads");
+    world
+        .run(&["supersessions", run, "--record"])
+        .exited(crate::harness::REFUSED)
+        .err_has(&format!("run '{run}' is being written by pid {pid}"));
+    assert_eq!(
+        std::fs::read_to_string(&journal).expect("the journal reads"),
+        before,
+        "a refused --record wrote to the settled run's journal"
+    );
+    held.release();
+    world.until("the driver to exit and release the run", |_| {
+        crate::harness::process_ended(pid)
     });
     world.run(&["supersessions", run, "--record"]).exited(0);
 }

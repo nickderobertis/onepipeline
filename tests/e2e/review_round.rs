@@ -286,7 +286,8 @@ fn pass_split(world: &World, run: &str, from: u64, to: u64) -> Value {
 }
 
 /// Run `step`, and record what the round spent while it ran — and, for a pass, its
-/// wall time by step.
+/// wall time by step. Answers the span of [`World::invocations`] the step made, so a
+/// call the round should not have made can be named with the phase it came from.
 fn timed(
     world: &World,
     host: &FileHost,
@@ -294,7 +295,7 @@ fn timed(
     name: &str,
     phases: &mut Vec<Value>,
     step: impl FnOnce(),
-) {
+) -> (String, std::ops::Range<usize>) {
     let from = marks(world, host, run);
     let began = std::time::Instant::now();
     let since = now_millis();
@@ -304,6 +305,111 @@ fn timed(
         spent["pass"] = pass_split(world, run, since, now_millis());
     }
     phases.push(spent);
+    (name.to_owned(), from.invocations..world.invocations().len())
+}
+
+/// What made each `rules/branches/<base>` read the round's phases recorded, as far as the
+/// run's own records say: the read and the `gh` call recorded after it, every base-merge
+/// decision `onevcs` did not settle without the host, and what the round's commands said.
+///
+/// Two `onevcs` questions read that route. Whether the base requires an up-to-date branch
+/// is asked by a base-merge decision — a session open, or a publication's sync, which
+/// always asks it of a base that moved since the branch merged it — and over this host's
+/// rules, which name required checks without saying `strict`, it stops at the rules read.
+/// Which checks a merge requires is asked by a publication watching its draft's checks,
+/// and reads classic protection (`branches/<base>/protection`) next; a republication
+/// falls back to that watch where it says it has no head-branch record.
+fn rule_read_report(
+    world: &World,
+    spans: &[(String, std::ops::Range<usize>)],
+    said: &[String],
+) -> String {
+    let invocations = world.invocations();
+    let route = |call: &Value| -> Option<String> {
+        (call["tool"] == "gh" && call["args"][0] == "api")
+            .then(|| call["args"][1].as_str().map(str::to_owned))
+            .flatten()
+    };
+    let mut report = Vec::new();
+    for (phase, span) in spans {
+        for at in span.clone() {
+            let Some(read) =
+                route(&invocations[at]).filter(|read| read.contains("/rules/branches/"))
+            else {
+                continue;
+            };
+            let next = invocations[at + 1..]
+                .iter()
+                .find(|call| call["tool"] == "gh")
+                .map_or_else(|| "nothing".to_owned(), Value::to_string);
+            report.push(format!(
+                "{phase}: gh api {read}, and the next gh call recorded was {next}"
+            ));
+        }
+    }
+    let mut streams = vec![world.onevcs_home()];
+    let mut decisions = Vec::new();
+    while let Some(dir) = streams.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                streams.push(path);
+                continue;
+            }
+            if path
+                .extension()
+                .is_none_or(|extension| extension != "ndjson")
+            {
+                continue;
+            }
+            for line in std::fs::read_to_string(&path).unwrap_or_default().lines() {
+                let Ok(event) = serde_json::from_str::<Value>(line) else {
+                    continue;
+                };
+                let (asked_at, decided) = match event["kind"].as_str() {
+                    Some("base-merge") => ("a publication's sync", &event["payload"]),
+                    Some("session-opened") => ("a session open", &event["payload"]["base_merge"]),
+                    _ => continue,
+                };
+                let because = decided["because"].as_str().unwrap_or_default();
+                if because.is_empty()
+                    || [
+                        "already carries",
+                        "the caller merges the base itself",
+                        "conflicts with the branch",
+                    ]
+                    .iter()
+                    .any(|settled| because.contains(settled))
+                {
+                    continue;
+                }
+                decisions.push(format!(
+                    "{} {asked_at} of {} onto {}: {} — {because} (labels {})",
+                    event["ts"].as_str().unwrap_or_default(),
+                    event["payload"]["branch"],
+                    decided["base"]
+                        .as_str()
+                        .or(event["payload"]["base"].as_str())
+                        .unwrap_or("its base"),
+                    decided["decision"],
+                    event["labels"],
+                ));
+            }
+        }
+    }
+    decisions.sort();
+    let lines: Vec<&str> = said
+        .iter()
+        .flat_map(|output| output.lines())
+        .map(str::trim)
+        .filter(|line| line.starts_with("onepipeline:") || line.starts_with("onevcs:"))
+        .collect();
+    format!(
+        "base branch-rule reads in the round:\n  {}\nbase-merge decisions onevcs did not settle without the host:\n  {}\nwhat the round's commands said:\n  {}",
+        report.join("\n  "),
+        if decisions.is_empty() { "none".to_owned() } else { decisions.join("\n  ") },
+        if lines.is_empty() { "nothing".to_owned() } else { lines.join("\n  ") },
+    )
 }
 
 /// The change request number of a node's draft, off its settlement.
@@ -379,6 +485,241 @@ fn passed(output: &crate::harness::Run, what: &str) {
     );
 }
 
+/// Keep the node identity, failure detail and lifecycle order a concise command omits.
+fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what: &str) {
+    let events = world.journal(run);
+    let short: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "node-settled" && event["payload"]["status"] != "done")
+        .collect();
+    let order: Vec<&Value> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some(
+                    "node-ready"
+                        | "node-dispatched"
+                        | "node-restack-started"
+                        | "node-restacked"
+                        | "node-settled"
+                        | "session-opened"
+                )
+            )
+        })
+        .collect();
+    assert_eq!(
+        output.code, 0,
+        "{what}:\n{}\n{}\nsettled short of done: {short:#?}\nlifecycle event order: {order:#?}",
+        output.stdout, output.stderr
+    );
+}
+
+/// A command's own exit is the completion signal. File captures keep a blocked child
+/// from filling a pipe and let a deadline report bytes the child has already written.
+/// The same single-step backstop as the other journeys fires before nextest can erase
+/// the round's evidence with its bare 540-second timeout. It counts one step from the
+/// last thing the command wrote, not from its start: an attached `start` settles the
+/// whole stack, several steps in a row, and streams each event as it lands, so a slower
+/// host lengthens it without failing it, while one that goes silent for a step fails.
+fn round_command(
+    world: &World,
+    mut command: std::process::Command,
+    input: Option<&str>,
+    clock: &dyn crate::harness::Clock,
+) -> crate::harness::Run {
+    use std::fs::File;
+    use std::process::Stdio;
+
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            // This is the child this invocation started, including on an assertion panic.
+            if self.0.try_wait().is_ok_and(|status| status.is_none()) {
+                let _ = self.0.kill();
+            }
+            let _ = self.0.wait();
+        }
+    }
+
+    let args = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stdout = world.root.join("round-command.stdout");
+    let stderr = world.root.join("round-command.stderr");
+    command
+        .stdout(File::create(&stdout).expect("the stdout capture opens"))
+        .stderr(File::create(&stderr).expect("the stderr capture opens"));
+    if let Some(input) = input {
+        let path = world.root.join("round-command.stdin");
+        std::fs::write(&path, input).expect("the command's input is written");
+        command.stdin(Stdio::from(File::open(path).expect("the input opens")));
+    }
+    eprintln!("busy round: starting {args}");
+    let mut child = Child(command.spawn().expect("the round's command starts"));
+    let written = || {
+        [&stdout, &stderr]
+            .map(|capture| std::fs::metadata(capture).map_or(0, |capture| capture.len()))
+    };
+    let mut seen = written();
+    let mut deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().expect("the command can be observed") {
+            break status;
+        }
+        let now = written();
+        let elapsed = clock.elapsed();
+        if now != seen {
+            seen = now;
+            deadline = elapsed.saturating_add(crate::harness::ONE_STEP);
+        }
+        assert!(
+            elapsed < deadline,
+            "busy round: waiting for `{args}` (pid {}) to exit, with nothing written for one step; stdout:\n{}\nstderr:\n{}\nlast invocations:\n{:#?}\nthe runs root held:\n{}",
+            child.0.id(),
+            std::fs::read_to_string(&stdout).expect("the stdout capture is readable"),
+            std::fs::read_to_string(&stderr).expect("the stderr capture is readable"),
+            world.invocations().into_iter().rev().take(20).collect::<Vec<_>>(),
+            world.dump(),
+        );
+        clock.pause(std::time::Duration::from_millis(20));
+    };
+    eprintln!("busy round: finished {args}: {status}");
+    crate::harness::Run {
+        code: status.code().unwrap_or(-1),
+        stdout: std::fs::read_to_string(stdout).expect("the stdout capture is readable"),
+        stderr: std::fs::read_to_string(stderr).expect("the stderr capture is readable"),
+        args,
+        world: world.dump(),
+    }
+}
+
+/// A store that has accepted a call and has not answered keeps the real CLI live.
+/// Move only the diagnostic clock after that handshake, so this exercises the blocked
+/// ordering without needing a slow host or spending the wall-clock backstop.
+#[test]
+fn a_blocked_round_command_names_its_wait_and_last_observation() {
+    let world = World::new("round-command-wait").through_scripted_source();
+    let project = world.plan(
+        "blocked-round",
+        &plan_of("blocked-round", vec![crate::harness::agent("n1", &[])]),
+    );
+    let gate = world.store_holds("get_project");
+    let clock = crate::harness::ManualClock::default();
+    let message = std::thread::scope(|scope| {
+        let _expires = clock.expiring();
+        let waiting = scope.spawn(|| {
+            round_command(
+                &world,
+                world.cmd(&["start", &project, "--attach"]),
+                None,
+                &clock,
+            )
+        });
+        world.until("the store to receive the command's project read", |world| {
+            world.store_asked("get_project") > 0
+        });
+        let held = gate.arrived();
+        world.until("the command's deadline to be established", |_| {
+            clock.read_again()
+        });
+        clock.advance(crate::harness::ONE_STEP);
+        let panic = match waiting.join() {
+            Ok(_) => panic!("the held command returned without a diagnostic"),
+            Err(panic) => panic,
+        };
+        held.release();
+        *panic.downcast::<String>().expect("the diagnostic is text")
+    });
+    assert!(
+        message.contains(&format!("waiting for `start {project} --attach`")),
+        "{message}"
+    );
+    for evidence in [
+        "to exit, with nothing written for one step; stdout:",
+        "stderr:",
+        "last invocations:",
+        "get_project",
+        "the runs root held:",
+    ] {
+        assert!(
+            message.contains(evidence),
+            "missing {evidence:?}: {message}"
+        );
+    }
+    world.store_stops_holding("get_project");
+    round_command(
+        &world,
+        world.cmd(&["start", &project, "--attach"]),
+        None,
+        &crate::harness::RealClock::started(),
+    )
+    .exited(0);
+}
+
+/// An attached `start` settles a whole stack, one step after another, so it can run past
+/// a step of wall time while every step lands. Hold the real command at two store calls,
+/// with a step's worth of clock spent before each: what it writes between them is the
+/// progress that keeps it alive, and it then exits on its own.
+#[test]
+fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
+    let world = World::new("round-command-progress").through_scripted_source();
+    let project = world.plan(
+        "progressing-round",
+        &plan_of("progressing-round", vec![crate::harness::agent("n1", &[])]),
+    );
+    let first = world.store_holds("get_project");
+    let later = world.store_holds("update_task");
+    let clock = crate::harness::ManualClock::default();
+    let almost = crate::harness::ONE_STEP - std::time::Duration::from_secs(1);
+    let finished = std::thread::scope(|scope| {
+        let _expires = clock.expiring();
+        let waiting = scope.spawn(|| {
+            round_command(
+                &world,
+                world.cmd(&["start", &project, "--attach"]),
+                None,
+                &clock,
+            )
+        });
+        let held = first.arrived();
+        world.until("the command's deadline to be established", |_| {
+            clock.read_again()
+        });
+        let written = |capture: &str| {
+            std::fs::metadata(world.root.join(capture)).map_or(0, |capture| capture.len())
+        };
+        let before = written("round-command.stderr");
+        clock.advance(almost);
+        held.release();
+        let held = later.arrived();
+        assert!(
+            written("round-command.stderr") > before,
+            "the command wrote nothing between the two held calls"
+        );
+        // Restart the count so two reads mean a whole look that came after what it wrote.
+        clock.advance(std::time::Duration::ZERO);
+        world.until("the command's progress to be seen", |_| clock.read_again());
+        clock.advance(almost);
+        world.until("the command to be looked at past its first step", |_| {
+            clock.read_again() || waiting.is_finished()
+        });
+        held.release();
+        waiting.join()
+    });
+    match finished {
+        Ok(run) => run.exited(0),
+        Err(panic) => panic!(
+            "a command still writing was failed after one step from its start: {}",
+            panic
+                .downcast_ref::<String>()
+                .map_or("(not text)", String::as_str)
+        ),
+    };
+}
+
 /// Where `bash` resolves on `path`, given the Windows directory `system_root` names.
 ///
 /// Not `Command::new("bash")`, which on Windows finds the WSL launcher first — the reason
@@ -427,6 +768,9 @@ pub(crate) fn budget_report(cwd: &Path, result: &Path) -> std::process::Output {
     .expect("the committed reporter runs")
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this is the journey this
+// node makes reliable, and `.config/nextest.toml` already gives it the whole e2e group while it
+// runs. Moving it out of `onepipeline-e2e` is left to the re-plan of this repository's test tiers.
 #[test]
 fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     let world = World::new("review-round")
@@ -449,16 +793,24 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
     // settlement, so nothing needs the host to number them in plan order.
     let plan = plan_of(run, nodes);
     let project = world.plan(run, &plan);
-    let launched = world.run_from(
-        &world.project,
-        &[
-            "start",
-            &project,
-            "--attach",
-            "--review-reply-graph",
-            &graph,
-        ],
-    );
+    let command = |command, input: Option<String>| {
+        round_command(
+            &world,
+            command,
+            input.as_deref(),
+            &crate::harness::RealClock::started(),
+        )
+    };
+    eprintln!("busy round: preparing start command and its subprocess doubles");
+    let mut launch = world.cmd(&[
+        "start",
+        &project,
+        "--attach",
+        "--review-reply-graph",
+        &graph,
+    ]);
+    launch.current_dir(&world.project);
+    let launched = command(launch, None);
     passed(&launched, "the stack settles");
     let host = seeded(&world, run);
     world.script("gh.standings-own", "");
@@ -484,22 +836,33 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .unwrap();
 
     let mut phases = Vec::new();
+    let mut spans = Vec::new();
+    // What the round's commands printed, for naming what made a read it should not make.
+    let said = std::cell::RefCell::new(Vec::new());
+    // A command the run ended unsuccessfully names each node it settled short of done, with
+    // the detail that settlement carries: the concise stream says only the outcome's word.
+    let ran = |output: crate::harness::Run, what: &str| {
+        passed_in_round(&world, run, &output, what);
+        said.borrow_mut().push(output.stderr);
+    };
     let round_from = projection_lines(&world, run).len();
     let mut reworked = Vec::new();
-    timed(&world, &host, run, "pass-1", &mut phases, || {
-        passed(&world.run(&["review", run]), "the first pass");
-    });
-    timed(&world, &host, run, "decline", &mut phases, || {
-        passed(
-            &world.run_with_stdin(
-                &["reply", run],
-                &json!({"version": 3, "commands": [{"op": "decline", "id": "n1",
+    spans.push(timed(&world, &host, run, "pass-1", &mut phases, || {
+        ran(command(world.cmd(&["review", run]), None), "the first pass");
+    }));
+    spans.push(timed(&world, &host, run, "decline", &mut phases, || {
+        ran(
+            command(
+                world.cmd(&["reply", run]),
+                Some(
+                    json!({"version": 3, "commands": [{"op": "decline", "id": "n1",
                     "comments": [named(&left)], "reason": "Out of scope for this stack."}]})
-                .to_string(),
+                    .to_string(),
+                ),
             ),
             "the decline",
         );
-    });
+    }));
     for (name, node, comments, file) in [
         ("rework-b", "n3", &on_b, "n3"),
         ("rework-h", "n7", &on_h, "n7"),
@@ -510,19 +873,19 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         );
         world.script(&format!("{node}-rework-1.work-file"), file);
         let from = projection_lines(&world, run).len();
-        timed(&world, &host, run, name, &mut phases, || {
-            passed(
-                &world.run_with_stdin(
-                    &["reply", run],
-                    &json!({"version": 3, "commands": [{"op": "rework", "id": node,
+        spans.push(timed(&world, &host, run, name, &mut phases, || {
+            ran(
+                command(
+                    world.cmd(&["reply", run]),
+                    Some(json!({"version": 3, "commands": [{"op": "rework", "id": node,
                         "reason": "the review asked for it", "instruction": "Change what the comments name",
                         "comments": comments.iter().map(named).collect::<Vec<_>>()}]})
-                    .to_string(),
+                    .to_string()),
                 ),
                 name,
             );
-            passed(&world.run(&["adopt", run]), name);
-        });
+            ran(command(world.cmd(&["adopt", run]), None), name);
+        }));
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
     // The bottom draft merged by a person mid-round, its branch kept — no call of the run's.
@@ -543,12 +906,18 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         "{}",
         String::from_utf8_lossy(&person.stderr)
     );
-    timed(&world, &host, run, "readjust", &mut phases, || {
-        passed(&world.run(&["readjust", run]), "the readjustment");
-    });
-    timed(&world, &host, run, "pass-2", &mut phases, || {
-        passed(&world.run(&["review", run]), "the second pass");
-    });
+    spans.push(timed(&world, &host, run, "readjust", &mut phases, || {
+        ran(
+            command(world.cmd(&["readjust", run]), None),
+            "the readjustment",
+        );
+    }));
+    spans.push(timed(&world, &host, run, "pass-2", &mut phases, || {
+        ran(
+            command(world.cmd(&["review", run]), None),
+            "the second pass",
+        );
+    }));
     #[cfg(unix)]
     the_round_started_few_enough_gits(&world);
 
@@ -724,7 +1093,31 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         .collect();
     assert!(
         rule_reads.is_empty(),
-        "base branch-rule reads: {rule_reads:?}"
+        "{}",
+        rule_read_report(&world, &spans, &said.borrow())
+    );
+    let sessions: Vec<_> = std::fs::read_dir(world.onevcs_home().join("sessions"))
+        .expect("the round opened sessions")
+        .map(|entry| entry.expect("a session entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .map(|path| {
+            let record: Value = serde_json::from_slice(
+                &std::fs::read(&path).expect("the session record is readable"),
+            )
+            .expect("the session record is JSON");
+            (path, record)
+        })
+        .collect();
+    assert!(!sessions.is_empty(), "the round opened no sessions");
+    assert!(
+        sessions
+            .iter()
+            .all(|(_, record)| record["state"] == "closed"),
+        "the round left sessions open: {sessions:?}\n{}",
+        rule_read_report(&world, &spans, &said.borrow())
     );
     let replies: usize = record["phases"]
         .as_array()
@@ -759,6 +1152,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         assert!(detail.contains(part), "the detail lacks {part:?}: {detail}");
     }
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The most `git` processes the round's commands may start, from the launch through
 /// the second pass.
@@ -787,6 +1181,57 @@ fn the_round_started_few_enough_gits(world: &World) {
         "the round started {started} git processes, over its {GIT_STARTS}"
     );
 }
+
+/// The busy round takes the whole of the `e2e` group, so on the four-core Windows leg it
+/// runs alone, which keeps it inside its limit: `.config/nextest.toml` says why.
+///
+/// nextest accepts a `test(=…)` that matches nothing, so a renamed round would quietly
+/// lose its override; this holds the override to the journey's name, and to scheduling
+/// first as every whole-group override must.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the runner's
+// configuration, which only nextest executes; running nextest from inside a test
+// it is running is the nesting `.config/nextest.toml` already declines.
+#[test]
+fn the_busy_review_round_takes_the_whole_group() {
+    let name = "the_busy_review_round_ends_answered_and_true_and_records_what_it_spent";
+    let text = std::fs::read_to_string(crate::harness::repo_file(".config/nextest.toml"))
+        .expect("the runner's configuration ships");
+    let config: toml::Value = toml::from_str(&text).expect("the configuration parses");
+    let cap = config["test-groups"]["e2e"]["max-threads"]
+        .as_integer()
+        .expect("the e2e group has a cap");
+    let overrides = config["profile"]["default"]["overrides"]
+        .as_array()
+        .expect("the default profile has overrides");
+    let required = overrides
+        .iter()
+        .find(|entry| {
+            entry["filter"]
+                .as_str()
+                .is_some_and(|filter| filter.contains(name))
+        })
+        .expect("an override names the busy round");
+    assert_eq!(
+        required["filter"].as_str(),
+        Some(format!("binary(e2e) and test(=review_round::{name})").as_str())
+    );
+    assert_eq!(
+        required
+            .get("threads-required")
+            .and_then(toml::Value::as_integer),
+        Some(cap)
+    );
+    assert_eq!(
+        required.get("priority").and_then(toml::Value::as_integer),
+        Some(100)
+    );
+    let source = std::fs::read_to_string(crate::harness::repo_file("tests/e2e/review_round.rs"))
+        .expect("this module ships");
+    assert!(
+        source.contains(&format!("\nfn {name}() {{")),
+        "review_round::{name} is no longer a journey, so the override naming it holds nothing"
+    );
+} // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The counting `git` a world's commands find on its `PATH` counts each start and is the
 /// real `git` for it, failures included; and a start it cannot count is not run, since a
@@ -827,6 +1272,626 @@ fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
     assert!(
         !world.root.join("uncounted").exists(),
         "a start nothing counted ran the real git"
+    );
+}
+
+/// An unavailable executor fails the real command; its assertion keeps the settlement's
+/// identity and detail, then the dispatch-to-settlement order. Reading that failed run
+/// successfully is still a successful command.
+#[test]
+fn a_failed_round_command_names_its_node_detail_and_event_order() {
+    let world = World::new("round-diagnostic");
+    let missing = world.root.join("no-such-executor");
+    let world = world.with_env(
+        "ONEPIPELINE_ONEAGENTGRAPH_BIN",
+        missing.to_str().expect("a path the environment can carry"),
+    );
+    let run = "round-diagnostic";
+    let project = world.plan(run, &plan_of(run, vec![crate::harness::agent("n9", &[])]));
+    let output = world.run(&["start", &project, "--attach"]);
+    output.exited(3);
+    let settlements = world.events_of(run, "node-settled");
+    let settlement = settlements
+        .last()
+        .expect("the unavailable executor settled n9");
+    assert_eq!(settlement["labels"]["node"], "n9");
+    let detail = settlement["payload"]["detail"]
+        .as_str()
+        .expect("the refusal explains itself");
+    let outcome = settlement["payload"]["outcome"]
+        .as_str()
+        .expect("the refusal names its outcome");
+    // Unwind-safe in fact: the closure only reads `world`'s journal and `output`, and
+    // writes nothing either holds, so both are whole after the assertion unwinds.
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        passed_in_round(&world, run, &output, "rework-h");
+    }))
+    .expect_err("a failed command must fail the round assertion");
+    let message = panic
+        .downcast_ref::<String>()
+        .expect("the assertion's message");
+    let (_, report) = message
+        .split_once("settled short of done:")
+        .expect("the failed settlements");
+    let (failed, order) = report
+        .split_once("lifecycle event order:")
+        .expect("the event order");
+    assert!(
+        failed.contains("\"labels\""),
+        "the failed settlement lost its node labels: {failed}"
+    );
+    let detail = format!("{detail:?}");
+    for expected in ["n9", "failed", outcome, &detail] {
+        assert!(failed.contains(expected), "missing {expected:?}: {failed}");
+    }
+    let dispatched = order.find("node-dispatched").expect("the dispatch");
+    let settled = order.find("node-settled").expect("the settlement");
+    assert!(dispatched < settled, "the event order changed: {order}");
+    let status = world.run(&["status", run]);
+    passed_in_round(&world, run, &status, "reading the failed run");
+}
+
+/// One session's clone, and real `onevcs` commands against it with `held-git` first on
+/// their `PATH`: what the two journeys below hold `onevcs` reads inside.
+struct CloneReads {
+    world: World,
+    checkout: PathBuf,
+    path: std::ffi::OsString,
+    real: PathBuf,
+    token: String,
+    worktree: PathBuf,
+    clone: PathBuf,
+}
+
+/// A child this journey started, ended on an assertion panic too.
+struct Started(std::process::Child);
+
+impl Drop for Started {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+impl CloneReads {
+    fn opened(name: &str) -> Self {
+        let world = World::new(name);
+        let checkout = world.repository("local-direct", &[]).checkout;
+        let real = World::resolved_on(&std::process::Command::new("git"), "git")
+            .expect("the host has a git");
+        let bin = world.root.join("held-git-bin");
+        std::fs::create_dir_all(&bin).expect("a directory for the held git");
+        std::fs::copy(
+            crate::harness::double("held-git"),
+            bin.join(format!("git{}", std::env::consts::EXE_SUFFIX)),
+        )
+        .expect("the held git is placed");
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .expect("a PATH this host can spell");
+        let mut reads = Self {
+            world,
+            checkout,
+            path,
+            real,
+            token: String::new(),
+            worktree: PathBuf::new(),
+            clone: PathBuf::new(),
+        };
+        let opened = reads
+            .onevcs(
+                &["session", "open", "service", "--branch", "feature/reader"],
+                "open",
+            )
+            .status()
+            .expect("onevcs runs");
+        assert!(
+            opened.success(),
+            "the session did not open: {:?}",
+            reads.said("open")
+        );
+        let session: Value = serde_json::from_str(reads.said("open")[0].trim())
+            .expect("`session open` prints a session");
+        reads.token = session["token"].as_str().expect("a token").to_owned();
+        reads.worktree = PathBuf::from(session["worktree"].as_str().expect("a worktree"));
+        reads.clone = reads
+            .worktree
+            .parent()
+            .expect("a session's worktree is in its run root")
+            .join("clone");
+        reads
+    }
+
+    /// A real `onevcs` command whose output is kept under `log`.
+    fn onevcs(&self, args: &[&str], log: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(crate::harness::onevcs_binary());
+        command
+            .args(args)
+            .current_dir(&self.checkout)
+            .env("ONEVCS_HOME", self.world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", self.world.gitconfig())
+            .env("GIT_AUTHOR_NAME", crate::harness::GIT_WHO)
+            .env("GIT_AUTHOR_EMAIL", crate::harness::GIT_EMAIL)
+            .env("GIT_COMMITTER_NAME", crate::harness::GIT_WHO)
+            .env("GIT_COMMITTER_EMAIL", crate::harness::GIT_EMAIL)
+            .env("PATH", &self.path)
+            .env("HELD_GIT_REAL", &self.real)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::fs::File::create(self.world.root.join(format!("{log}.stdout"))).unwrap())
+            .stderr(std::fs::File::create(self.world.root.join(format!("{log}.stderr"))).unwrap());
+        command
+    }
+
+    /// What the command logged under `log` printed, as `[stdout, stderr]`.
+    fn said(&self, log: &str) -> [String; 2] {
+        ["stdout", "stderr"].map(|stream| {
+            std::fs::read_to_string(self.world.root.join(format!("{log}.{stream}")))
+                .unwrap_or_default()
+        })
+    }
+
+    /// The pause `held-git` keeps for the read logged as `log`.
+    fn control(&self, log: &str) -> PathBuf {
+        let control = self.world.root.join(format!("held-{log}"));
+        std::fs::create_dir_all(&control).expect("a directory for the read's pause");
+        control
+    }
+
+    /// `onevcs status` of the session's branch, held at its first `git` in the clone.
+    fn held_read(&self, log: &str, extra: &[(&str, &str)]) -> Started {
+        let mut read = self.onevcs(&["status", "feature/reader", "--json"], log);
+        read.env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &self.clone)
+            .env("HELD_GIT_DIR", self.control(log));
+        for (key, value) in extra {
+            read.env(key, value);
+        }
+        Started(read.spawn().expect("the read starts"))
+    }
+
+    /// Whether the read logged as `log` has its `git` held on the clone.
+    fn inside(&self, log: &str) -> bool {
+        std::fs::read_to_string(self.control(log).join("inside")).is_ok_and(|pid| !pid.is_empty())
+    }
+
+    fn release(&self, log: &str) {
+        std::fs::write(self.control(log).join("release"), "go").expect("the read is released");
+    }
+
+    /// Wait for `child` to exit, under the suite's one-step backstop.
+    fn ended(&self, child: &mut Started, what: &str) -> std::process::ExitStatus {
+        let mut status = None;
+        self.world.until(&format!("the {what} to finish"), |_| {
+            status = child.0.try_wait().expect("the command can be observed");
+            status.is_some()
+        });
+        status.expect("the wait ends on an exit")
+    }
+
+    fn running(child: &mut Started) -> bool {
+        child
+            .0
+            .try_wait()
+            .expect("the command can be observed")
+            .is_none()
+    }
+
+    fn record(&self) -> Value {
+        serde_json::from_slice(
+            &std::fs::read(
+                self.world
+                    .onevcs_home()
+                    .join("sessions")
+                    .join(format!("{}.json", self.token)),
+            )
+            .expect("the session record is readable"),
+        )
+        .expect("the session record is JSON")
+    }
+
+    /// Hold the read logged as `log` at its `git` on the clone: started inside it by the
+    /// `onevcs` releases before 0.56.8, and naming its `.git` from outside every run root
+    /// since, which `held-git` holds alike.
+    fn held_inside(&self, log: &str) -> Started {
+        let mut read = self.held_read(log, &[]);
+        self.world
+            .until("the read's git to start on the session's clone", |_| {
+                self.inside(log) || !Self::running(&mut read)
+            });
+        assert!(
+            Self::running(&mut read),
+            "the read finished without a git on the session's clone: {:?}",
+            self.said(log)
+        );
+        read
+    }
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey is one of
+// the busy round's two regression proofs of the onevcs this crate links, and costs 4-9 s. A
+// tier of its own would still depend on all of src/** through the harness, which builds the
+// onepipeline binary, and placing it is left to the re-plan of this repository's test tiers.
+/// On macOS the busy round's stack-base close was refused for a process working inside
+/// that session's clone: a `git` an `onevcs` landing-status read had started there. This
+/// is that ordering on any platform, against the `onevcs` this crate links: a real
+/// `onevcs status` is held at its `git` on the clone while a real `onevcs session
+/// close` runs, and the read is let go only after that close has exited.
+///
+/// The close's exit is the rendezvous. It is given [`CLOSE_LOCK_WAIT`] for any lock it
+/// waits on, so a close that waits for the read reaches the read's lock and says it timed
+/// out there, leaving the session open; one that does not wait reaches the occupancy
+/// decision and refuses over the held `git` instead. Whichever decision it reached, it
+/// reached it with the read still held, so how long it took to get there decides nothing.
+/// A second close after the release must then close the session.
+#[test]
+fn a_session_close_waits_for_an_onevcs_read_working_inside_its_clone() {
+    let reads = CloneReads::opened("close-beside-a-read");
+    let mut read = reads.held_inside("read");
+    let mut beside = reads.onevcs(&["session", "close", &reads.token], "close-beside");
+    beside.env(
+        "ONEVCS_LOCK_TIMEOUT_SECONDS",
+        CLOSE_LOCK_WAIT.as_secs().to_string(),
+    );
+    let mut beside = Started(beside.spawn().expect("the close starts"));
+    let met = reads.ended(&mut beside, "close beside the held read");
+    let [_, met_said] = reads.said("close-beside");
+    eprintln!("close beside the held read: {}", met_said.trim());
+    assert!(
+        CloneReads::running(&mut read),
+        "the read was let go before the close beside it decided: {:?}",
+        reads.said("read")
+    );
+    assert!(
+        !met.success()
+            && met_said.contains("timed out after")
+            && (met_said.contains(&format!("onevcs-closing-runs-{}.lock", reads.token))
+                || met_said.contains("onevcs-reads.lock")),
+        "the close did not stop at the held read's lock (exit {:?}); a close that \
+         refuses over the read's git, or removes the clone under it, has not waited \
+         for the read: {met_said}",
+        met.code()
+    );
+    assert_eq!(
+        reads.record()["state"],
+        "open",
+        "a close that waited closed nothing"
+    );
+    assert!(
+        reads.worktree.exists(),
+        "a close that waited removed the worktree"
+    );
+
+    reads.release("read");
+    let read_status = reads.ended(&mut read, "read");
+    assert!(
+        read_status.success(),
+        "the read failed: {:?}",
+        reads.said("read")
+    );
+    let mut close = Started(
+        reads
+            .onevcs(&["session", "close", &reads.token], "close")
+            .spawn()
+            .expect("the close starts"),
+    );
+    let closed = reads.ended(&mut close, "close");
+    assert!(
+        closed.success(),
+        "the close failed: {:?}",
+        reads.said("close")
+    );
+    assert_eq!(reads.record()["state"], "closed", "{}", reads.record());
+    assert!(
+        !reads.worktree.exists(),
+        "the close left the session's worktree"
+    );
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// How long the close beside the held read waits for any lock before saying where it
+/// waited: what ends that close, so the journey reads which decision it reached.
+const CLOSE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey is the other
+// regression proof, of the same onevcs, and costs 4-9 s; it stays in this tier for the same
+// reason as the close journey above, until the re-plan of this repository's test tiers.
+/// The busy round's four drivers and its commands read one identity at once: each
+/// view render and reconcile asks `onevcs` for landings (`vcs::landing_now`,
+/// `vcs::landings_now`), each driver asks it for session holders, and every one of those
+/// reads runs `git` on the identity's checkouts. Reads that each took the identity
+/// alone would queue every one of them behind whichever is running its `git`, which is
+/// where the round's time goes on a host whose `git` starts are dear.
+///
+/// So a second real `onevcs status` of the identity must reach its own `git` on the
+/// clone while a first is held at its `git` there. It is given [`READ_LOCK_WAIT`] for
+/// any lock, so a read that queues behind the first says which lock it waited on and
+/// exits; either its held `git` or that refusal ends the wait, never time alone.
+#[test]
+fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
+    let reads = CloneReads::opened("reads-beside-a-read");
+    let mut first = reads.held_inside("first");
+    let wait = READ_LOCK_WAIT.as_secs().to_string();
+    let mut second = reads.held_read("second", &[("ONEVCS_LOCK_TIMEOUT_SECONDS", &wait)]);
+    reads.world.until(
+        "the second read to reach its git or to stop at a lock",
+        |_| reads.inside("second") || !CloneReads::running(&mut second),
+    );
+    let [_, second_said] = reads.said("second");
+    let beside = reads.inside("second");
+    eprintln!(
+        "second read: {}",
+        if beside {
+            "its git is on the clone".to_owned()
+        } else {
+            second_said.trim().to_owned()
+        }
+    );
+    assert!(
+        CloneReads::running(&mut first),
+        "the first read was let go before the second decided: {:?}",
+        reads.said("first")
+    );
+    assert!(
+        beside,
+        "a second read of the identity queued behind one held inside its clone instead \
+         of reading beside it: {second_said}"
+    );
+    reads.release("first");
+    reads.release("second");
+    for (child, log) in [(&mut first, "first"), (&mut second, "second")] {
+        let status = reads.ended(child, &format!("{log} read"));
+        assert!(
+            status.success(),
+            "the {log} read failed: {:?}",
+            reads.said(log)
+        );
+    }
+}
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// How long the second read waits for any lock before saying which one it waited on.
+const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A hold whose clone does not resolve is set up wrongly, and `held-git` says so and exits
+/// 70 without running `git`, rather than taking every directory for "not the clone" and
+/// running `git` with no pause, which would let a journey's held read pass unheld.
+#[test]
+fn held_git_refuses_a_hold_whose_clone_does_not_resolve() {
+    let world = World::new("held-git-unresolved-clone");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let control = world.root.join("held");
+    std::fs::create_dir_all(&control).expect("a directory for the pause");
+    let missing = world.root.join("no-such-clone");
+    let refused = std::process::Command::new(crate::harness::double("held-git"))
+        .args(["init", "--quiet", "initialised"])
+        .current_dir(&world.root)
+        .env("HELD_GIT_REAL", &real)
+        .env("HELD_GIT_HOLD", "1")
+        .env("HELD_GIT_CLONE", &missing)
+        .env("HELD_GIT_DIR", &control)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(70), "{stderr}");
+    assert!(
+        stderr.contains(&missing.display().to_string()) && stderr.contains("does not resolve"),
+        "the refusal does not name the clone that does not resolve: {stderr}"
+    );
+    assert!(
+        !world.root.join("initialised").exists(),
+        "a refused hold ran the real git"
+    );
+    assert!(
+        !control.join("inside").exists(),
+        "a refused hold claimed the pause"
+    );
+}
+
+/// `held-git` answers with the real `git`'s own exit code, so a held read whose `git`
+/// fails fails as it would unheld rather than reading as a success.
+#[test]
+fn held_git_answers_with_the_real_gits_failing_exit_code() {
+    let world = World::new("held-git-failing-git");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let outside = world.root.join("not-a-repository");
+    std::fs::create_dir_all(&outside).expect("a directory outside any repository");
+    let direct = std::process::Command::new(&real)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&outside)
+        .env("GIT_CEILING_DIRECTORIES", &world.root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the real git runs");
+    let held = std::process::Command::new(crate::harness::double("held-git"))
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&outside)
+        .env("GIT_CEILING_DIRECTORIES", &world.root)
+        .env("HELD_GIT_REAL", &real)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    let stderr = String::from_utf8_lossy(&held.stderr);
+    assert!(
+        !direct.status.success() && direct.status.code() != Some(70),
+        "the real git did not fail outside a repository as this test needs: {:?}",
+        direct.status
+    );
+    assert_eq!(held.status.code(), direct.status.code(), "{stderr}");
+    assert_eq!(
+        stderr,
+        String::from_utf8_lossy(&direct.stderr),
+        "held-git did not pass the real git's own refusal through"
+    );
+}
+
+/// A real `git` killed by a signal has no exit code, and `held-git` exits 1 for it rather
+/// than 0, so a read whose `git` died is never taken for one that answered.
+#[cfg(unix)]
+#[test]
+fn held_git_fails_when_the_real_git_is_killed_by_a_signal() {
+    let world = World::new("held-git-signalled-git");
+    let killed = world.root.join("killed-git");
+    onepipeline_testfakes::executable(&killed, "#!/bin/sh\nkill -KILL $$\n");
+    let held = std::process::Command::new(crate::harness::double("held-git"))
+        .arg("status")
+        .current_dir(&world.root)
+        .env("HELD_GIT_REAL", &killed)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    assert_eq!(
+        held.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+}
+
+/// Only the first start inside the held clone waits for the release: a second one while
+/// the first is still held runs its `git` straight away, so a journey holds one read and
+/// every other `git` of the round goes on.
+#[test]
+fn held_git_holds_only_the_first_start_inside_its_clone() {
+    let world = World::new("held-git-first-start");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let clone = world.root.join("clone");
+    let control = world.root.join("held");
+    for directory in [&clone, &control] {
+        std::fs::create_dir_all(directory).expect("a directory for the hold");
+    }
+    let start = || {
+        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        command
+            .arg("--version")
+            .current_dir(&clone)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &clone)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+    let mut first = start().spawn().expect("the first held-git starts");
+    world.until("the first start to claim the pause", |_| {
+        control.join("inside").exists()
+    });
+    let mut second = start().spawn().expect("the second held-git starts");
+    world.until("the second start to run its git without waiting", |_| {
+        matches!(second.try_wait(), Ok(Some(_)))
+    });
+    let second = second
+        .wait_with_output()
+        .expect("the second start's output");
+    assert!(
+        second.status.success() && String::from_utf8_lossy(&second.stdout).contains("git version"),
+        "the second start did not run the real git: {second:?}"
+    );
+    assert!(
+        matches!(first.try_wait(), Ok(None)),
+        "the first start stopped holding before its release"
+    );
+    assert_eq!(
+        std::fs::read_to_string(control.join("inside")).expect("the pause names its holder"),
+        first.id().to_string(),
+        "the pause names a start other than the first"
+    );
+    std::fs::write(control.join("release"), "").expect("the release");
+    let first = first.wait_with_output().expect("the first start's output");
+    assert!(
+        first.status.success() && String::from_utf8_lossy(&first.stdout).contains("git version"),
+        "the released start did not run the real git: {first:?}"
+    );
+}
+
+/// A `git` started outside the held clone that names the clone's `.git` with `--git-dir`
+/// works on it, and is held, as `onevcs` 0.56.8 and later run a read of a session's
+/// repository; one naming another repository's, or asking `rev-parse --git-dir` as its
+/// subcommand, is not, and runs straight away.
+#[test]
+fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
+    let world = World::new("held-git-named-git-dir");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let control = world.root.join("held");
+    let outside = world.root.join("outside");
+    for directory in [&control, &outside] {
+        std::fs::create_dir_all(directory).expect("a directory for the hold");
+    }
+    let [clone, other] = ["clone", "other"].map(|name| {
+        let repository = world.root.join(name);
+        let made = std::process::Command::new(&real)
+            .args(["init", "--quiet"])
+            .arg(&repository)
+            .status()
+            .expect("git init runs");
+        assert!(made.success(), "git init {name} failed");
+        repository
+    });
+    let start = |args: &[&std::ffi::OsStr]| {
+        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        command
+            .args(args)
+            .current_dir(&outside)
+            .env("GIT_CEILING_DIRECTORIES", &world.root)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &clone)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+    let git_dir = std::ffi::OsStr::new("--git-dir");
+    let other_git = other.join(".git");
+    let unheld = [
+        vec![
+            git_dir,
+            other_git.as_os_str(),
+            "symbolic-ref".as_ref(),
+            "HEAD".as_ref(),
+        ],
+        vec!["rev-parse".as_ref(), git_dir],
+    ];
+    for args in unheld {
+        let ran = start(&args).output().expect("held-git runs");
+        assert!(
+            !control.join("inside").exists(),
+            "{args:?} was held though it does not work on the clone"
+        );
+        assert_ne!(ran.status.code(), Some(70), "{ran:?}");
+    }
+    let clone_git = clone.join(".git");
+    let mut held = start(&[
+        git_dir,
+        clone_git.as_os_str(),
+        "symbolic-ref".as_ref(),
+        "HEAD".as_ref(),
+    ])
+    .spawn()
+    .expect("the held start starts");
+    world.until(
+        "the start naming the clone's git directory to claim the pause",
+        |_| control.join("inside").exists() || !matches!(held.try_wait(), Ok(None)),
+    );
+    assert!(
+        matches!(held.try_wait(), Ok(None)),
+        "the start naming the clone's git directory ran without being held"
+    );
+    std::fs::write(control.join("release"), "").expect("the release");
+    let held = held.wait_with_output().expect("the held start's output");
+    assert!(
+        held.status.success() && String::from_utf8_lossy(&held.stdout).starts_with("refs/heads/"),
+        "the released start did not run the real git on the clone: {held:?}"
     );
 }
 
