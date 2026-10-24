@@ -1165,9 +1165,14 @@ onevcs-testing = "0.19.19"
 # document metadata in one request each. The public held-task-image read (0.9.4)
 # carries authoring images through the shadow store. Hosts hold their plan-store CLI
 # to this linked release, adopting both improvements together.
-onetaskgraph-core = "=0.11.0"
-onetaskgraph-plugin-api = "=0.11.0"
-onetaskgraph-local-md = "=0.11.0"
+# **No earlier release than 0.11.1**: local-md writes every entry atomically, beside its file
+# and renamed into place, where 0.11.0 wrote an entry carrying no answers with `fs::write`.
+# The write-back's image step rewrites a created task's shadow document that way, so on
+# 0.11.0 a reader listing the shadow could open it empty or half-written
+# (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
+onetaskgraph-core = "=0.11.1"
+onetaskgraph-plugin-api = "=0.11.1"
+onetaskgraph-local-md = "=0.11.1"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
