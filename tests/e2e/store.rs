@@ -2258,15 +2258,10 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     });
 }
 
-/// A node held on two private sources at once is read again only once both are due: the
-/// backing-off source is not asked on its own schedule while the node also waits out the
-/// other's reset, and the one read at that reset asks each source once.
-#[test]
-fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
-    let world = with_tracker(
-        with_tracker(World::new("store-hold-joint"), "vault"),
-        "archive",
-    );
+/// The world, plan and project of a node `joint` edged into the private sources `vault` and
+/// `archive` both, each holding the item it names.
+fn joint_world(label: &str) -> (World, String) {
+    let world = with_tracker(with_tracker(World::new(label), "vault"), "archive");
     private_item(&world, "vault", "vault-design", "design");
     private_item(&world, "archive", "archive-design", "design");
     let mut joint = agent("joint", &["design"]);
@@ -2274,9 +2269,23 @@ fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
         {"designator": designator_of("vault"), "id": "vault-design"},
         {"designator": designator_of("archive"), "id": "archive-design"},
     ]);
+    let project = world.plan(
+        "joint",
+        &plan_of("joint", vec![agent("design", &[]), joint]),
+    );
+    (world, project)
+}
+
+/// A node held on a private source waiting out its provider's reset and on one backing off is
+/// read again at that reset alone: the store reads every edge of a task in one operation, so
+/// the backing-off source's schedule cannot ask the node without asking the other before its
+/// reset. Neither is asked between the launch and the reset, and the read at the reset asks
+/// each once.
+#[test]
+fn a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone() {
+    let (world, project) = joint_world("store-hold-joint");
     let name = "joint";
-    let project = world.plan(name, &plan_of(name, vec![agent("design", &[]), joint]));
-    rate_limit(&world, "vault", Some(now_ms() + 8_000));
+    rate_limit(&world, "vault", Some(now_ms() + 15_000));
     rate_limit(&world, "archive", None);
     world.run(&["start", &project, "--detach"]).exited(0);
     let held = first_held_for_source(&world, name, "joint").expect("joint is held");
@@ -2289,24 +2298,17 @@ fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
     assert_eq!(sources, ["archive", "vault"], "{held}");
     let retry_at = held["unanswered"][1]["retry_at_ms"]
         .as_u64()
-        .expect("vault named its reset");
+        .unwrap_or_else(|| panic!("vault named no reset: {held}"));
     assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
 
-    world.until_within(Duration::from_secs(30), "joint to be read again", |world| {
-        !rereads_of(world, name, "archive").is_empty()
-    });
-    let reread = rereads_of(&world, name, "archive")[0]["at_ms"]
-        .as_u64()
-        .expect("an instant");
-    // The pass at the reset ends where the next begins: both sources refuse again, each on a
-    // one-interval backoff.
-    world.until_within(Duration::from_secs(30), "the re-read after it", |world| {
+    world.until_within(Duration::from_secs(40), "joint to be read again", |world| {
         passes_over(world, name, "archive").len() >= 2
     });
-    let after = passes_over(&world, name, "archive")[1];
+    let passes = passes_over(&world, name, "archive");
     assert!(
-        reread >= retry_at + 1_000,
-        "joint was read again at {reread}, inside vault's reset {retry_at}, on archive's backoff"
+        passes[0] >= retry_at + 1_000,
+        "joint was read again at {}, inside vault's reset {retry_at}, on archive's backoff",
+        passes[0]
     );
     for source in ["archive", "vault"] {
         let reads = item_reads(&world, source);
@@ -2318,7 +2320,7 @@ fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
         assert_eq!(
             reads
                 .iter()
-                .filter(|at| (reread..after).contains(*at))
+                .filter(|at| (passes[0]..passes[1]).contains(*at))
                 .count(),
             1,
             "the read at the reset asked {source} other than once: {reads:?}"
@@ -2327,6 +2329,56 @@ fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
     world.unscript("vault.get_task.rate-limited");
     world.unscript("archive.get_task.rate-limited");
     world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
+/// Two private sources holding one node, both backing off with no reset named, are each read
+/// on their own schedule: a source that starts refusing after the other's backoff has grown
+/// has the node read again one interval later, not when the other's longer wait ends.
+#[test]
+fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
+    let (world, project) = joint_world("store-hold-backoffs");
+    let name = "joint";
+    rate_limit(&world, "vault", None);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let held = first_held_for_source(&world, name, "joint").expect("joint is held");
+    assert_eq!(held["unanswered"][0]["source"], "vault", "{held}");
+    assert_eq!(
+        held["unanswered"].as_array().map(Vec::len),
+        Some(1),
+        "{held}"
+    );
+    // vault's backoff grows past one interval: 1, 2, 4 seconds.
+    world.until_within(
+        Duration::from_secs(30),
+        "vault's backoff to grow",
+        |world| passes_over(world, name, "vault").len() >= 3,
+    );
+    rate_limit(&world, "archive", None);
+    world.until_within(
+        Duration::from_secs(60),
+        "joint to be read on archive's schedule",
+        |world| !passes_over(world, name, "archive").is_empty(),
+    );
+    let archive = passes_over(&world, name, "archive")[0];
+    let vault: Vec<u64> = passes_over(&world, name, "vault")
+        .into_iter()
+        .filter(|at| *at < archive)
+        .collect();
+    let [.., before, refused] = vault[..] else {
+        panic!("vault was read again fewer than twice before archive's pass: {vault:?}");
+    };
+    assert!(
+        archive - refused < refused - before,
+        "archive refused at {refused} and was read again at {archive}, on vault's doubled \
+         backoff (its last wait {} ms) rather than its own first interval",
+        refused - before
+    );
+    world.unscript("vault.get_task.rate-limited");
+    world.unscript("archive.get_task.rate-limited");
+    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");

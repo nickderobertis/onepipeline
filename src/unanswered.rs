@@ -515,6 +515,17 @@ pub(crate) fn backoff(backoffs: u32, poll: u64) -> u64 {
         .min(cap)
 }
 
+/// What [`SourceHolds::due`] finds a pass owes now.
+struct Pass {
+    /// The sources it asks.
+    sources: BTreeSet<String>,
+    /// Each node it asks about, and the sources it is held on.
+    asked: BTreeMap<String, BTreeSet<String>>,
+    /// Each source due but held back with nodes waiting out another source's reset, and when
+    /// it is read with them.
+    later: BTreeMap<String, u64>,
+}
+
 /// A re-read under way, on its own thread, and the sources it set out to ask.
 struct Reading {
     answer: Receiver<Result<BTreeMap<String, Reread>>>,
@@ -789,32 +800,66 @@ impl SourceHolds {
         changed
     }
 
-    /// The sources due now, and the nodes a pass over them asks about: each node every source
-    /// it is held on is due, and each node held only for a prerequisite once its interval is.
-    /// A node held on two sources waits for the later of them, which
-    /// `store::a_node_held_on_two_sources_is_read_again_once_both_are_due` drives.
-    fn due(&self, now: u64) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
+    /// The sources a pass now asks, the nodes it asks about, and when each source due but held
+    /// back is next read.
+    ///
+    /// A node is asked about once any source it is held on is due and none of them is still
+    /// waiting out a reset its provider named: the store reads every edge of a task in one
+    /// operation and cannot leave one source out, so asking a node would ask that source before
+    /// its reset. Sources held on backoff alone are read on their own schedules, each
+    /// independently of the others. A source due whose every node waits out another's reset is
+    /// read with them, at the earliest of those resets. A node held only for a prerequisite is
+    /// asked about once its interval is due. Driven by
+    /// `store::a_node_held_on_a_reset_and_a_backoff_is_read_again_at_the_reset_alone` and
+    /// `store::nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule`.
+    fn due(&self, now: u64) -> Pass {
         let due: BTreeSet<String> = self
             .schedule
             .iter()
             .filter(|(_, scheduled)| scheduled.at_ms <= now)
             .map(|(source, _)| source.clone())
             .collect();
-        let asked = self
-            .held
-            .iter()
-            .filter_map(|(node, hold)| {
-                let held_on: BTreeSet<String> =
-                    hold.unanswered.iter().map(Unanswered::name).collect();
-                let ready = if held_on.is_empty() {
-                    self.missing_at <= now
-                } else {
-                    held_on.is_subset(&due)
-                };
-                ready.then(|| (node.clone(), held_on))
-            })
-            .collect();
-        (due, asked)
+        // When a source still waiting out a reset is next read; `None` for every other.
+        let reset = |source: &String| {
+            self.schedule
+                .get(source)
+                .filter(|scheduled| scheduled.wait.is_none() && scheduled.at_ms > now)
+                .map(|scheduled| scheduled.at_ms)
+        };
+        let mut asked = BTreeMap::new();
+        let mut later: BTreeMap<String, u64> = BTreeMap::new();
+        for (node, hold) in &self.held {
+            let held_on: BTreeSet<String> = hold.unanswered.iter().map(Unanswered::name).collect();
+            if held_on.is_empty() {
+                if self.missing_at <= now {
+                    asked.insert(node.clone(), held_on);
+                }
+                continue;
+            }
+            if held_on.is_disjoint(&due) {
+                continue;
+            }
+            match held_on.iter().filter_map(reset).max() {
+                None => {
+                    asked.insert(node.clone(), held_on);
+                }
+                Some(at) => {
+                    for source in held_on.intersection(&due) {
+                        later
+                            .entry(source.clone())
+                            .and_modify(|earliest| *earliest = (*earliest).min(at))
+                            .or_insert(at);
+                    }
+                }
+            }
+        }
+        let asking: BTreeSet<String> = asked.values().flatten().cloned().collect();
+        later.retain(|source, _| !asking.contains(source));
+        Pass {
+            sources: due.intersection(&asking).cloned().collect(),
+            asked,
+            later,
+        }
     }
 
     /// Start a re-read of every held node a due source holds, where one is due and none is
@@ -830,30 +875,18 @@ impl SourceHolds {
             return;
         };
         let now = crate::sys::now_millis();
-        let (due, asked) = self.due(now);
-        if asked.is_empty() {
-            // Each source due here holds only nodes another source holds too, which is not
-            // due yet: it is read with that one, when the latest of them falls due — as
-            // `store::a_node_held_on_two_sources_is_read_again_once_both_are_due` drives.
-            for source in &due {
-                let with = self
-                    .held
-                    .values()
-                    .filter(|hold| {
-                        hold.unanswered
-                            .iter()
-                            .any(|unasked| &unasked.name() == source)
-                    })
-                    .flat_map(|hold| hold.unanswered.iter())
-                    .filter_map(|unasked| self.schedule.get(&unasked.name()))
-                    .map(|scheduled| scheduled.at_ms)
-                    .max()
-                    .unwrap_or(now);
-                if let Some(scheduled) = self.schedule.get_mut(source) {
-                    scheduled.at_ms = with.max(now.saturating_add(1));
-                }
+        let Pass {
+            sources: due,
+            asked,
+            later,
+        } = self.due(now);
+        for (source, at) in later {
+            if let Some(scheduled) = self.schedule.get_mut(&source) {
+                scheduled.at_ms = at;
             }
-            self.record();
+        }
+        self.record();
+        if asked.is_empty() {
             return;
         }
         let nodes = nodes();
@@ -1363,6 +1396,61 @@ mod tests {
         assert!(!holds.held.contains_key("alpha"));
         let scheduled = holds.schedule["vault"];
         assert_eq!((scheduled.backoffs, scheduled.wait), (1, Some(10)));
+        std::env::remove_var(POLL_ENV);
+    }
+
+    /// A node held on two sources backing off is asked about as soon as either is due, the
+    /// other not waiting for it; one held on a source waiting out a reset is asked about at that
+    /// reset alone, the source backing off beside it read with it then rather than before.
+    #[test]
+    fn a_node_is_asked_about_when_a_source_is_due_and_none_waits_out_a_reset() {
+        let _held = crate::vcs::scratch_home_held();
+        std::env::set_var(POLL_ENV, "10");
+        let now = crate::sys::now_millis();
+        let archive = Unanswered {
+            who: Unasked::Source {
+                source: onetaskgraph_plugin_api::SourceName::new("archive").expect("a source name"),
+                cause: SourceCause::RateLimited { retry_at_ms: None },
+            },
+            reason: "rate limited".to_owned(),
+        };
+        let holds_of = |vault: Unanswered| {
+            let hold = SourceHold::new(vec![archive.clone(), vault], Vec::new()).expect("a hold");
+            let payloads: BTreeMap<String, Vec<Value>> =
+                [("joint".to_owned(), vec![hold.payload()])].into();
+            SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p")
+        };
+        let both = BTreeSet::from(["archive".to_owned(), "vault".to_owned()]);
+
+        // Both backing off, archive due first: joint is asked about on archive's schedule.
+        let mut holds = holds_of(limited(None));
+        let archive_due = holds.schedule["archive"].at_ms;
+        holds.schedule.get_mut("vault").expect("vault").at_ms = archive_due + 60_000;
+        let pass = holds.due(archive_due);
+        assert_eq!(pass.sources, BTreeSet::from(["archive".to_owned()]));
+        assert_eq!(
+            pass.asked,
+            BTreeMap::from([("joint".to_owned(), both.clone())])
+        );
+        assert!(pass.later.is_empty(), "{:?}", pass.later);
+        let pass = holds.due(archive_due - 1);
+        assert!(pass.sources.is_empty() && pass.asked.is_empty());
+
+        // vault waiting out a reset: archive's backoff asks nothing before it, and archive is
+        // read with joint a second after that reset.
+        let holds = holds_of(limited(Some(now + 600_000)));
+        let reset = holds.schedule["vault"].at_ms;
+        assert_eq!(reset, now + 600_000 + AFTER_RESET_MS);
+        let pass = holds.due(holds.schedule["archive"].at_ms);
+        assert!(
+            pass.sources.is_empty() && pass.asked.is_empty(),
+            "{:?}",
+            pass.asked
+        );
+        assert_eq!(pass.later, BTreeMap::from([("archive".to_owned(), reset)]));
+        let pass = holds.due(reset);
+        assert_eq!(pass.sources, both);
+        assert_eq!(pass.asked, BTreeMap::from([("joint".to_owned(), both)]));
         std::env::remove_var(POLL_ENV);
     }
 
