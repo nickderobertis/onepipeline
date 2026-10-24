@@ -1790,6 +1790,8 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     if launch.project.parse::<QualifiedId>().is_err() {
         return;
     }
+    // The stopping process asks the store for the release, so what it asks is the run's.
+    crate::storeops::attach(&paths.dir);
     let store = Store::at(launch_dir(launch));
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();

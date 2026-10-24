@@ -376,6 +376,13 @@ fn a_stopped_run_releases_its_unstarted_tickets_and_an_adoption_claims_them_agai
         Some("todo"),
         "a node the stopped run never started is still claimed"
     );
+    // What the stopping process asked the store for is counted as the run's release.
+    assert!(
+        world.store_operations(name).iter().any(|operation| {
+            operation["phase"] == "release" && operation["operation"] == "task-update"
+        }),
+        "the stop's release was not counted among the run's store operations"
+    );
     assert_eq!(
         ticket_reads(&world, &delivered),
         "todo",

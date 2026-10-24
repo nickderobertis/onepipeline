@@ -1605,3 +1605,168 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Every record the reporter cannot vouch for is refused, naming what is wrong and reporting
+/// nothing: a count that is not one, an operation map that is not one, an hour that is not the
+/// workload's, a dispatch or settlement list that is not the run's, a file that cannot be read,
+/// is not JSON, or is of another schema.
+#[cfg(unix)]
+#[test]
+fn the_store_operations_reporter_refuses_every_record_it_cannot_vouch_for() {
+    type Mutation = fn(&mut serde_json::Value);
+    let dir = scratch("store-operations-refusals");
+    let records = dir.join("target/budget-records/store-operations");
+    std::fs::create_dir_all(&records).expect("the records' directory");
+    let result = dir.join("result.json");
+    let staged = store_operations_records();
+    let cases: Vec<(usize, Mutation, &str)> = vec![
+        (
+            0,
+            |r| r["total"] = serde_json::json!(-1),
+            "total must be a nonnegative integer",
+        ),
+        (
+            0,
+            |r| r["passes"][0]["operations"] = serde_json::json!([]),
+            "must map each operation kind",
+        ),
+        (
+            0,
+            |r| r["window"]["to_ms"] = serde_json::json!(50_000),
+            "window.to_ms is not an hour",
+        ),
+        (
+            0,
+            |r| r["window"]["from_ms"] = serde_json::json!(70_000),
+            "window.from_ms must fall",
+        ),
+        (
+            0,
+            |r| r["passes"][1]["by"] = serde_json::json!("other"),
+            "by must be reset or backoff",
+        ),
+        (
+            0,
+            |r| r["passes"][0]["by"] = serde_json::json!("backoff"),
+            "first re-read must be at the reset",
+        ),
+        (
+            0,
+            |r| r["passes"][0]["at_ms"] = serde_json::json!(100_000),
+            "falls outside the hour",
+        ),
+        (
+            0,
+            |r| r["passes"][0]["after_launch_ms"] = serde_json::json!(5),
+            "is not its instant less the launch",
+        ),
+        (
+            0,
+            |r| r["fixed_interval"]["basis"] = serde_json::json!("measured"),
+            "basis must be arithmetic",
+        ),
+        (
+            0,
+            |r| r["per_node"] = serde_json::json!({"held-1": 5}),
+            "must name each of the 3 held nodes",
+        ),
+        (
+            1,
+            |r| {
+                r["dispatches"].as_array_mut().expect("dispatches").pop();
+            },
+            "must list the run's 20 dispatches",
+        ),
+        (
+            1,
+            |r| r["dispatches"][0]["total"] = serde_json::json!(3),
+            "total is not the sum of its operations",
+        ),
+        (
+            1,
+            |r| r["attempts"] = serde_json::json!([]),
+            "attempts must be a nonempty list",
+        ),
+        (
+            1,
+            |r| r["attempts"][0]["items"] = serde_json::json!(-1),
+            "items must be a nonnegative integer",
+        ),
+        (
+            1,
+            |r| r["launch_claim"] = serde_json::json!([]),
+            "must map each operation kind",
+        ),
+        (
+            2,
+            |r| {
+                r["settlements"].as_array_mut().expect("settlements").pop();
+            },
+            "must list five consecutive settlements",
+        ),
+        (
+            2,
+            |r| r["settlements"][1]["ordinal"] = serde_json::json!(3),
+            "ordinal must be 2",
+        ),
+        (
+            2,
+            |r| r["settlements"][1]["node"] = serde_json::json!("task-01"),
+            "settlements names a node more than once",
+        ),
+        (
+            2,
+            |r| r["settlements"][0]["total"] = serde_json::json!(2),
+            "total is not the sum of its operations",
+        ),
+        (
+            2,
+            |r| r["schema_version"] = serde_json::json!(2),
+            "schema_version must be 1",
+        ),
+    ];
+    let stderr =
+        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+    for (index, mutate, said) in cases {
+        let (id, record) = &staged[index];
+        let mut wrong = record.clone();
+        mutate(&mut wrong);
+        std::fs::write(records.join(format!("{id}.json")), wrong.to_string()).expect("staged");
+        let _ = std::fs::remove_file(&result);
+        let refused = store_operations_report(&dir, Some(id), Some(&result));
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "{id} {said}: {}",
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains(said),
+            "{id}: wanted {said:?}: {}",
+            stderr(&refused)
+        );
+        assert!(!result.exists(), "{id} {said}: a value was reported");
+    }
+    // Not JSON, and a record that cannot be read as a file at all.
+    let id = "store-operations-per-dispatch";
+    let path = records.join(format!("{id}.json"));
+    std::fs::write(&path, "{").expect("staged");
+    let refused = store_operations_report(&dir, Some(id), Some(&result));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("unreadable:"),
+        "{}",
+        stderr(&refused)
+    );
+    std::fs::remove_file(&path).expect("removed");
+    std::fs::create_dir(&path).expect("a directory where the record goes");
+    let refused = store_operations_report(&dir, Some(id), Some(&result));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("unreadable:"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(!result.exists(), "a value was reported");
+    let _ = std::fs::remove_dir_all(&dir);
+}

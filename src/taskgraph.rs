@@ -1593,6 +1593,11 @@ impl SourceCause {
                     .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000))),
             },
             SourceError::Auth { .. } => Self::Auth,
+            // The store names in `unanswered` only a source that could not answer — refused
+            // its credential, unreachable, rate limited — and fails the read on any other
+            // error, so these three arms are the match's exhaustiveness, which
+            // `taskgraph::tests::an_unanswered_source_keeps_its_cause_and_a_rate_limit_its_reset`
+            // holds.
             SourceError::Unavailable { .. }
             | SourceError::Refused { .. }
             | SourceError::Malformed { .. }
@@ -3117,6 +3122,24 @@ mod tests {
                         message: "no route".to_owned(),
                     },
                 ),
+                source(
+                    "refusing",
+                    SourceError::Refused {
+                        message: "no".to_owned(),
+                    },
+                ),
+                source(
+                    "garbled",
+                    SourceError::Malformed {
+                        message: "not JSON".to_owned(),
+                    },
+                ),
+                source(
+                    "misconfigured",
+                    SourceError::Config {
+                        message: "no root".to_owned(),
+                    },
+                ),
                 onetaskgraph_core::Unanswered::Designator(
                     onetaskgraph_core::UnresolvedDesignator {
                         designator: designator.clone(),
@@ -3139,11 +3162,14 @@ mod tests {
                     None
                 ),
                 ("down".to_owned(), Some(Cause::Unavailable), None),
+                ("garbled".to_owned(), Some(Cause::Unavailable), None),
                 (
                     "limited".to_owned(),
                     Some(Cause::RateLimited),
                     Some(1_801_000)
                 ),
+                ("misconfigured".to_owned(), Some(Cause::Unavailable), None),
+                ("refusing".to_owned(), Some(Cause::Unavailable), None),
                 ("unreset".to_owned(), Some(Cause::RateLimited), None),
             ]
         );
