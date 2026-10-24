@@ -1401,57 +1401,6 @@ fn retained_disk_usage_matches_du_for_sparse_files_and_hard_links() {
     assert!(!world.run_file("usage", "scratch").exists());
 }
 
-/// Open a live run's journal for appending the way a second producer must: by
-/// taking the exclusion the engine's own appender takes, and waiting for the
-/// driver while it holds it.
-///
-/// On Windows that exclusion is the share mode the driver opens the journal
-/// with, which admits readers and no second writer, so a plain append handle
-/// opened while the driver is mid-record is refused with a sharing violation
-/// (os error 32) instead of waiting its turn.
-fn append_beside_the_driver(journal: &std::path::Path) -> std::fs::File {
-    let deadline = std::time::Instant::now() + crate::harness::ONE_STEP;
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let file = std::fs::OpenOptions::new()
-            .append(true)
-            .open(journal)
-            .unwrap();
-        // SAFETY: the descriptor is one this function just opened and still owns,
-        // and `flock` borrows no memory.
-        while unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the driver held {} for {:?}",
-                journal.display(),
-                crate::harness::ONE_STEP
-            );
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        file
-    }
-    #[cfg(windows)]
-    loop {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
-        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-        match std::fs::OpenOptions::new()
-            .append(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(journal)
-        {
-            Err(error)
-                if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
-                    && std::time::Instant::now() < deadline =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-            opened => return opened.unwrap(),
-        }
-    }
-}
-
 /// A future producer's record is external journal input. The older reader must
 /// not reclaim scratch from the partial graph it can still display as settled.
 #[test]
@@ -1485,12 +1434,30 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
         // external journal fixture; the real driver and compiled discard reader
         // consume it, without substituting their fold or filesystem operations.
         let record = serde_json::json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":0, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
-        // The handle is a temporary dropped at the end of this statement, before
-        // any wait for the driver below, so it can never be the second writer
-        // that blocks one of the driver's appends.
-        append_beside_the_driver(&world.run_file(run, "events.jsonl"))
-            .write_all(format!("{record}\n").as_bytes())
-            .unwrap();
+        // On Windows the live driver appends under a share mode that admits no
+        // second writer, so an open landing inside one of its appends is a sharing
+        // violation: wait it out, as the engine's own appender does. The handle is
+        // closed at the end of this block, before any wait for the driver below,
+        // so it can never be the second writer that blocks one of its appends.
+        {
+            let waiting_since = std::time::Instant::now();
+            let mut journal = loop {
+                match std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(world.run_file(run, "events.jsonl"))
+                {
+                    Err(e)
+                        if cfg!(windows)
+                            && e.raw_os_error() == Some(32)
+                            && waiting_since.elapsed() < std::time::Duration::from_secs(30) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    opened => break opened.unwrap(),
+                }
+            };
+            journal.write_all(format!("{record}\n").as_bytes()).unwrap();
+        }
         // llmlint: ignore-end[tests_mirror_real_usage]
         if automatic {
             world.release("build.go");
