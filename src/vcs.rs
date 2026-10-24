@@ -941,6 +941,37 @@ pub(crate) fn landings_now(
         .collect()
 }
 
+/// `held`, answering as well each of `nodes` that names the branch and repository
+/// a node of `held` names — the rule [`landings_now`] reads by, for answers
+/// already in hand.
+pub(crate) fn sharing_work<T: Clone>(
+    state: &crate::projection::RunState,
+    nodes: &[&String],
+    mut held: BTreeMap<String, T>,
+) -> BTreeMap<String, T> {
+    let work = |node: &str| {
+        let branch = state.branches.get(node)?;
+        let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
+        Some((branch.as_str(), repo))
+    };
+    for node in nodes {
+        if held.contains_key(*node) {
+            continue;
+        }
+        let Some(named) = work(node) else {
+            continue;
+        };
+        let shared = held
+            .iter()
+            .find(|(other, _)| work(other) == Some(named))
+            .map(|(_, answer)| answer.clone());
+        if let Some(answer) = shared {
+            held.insert((*node).clone(), answer);
+        }
+    }
+    held
+}
+
 /// How many threads besides the caller's [`side_by_side`] starts for `reads`: as
 /// many as the host has cores, counting the caller's, and never more than there
 /// are reads to share.
@@ -4886,6 +4917,43 @@ mod tests {
         );
         assert!(asked_of.contains(&("b", "owner/other")), "{written}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An answer in hand for one node answers each other node naming the same
+    /// branch in the same repository, and no node naming it in another, naming
+    /// another branch, or naming none.
+    #[test]
+    fn an_answer_in_hand_answers_every_node_naming_its_branch_in_its_repository() {
+        let mut state = crate::projection::RunState::default();
+        for (node, repo, branch) in [
+            ("a", "owner/service", Some("me/a")),
+            ("a-rework-1", "owner/service", Some("me/a")),
+            ("elsewhere", "owner/other", Some("me/a")),
+            ("b", "owner/service", Some("me/b")),
+            ("unpublished", "owner/service", None),
+        ] {
+            state.graph.insert(crate::plan::Node {
+                id: node.into(),
+                repo: Some(repo.into()),
+                ..crate::plan::Node::default()
+            });
+            if let Some(branch) = branch {
+                state.branches.insert(node.into(), branch.into());
+            }
+        }
+        let nodes: Vec<String> = ["a", "a-rework-1", "elsewhere", "b", "unpublished"]
+            .map(String::from)
+            .to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let held = BTreeMap::from([("a-rework-1".to_owned(), "the rework's answer")]);
+        let shared = sharing_work(&state, &asked, held);
+        assert_eq!(
+            shared,
+            BTreeMap::from([
+                ("a".to_owned(), "the rework's answer"),
+                ("a-rework-1".to_owned(), "the rework's answer"),
+            ])
+        );
     }
 
     /// The variable naming the sibling's state root, spelled once.

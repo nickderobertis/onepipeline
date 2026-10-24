@@ -11977,6 +11977,12 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// is the run's close-out, nothing else is left running beside it, and one after
 /// another they were a tail every closing command waited out.
 ///
+/// **Except where an attach stream rendering `run` in this process has just asked
+/// it** — after the run last recorded the node moving, inside the stream's reuse
+/// window, and answered: that read is taken up rather than asked a second time —
+/// see [`crate::views::streamed_for_close_out`]. A branch two nodes name, a rework
+/// and the node it replaced, is answered by a read of either.
+///
 /// And handed to an attach stream rendering `run` in this process, whose last
 /// render reports the same settled run a moment later — see
 /// [`crate::views::closed_out`].
@@ -11994,10 +12000,29 @@ fn landings_after_asking_again(run: &str, state: &RunState) -> BTreeMap<String, 
     // Each in the node's own repository, so a branch name two identities both hold
     // is asked about the one this run's work is in rather than refused as an
     // ambiguity the run has already resolved — see `vcs::landings_now`.
+    let streamed = crate::vcs::sharing_work(
+        state,
+        &asked,
+        crate::views::streamed_for_close_out(run, &asked),
+    );
+    let unread: Vec<&String> = asked
+        .iter()
+        .copied()
+        .filter(|node| !streamed.contains_key(*node))
+        .collect();
     let taken = std::time::Instant::now();
-    let read = crate::vcs::landings_now(state, &asked);
-    crate::views::closed_out(run, taken, &read);
-    for (node, read) in read {
+    let read: Vec<(String, crate::vcs::LandingRead, std::time::Instant)> =
+        crate::vcs::landings_now(state, &unread)
+            .into_iter()
+            .map(|(node, read)| (node, read, taken))
+            .chain(
+                streamed
+                    .into_iter()
+                    .map(|(node, (read, asked))| (node, read, asked)),
+            )
+            .collect();
+    crate::views::closed_out(run, &read);
+    for (node, read, _) in read {
         if read.proves_landed() {
             landings.insert(node, Landing::Landed);
         }
