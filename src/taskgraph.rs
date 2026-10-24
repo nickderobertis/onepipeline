@@ -532,7 +532,7 @@ impl Store {
                 || reader.deps(&task, &ids, &Withdrawn::new()),
             )
             .map_err(Error::from)?;
-            refused.extend(unanswered.iter().map(|unasked| unasked.source.clone()));
+            refused.extend(unanswered.iter().map(|unasked| unasked.name()));
             read.insert(node.id.clone(), Reread { deps, unanswered });
         }
         Ok(read)
@@ -1501,22 +1501,42 @@ pub(crate) struct Read {
 /// The store's own [`onetaskgraph_core::Unanswered`], kept structured rather than reduced to
 /// text: the hold record's `cause` and, for a rate limit naming its reset, the instant the
 /// source may be asked again are what the run decides when to read it again by.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unanswered {
-    /// The source's name, as its configuration spells it — or, for an `unconfigured` one,
-    /// the designator no configured source is.
-    pub source: String,
+    /// Who could not be asked, and what kind of not answering it was.
+    pub who: Unasked,
     /// Why it did not answer, in the store's own words.
     pub reason: String,
-    /// What kind of not answering it was; `None` only for a hold a build before this field
-    /// journalled, which is read and said exactly as it was.
-    pub cause: Option<Cause>,
-    /// The epoch milliseconds the source said it may be asked again — now plus its
-    /// `retry_after_seconds` — where it was rate limited and said; `None` otherwise.
-    pub retry_at_ms: Option<u64>,
 }
 
-/// Why a source could not be asked, as a `node-held` record's `cause` spells it.
+/// Who a dependency read could not ask, each with only the account its kind can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unasked {
+    /// A configured source, and why it could not be asked.
+    Source {
+        source: SourceName,
+        cause: SourceCause,
+    },
+    /// The tracker an opaque edge names, which no source configured here is.
+    Tracker(onetaskgraph_plugin_api::Designator),
+    /// A source a hold a build before the cause was recorded names: read and said as it was
+    /// written, with no cause and no reset.
+    Recorded(SourceName),
+}
+
+/// Why a configured source could not be asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceCause {
+    /// It asked the reader to slow down, naming — where it did — the epoch milliseconds it may
+    /// be asked again at: the read's instant plus its `retry_after_seconds`.
+    RateLimited { retry_at_ms: Option<u64> },
+    /// Its credential was absent, malformed or refused.
+    Auth,
+    /// It could not be reached, or answered in a way no wait or credential is known to fix.
+    Unavailable,
+}
+
+/// Why something could not be asked, as a `node-held` record's `cause` spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Cause {
     /// It asked the reader to slow down.
@@ -1552,13 +1572,22 @@ impl Cause {
     pub(crate) fn of_word(word: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|cause| cause.as_str() == word)
     }
+}
 
-    /// The cause of one source failure. A configuration the source refused, or an answer it
-    /// could not give, is `unavailable`: no wait and no credential is known to change it.
-    fn of_error(error: &onetaskgraph_plugin_api::SourceError) -> Self {
+impl SourceCause {
+    /// The cause of one source failure, and a rate limit's reset counted from `now_ms`. A
+    /// configuration the source refused, or an answer it could not give, is `unavailable`: no
+    /// wait and no credential is known to change it.
+    fn of_error(error: &onetaskgraph_plugin_api::SourceError, now_ms: u64) -> Self {
         use onetaskgraph_plugin_api::SourceError;
         match error {
-            SourceError::RateLimited { .. } => Self::RateLimited,
+            SourceError::RateLimited {
+                retry_after_seconds,
+                ..
+            } => Self::RateLimited {
+                retry_at_ms: retry_after_seconds
+                    .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000))),
+            },
             SourceError::Auth { .. } => Self::Auth,
             SourceError::Unavailable { .. }
             | SourceError::Refused { .. }
@@ -1578,27 +1607,53 @@ impl Unanswered {
         for entry in unanswered {
             let read = match entry {
                 onetaskgraph_core::Unanswered::Source(failure) => Self {
-                    source: failure.source.to_string(),
-                    reason: failure.error.to_string(),
-                    cause: Some(Cause::of_error(&failure.error)),
-                    retry_at_ms: match &failure.error {
-                        onetaskgraph_plugin_api::SourceError::RateLimited {
-                            retry_after_seconds: Some(seconds),
-                            ..
-                        } => Some(now_ms.saturating_add(seconds.saturating_mul(1_000))),
-                        _ => None,
+                    who: Unasked::Source {
+                        source: failure.source.clone(),
+                        cause: SourceCause::of_error(&failure.error, now_ms),
                     },
+                    reason: failure.error.to_string(),
                 },
                 onetaskgraph_core::Unanswered::Designator(unresolved) => Self {
-                    source: unresolved.designator.to_string(),
+                    who: Unasked::Tracker(unresolved.designator.clone()),
                     reason: unresolved.reason.as_str().to_owned(),
-                    cause: Some(Cause::Unconfigured),
-                    retry_at_ms: None,
                 },
             };
-            named.entry(read.source.clone()).or_insert(read);
+            named.entry(read.name()).or_insert(read);
         }
         named.into_values().collect()
+    }
+
+    /// What the record's `source` names it by: the source's configured name, or the
+    /// designator of a tracker no configured source is.
+    pub(crate) fn name(&self) -> String {
+        match &self.who {
+            Unasked::Source { source, .. } | Unasked::Recorded(source) => source.to_string(),
+            Unasked::Tracker(designator) => designator.to_string(),
+        }
+    }
+
+    /// The record's `cause`, or `None` for a hold journalled before it was recorded.
+    pub(crate) fn cause(&self) -> Option<Cause> {
+        match &self.who {
+            Unasked::Source { cause, .. } => Some(match cause {
+                SourceCause::RateLimited { .. } => Cause::RateLimited,
+                SourceCause::Auth => Cause::Auth,
+                SourceCause::Unavailable => Cause::Unavailable,
+            }),
+            Unasked::Tracker(_) => Some(Cause::Unconfigured),
+            Unasked::Recorded(_) => None,
+        }
+    }
+
+    /// The reset a rate-limited source named, as the epoch milliseconds it falls at.
+    pub(crate) fn retry_at_ms(&self) -> Option<u64> {
+        match &self.who {
+            Unasked::Source {
+                cause: SourceCause::RateLimited { retry_at_ms },
+                ..
+            } => *retry_at_ms,
+            _ => None,
+        }
     }
 }
 
@@ -3006,7 +3061,7 @@ mod tests {
             0,
         )
         .into_iter()
-        .map(|unanswered| (unanswered.source, unanswered.reason))
+        .map(|unanswered| (unanswered.name(), unanswered.reason))
         .collect();
         assert_eq!(
             named,
@@ -3067,17 +3122,25 @@ mod tests {
             ],
             1_000,
         );
-        let said: Vec<(&str, Option<Cause>, Option<u64>)> = read
+        let said: Vec<(String, Option<Cause>, Option<u64>)> = read
             .iter()
-            .map(|unasked| (unasked.source.as_str(), unasked.cause, unasked.retry_at_ms))
+            .map(|unasked| (unasked.name(), unasked.cause(), unasked.retry_at_ms()))
             .collect();
         assert_eq!(
             said,
             [
-                ("alias/an-alias-of-sixteen", Some(Cause::Unconfigured), None),
-                ("down", Some(Cause::Unavailable), None),
-                ("limited", Some(Cause::RateLimited), Some(1_801_000)),
-                ("unreset", Some(Cause::RateLimited), None),
+                (
+                    "alias/an-alias-of-sixteen".to_owned(),
+                    Some(Cause::Unconfigured),
+                    None
+                ),
+                ("down".to_owned(), Some(Cause::Unavailable), None),
+                (
+                    "limited".to_owned(),
+                    Some(Cause::RateLimited),
+                    Some(1_801_000)
+                ),
+                ("unreset".to_owned(), Some(Cause::RateLimited), None),
             ]
         );
     }

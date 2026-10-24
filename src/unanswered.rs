@@ -43,7 +43,7 @@ use crate::error::Result;
 use crate::journal::Journal;
 use crate::ledger::RunPaths;
 use crate::plan::Node;
-use crate::taskgraph::{Cause, QualifiedId, Reread, Store, Unanswered};
+use crate::taskgraph::{Cause, QualifiedId, Reread, SourceCause, Store, Unanswered, Unasked};
 
 /// The kind a held node's wait is surfaced under.
 pub const WAIT_SURFACE_KIND: &str = "source-wait";
@@ -109,11 +109,11 @@ impl SourceHold {
                 .unanswered
                 .iter()
                 .map(|unasked| {
-                    let mut said = json!({"source": unasked.source, "reason": unasked.reason});
-                    if let Some(cause) = unasked.cause {
+                    let mut said = json!({"source": unasked.name(), "reason": unasked.reason});
+                    if let Some(cause) = unasked.cause() {
                         said["cause"] = json!(cause.as_str());
                     }
-                    if let Some(at) = unasked.retry_at_ms {
+                    if let Some(at) = unasked.retry_at_ms() {
                         said["retry_at_ms"] = json!(at);
                     }
                     said
@@ -138,18 +138,38 @@ impl SourceHold {
             .as_array()?
             .iter()
             .map(|unasked| {
-                let source = unasked.get("source")?.as_str()?;
+                let named = unasked.get("source")?.as_str()?;
+                let retry_at_ms = match unasked.get("retry_at_ms") {
+                    None => None,
+                    Some(at) => Some(at.as_u64()?),
+                };
+                let cause = match unasked.get("cause") {
+                    None => None,
+                    Some(word) => Some(Cause::of_word(word.as_str()?)?),
+                };
+                // Each kind carries only what it can: a reset rides a rate limit alone.
+                if retry_at_ms.is_some() && cause != Some(Cause::RateLimited) {
+                    return None;
+                }
+                let name = || onetaskgraph_plugin_api::SourceName::new(named).ok();
+                let source = |cause| {
+                    Some(Unasked::Source {
+                        source: name()?,
+                        cause,
+                    })
+                };
+                let who = match cause {
+                    None => Unasked::Recorded(name()?),
+                    Some(Cause::RateLimited) => source(SourceCause::RateLimited { retry_at_ms })?,
+                    Some(Cause::Auth) => source(SourceCause::Auth)?,
+                    Some(Cause::Unavailable) => source(SourceCause::Unavailable)?,
+                    Some(Cause::Unconfigured) => Unasked::Tracker(
+                        onetaskgraph_plugin_api::Designator::try_from(named.to_owned()).ok()?,
+                    ),
+                };
                 Some(Unanswered {
-                    source: (!source.is_empty()).then(|| source.to_owned())?,
+                    who,
                     reason: unasked.get("reason")?.as_str()?.to_owned(),
-                    cause: match unasked.get("cause") {
-                        None => None,
-                        Some(word) => Some(Cause::of_word(word.as_str()?)?),
-                    },
-                    retry_at_ms: match unasked.get("retry_at_ms") {
-                        None => None,
-                        Some(at) => Some(at.as_u64()?),
-                    },
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -171,7 +191,7 @@ impl SourceHold {
         if self
             .unanswered
             .iter()
-            .any(|unasked| unasked.cause.is_none())
+            .any(|unasked| unasked.cause().is_none())
         {
             // A hold journalled before the cause was recorded reads as it always did.
             return said;
@@ -184,15 +204,16 @@ impl SourceHold {
         let mut said: Vec<String> = self
             .unanswered
             .iter()
-            .map(|unasked| match unasked.cause {
+            .map(|unasked| match unasked.cause() {
                 None => format!(
                     "source '{}', declared private, could not be asked what it records of \
                      its task: {}",
-                    unasked.source, unasked.reason
+                    unasked.name(),
+                    unasked.reason
                 ),
                 Some(cause) => format!(
                     "{}: {}; {}",
-                    what(&unasked.source, cause),
+                    what(&unasked.name(), cause),
                     unasked.reason,
                     when(unasked, wait(unasked), "it")
                 ),
@@ -213,7 +234,7 @@ impl SourceHold {
             &self
                 .unanswered
                 .iter()
-                .map(|unasked| unasked.source.clone())
+                .map(Unanswered::name)
                 .collect::<Vec<_>>(),
         )
     }
@@ -248,13 +269,13 @@ fn what(source: &str, cause: Cause) -> String {
 fn when(unasked: &Unanswered, wait: Option<u64>, subject: &str) -> String {
     let poll = poll_seconds();
     let cap = poll.saturating_mul(BACKOFF_CAP_INTERVALS);
-    if let Some(at) = unasked.retry_at_ms {
+    if let Some(at) = unasked.retry_at_ms() {
         return format!(
             "{subject} is read again at {}, the reset the provider gave",
             utc(at)
         );
     }
-    let given = if unasked.cause == Some(Cause::RateLimited) {
+    let given = if unasked.cause() == Some(Cause::RateLimited) {
         "no reset time was given, so "
     } else {
         ""
@@ -315,7 +336,7 @@ pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
     for (node, hold) in held {
         for unasked in hold.unanswered() {
             by_source
-                .entry(unasked.source.clone())
+                .entry(unasked.name())
                 .or_insert_with(|| (unasked.clone(), Vec::new()))
                 .1
                 .push(node.clone());
@@ -330,13 +351,13 @@ pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
         by_source
             .into_values()
             .map(|(unasked, nodes)| {
-                let cause = unasked.cause.unwrap_or(Cause::Unavailable);
+                let cause = unasked.cause().unwrap_or(Cause::Unavailable);
                 let who = match cause {
                     Cause::Unconfigured => format!(
                         "tracker '{}', which no source configured here is,",
-                        unasked.source
+                        unasked.name()
                     ),
-                    _ => format!("source '{}', declared private,", unasked.source),
+                    _ => format!("source '{}', declared private,", unasked.name()),
                 };
                 let why = match cause {
                     Cause::RateLimited => "is rate limited and could not be asked",
@@ -386,10 +407,11 @@ struct Due {
 }
 
 impl Due {
-    /// The schedule after `refusal`, answered at `now_ms`: the reset it names plus a second,
-    /// or the backoff's next wait, which then doubles.
-    fn after(self, refusal: &Unanswered, now_ms: u64, poll: u64) -> Self {
-        if let Some(at) = refusal.retry_at_ms {
+    /// The schedule after a refusal answered at `now_ms` naming the reset `retry_at_ms`: that
+    /// reset plus a second, or — where it named none — the backoff's next wait, which then
+    /// doubles.
+    fn after(self, retry_at_ms: Option<u64>, now_ms: u64, poll: u64) -> Self {
+        if let Some(at) = retry_at_ms {
             return Self {
                 at_ms: at.saturating_add(AFTER_RESET_MS),
                 wait: None,
@@ -484,9 +506,9 @@ impl SourceHolds {
         let mut schedule = BTreeMap::new();
         for unasked in held.values().flat_map(SourceHold::unanswered) {
             schedule
-                .entry(unasked.source.clone())
-                .or_insert_with(|| match unasked.retry_at_ms {
-                    Some(_) => Due::fresh(now).after(unasked, now, poll),
+                .entry(unasked.name())
+                .or_insert_with(|| match unasked.retry_at_ms() {
+                    Some(at) => Due::fresh(now).after(Some(at), now, poll),
                     None => Due {
                         at_ms: now.saturating_add(poll.saturating_mul(1_000)),
                         backoffs: 0,
@@ -509,14 +531,13 @@ impl SourceHolds {
     /// started or settled, holds nothing.
     pub(crate) fn retain(&mut self, waiting: impl Fn(&str) -> bool) {
         self.held.retain(|node, _| waiting(node));
-        let named: BTreeSet<&str> = self
+        let named: BTreeSet<String> = self
             .held
             .values()
             .flat_map(SourceHold::unanswered)
-            .map(|unasked| unasked.source.as_str())
+            .map(Unanswered::name)
             .collect();
-        self.schedule
-            .retain(|source, _| named.contains(source.as_str()));
+        self.schedule.retain(|source, _| named.contains(source));
     }
 
     /// Take up what a finished re-read answered, and say whether it changed a hold.
@@ -550,7 +571,7 @@ impl SourceHolds {
                 );
                 for source in &due {
                     if let Some(scheduled) = self.schedule.get_mut(source) {
-                        *scheduled = scheduled.after(&no_reset(source), now, self.poll);
+                        *scheduled = scheduled.after(None, now, self.poll);
                     }
                 }
                 self.missing_at = now.saturating_add(self.poll.saturating_mul(1_000));
@@ -564,14 +585,14 @@ impl SourceHolds {
         for (node, read) in &reread {
             for unasked in &read.unanswered {
                 refused_by
-                    .entry(unasked.source.clone())
+                    .entry(unasked.name())
                     .or_insert_with(|| unasked.clone());
             }
             for source in asked.get(node).into_iter().flatten() {
                 if !read
                     .unanswered
                     .iter()
-                    .any(|unasked| &unasked.source == source)
+                    .any(|unasked| &unasked.name() == source)
                 {
                     answered_by.insert(source.clone());
                 }
@@ -589,7 +610,7 @@ impl SourceHolds {
                 scheduled.backoffs = 0;
             }
             scheduled = match refused_by.get(source) {
-                Some(refusal) => scheduled.after(refusal, now, self.poll),
+                Some(refusal) => scheduled.after(refusal.retry_at_ms(), now, self.poll),
                 // Due and not asked: every node held on it was held on a source that refused
                 // first. It is read with them, an interval from now.
                 None if !answered_by.contains(source) => Due {
@@ -621,7 +642,7 @@ impl SourceHolds {
                     .iter()
                     .map(|unasked| {
                         refused_by
-                            .get(&unasked.source)
+                            .get(&unasked.name())
                             .cloned()
                             .unwrap_or_else(|| unasked.clone())
                     })
@@ -670,11 +691,8 @@ impl SourceHolds {
             .held
             .iter()
             .filter_map(|(node, hold)| {
-                let held_on: BTreeSet<String> = hold
-                    .unanswered
-                    .iter()
-                    .map(|unasked| unasked.source.clone())
-                    .collect();
+                let held_on: BTreeSet<String> =
+                    hold.unanswered.iter().map(Unanswered::name).collect();
                 let ready = if held_on.is_empty() {
                     self.missing_at <= now
                 } else {
@@ -710,10 +728,10 @@ impl SourceHolds {
                     .filter(|hold| {
                         hold.unanswered
                             .iter()
-                            .any(|unasked| &unasked.source == source)
+                            .any(|unasked| &unasked.name() == source)
                     })
                     .flat_map(|hold| hold.unanswered.iter())
-                    .filter_map(|unasked| self.schedule.get(&unasked.source))
+                    .filter_map(|unasked| self.schedule.get(&unasked.name()))
                     .map(|scheduled| scheduled.at_ms)
                     .max()
                     .unwrap_or(now);
@@ -769,7 +787,7 @@ impl SourceHolds {
     fn wait(&self, unasked: &Unanswered) -> Option<u64> {
         Some(
             self.schedule
-                .get(&unasked.source)
+                .get(&unasked.name())
                 .and_then(|scheduled| scheduled.wait)
                 .unwrap_or(self.poll),
         )
@@ -799,16 +817,6 @@ impl SourceHolds {
     }
 }
 
-/// A refusal of `source` that named no reset, as a pass the store failed outright is taken.
-fn no_reset(source: &str) -> Unanswered {
-    Unanswered {
-        source: source.to_owned(),
-        reason: String::new(),
-        cause: None,
-        retry_at_ms: None,
-    }
-}
-
 /// The surface a held node's wait raises, saying of each source the backoff wait `wait`
 /// gives it.
 fn wait_surface(
@@ -819,7 +827,7 @@ fn wait_surface(
     let message = if hold
         .unanswered
         .iter()
-        .any(|unasked| unasked.cause.is_none())
+        .any(|unasked| unasked.cause().is_none())
     {
         legacy_message(node, hold)
     } else {
@@ -857,8 +865,8 @@ fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u
     let of = |cause: Cause| -> Vec<String> {
         hold.unanswered
             .iter()
-            .filter(|unasked| unasked.cause == Some(cause))
-            .map(|unasked| unasked.source.clone())
+            .filter(|unasked| unasked.cause() == Some(cause))
+            .map(Unanswered::name)
             .collect()
     };
     let refused = of(Cause::Auth);
@@ -890,8 +898,8 @@ fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u
         .unanswered
         .iter()
         .map(|unasked| {
-            let cause = unasked.cause.unwrap_or(Cause::Unavailable);
-            format!("{}: {}", self::what(&unasked.source, cause), unasked.reason)
+            let cause = unasked.cause().unwrap_or(Cause::Unavailable);
+            format!("{}: {}", self::what(&unasked.name(), cause), unasked.reason)
         })
         .collect();
     let next: Vec<String> = hold
@@ -899,7 +907,7 @@ fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u
         .iter()
         .map(|unasked| {
             let subject = if many {
-                format!("'{}'", unasked.source)
+                format!("'{}'", unasked.name())
             } else {
                 "it".to_owned()
             };
@@ -968,19 +976,21 @@ mod tests {
 
     fn vault(reason: &str) -> Unanswered {
         Unanswered {
-            source: "vault".to_owned(),
+            who: Unasked::Source {
+                source: onetaskgraph_plugin_api::SourceName::new("vault").expect("a source name"),
+                cause: SourceCause::Auth,
+            },
             reason: reason.to_owned(),
-            cause: Some(Cause::Auth),
-            retry_at_ms: None,
         }
     }
 
     fn limited(retry_at_ms: Option<u64>) -> Unanswered {
         Unanswered {
-            source: "vault".to_owned(),
+            who: Unasked::Source {
+                source: onetaskgraph_plugin_api::SourceName::new("vault").expect("a source name"),
+                cause: SourceCause::RateLimited { retry_at_ms },
+            },
             reason: "rate limited".to_owned(),
-            cause: Some(Cause::RateLimited),
-            retry_at_ms,
         }
     }
 
@@ -1020,6 +1030,16 @@ mod tests {
             ]}),
             json!({"kind": "source", "unanswered": [
                 {"source": "vault", "reason": "r", "cause": "rate-limited", "retry_at_ms": "soon"}
+            ]}),
+            // A reset rides a rate limit alone, and a tracker is named by its designator.
+            json!({"kind": "source", "unanswered": [
+                {"source": "vault", "reason": "r", "cause": "auth", "retry_at_ms": 1}
+            ]}),
+            json!({"kind": "source", "unanswered": [
+                {"source": "vault", "reason": "r", "retry_at_ms": 1}
+            ]}),
+            json!({"kind": "source", "unanswered": [
+                {"source": "vault", "reason": "r", "cause": "unconfigured"}
             ]}),
         ] {
             assert_eq!(SourceHold::of_payload(&unreadable), None, "{unreadable}");
@@ -1142,11 +1162,11 @@ mod tests {
         assert_eq!(backoff(u32::MAX, poll), 1_800);
 
         let now = 1_000_000;
-        let refused = Due::fresh(now).after(&limited(None), now, poll);
+        let refused = Due::fresh(now).after(None, now, poll);
         assert_eq!((refused.at_ms, refused.backoffs), (now + 60_000, 1));
-        let again = refused.after(&limited(None), now, poll);
+        let again = refused.after(None, now, poll);
         assert_eq!((again.at_ms, again.backoffs), (now + 120_000, 2));
-        let reset = again.after(&limited(Some(now + 1_800_000)), now, poll);
+        let reset = again.after(Some(now + 1_800_000), now, poll);
         assert_eq!(
             (reset.at_ms, reset.backoffs, reset.wait),
             (now + 1_801_000, 2, None)

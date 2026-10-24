@@ -12151,6 +12151,10 @@ reads unchanged; and authentication and prerequisite holds behave as above.
     "kind": "source",
     "unanswered": [{"source": "vault", "reason": "rate limited, retry after 1800s", "cause": "rate-limited", "retry_at_ms": 1777895400000}]
   },
+  "hold_unconfigured": {
+    "kind": "source",
+    "unanswered": [{"source": "alias/vault-tracker-alias", "reason": "not configured on this host", "cause": "unconfigured"}]
+  },
   "hold_with_missing": {
     "kind": "source",
     "unanswered": [],
