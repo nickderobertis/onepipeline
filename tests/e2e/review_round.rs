@@ -775,8 +775,14 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// asking every branch again; and the close-out reads a branch a rework shares with
 /// the node it replaced once. The bound sits within a fifth of that count and below
 /// anything the round cost before, so a return to any of those repeats fails it.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the count this bounds is
+// what `views`, `engine`, `driver`, `vcs` and the linked `onevcs` start between them, so any
+// change under `src/` can move it, and a project edged narrower than the crate would drop
+// the journey out of `nx affected` for the very changes the bound exists to catch — the
+// ground `change_telemetry.rs` carries for its own.
 #[cfg(unix)]
 const GIT_STARTS: usize = 10_800;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Hold the round to [`GIT_STARTS`].
 ///
