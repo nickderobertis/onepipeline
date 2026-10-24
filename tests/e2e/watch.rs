@@ -1386,6 +1386,138 @@ fn a_watch_holds_at_a_record_its_writer_has_not_finished_and_emits_it_after() {
     );
 }
 
+/// A record whose writer finishes it **while a watch is reading** is either
+/// emitted by that watch or held in front of — never stepped over — and a watch
+/// that held in front of it resumes onto it.
+///
+/// The journey above finishes the record between two watches. This one finishes
+/// it inside one watch's read, at both places a writer can land there: with the
+/// view read and the journal not yet tailed, where the tail sees the record
+/// whole and has to emit it; and with the journal tailed and the cursor not yet
+/// printed, where the tail saw half a record and the cursor has to stay before
+/// it. Each window is held open by the binary's own ordering failpoint, so the
+/// interleaving is the same on every run.
+#[test]
+fn a_record_finished_while_a_watch_reads_it_is_emitted_or_held_before_and_never_passed() {
+    for (window, gate, emitted_in_the_read) in [
+        ("before-tail", "ONEPIPELINE_TEST_WATCH_TAIL_GATE", true),
+        ("after-tail", "ONEPIPELINE_TEST_WATCH_TAILED_GATE", false),
+    ] {
+        let world = World::new(&format!("watch-torn-{window}"));
+        let run = format!("watchtorn{}", window.replace('-', ""));
+        // Attached, so its driver has exited and this journey is the journal's
+        // only writer — see the journey above.
+        let path = world.plan(&run, &plan_of(&run, vec![agent("build", &[])]));
+        world.run(&["start", &path, "--attach"]).exited(0).settled();
+
+        let first = world.run(&["watch", &run, "--timeout", "0", "--tick-interval", "0"]);
+        agreed(&first, "settled", 0);
+        let before = returned(&first)["cursor"]
+            .as_str()
+            .expect("a watch prints a cursor on exit")
+            .to_string();
+
+        // llmlint: ignore-block[tests_mirror_real_usage] the record is appended to the
+        // journal directly for the reason the journey above gives: a writer caught
+        // halfway is a moment, not a command. Its second half is appended from inside
+        // a real `watch`'s read, held there by that watch's own ordering failpoint,
+        // which is the interleaving under test and one no verb can be asked for.
+        let journal = world.run_file(&run, "events.jsonl");
+        let settlement: Value = std::fs::read_to_string(&journal)
+            .expect("the journal reads")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|event| event["kind"] == json!("node-settled"))
+            .expect("a settled run recorded a settlement");
+        let mut appended = settlement;
+        appended["ts"] = json!("2099-01-01T00:00:00.000Z");
+        appended["stream"] = json!("a-writer-caught-halfway");
+        let record = serde_json::to_string(&appended).expect("the record renders");
+        let (opening, rest) = record.split_at(record.len() / 2);
+        let record_ends = byte_of(&before) + record.len() as u64 + 1;
+        append(&journal, opening);
+
+        let reading = crate::harness::Rendezvous::failpoint();
+        let argv = [
+            "watch",
+            &run,
+            "--timeout",
+            "0",
+            "--tick-interval",
+            "0",
+            "--cursor",
+            &before,
+        ];
+        let mut command = world.cmd(&argv);
+        command.env(gate, reading.address());
+        let during = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let inside = reading.arrived_within_a_step(&world, "the watch inside its read");
+                append(&journal, &format!("{rest}\n"));
+                inside.release();
+            });
+            world.run_on(command, &argv.join(" "))
+        });
+        // llmlint: ignore-end[tests_mirror_real_usage]
+        agreed(&during, "settled", 0);
+        let shown = emitted(&during);
+        let returned_at = returned(&during)["cursor"]
+            .as_str()
+            .expect("a watch prints a cursor on exit")
+            .to_string();
+        assert!(
+            !shown.is_empty() || byte_of(&returned_at) <= byte_of(&before),
+            "[{window}] a watch moved its cursor past a record it did not emit, so nothing \
+             will ever emit that record:\n{}",
+            during.stdout
+        );
+        assert_eq!(
+            !shown.is_empty(),
+            emitted_in_the_read,
+            "[{window}] the record finished in this window was {} by the watch reading it:\n{}",
+            if shown.is_empty() { "held" } else { "emitted" },
+            during.stdout
+        );
+
+        // Resumed from what that watch printed: a record it held before is emitted
+        // now, and one it already emitted is not emitted again.
+        let resumed = world.run(&[
+            "watch",
+            &run,
+            "--timeout",
+            "0",
+            "--tick-interval",
+            "0",
+            "--cursor",
+            &returned_at,
+        ]);
+        agreed(&resumed, "settled", 0);
+        let expected = if emitted_in_the_read {
+            assert_eq!(shown, vec!["node-settled".to_string()], "{}", during.stdout);
+            Vec::new()
+        } else {
+            assert_eq!(returned_at, before, "{}", during.stdout);
+            vec!["node-settled".to_string()]
+        };
+        assert_eq!(
+            emitted(&resumed),
+            expected,
+            "[{window}] resuming from the cursor the reading watch printed:\n{}",
+            resumed.stdout
+        );
+        assert_eq!(
+            byte_of(
+                returned(&resumed)["cursor"]
+                    .as_str()
+                    .expect("a watch prints a cursor on exit")
+            ),
+            record_ends,
+            "[{window}] the resumed watch does not end just past the finished record:\n{}",
+            resumed.stdout
+        );
+    }
+}
+
 /// A cursor is a place in **one** run's journal, and one pasted against another
 /// run is refused by name rather than resumed from.
 ///
