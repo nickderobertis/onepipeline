@@ -795,7 +795,9 @@ pub fn compile(
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
             crate::storeops::about(crate::storeops::Scope::Edit, || {
                 crate::storeops::record(crate::storeops::Operation::TaskAssets);
-                runtime.block_on(built.engine.task_assets(id))
+                runtime
+                    .block_on(built.engine.task_assets(id))
+                    .map_err(|why| why.to_string())
             })
             .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
         }

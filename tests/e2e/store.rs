@@ -1069,14 +1069,10 @@ fn item_reads(world: &World, source: &str) -> Vec<u64> {
         .collect()
 }
 
-/// Every store operation `run` has asked for, as its telemetry counted them.
-fn store_operations(world: &World, run: &str) -> Vec<Value> {
-    world.store_operations(run)
-}
-
 /// The store operations `run` asked for re-reading a node held on `source`.
 fn rereads_of(world: &World, run: &str, source: &str) -> Vec<Value> {
-    store_operations(world, run)
+    world
+        .store_operations(run)
         .into_iter()
         .filter(|operation| {
             operation["phase"] == "re-read"
@@ -1270,7 +1266,8 @@ fn a_plan_naming_no_private_item_launches_holding_nothing_and_asks_the_private_s
         "the private source was asked something"
     );
     assert_eq!(
-        store_operations(&world, name)
+        world
+            .store_operations(name)
             .iter()
             .filter(|operation| operation["phase"] == "re-read")
             .count(),
@@ -1350,7 +1347,8 @@ fn a_source_naming_no_reset_is_read_again_on_a_doubling_backoff_capped_at_thirty
         passes_over(world, name, "vault").len() >= 8
     });
     let passes = passes_over(&world, name, "vault");
-    let launch_read = store_operations(&world, name)
+    let launch_read = world
+        .store_operations(name)
         .iter()
         .filter(|operation| operation["phase"] == "launch")
         .filter_map(|operation| operation["at_ms"].as_u64())
@@ -1558,7 +1556,8 @@ fn an_adopted_run_honours_the_journalled_reset() {
 /// `scripts/store-operations-budget.mjs`.
 const STORE_OPERATIONS_RECORDS: &str = "target/budget-records/store-operations";
 
-/// Write the telemetry record of the budget `budget`.
+/// Write `budget`'s record whole, over the last run's: the reporter judges the latest
+/// journey's figure, never an older one beside it.
 fn record_store_operations(budget: &str, record: &Value) {
     let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(STORE_OPERATIONS_RECORDS);
     std::fs::create_dir_all(&directory).expect("the budget records directory");
@@ -1569,7 +1568,8 @@ fn record_store_operations(budget: &str, record: &Value) {
     .expect("the budget's record is written");
 }
 
-/// Operations counted by kind.
+/// Operations by kind, as the budgets' detail reports them: the store API's own operations,
+/// never a backend's requests.
 fn by_kind<'a>(operations: impl IntoIterator<Item = &'a Value>) -> BTreeMap<String, u64> {
     let mut kinds: BTreeMap<String, u64> = BTreeMap::new();
     for operation in operations {
@@ -1608,7 +1608,8 @@ fn a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_mo
     let reset_at = launched_at + 30_000;
     rate_limit(&world, "vault", Some(reset_at));
     world.run(&["start", &project, "--detach"]).exited(0);
-    let launch_end = store_operations(&world, name)
+    let launch_end = world
+        .store_operations(name)
         .iter()
         .filter(|operation| operation["phase"] == "launch")
         .filter_map(|operation| operation["at_ms"].as_u64())
@@ -1747,11 +1748,12 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
     world.until("the run's last projection to be recorded", |world| {
-        store_operations(world, name)
+        world
+            .store_operations(name)
             .iter()
             .any(|operation| operation["operation"] == "project-status-set")
     });
-    let operations = store_operations(&world, name);
+    let operations = world.store_operations(name);
     let stamp = |kind: &str, node: &str| -> u64 {
         let journal = world.events_of(name, kind);
         let event = journal
@@ -1919,7 +1921,8 @@ fn spike_world(label: &str) -> (World, String, String) {
     (world, name, project)
 }
 
-/// The one line of `text` that starts with `prefix`, trimmed.
+/// The line of a view that starts with `prefix`, without the indentation the view nests it
+/// under, so a journey asserts the words whole.
 fn line_of<'a>(text: &'a str, prefix: &str) -> &'a str {
     text.lines()
         .map(str::trim)
@@ -2342,7 +2345,7 @@ fn an_edge_into_a_tracker_configured_nowhere_holds_its_node_until_it_is_configur
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
     assert!(
-        item_reads(&world, "elsewhere").len() >= 1,
+        !item_reads(&world, "elsewhere").is_empty(),
         "the resolved edge was never read through the source it names"
     );
 }

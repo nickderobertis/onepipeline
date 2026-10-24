@@ -138,12 +138,23 @@ pub(crate) enum Scope<'a> {
     Edit,
 }
 
+/// The phase a line says its operation was asked for in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Phase {
+    Launch,
+    ReRead,
+    WriteBack,
+    Release,
+    Edit,
+}
+
 /// What the operations this thread asks for now are for: each field set by the scope that
 /// names it, an inner scope's over an outer one's.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 struct Context {
     #[serde(skip_serializing_if = "Option::is_none")]
-    phase: Option<&'static str>,
+    phase: Option<Phase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,22 +169,22 @@ impl Context {
     fn within(&self, scope: Scope<'_>) -> Self {
         let mut inner = self.clone();
         match scope {
-            Scope::Launch => inner.phase = Some("launch"),
+            Scope::Launch => inner.phase = Some(Phase::Launch),
             Scope::Reread { node, held_on } => {
-                inner.phase = Some("re-read");
+                inner.phase = Some(Phase::ReRead);
                 inner.node = Some(node.to_owned());
                 inner.held_on = Some(held_on.iter().cloned().collect());
             }
             Scope::WriteBack { projection_at } => {
-                inner.phase = Some("write-back");
+                inner.phase = Some(Phase::WriteBack);
                 inner.projection_at = Some(projection_at.to_owned());
             }
             Scope::Release { projection_at } => {
-                inner.phase = Some("release");
+                inner.phase = Some(Phase::Release);
                 inner.projection_at = Some(projection_at.to_owned());
             }
             Scope::Item(item) => inner.item = Some(item.to_owned()),
-            Scope::Edit => inner.phase = Some("edit"),
+            Scope::Edit => inner.phase = Some(Phase::Edit),
         }
         inner
     }
