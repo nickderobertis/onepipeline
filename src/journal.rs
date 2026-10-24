@@ -173,6 +173,9 @@ impl Journal {
         // bytes back off the file and returned above, with no summary written
         // for them.
         self.summary.appended(envelope, bytes);
+        // And after it for the same reason: a stream read asked once this returns
+        // was asked of a store that holds the record.
+        crate::views::recorded(&self.paths.run, envelope);
         Ok(())
     }
 }
