@@ -12104,8 +12104,10 @@ whichever driver journalled it, an adopting one included. Any other is read agai
 backoff that starts at `ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or
 is not a positive whole number of seconds — doubles after each re-read that source still does
 not answer, stops doubling at thirty intervals, and returns to one interval once it answers;
-the launch's own refusal counts as the first, so its first re-read is one interval out. No
-source is read on a fixed interval. A pass re-reads, in node-id order and off the loop's
+a driver taking such a hold up — the launch's own, or an adopting one — reads it again one
+interval later, and the backoff doubles from the re-reads that follow, so a source that never
+answers is re-read 1, 2, 4, 8 and 16 intervals apart and then every 30. No source is read on
+a fixed interval. A pass re-reads, in node-id order and off the loop's
 thread, every held node whose every source is due, through the store configured from the
 launch directory, and stops asking a source the moment it refuses again: a node held on it
 not yet read keeps its hold, restated with that refusal, so one pass costs a source that still

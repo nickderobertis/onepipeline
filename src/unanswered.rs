@@ -460,7 +460,7 @@ impl SourceHolds {
     /// launch's read, which no driver repeats, so a fresh driver that started empty would
     /// dispatch every node the launch held. A source whose hold records a reset is read
     /// again a second after it, whichever driver journalled it; any other one interval from
-    /// now, its backoff once doubled, as the read the record stands for did not answer.
+    /// now, its backoff doubling from the re-reads after that one.
     pub(crate) fn of_run(
         holds: &BTreeMap<String, Vec<Value>>,
         dir: &std::path::Path,
@@ -485,7 +485,14 @@ impl SourceHolds {
         for unasked in held.values().flat_map(SourceHold::unanswered) {
             schedule
                 .entry(unasked.source.clone())
-                .or_insert_with(|| Due::fresh(now).after(unasked, now, poll));
+                .or_insert_with(|| match unasked.retry_at_ms {
+                    Some(_) => Due::fresh(now).after(unasked, now, poll),
+                    None => Due {
+                        at_ms: now.saturating_add(poll.saturating_mul(1_000)),
+                        backoffs: 0,
+                        wait: Some(poll),
+                    },
+                });
         }
         Self {
             held,
@@ -570,7 +577,9 @@ impl SourceHolds {
                 }
             }
         }
-        for source in due.iter().chain(refused_by.keys()) {
+        // Each source once: one due and refused again is scheduled by that refusal alone.
+        let learned: BTreeSet<&String> = due.iter().chain(refused_by.keys()).collect();
+        for source in learned {
             let mut scheduled = self
                 .schedule
                 .get(source)
@@ -1142,6 +1151,83 @@ mod tests {
             (reset.at_ms, reset.backoffs, reset.wait),
             (now + 1_801_000, 2, None)
         );
+    }
+
+    /// A pass a source refuses again advances its schedule once — however it was due and
+    /// whatever it refused — and a node it passed over takes up the same refusal; a pass in
+    /// which the source answered one node starts its backoff again from one interval.
+    #[test]
+    fn a_pass_advances_each_source_once_and_an_answer_restarts_its_backoff() {
+        let _held = crate::vcs::scratch_home_held();
+        std::env::set_var(POLL_ENV, "10");
+        let hold = || SourceHold::new(vec![limited(None)], Vec::new()).expect("a hold");
+        let payloads: BTreeMap<String, Vec<Value>> = ["alpha", "beta"]
+            .into_iter()
+            .map(|node| (node.to_owned(), vec![hold().payload()]))
+            .collect();
+        let mut holds = SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p");
+        assert_eq!(
+            (
+                holds.schedule["vault"].backoffs,
+                holds.schedule["vault"].wait
+            ),
+            (0, Some(10)),
+            "a hold taken up is read again one interval out"
+        );
+        let pass = |holds: &mut SourceHolds, read: BTreeMap<String, Reread>| {
+            let (answer, reading) = mpsc::channel();
+            let asked: BTreeMap<String, BTreeSet<String>> = holds
+                .held
+                .keys()
+                .map(|node| (node.clone(), BTreeSet::from(["vault".to_owned()])))
+                .collect();
+            holds.reading = Some(Reading {
+                answer: reading,
+                due: BTreeSet::from(["vault".to_owned()]),
+                asked,
+            });
+            answer.send(Ok(read)).expect("the pass answers");
+            holds.take_up(|_| Some(Vec::new()))
+        };
+        let refused = |reason: &str| Reread {
+            deps: Vec::new(),
+            unanswered: vec![Unanswered {
+                reason: reason.to_owned(),
+                ..limited(None)
+            }],
+        };
+        // alpha refused again, twice; beta passed over each time.
+        assert!(pass(
+            &mut holds,
+            [("alpha".to_owned(), refused("again"))].into()
+        ));
+        assert_eq!(holds.schedule["vault"].backoffs, 1);
+        let before = crate::sys::now_millis();
+        assert!(pass(
+            &mut holds,
+            [("alpha".to_owned(), refused("still"))].into()
+        ));
+        let scheduled = holds.schedule["vault"];
+        assert_eq!((scheduled.backoffs, scheduled.wait), (2, Some(20)));
+        assert!(scheduled.at_ms >= before + 20_000, "{scheduled:?}");
+        assert_eq!(holds.held["beta"].unanswered[0].reason, "still");
+        // alpha answered, beta refused: alpha is released and the backoff starts again.
+        let answered = Reread {
+            deps: Vec::new(),
+            unanswered: Vec::new(),
+        };
+        assert!(pass(
+            &mut holds,
+            [
+                ("alpha".to_owned(), answered),
+                ("beta".to_owned(), refused("yet"))
+            ]
+            .into()
+        ));
+        assert!(!holds.held.contains_key("alpha"));
+        let scheduled = holds.schedule["vault"];
+        assert_eq!((scheduled.backoffs, scheduled.wait), (1, Some(10)));
+        std::env::remove_var(POLL_ENV);
     }
 
     /// The launch notice names the source, its cause and its next read, in one line with no
