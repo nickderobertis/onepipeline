@@ -11951,7 +11951,7 @@ launch setting.
   "store_review_keys": [],
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
-  "checkpoint_schema_version": 13,
+  "checkpoint_schema_version": 14,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
@@ -11962,6 +11962,10 @@ that number and the events bundles `1.5.0` and `1.6.0` first, moved this record 
 to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
 bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
 first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
+The engine's reading of turn content through transcript references, which keeps a
+node's last activity in the checkpoint as the `transcript` reference it recorded, moved
+the checkpoint to version 14 with its golden; the block pins the version this build
+reads, so it moved from 13 to 14 with it.
 
 **What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
 compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s

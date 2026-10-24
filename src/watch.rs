@@ -323,10 +323,9 @@ pub(crate) fn watch(
     loop {
         if moved {
             wait.read(&fresh);
-            for event in fresh
-                .iter()
-                .filter(|event| meaningful(event) && request.filter.matches(event))
-            {
+            for event in fresh.iter().filter(|event| {
+                (meaningful(event) || referenced(event)) && request.filter.matches(event)
+            }) {
                 sink(Frame::Event { view: &view, event })?;
                 quiet_since = Instant::now();
             }
@@ -1205,6 +1204,23 @@ fn meaningful(event: &Envelope) -> bool {
         && PipelineKind::from_wire(&event.kind).is_some_and(|kind| MEANINGFUL.contains(&kind))
 }
 
+/// Whether this is a turn record of a dispatch in flight that references its
+/// history: shown beside the [`MEANINGFUL`] kinds, through the caller's own
+/// profile, as the one line [`views::described`] says it holds.
+///
+/// Beside rather than among them, because the set above is this crate's own
+/// closed vocabulary and these are a sibling's records; and only those carrying
+/// a reference, so a record carrying a bounded copy — every record a journal
+/// written before references holds — is passed over exactly as it always was.
+fn referenced(event: &Envelope) -> bool {
+    event.source == Source::Agentgraph
+        && matches!(
+            event.kind.0.as_str(),
+            "turn-started" | "turn-message" | "turn-activity"
+        )
+        && event.payload.contains_key("transcript")
+}
+
 /// The terminal condition this pass reached, if it reached one, and whether a
 /// blocking surface is among what ended it.
 ///
@@ -1438,7 +1454,14 @@ enum Record<'a> {
     /// of it — exactly as `next` hands its caller the events it read, so a
     /// consumer needing a field this crate does not put on the line never has to
     /// go back to the store for it.
-    Event { event: &'a Envelope },
+    Event {
+        event: &'a Envelope,
+        /// What a turn record's `transcript` reference resolved to: its
+        /// description and its whole text, or why it could not be read.
+        /// Omitted for every record that carries no reference.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript: Option<ResolvedRecord>,
+    },
     Heartbeat {
         run_id: &'a str,
         unread: UnreadRecord<'a>,
@@ -1462,6 +1485,89 @@ enum Record<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         summary: Option<&'a Summary>,
     },
+}
+
+/// A turn record's referenced content, as the machine record carries it.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ResolvedRecord {
+    /// The description, and the whole text under the field naming what it is.
+    Resolved {
+        description: String,
+        #[serde(flatten)]
+        text: ResolvedText,
+    },
+    /// The file the reference names, why it was not read, and the line every
+    /// view renders that as.
+    Unavailable {
+        unavailable: String,
+        path: String,
+        why: views::transcript::Why,
+    },
+}
+
+/// The whole text a reference resolved to, under the one field (or, for a
+/// tool, the two) naming what it is.
+#[derive(Debug, serde::Serialize)]
+#[serde(untagged)]
+enum ResolvedText {
+    Instruction {
+        instruction: String,
+    },
+    Message {
+        message: String,
+    },
+    Reasoning {
+        reasoning: String,
+    },
+    Tool {
+        input: Option<String>,
+        output: Option<String>,
+    },
+}
+
+impl ResolvedRecord {
+    fn of(event: &Envelope) -> Option<Self> {
+        if !referenced(event) {
+            return None;
+        }
+        views::transcript::of_record(&event.kind.0, &event.payload).map(Self::from)
+    }
+}
+
+impl From<std::result::Result<views::transcript::Resolved, views::transcript::Unresolved>>
+    for ResolvedRecord
+{
+    fn from(
+        resolution: std::result::Result<views::transcript::Resolved, views::transcript::Unresolved>,
+    ) -> Self {
+        use views::transcript::Text;
+        match resolution {
+            Ok(resolved) => Self::Resolved {
+                text: match &resolved.text {
+                    Text::Instruction(said) => ResolvedText::Instruction {
+                        instruction: said.clone(),
+                    },
+                    Text::Message(said) => ResolvedText::Message {
+                        message: said.clone(),
+                    },
+                    Text::Reasoning(said) => ResolvedText::Reasoning {
+                        reasoning: said.clone(),
+                    },
+                    Text::Tool { output, .. } => ResolvedText::Tool {
+                        input: resolved.text.input_text(),
+                        output: output.clone(),
+                    },
+                },
+                description: resolved.description,
+            },
+            Err(unresolved) => Self::Unavailable {
+                unavailable: unresolved.to_string(),
+                path: unresolved.path.display().to_string(),
+                why: unresolved.why,
+            },
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1525,7 +1631,10 @@ impl Lines {
         let (human, machine) = match frame {
             Frame::Event { view, event } => (
                 views::event_line(view, event),
-                rendered(&Record::Event { event })?,
+                rendered(&Record::Event {
+                    event,
+                    transcript: ResolvedRecord::of(event),
+                })?,
             ),
             Frame::Tick { view } => {
                 let unread = view.unread();
@@ -1645,6 +1754,53 @@ pub(crate) fn unread_phrase(unread: &Unread) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The contract's `watch-transcript` example is what this serializer writes:
+    /// each record's `transcript` object is the one [`ResolvedRecord`] makes of
+    /// the resolution it shows, so a field this file renames or adds fails here
+    /// rather than leaving the document describing a record nobody writes.
+    #[test]
+    fn the_contracts_watch_transcript_example_is_what_the_machine_record_writes() {
+        use views::transcript::{Resolved, Text, ToolKind, Unresolved, Why};
+        let contract = include_str!("../docs/contract.md");
+        let (_, after) = contract
+            .split_once("```json watch-transcript\n")
+            .expect("the contract carries a watch-transcript example");
+        let (block, _) = after.split_once("```").expect("the example is closed");
+        let example: Vec<serde_json::Value> =
+            serde_json::from_str(block).expect("the example parses");
+        let written = [
+            Ok(Resolved {
+                text: Text::Tool {
+                    kind: ToolKind::Call,
+                    name: Some("bash".into()),
+                    input: Some(
+                        serde_json::json!({"command": "cargo nextest run --workspace\necho done"}),
+                    ),
+                    output: None,
+                },
+                description: "cargo nextest run --workspace".into(),
+                cut: false,
+            }),
+            Ok(Resolved {
+                text: Text::Instruction("## What\nthe whole prompt".into()),
+                description: "## What".into(),
+                cut: false,
+            }),
+            Err(Unresolved {
+                path: "/state/oneharness/history/project/session.jsonl".into(),
+                why: Why::MissingFile,
+            }),
+        ]
+        .into_iter()
+        .map(|resolution| {
+            serde_json::to_value(ResolvedRecord::from(resolution)).expect("a record serializes")
+        })
+        .collect::<Vec<_>>();
+        let shown: Vec<&serde_json::Value> =
+            example.iter().map(|record| &record["transcript"]).collect();
+        assert_eq!(shown, written.iter().collect::<Vec<_>>());
+    }
 
     /// A wait reads what it follows once per change it reports, and never across
     /// a wait that reports none — over the bus's memory transport, where a change

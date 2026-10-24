@@ -76,6 +76,9 @@ use crate::verbs::Grouping;
 /// reports: a root that was skipped is named on the same output a run is.
 pub use crate::ledger::Skipped;
 
+#[path = "views_transcript.rs"]
+pub mod transcript;
+
 /// Where one run's durable state lives.
 ///
 /// Re-exported where the views are, because it is the type a consumer already
@@ -4198,7 +4201,19 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
         progress.events(),
         ago(progress.last_at())
     );
-    match &activity.doing {
+    // A reference is described now rather than when it was folded: the one
+    // line its resolver gives, or the diagnostic naming the file it could not
+    // read.
+    let doing = activity.doing.as_ref().map(|doing| match doing {
+        crate::projection::Doing::Said(said) => said.clone(),
+        crate::projection::Doing::Referenced(reference) => {
+            match transcript::resolve(&reference.transcript()) {
+                Ok(resolved) => one_line(&voiced(&resolved)),
+                Err(unresolved) => one_line(&unresolved.to_string()),
+            }
+        }
+    });
+    match doing {
         Some(doing) => format!("now {doing} ({counted})"),
         // Absent rather than guessed: the dispatch has recorded something and
         // has not named a tool, so the count and the age are the whole of what
@@ -4600,11 +4615,22 @@ fn summarize(event: &Envelope) -> String {
             }
         }
     }
-    // The agent's own words, which name no tool and so said nothing past the
-    // kind: its text or its reasoning, on the one line oneharness draws it on.
-    // A tool's activity is left as the kind alone, as it always was — its
-    // detail is `status`'s readout and the transcript's, not this stream's.
-    if event.kind.0 == "turn-activity" {
+    // A turn record referencing its history: the one line describing what it
+    // holds — a tool call's command, path, pattern or argument, a message's or
+    // an instruction's first line — or the diagnostic saying it could not be
+    // read. Never cut here: the description is bounded already, and a path cut
+    // short names no file.
+    let referenced = described(event);
+    if let Some(said) = &referenced {
+        if !said.is_empty() {
+            detail.push_str(&format!(" {said}"));
+        }
+    }
+    // The agent's own words in a record carrying a copy, which name no tool and
+    // so said nothing past the kind: its text or its reasoning, on the one line
+    // oneharness draws it on. A tool's copy is left as the kind alone, as it
+    // always was — its detail is `status`'s readout and the transcript's.
+    else if event.kind.0 == "turn-activity" {
         let field = |key: &str| event.payload.get(key).and_then(serde_json::Value::as_str);
         if let Some(said) = field("kind")
             .and_then(Voice::of)
@@ -4617,13 +4643,41 @@ fn summarize(event: &Envelope) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    if surface || kept {
+    if surface || kept || referenced.is_some() {
         return stripped;
     }
     if stripped.chars().count() <= CAP {
         return stripped;
     }
     stripped.chars().take(CAP).collect()
+}
+
+/// The one line describing a turn record that references its history — the
+/// resolver's description, or `transcript unavailable: <path>: <why>` — and
+/// `None` for every record that carries no reference.
+pub(crate) fn described(event: &Envelope) -> Option<String> {
+    if event.source != Source::Agentgraph || !event.payload.contains_key("transcript") {
+        return None;
+    }
+    transcript::of_record(&event.kind.0, &event.payload).map(|resolved| match resolved {
+        Ok(resolved) if event.kind.0 == "turn-activity" => voiced(&resolved),
+        Ok(resolved) => resolved.description,
+        Err(unresolved) => unresolved.to_string(),
+    })
+}
+
+/// An activity's description as a readout draws it: the agent's own words and
+/// reasoning under the marks oneharness's text view draws them with — the same
+/// line a copy of them reads as — and a tool's description as it is.
+fn voiced(resolved: &transcript::Resolved) -> String {
+    let voice = match resolved.text {
+        transcript::Text::Message(_) => Some(Voice::Message),
+        transcript::Text::Reasoning(_) => Some(Voice::Reasoning),
+        _ => None,
+    };
+    voice
+        .and_then(|voice| voice.block(&resolved.description))
+        .unwrap_or_else(|| resolved.description.clone())
 }
 
 /// How a landing reads on a rendered line.
@@ -5529,22 +5583,34 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     .unwrap_or_default()
             };
             match event.kind.0.as_str() {
-                "turn-started" => out.push_str(&format!(
-                    "  turn {}\n",
-                    event
-                        .payload
-                        .get("turn")
-                        .map_or_else(|| "-".to_string(), ToString::to_string)
-                )),
+                "turn-started" => {
+                    out.push_str(&format!(
+                        "  turn {}\n",
+                        event
+                            .payload
+                            .get("turn")
+                            .map_or_else(|| "-".to_string(), ToString::to_string)
+                    ));
+                    out.push_str(&referenced_text(event, "instruction"));
+                }
+                "turn-message" => {
+                    out.push_str(&referenced_text(event, &format!("{} said", field("role"))));
+                }
                 "turn-activity" => out.push_str(&activity_lines(
                     "    ",
                     field("kind"),
                     field("name"),
-                    // Read out of the payload the same way a retained report's
-                    // event is: a result's text is under `output` and it carries
-                    // no `detail` at all, so a third column read out of `detail`
-                    // was blank on every observation a turn made.
-                    &ActivityText::of(field("kind"), |key| event.payload.get(key)),
+                    // Read through the resolver: a record referencing its
+                    // history is shown the whole of what the history holds,
+                    // and one carrying a copy is read the same way a retained
+                    // report's event is — a result's text is under `output`
+                    // and it carries no `detail` at all, so a third column read
+                    // out of `detail` was blank on every observation a turn
+                    // made.
+                    &ActivityText::relayed(&event.payload),
+                    // Not cut: a copy is inside the journal's bound already,
+                    // and a reference's text is the whole of what was said.
+                    usize::MAX,
                 )),
                 _ => {}
             }
@@ -5580,7 +5646,11 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 }
                 for item in turn.activity {
                     out.push_str(&activity_lines(
-                        "      ", &item.kind, &item.name, &item.text,
+                        "      ",
+                        &item.kind,
+                        &item.name,
+                        &item.text,
+                        MAX_TOOL_OUTPUT_CHARS,
                     ));
                 }
             }
@@ -5614,22 +5684,54 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
     nodes
 }
 
-/// How much of a tool's own output one transcript line prints.
+/// How much of a tool's own output one line of a **retained report** prints.
 ///
-/// Explicit rather than incidental, because the two sources this verb reads are
-/// bounded differently. A `turn-activity` summary is inside
+/// Explicit rather than incidental, because the sources this verb reads are
+/// bounded differently. A `turn-activity` copy is inside
 /// [`MAX_PAYLOAD_TEXT_BYTES`](crate::event::MAX_PAYLOAD_TEXT_BYTES) by the time
 /// it is in the store — this crate's own promise about its own envelope, cut and
-/// marked at ingest — while a retained report's output is the harness's raw
-/// bytes with nothing bounding them at all: reports on this host carry single
-/// outputs past sixty kilobytes, and one of those splatted whole into a terminal
-/// is the rendering this ceiling exists to prevent.
+/// marked at ingest — and a `turn-activity` reference is shown the whole of what
+/// its history file holds, which is what a reader opens the transcript for; so
+/// neither is cut here. A retained report's output is the harness's raw bytes
+/// with nothing bounding them at all: reports on this host carry single outputs
+/// past sixty kilobytes, and one of those splatted whole into a terminal beside
+/// the journal's own record of the same call is the rendering this ceiling
+/// exists to prevent.
 ///
-/// So it is that same bound, read as a **character** ceiling against a byte one:
-/// a text inside 4096 bytes is inside 4096 characters, which is what makes this
-/// unable to cut anything the run's own journal kept. What it does cut on the
-/// report path it counts out loud.
+/// So it is the journal's bound, read as a **character** ceiling against a byte
+/// one. What it cuts on the report path it counts out loud.
 const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
+
+/// The whole text a `turn-started` or `turn-message` references, laid out under
+/// `label` — or, for a reference that resolved to nothing, the diagnostic that
+/// says so on the label's own line.
+///
+/// Nothing for a record carrying a copy instead, which this view has never
+/// drawn and still does not: a journal written before references renders as it
+/// did, and the copy is the producer's bounded summary rather than the text.
+fn referenced_text(event: &Envelope, label: &str) -> String {
+    if !event.payload.contains_key("transcript") {
+        return String::new();
+    }
+    let label = one_line(label);
+    match transcript::of_record(&event.kind.0, &event.payload) {
+        Some(Ok(resolved)) => {
+            let (transcript::Text::Instruction(text)
+            | transcript::Text::Message(text)
+            | transcript::Text::Reasoning(text)) = &resolved.text
+            else {
+                return format!("    {label}  {}\n", one_line(&resolved.description));
+            };
+            let mut out = format!("    {label}\n");
+            for line in text.lines() {
+                out.push_str(&format!("      {}\n", one_line(line)));
+            }
+            out
+        }
+        Some(Err(unresolved)) => format!("    {label}  {}\n", one_line(&unresolved.to_string())),
+        None => String::new(),
+    }
+}
 
 /// One event of a turn as the transcript lays it out, under `indent`.
 ///
@@ -5638,7 +5740,13 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// they are oneharness's own text view of them ([`Voice::block`]), `›` before
 /// what it said and `(thinking)` before what it reasoned, a paragraph laid out
 /// under its mark rather than flattened into a column beside no tool name.
-fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> String {
+fn activity_lines(
+    indent: &str,
+    kind: &str,
+    name: &str,
+    text: &ActivityText,
+    ceiling: usize,
+) -> String {
     let ActivityText::Spoken {
         voice,
         text,
@@ -5649,11 +5757,11 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
             "{indent}{} {}  {}\n",
             one_line(kind),
             one_line(name),
-            activity_text(text)
+            activity_text(text, ceiling)
         );
     };
     let whole = text.chars().count();
-    let kept: String = text.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let kept: String = text.chars().take(ceiling).collect();
     let Some(block) = voice.block(&kept) else {
         // Said and empty is still said: the kind alone, rather than nothing a
         // reader could tell from the event never having arrived.
@@ -5663,7 +5771,7 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
         .lines()
         .map(|line| format!("{indent}{line}\n"))
         .collect();
-    let notes = omissions(whole, *truncated);
+    let notes = omissions(whole, *truncated, ceiling);
     if !notes.is_empty() {
         out.insert_str(out.len() - 1, &format!(" … [{}]", notes.join("; ")));
     }
@@ -5673,10 +5781,10 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
 /// What a rendered text leaves out, said rather than dropped: how much of it a
 /// reader is looking at when this view cut it, and whether the producer had
 /// already cut it short.
-fn omissions(whole: usize, truncated: Truncation) -> Vec<String> {
+fn omissions(whole: usize, truncated: Truncation, ceiling: usize) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
-    if whole > MAX_TOOL_OUTPUT_CHARS {
-        notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
+    if whole > ceiling {
+        notes.push(format!("{ceiling} of {whole} characters"));
     }
     match truncated {
         Truncation::Whole => {}
@@ -5711,9 +5819,9 @@ fn omissions(whole: usize, truncated: Truncation) -> Vec<String> {
 ///
 /// The agent's own words are laid out by [`activity_lines`] rather than put in
 /// a column; handed one anyway, this reads it as the text it carries.
-fn activity_text(text: &ActivityText) -> String {
+fn activity_text(text: &ActivityText, ceiling: usize) -> String {
     let (output, truncated) = match text {
-        ActivityText::Acted(detail) => return one_line(detail),
+        ActivityText::Acted(detail) | ActivityText::Unavailable(detail) => return one_line(detail),
         ActivityText::Returned { output, truncated }
         | ActivityText::Spoken {
             text: output,
@@ -5726,8 +5834,8 @@ fn activity_text(text: &ActivityText) -> String {
     }
     let stripped = one_line(output);
     let whole = stripped.chars().count();
-    let mut text: String = stripped.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
-    let notes = omissions(whole, truncated);
+    let mut text: String = stripped.chars().take(ceiling).collect();
+    let notes = omissions(whole, truncated, ceiling);
     if !notes.is_empty() {
         text.push_str(&format!(" … [{}]", notes.join("; ")));
     }
@@ -8186,7 +8294,7 @@ mod tests {
     fn a_heartbeat_is_reported_beside_the_age_of_the_work_rather_than_as_work() {
         let now = sys::now_millis();
         let rendered = working(&crate::projection::NodeActivity {
-            doing: Some("Bash red-green.sh".into()),
+            doing: Some(crate::projection::Doing::Said("Bash red-green.sh".into())),
             progress: recorded(4, now - 600_000),
             last_heartbeat_at: Some(now),
         });
@@ -8475,10 +8583,13 @@ mod tests {
     /// view's own.
     #[test]
     fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
-        let rendered = activity_text(&ActivityText::Returned {
-            output: "first\r\nsecond\u{1b}[2K".to_string(),
-            truncated: Truncation::Whole,
-        });
+        let rendered = activity_text(
+            &ActivityText::Returned {
+                output: "first\r\nsecond\u{1b}[2K".to_string(),
+                truncated: Truncation::Whole,
+            },
+            MAX_TOOL_OUTPUT_CHARS,
+        );
         assert_eq!(rendered, "first  second [2K");
     }
 
@@ -8492,10 +8603,13 @@ mod tests {
     #[test]
     fn a_truncation_flag_this_build_cannot_read_is_said_rather_than_assumed() {
         let text = |flag: Option<serde_json::Value>| {
-            activity_text(&ActivityText::Returned {
-                output: "what it returned".to_string(),
-                truncated: Truncation::of(flag.as_ref()),
-            })
+            activity_text(
+                &ActivityText::Returned {
+                    output: "what it returned".to_string(),
+                    truncated: Truncation::of(flag.as_ref()),
+                },
+                MAX_TOOL_OUTPUT_CHARS,
+            )
         };
         assert_eq!(text(None), "what it returned");
         assert_eq!(text(Some(json!(false))), "what it returned");
