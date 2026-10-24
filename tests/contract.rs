@@ -7893,6 +7893,12 @@ const RULINGS: &[(&str, &str)] = &[
         "`public_id` is what the run is named by wherever the destination is not private",
     ),
     ("137.", "onepipeline.projected_status"),
+    // The store owns task visibility: a node's classification is its task's own, never its
+    // project's, and the guidance coordinates one private plan.
+    (
+        "139.",
+        "never its project's: a public task of a private coordinating project is public",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

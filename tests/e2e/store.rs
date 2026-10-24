@@ -496,7 +496,8 @@ fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_pl
 /// The private source is a real `scripted-source` serving an empty folder through the real
 /// `local-md` plugin, declared `visibility: private`, answering every task query with the
 /// authentication failure a hosted tracker answers a reader without its credential with.
-/// The store asks it what it records of each public task, so every node's read names it.
+/// The store asks it what it records of each public task a copy landed — the only kind
+/// whose edges a private source may keep — so every node's read names it.
 ///
 /// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
 /// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
@@ -523,6 +524,7 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
             ],
         ),
     );
+    landed_by_copy(&world, &project);
 
     world
         .run(&["plan", "check", &project])
@@ -708,6 +710,7 @@ fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_
             ],
         ),
     );
+    landed_by_copy(&world, &project);
     let build = world
         .store_tasks(&project)
         .into_iter()
@@ -837,6 +840,7 @@ fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
         name,
         &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
     );
+    landed_by_copy(&world, &project);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("both nodes to be held", |world| {
         held_for_source(world, name, "design").is_some()
@@ -910,6 +914,7 @@ fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_
             ],
         ),
     );
+    landed_by_copy(&world, &project);
 
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("build to be held under its sources", |world| {
@@ -957,6 +962,32 @@ fn with_private_source(world: World, name: &str) -> World {
         )
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &fakes)
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
+}
+
+/// Mark every task of `project` as one a copy landed and did not mark as holding every
+/// edge on its own record — the store's `onetaskgraph.copied_destination_version`, and no
+/// `onetaskgraph.edges_on_record` — which is the only kind of task whose edges a source
+/// declared private may keep on its own side, so the only kind a dependency read asks it
+/// about.
+fn landed_by_copy(world: &World, project: &str) {
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    let tasks = world.store().join("tasks").join(identifier);
+    for entry in std::fs::read_dir(&tasks)
+        .expect("the plan's tasks")
+        .flatten()
+    {
+        let held = std::fs::read_to_string(entry.path()).expect("a task");
+        let copied = held.replacen(
+            "\nmetadata:\n",
+            &format!(
+                "\nmetadata:\n  onetaskgraph.copied_destination_version: sha256:{}\n",
+                "0".repeat(64)
+            ),
+            1,
+        );
+        assert_ne!(held, copied, "the task carries no metadata: {held}");
+        std::fs::write(entry.path(), copied).expect("the task is marked copied");
+    }
 }
 
 /// The `source` reason `node` of `run` is held under now, on the run's own record.
