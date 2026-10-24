@@ -726,7 +726,7 @@ resolver = "2"
 # `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
 # no 0.56.x.
 #
-# `onevcs` 0.56.9 is the floor because a busy review round and a pooled identity
+# `onevcs` 0.56.10 is the floor because a busy review round and a pooled identity
 # need these of its checkout reads and sessions, and it is the newest release
 # carrying them all. A read of a session's refs and objects runs from outside every run
 # root, and a session close holds that checkout's lease exclusively against its
@@ -741,7 +741,9 @@ resolver = "2"
 # hold the lock the other needs
 # (`lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back`).
 # And an open session's read is answered while another caller only probes its
-# checkout (onevcs #529).
+# checkout (onevcs #529). And none of that starts more git processes for the
+# same work than before the pool fix did (onevcs #531), which the busy round's
+# git-start bound holds.
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
@@ -839,7 +841,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.7.1"
-onevcs = "0.56.9"
+onevcs = "0.56.10"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
