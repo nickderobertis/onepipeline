@@ -443,8 +443,8 @@ fn shut_down_while_admitting(
     let mut start = world.cmd(&["start", &project, "--detach"]);
     start
         .current_dir(&world.project)
-        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", begins.address())
-        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_NODE", "work");
+        .env("ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE", begins.address())
+        .env("ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE", "work");
     world
         .run_on_within(start, "start --detach", crate::harness::ONE_STEP)
         .exited(0);
