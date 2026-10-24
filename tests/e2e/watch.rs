@@ -1295,20 +1295,22 @@ fn a_resumed_watch_does_not_repeat_what_the_one_before_it_emitted() {
 #[test]
 fn a_watch_holds_at_a_record_its_writer_has_not_finished_and_emits_it_after() {
     let world = World::new("watch-torn");
-    world.script("build.wait", "hold");
-    let run = running(&world, "watchtorn", vec![agent("build", &[])]);
-    world.release("build.go");
-    world.until("the run to settle", |world| {
-        world.run_file(&run, "result.json").is_file()
-    });
+    let run = "watchtorn".to_string();
+    // Attached, so the launch returns only once its driver has exited. A
+    // `result.json` is not that moment: the driver writes it and then journals
+    // its `driver-exited`, a finished record the watch's profile hides and its
+    // cursor rightly steps past — so a journey that went on at `result.json`
+    // could see its cursor move with no record of its own behind it.
+    let path = world.plan(&run, &plan_of(&run, vec![agent("build", &[])]));
+    world.run(&["start", &path, "--attach"]).exited(0).settled();
 
     // llmlint: ignore-block[tests_mirror_real_usage] the journal is appended to
     // directly because the case under test is a *writer caught halfway through an
     // append*, which is a moment rather than a command: no verb of this binary can be
     // asked to leave half a record behind, and a driver reached that state by chance
-    // would make the journey a race. The run has settled first, so this journey is the
-    // only writer while it stands in for that moment, and everything it then asks is a
-    // real `watch` invocation.
+    // would make the journey a race. The run's driver has exited first, so this
+    // journey is the only writer while it stands in for that moment, and everything it
+    // then asks is a real `watch` invocation.
     let journal = world.run_file(&run, "events.jsonl");
     let settlement: Value = std::fs::read_to_string(&journal)
         .expect("the journal reads")
