@@ -743,6 +743,18 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
         EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
         EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
+        // A dependency named by a form other than its own native id, and an opaque far end
+        // whose tracker no configured source is, are refused for a write that *states* a
+        // reference or a read that asks for every edge; a write-back does neither.
+        EngineError::PrivateReferenceContent { .. } => decided("private-reference-content"),
+        EngineError::DesignatorNotConfigured { .. } => decided("designator-not-configured"),
+        // A public projection is the store's own view of a canonical task, made by a project
+        // copy the engine never asks for; the canonical status write mirrors onto one only
+        // where such a copy recorded it, and a mirror that failed has already set the
+        // canonical status, so asking again is the store's own recovery, not this worker's.
+        EngineError::ProjectionReference { .. } => decided("projection-reference"),
+        EngineError::ProjectionsMalformed { .. } => decided("projections-malformed"),
+        EngineError::ProjectionNotMirrored { .. } => decided("projection-not-mirrored"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
@@ -6551,6 +6563,29 @@ mod tests {
             EngineError::PrivateMemberOfPublicProject {
                 item: "plans:a".into(),
                 project: "plans:p".into(),
+            },
+            EngineError::PrivateReferenceContent {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                form: onetaskgraph_core::boundary::ReferenceForm::Slug,
+            },
+            EngineError::DesignatorNotConfigured {
+                id: "plans:a".into(),
+                designator: onetaskgraph_plugin_api::Designator::of_backend("local-md", "board")
+                    .expect("a designator"),
+            },
+            EngineError::ProjectionReference {
+                task: id(),
+                reference: "./notes.md".into(),
+            },
+            EngineError::ProjectionsMalformed {
+                project: id(),
+                why: words(),
+            },
+            EngineError::ProjectionNotMirrored {
+                task: id(),
+                projection: Box::new(onetaskgraph_core::MirrorTarget::View(id())),
+                why: words(),
             },
             // A copy that could not be undone takes the class and kind of the failure it wraps.
             EngineError::CopyNotUndone {

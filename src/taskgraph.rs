@@ -44,7 +44,7 @@ use onetaskgraph_core::{
     SourceFailure, TaskRequest,
 };
 use onetaskgraph_plugin_api::{
-    Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
+    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
     SourceName, StatusCategory, Task,
 };
 use serde_json::{Map, Value};
@@ -172,7 +172,7 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ),
     (
         "classification",
-        "the task's own `classification`, tightened by its project's",
+        "the task's own `classification`, never its project's",
     ),
 ];
 
@@ -657,8 +657,7 @@ impl Reader {
         let mut nodes = Vec::with_capacity(tasks.len());
         let mut unanswered: BTreeMap<String, Vec<Unanswered>> = BTreeMap::new();
         for task in &tasks {
-            let (node, unasked) =
-                self.node(task, project, held.item.classification, &ids, &withdrawn)?;
+            let (node, unasked) = self.node(task, project, &ids, &withdrawn)?;
             if !unasked.is_empty() {
                 unanswered.insert(ids[&task.id.to_string()].clone(), unasked);
             }
@@ -786,7 +785,6 @@ impl Reader {
         &self,
         task: &Qualified<Task>,
         home: &QualifiedId,
-        project_classification: Classification,
         ids: &Ids,
         withdrawn: &Withdrawn,
     ) -> std::result::Result<(Value, Vec<Unanswered>), Load> {
@@ -878,8 +876,11 @@ impl Reader {
             );
         }
         node.insert("task_record".to_owned(), Value::Object(record));
-        // A private project keeps every task in it private, whatever the task says.
-        let classification = task.item.classification.strictest(project_classification);
+        // The task's own visibility, as the store answers it: a task is classified by its
+        // own declaration and its own repositories, never by the project it is filed under,
+        // so a public task of a private coordinating project stays public. Its repositories
+        // still decide its clearance (`crate::boundary`).
+        let classification = task.item.classification;
         if !classification.is_public() {
             node.insert(
                 "classification".to_owned(),
@@ -1164,7 +1165,25 @@ impl Reader {
                 .map_err(|error| failed(query, about, &error))?;
             partial(query, about, &response.errors)?;
             all.extend(response.items);
-            unasked.extend(response.unanswered);
+            for unanswered in response.unanswered {
+                match unanswered {
+                    onetaskgraph_core::Unanswered::Source(failure) => unasked.push(failure),
+                    // A far end recorded opaquely under a tracker this host does not configure
+                    // is a prerequisite no re-read here can name, so the read is refused
+                    // rather than held for an answer that cannot come.
+                    onetaskgraph_core::Unanswered::Designator(unresolved) => {
+                        return Err(Error::Sibling {
+                            tool: STORE,
+                            message: format!(
+                                "`{query}` of '{about}' answered in part: a dependency is \
+                                 recorded under designator {}, {}",
+                                unresolved.designator,
+                                unresolved.reason.as_str()
+                            ),
+                        });
+                    }
+                }
+            }
             let Some(next) = response.next else {
                 return Ok((all, unasked));
             };
@@ -1652,6 +1671,7 @@ fn one<T>(
 #[cfg(test)]
 mod tests {
     use onetaskgraph_core::Config;
+    use onetaskgraph_plugin_api::Classification;
     use serde_json::json;
 
     use super::*;
@@ -2039,7 +2059,7 @@ mod tests {
 
     /// The boundary's three record fields reach the plan from where the store keeps them:
     /// the export edges from the project's reserved key, a node's classification from its
-    /// task's own field — tightened by a private project — and every repository a task
+    /// task's own field — never its project's — and every repository a task
     /// names beyond its `repo` onto its record.
     #[test]
     fn the_boundary_fields_reconcile_with_the_records_they_are_read_from() {
@@ -2107,8 +2127,13 @@ mod tests {
         let written = serde_json::to_value(nodes["consume"]).expect("a node serializes");
         assert!(written.get("classification").is_none(), "{written}");
 
-        // A private project keeps every task in it private, whatever the task says.
-        let mut private = store(json!({}), vec![task("t-a", node("a"), json!({}))], vec![]);
+        // A private coordinating project classifies none of its tasks: each keeps its own
+        // visibility, so a public task under it stays public and a private one private.
+        let tasks = vec![
+            task("t-a", node("a"), json!({})),
+            task("t-b", node("b"), json!({"classification": "private"})),
+        ];
+        let mut private = store(json!({}), tasks.clone(), vec![]);
         private.config = Config::from_document(json!({
             "sources": {"plans": {"plugin": "in-memory", "config": {
                 "projects": [{
@@ -2119,7 +2144,7 @@ mod tests {
                     "classification": "private",
                     "metadata": {"onepipeline.schema_version": crate::plan::PLAN_SCHEMA_VERSION},
                 }],
-                "tasks": [task("t-a", node("a"), json!({}))],
+                "tasks": tasks,
                 "task_dependencies": [],
             }}},
         }))
@@ -2129,7 +2154,16 @@ mod tests {
             &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
         );
         let read = load(private).unwrap_or_else(|_| panic!("the project reads as a plan"));
-        assert_eq!(read.plan.tasks[0].classification, Classification::Private);
+        let classes: BTreeMap<&str, Classification> = read
+            .plan
+            .tasks
+            .iter()
+            .map(|node| (node.id.as_str(), node.classification))
+            .collect();
+        assert_eq!(
+            classes,
+            BTreeMap::from([("a", Classification::Public), ("b", Classification::Private)])
+        );
 
         // And the field is the task's, never a reserved key.
         let refused = load(store(
