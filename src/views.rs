@@ -1132,11 +1132,13 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// records for as long as the run goes. There a node's read is carried across
 /// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
 /// [`StreamReads`] — and is taken again at once after the stream records a
-/// settlement or restack of that node or any record of its session — its
-/// publication and landing among them — and on the stream's final render — the one made once the
-/// run's loop has finished, or the one printing the driver's exit where that came
-/// first — which reports the run as it settled and carries nothing. `status`,
-/// `results` and `watch` carry nothing and read on every render.
+/// settlement or restack of that node or its change merging, and on the stream's
+/// final render — the one made once the run's loop has finished, or the one
+/// printing the driver's exit where that came first — which reports the run as it
+/// settled and carries nothing from the renders before it, taking up only the
+/// answers the run's own close-out read once its loop had settled (see
+/// [`closed_out`]). `status`, `results` and `watch` carry nothing and read on
+/// every render.
 ///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
@@ -1186,7 +1188,7 @@ enum Renders {
 /// started, and, one read after another, a tail after its run had finished. Ten
 /// seconds is a merge somebody else performs going unreported for no longer than
 /// a person takes to look up from it; the stream's own records end the reuse
-/// sooner, and its last render reads afresh.
+/// sooner, and its last render carries none of it.
 pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// One landing read a render holds, and when it was taken.
@@ -1220,28 +1222,57 @@ impl StreamReads {
     /// Make ready for the render of `fresh`, the records the stream is about to
     /// print, `concluded` once the run's loop has finished.
     ///
-    /// The stream's last render reports the run as it settled, so it reads every
-    /// landing afresh — as does the render printing the driver's exit, which is the
-    /// last one where nothing is left to print after it; before them, a node's read
-    /// is carried only until the stream records something that moves it.
+    /// The stream's last render reports the run as it settled, so it carries no
+    /// read from the renders before it — as does the render printing the driver's
+    /// exit, which is the last one where nothing is left to print after it; before
+    /// them, a node's read is carried only until the stream records something that
+    /// moves it.
     pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
+        // First, so a close-out read the run moved past is not what its last render
+        // takes up, whichever of the two branches below that render is.
+        let mut closed = closed_out_held();
+        for node in fresh.iter().filter_map(|event| moved_by(event)) {
+            closed.remove(&(run.to_owned(), node.to_owned()));
+        }
+        drop(closed);
         if concluded {
-            self.forget_all();
+            self.forget_all(run);
         } else {
             self.forget_moved(run, fresh);
         }
     }
 
-    /// Take every node's landing afresh on the next render, which is the one
-    /// reporting the run as it settled.
-    fn forget_all(&self) {
-        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+    /// Carry nothing from the renders before into the next, which is the one
+    /// reporting the run as it settled — except the reads the run's own close-out
+    /// took in this process, after its loop's last settlement, still inside
+    /// [`STREAM_READ_REUSE`] and moved by nothing the stream recorded since: see
+    /// [`closed_out`].
+    fn forget_all(&self, run: &str) {
+        let now = std::time::Instant::now();
+        let settled: Vec<((String, String), Carried)> = closed_out_held()
+            .iter()
+            .filter(|((closed, _), _)| closed == run)
+            .map(|(key, (read, taken))| {
+                let carried = Carried {
+                    read: std::rc::Rc::new(read.clone()),
+                    taken: *taken,
+                };
+                (key.clone(), carried)
+            })
+            .filter(|(_, carried)| carried.still_carried(now))
+            .collect();
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.clear();
+            reads.extend(settled);
+        });
     }
 
     /// Take a node's landing afresh where the stream just recorded something that
-    /// can move it: a settlement or restack of the node, or any record of its
-    /// session — its publication and its landing among them. A session's records
-    /// that move nothing are let go of too, which costs a read and is never stale.
+    /// moves it — see [`moved_by`]. Every other record of its session is a step
+    /// of a publication whose outcome the run records as the node's settlement or
+    /// restack, and is let go of there: letting go at each step read the node
+    /// again on every render of its publication, some forty `git` each time, to
+    /// answer what the read before it had.
     ///
     /// And every node's, where the stream just recorded the driver exiting: the
     /// render printing that reports the run as it settled, and the stream's last
@@ -1252,25 +1283,72 @@ impl StreamReads {
         if events.iter().any(|event| {
             event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
         }) {
-            self.forget_all();
+            self.forget_all(run);
             return;
         }
         READ_THIS_RENDER.with_borrow_mut(|reads| {
-            for event in events {
-                let moves = match event.source {
-                    Source::Vcs => true,
-                    Source::Pipeline => {
-                        event.kind.0 == PipelineKind::NodeSettled.as_str()
-                            || event.kind.0 == PipelineKind::NodeRestacked.as_str()
-                    }
-                    Source::Agentgraph => false,
-                };
-                if let (true, Some(node)) = (moves, event.labels.node.as_deref()) {
-                    reads.remove(&(run.to_owned(), node.to_owned()));
-                }
+            for node in events.iter().filter_map(|event| moved_by(event)) {
+                reads.remove(&(run.to_owned(), node.to_owned()));
             }
         });
     }
+}
+
+/// The node whose landing `event` can move, if it can move one: the run's record
+/// of the node settling or restacking, which is where it records what each
+/// publication of the node did, and the sibling's record of a change merging,
+/// which is the landing itself.
+fn moved_by(event: &Envelope) -> Option<&str> {
+    let moves = match event.source {
+        Source::Vcs => crate::vcs::is_landing(&event.kind),
+        Source::Pipeline => {
+            event.kind.0 == PipelineKind::NodeSettled.as_str()
+                || event.kind.0 == PipelineKind::NodeRestacked.as_str()
+        }
+        Source::Agentgraph => false,
+    };
+    moves.then_some(event.labels.node.as_deref()).flatten()
+}
+
+/// Hand the landing reads the run's close-out just took to an attach stream
+/// rendering the same run in this process, for its last render.
+///
+/// The driver's close-out — see `engine`'s `landings_after_asking_again` — asks
+/// every unlanded node's landing once the run's loop has settled its last node,
+/// and the attached stream's last render, a moment later, asked every one of them
+/// again: ten branches read twice over in the closing seconds of every attached
+/// command. Both report the run as it settled, so the render takes the close-out's
+/// answer — inside [`STREAM_READ_REUSE`] of when it was `taken`, only where the
+/// sibling answered it, and only where the stream recorded nothing that moves the
+/// node since — and reads the rest.
+pub(crate) fn closed_out(run: &str, taken: std::time::Instant, reads: &[(String, LandingRead)]) {
+    let mut held = closed_out_held();
+    held.retain(|(closed, _), _| closed != run);
+    // A refusal is not handed over: the last render asks again rather than repeat
+    // that nothing could decide it a moment ago.
+    held.extend(
+        reads
+            .iter()
+            .filter(|(_, read)| matches!(read, LandingRead::Answered(_)))
+            .map(|(node, read)| ((run.to_owned(), node.clone()), (read.clone(), taken))),
+    );
+}
+
+/// The close-out reads [`closed_out`] handed over, keyed by run and node, and when
+/// each was taken.
+///
+/// Process-wide rather than per thread like [`READ_THIS_RENDER`], because the
+/// close-out runs on the engine's thread and the stream renders on the driver's.
+// llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as, for the reason the suppression on `READ_THIS_RENDER` above records.
+static CLOSED_OUT: std::sync::Mutex<BTreeMap<(String, String), (LandingRead, std::time::Instant)>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// [`CLOSED_OUT`], whoever panicked while holding it: each entry is a whole read.
+fn closed_out_held(
+) -> std::sync::MutexGuard<'static, BTreeMap<(String, String), (LandingRead, std::time::Instant)>> {
+    CLOSED_OUT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Drop for StreamReads {
@@ -5897,11 +5975,12 @@ mod tests {
 
     /// What an attach stream lets go of before each render, over the records that
     /// render is about to print — the one call the driver's attach loop makes: a
-    /// node's read goes where the stream records it settling or restacking, or records
-    /// anything of its session; it stays through a record of its own that moves
-    /// nothing, an agent's, and another node's; and every read goes before the render
-    /// made once the run's loop has finished, and before the one printing the
-    /// driver's exit.
+    /// node's read goes where the stream records it settling or restacking, or its
+    /// change merging; it stays through the steps of a publication — a fetch, a
+    /// push, the publication itself — through a record of its own that moves
+    /// nothing, an agent's, and another node's; and every read goes before the
+    /// render made once the run's loop has finished, and before the one printing
+    /// the driver's exit.
     ///
     /// A structural assertion rather than a journey, and for a reason beyond the one
     /// above: the stream's last render folds the run's own settled report — see
@@ -5915,14 +5994,32 @@ mod tests {
         for (lets_go, record) in [
             (
                 true,
+                relayed(
+                    EventKind("merge-completed".into()),
+                    Source::Vcs,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+            (
+                true,
+                relayed(
+                    EventKind("change-merged".into()),
+                    Source::Vcs,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+            (
+                false,
                 relayed(EventKind("push".into()), Source::Vcs, Some("a"), &[]),
             ),
             (
-                true,
+                false,
                 relayed(EventKind("fetch".into()), Source::Vcs, Some("a"), &[]),
             ),
             (
-                true,
+                false,
                 relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
             ),
             (
@@ -5978,6 +6075,64 @@ mod tests {
             reads_held().is_empty(),
             "the render printing the driver's exit carried a read into it"
         );
+    }
+
+    /// The stream's last render takes up the run's close-out reads in place of
+    /// asking again — only the answered ones, only the run's own, only inside the
+    /// window, and only where nothing the stream recorded since moved the node; a
+    /// render before the last takes up none of them.
+    #[test]
+    fn the_last_render_of_a_stream_takes_up_the_close_out_s_answered_reads() {
+        let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
+        let refused = crate::vcs::LandingRead::Refused {
+            because: "no answer".into(),
+        };
+        let now = std::time::Instant::now();
+        let stale = now
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        let stream = StreamReads::begin();
+
+        closed_out(
+            "closing",
+            now,
+            &[
+                ("kept".into(), answered()),
+                ("moved".into(), answered()),
+                ("refused".into(), refused),
+            ],
+        );
+        closed_out("other", now, &[("elsewhere".into(), answered())]);
+        stream.before_render("closing", &[], false);
+        assert!(
+            reads_held().is_empty(),
+            "a render before the last took one up"
+        );
+
+        let moved = event(
+            crate::journal::PipelineKind::NodeRestacked,
+            Some("moved"),
+            &[],
+        );
+        stream.before_render("closing", &[&moved], true);
+        assert_eq!(reads_held(), ["kept"], "the last render's reads");
+        let held = READ_THIS_RENDER.with_borrow(|reads| {
+            reads
+                .get(&("closing".to_owned(), "kept".to_owned()))
+                .map(|carried| (*carried.read).clone())
+        });
+        assert_eq!(held, Some(answered()), "the close-out's own answer");
+
+        // A close-out read the window has passed is asked again.
+        closed_out("closing", stale, &[("kept".into(), answered())]);
+        stream.before_render("closing", &[], true);
+        assert!(
+            reads_held().is_empty(),
+            "a read past its window was taken up"
+        );
+        drop(stream);
+        closed_out("closing", now, &[]);
+        closed_out("other", now, &[]);
     }
 
     /// A read is carried inside its window and taken again once the window has

@@ -895,25 +895,50 @@ pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
 /// Each read is counted against the node it was asked for and the render the
 /// caller is inside, if any — see [`crate::rendercost::within`] — so a read taken
 /// on another thread costs the render exactly what one taken in it would.
+///
+/// **One read per branch and repository**, however many of `nodes` name it: a
+/// rework continues the branch of the node it replaced, so both name one branch in
+/// one repository, and the sibling's answer is about that branch alone. The read
+/// is counted against the first node asked that names it, and handed back for
+/// every one.
 pub(crate) fn landings_now(
     state: &crate::projection::RunState,
     nodes: &[&String],
 ) -> Vec<(String, LandingRead)> {
-    let asked: Vec<&String> = nodes
+    // The node's own repository, so a branch name two identities both hold is
+    // asked about the one this run's work is in.
+    let asked: Vec<(&String, (&str, Option<&str>))> = nodes
         .iter()
         .copied()
-        .filter(|node| state.branches.contains_key(*node))
+        .filter_map(|node| {
+            let branch = state.branches.get(node)?;
+            let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
+            Some((node, (branch.as_str(), repo)))
+        })
         .collect();
+    let mut distinct: Vec<(&String, (&str, Option<&str>))> = Vec::new();
+    for (node, read_of) in &asked {
+        if !distinct.iter().any(|(_, taken)| taken == read_of) {
+            distinct.push((node, *read_of));
+        }
+    }
     let within = crate::rendercost::within();
-    let read = side_by_side(&asked, helpers_for(asked.len()), |node| {
+    let read = side_by_side(&distinct, helpers_for(distinct.len()), |(node, read_of)| {
         let _adopted = within.adopted();
         let _deciding = crate::rendercost::deciding(node);
-        // The node's own repository, so a branch name two identities both hold is
-        // asked about the one this run's work is in.
-        let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
-        landing_now(&state.branches[*node], repo)
+        let (branch, repo) = *read_of;
+        landing_now(branch, repo)
     });
-    asked.into_iter().cloned().zip(read).collect()
+    asked
+        .into_iter()
+        .map(|(node, read_of)| {
+            let at = distinct
+                .iter()
+                .position(|(_, taken)| *taken == read_of)
+                .expect("every branch asked was read");
+            (node.clone(), read[at].clone())
+        })
+        .collect()
 }
 
 /// How many threads besides the caller's [`side_by_side`] starts for `reads`: as
@@ -4773,6 +4798,84 @@ mod tests {
             .map(|node| (node.to_owned(), landing_now(&format!("me/{node}"), None)))
             .to_vec();
         assert_eq!(read, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two nodes naming one branch in one repository — a rework and the node it
+    /// replaced — are read once between them, and each is handed that one answer;
+    /// the same branch in another repository is a read of its own.
+    ///
+    /// Counted off the render record [`crate::rendercost`] writes, which is the
+    /// account of every read a render takes.
+    #[test]
+    fn landings_now_reads_a_branch_two_nodes_name_once() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-one-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+        let record = root.join("render-cost.jsonl");
+        std::env::set_var(crate::rendercost::RENDER_COST_ENV, &record);
+
+        let mut state = crate::projection::RunState::default();
+        for (node, repo) in [
+            ("a", "owner/service"),
+            ("a-rework-1", "owner/service"),
+            ("b", "owner/other"),
+        ] {
+            state.graph.insert(crate::plan::Node {
+                id: node.into(),
+                repo: Some(repo.into()),
+                ..crate::plan::Node::default()
+            });
+        }
+        for node in ["a", "a-rework-1", "b"] {
+            state.branches.insert(node.into(), "me/a".into());
+        }
+        let nodes: Vec<String> = ["a-rework-1", "a", "b"].map(String::from).to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let read = {
+            let _render =
+                crate::rendercost::rendering(crate::rendercost::Rendered::Summary, "one-read");
+            landings_now(&state, &asked)
+        };
+        std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+
+        let by_node: Vec<&str> = read.iter().map(|(node, _)| node.as_str()).collect();
+        assert_eq!(
+            by_node,
+            ["a-rework-1", "a", "b"],
+            "handed back in the order asked"
+        );
+        assert_eq!(
+            read[0].1, read[1].1,
+            "the two nodes were told different things"
+        );
+        let written = std::fs::read_to_string(&record).expect("the render was recorded");
+        let reads: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a JSON line"))
+            .filter(|act: &serde_json::Value| act["act"] == "landing-read")
+            .collect();
+        let asked_of: Vec<(&str, &str)> = reads
+            .iter()
+            .map(|act| {
+                (
+                    act["node"].as_str().unwrap_or_default(),
+                    act["repo"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(asked_of.len(), 2, "{written}");
+        assert!(
+            asked_of.contains(&("a-rework-1", "owner/service")),
+            "{written}"
+        );
+        assert!(asked_of.contains(&("b", "owner/other")), "{written}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

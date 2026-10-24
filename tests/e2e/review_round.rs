@@ -767,12 +767,16 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// on the Windows runner a `git` start costs some twenty times what it does on Linux,
 /// and this round ran 420–540 seconds there against its 540-second bound. Counted on
 /// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
-/// unlanded draft's landing afresh on each of its renders, about forty `git` a read. Now
-/// it starts about 10,000, and more on a slower host, which renders and asks on a timer
-/// more often over a longer run — so the bound sits well above the first and below
-/// anything the round cost before.
+/// unlanded draft's landing afresh on each of its renders, about forty `git` a read;
+/// carrying those reads across a stream's renders brought it to 11,000–11,700. It
+/// starts 9,000–9,300 now: a stream lets go of a carried read only where a record moves
+/// the landing, rather than at every step of a restacked draft's publication; its last
+/// render takes up the reads the driver's close-out took a moment before rather than
+/// asking every branch again; and the close-out reads a branch a rework shares with
+/// the node it replaced once. The bound sits within a fifth of that count and below
+/// anything the round cost before, so a return to any of those repeats fails it.
 #[cfg(unix)]
-const GIT_STARTS: usize = 15_000;
+const GIT_STARTS: usize = 10_800;
 
 /// Hold the round to [`GIT_STARTS`].
 ///

@@ -11895,7 +11895,7 @@ fn watch_for_quiet(
 /// has got to rather than what one round did.
 fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Result<RunResult> {
     let statuses = state.statuses();
-    let landings = landings_after_asking_again(state);
+    let landings = landings_after_asking_again(&paths.run, state);
     let mut nodes: Vec<NodeResult> = state
         .graph
         .iter()
@@ -11976,7 +11976,11 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// The reads are asked **side by side** — see [`crate::vcs::landings_now`]: this
 /// is the run's close-out, nothing else is left running beside it, and one after
 /// another they were a tail every closing command waited out.
-fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
+///
+/// And handed to an attach stream rendering `run` in this process, whose last
+/// render reports the same settled run a moment later — see
+/// [`crate::views::closed_out`].
+fn landings_after_asking_again(run: &str, state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     // A draft merged into another node's branch lands only with that node: its own
     // merged change request says nothing about the root.
@@ -11990,7 +11994,10 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     // Each in the node's own repository, so a branch name two identities both hold
     // is asked about the one this run's work is in rather than refused as an
     // ambiguity the run has already resolved — see `vcs::landings_now`.
-    for (node, read) in crate::vcs::landings_now(state, &asked) {
+    let taken = std::time::Instant::now();
+    let read = crate::vcs::landings_now(state, &asked);
+    crate::views::closed_out(run, taken, &read);
+    for (node, read) in read {
         if read.proves_landed() {
             landings.insert(node, Landing::Landed);
         }
