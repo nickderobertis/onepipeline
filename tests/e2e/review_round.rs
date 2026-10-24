@@ -1828,18 +1828,21 @@ fn held_git_holds_only_the_first_start_inside_its_clone() {
 
 /// A `git` started outside the held clone that names the clone's `.git` with `--git-dir`
 /// works on it, and is held, as `onevcs` 0.56.8 and later run a read of a session's
-/// repository; one naming another repository's, or asking `rev-parse --git-dir` as its
-/// subcommand, is not, and runs straight away.
+/// repository — in either spelling, and behind a global option that takes a value; one
+/// naming another repository's, or asking `rev-parse --git-dir` as its subcommand, is not,
+/// and runs straight away.
 #[test]
 fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
     let world = World::new("held-git-named-git-dir");
     let real =
         World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
-    let control = world.root.join("held");
+    let control = |spelling: &str| {
+        let control = world.root.join("held").join(spelling);
+        std::fs::create_dir_all(&control).expect("a directory for the hold");
+        control
+    };
     let outside = world.root.join("outside");
-    for directory in [&control, &outside] {
-        std::fs::create_dir_all(directory).expect("a directory for the hold");
-    }
+    std::fs::create_dir_all(&outside).expect("a directory to start from");
     let [clone, other] = ["clone", "other"].map(|name| {
         let repository = world.root.join(name);
         let made = std::process::Command::new(&real)
@@ -1850,7 +1853,7 @@ fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
         assert!(made.success(), "git init {name} failed");
         repository
     });
-    let start = |args: &[&std::ffi::OsStr]| {
+    let start = |args: &[&std::ffi::OsStr], control: &std::path::Path| {
         let mut command = std::process::Command::new(crate::harness::double("held-git"));
         command
             .args(args)
@@ -1859,7 +1862,7 @@ fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
             .env("HELD_GIT_REAL", &real)
             .env("HELD_GIT_HOLD", "1")
             .env("HELD_GIT_CLONE", &clone)
-            .env("HELD_GIT_DIR", &control)
+            .env("HELD_GIT_DIR", control)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -1876,37 +1879,57 @@ fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
         ],
         vec!["rev-parse".as_ref(), git_dir],
     ];
+    let unheld_control = control("unheld");
     for args in unheld {
-        let ran = start(&args).output().expect("held-git runs");
+        let ran = start(&args, &unheld_control)
+            .output()
+            .expect("held-git runs");
         assert!(
-            !control.join("inside").exists(),
+            !unheld_control.join("inside").exists(),
             "{args:?} was held though it does not work on the clone"
         );
         assert_ne!(ran.status.code(), Some(70), "{ran:?}");
     }
     let clone_git = clone.join(".git");
-    let mut held = start(&[
-        git_dir,
-        clone_git.as_os_str(),
-        "symbolic-ref".as_ref(),
-        "HEAD".as_ref(),
-    ])
-    .spawn()
-    .expect("the held start starts");
-    world.until(
-        "the start naming the clone's git directory to claim the pause",
-        |_| control.join("inside").exists() || !matches!(held.try_wait(), Ok(None)),
-    );
-    assert!(
-        matches!(held.try_wait(), Ok(None)),
-        "the start naming the clone's git directory ran without being held"
-    );
-    std::fs::write(control.join("release"), "").expect("the release");
-    let held = held.wait_with_output().expect("the held start's output");
-    assert!(
-        held.status.success() && String::from_utf8_lossy(&held.stdout).starts_with("refs/heads/"),
-        "the released start did not run the real git on the clone: {held:?}"
-    );
+    let mut equals = std::ffi::OsString::from("--git-dir=");
+    equals.push(&clone_git);
+    // `-c` takes the next argument as its value, which a reading that did not skip it
+    // would take for the subcommand, and so hold nothing.
+    let spellings: [(&str, Vec<&std::ffi::OsStr>); 3] = [
+        ("split", vec![git_dir, clone_git.as_os_str()]),
+        ("equals", vec![equals.as_os_str()]),
+        (
+            "behind-a-valued-option",
+            vec![
+                "-c".as_ref(),
+                "core.quotepath=false".as_ref(),
+                git_dir,
+                clone_git.as_os_str(),
+            ],
+        ),
+    ];
+    for (spelling, mut args) in spellings {
+        args.extend(["symbolic-ref", "HEAD"].map(std::ffi::OsStr::new));
+        let control = control(spelling);
+        let mut held = start(&args, &control)
+            .spawn()
+            .expect("the held start starts");
+        world.until(
+            &format!("the {spelling} start naming the clone's git directory to claim the pause"),
+            |_| control.join("inside").exists() || !matches!(held.try_wait(), Ok(None)),
+        );
+        assert!(
+            matches!(held.try_wait(), Ok(None)),
+            "the {spelling} start naming the clone's git directory ran without being held"
+        );
+        std::fs::write(control.join("release"), "").expect("the release");
+        let held = held.wait_with_output().expect("the held start's output");
+        assert!(
+            held.status.success()
+                && String::from_utf8_lossy(&held.stdout).starts_with("refs/heads/"),
+            "the released {spelling} start did not run the real git on the clone: {held:?}"
+        );
+    }
 }
 
 /// A whole round's record, as the journey writes one, with `replies` reply posts on its
