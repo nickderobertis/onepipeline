@@ -1208,7 +1208,6 @@ impl Reader {
     }
 }
 
-/// An engine's refusal to run one query, as the refusal a launch reports.
 /// A store read that was not answered, with how long its source asked to be left alone
 /// first: `None` where it named no wait.
 #[derive(Debug)]
@@ -1223,6 +1222,7 @@ impl From<Error> for ReadRefused {
     }
 }
 
+/// An engine's refusal to run one query, as the refusal a launch reports.
 fn failed(query: &str, about: &str, error: &EngineError) -> Error {
     Error::Sibling {
         tool: STORE,
