@@ -2315,6 +2315,12 @@ fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
         .unwrap_or_else(|| panic!("{source} named no reset: {held}"))
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these four wait on
+// is the re-read schedule itself — a provider's reset served in full, and backoffs that grow —
+// which cannot be observed in less time than the schedule takes. The task this change belongs
+// to places the hold journeys here, in `tests/e2e/store.rs` under `onepipeline-e2e`, beside the
+// hold journeys they extend; they drive the compiled binary against the store double exactly as
+// those do, so a project of their own would declare the same dependency and skip nothing.
 /// A node held on a private source waiting out its provider's reset and on one backing off is
 /// read again at that reset alone: the store reads every edge of a task in one operation, so
 /// the backing-off source's schedule cannot ask the node without asking the other before its
@@ -2535,6 +2541,8 @@ fn a_source_shared_with_a_node_waiting_out_a_reset_reads_its_other_node_on_sched
     );
     world.run(&["stop", run]).exited(0);
 }
+
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// A private source that cannot be reached holds the node edged into it saying so, and asks
 /// for it to be reachable — no credential, no wait — and the node is released once it is.

@@ -516,6 +516,10 @@ pub(crate) fn backoff(backoffs: u32, poll: u64) -> u64 {
 }
 
 /// What [`SourceHolds::due`] finds a pass owes now.
+// llmlint: ignore[invalid_states_unrepresentable] node ids and source names are keyed as `String`
+// here because this is what `Reading` holds and `Store::reread` takes for the same pass, and
+// every source name in it is read off a `SourceHold`'s already-validated `SourceName`; a type
+// of its own here alone would convert at both ends and validate nothing new.
 struct Pass {
     /// The sources it asks.
     sources: BTreeSet<String>,
