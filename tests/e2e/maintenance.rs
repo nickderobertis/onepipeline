@@ -2335,12 +2335,14 @@ fn a_closing_driver_cuts_a_retirement_pass_waiting_on_what_the_run_names() {
 
     let every = schedule(&world, "named", "1s", "");
     held_run(&world, "named", 2, &["--maintenance-config", &every]).exited(0);
-    let held = inside.arrived_in(&world, "the sweep to hold inside service's maintenance");
+    let held =
+        inside.arrived_within_a_step(&world, "the sweep to hold inside service's maintenance");
     world.release("named-build.go");
-    let stop = stopping.arrived_in(&world, "the closing driver to raise its sweep's stop");
+    let stop =
+        stopping.arrived_within_a_step(&world, "the closing driver to raise its sweep's stop");
     held.release();
     asking
-        .arrived_in(
+        .arrived_within_a_step(
             &world,
             "the retirement pass to ask the closing driver what the run names",
         )

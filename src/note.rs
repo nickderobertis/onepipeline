@@ -1153,16 +1153,21 @@ impl Routing {
     /// says the turn opened on *a* note, and several notes routed at once — two
     /// in one envelope are acknowledged one turn apart and recorded at one
     /// instant — open separate turns, so the stamp alone would put every
-    /// pending note on the first of them. An instruction cut short of the text
-    /// by the payload bound is no evidence either way, and confirms nothing.
+    /// pending note on the first of them. `instruction` is the prompt the turn
+    /// was opened with, resolved through [`crate::views::transcript`] — the
+    /// whole of it where the record references its history, so a note past the
+    /// bound a copy is cut to is still found. A copy cut short of the text is no
+    /// evidence either way, and neither is a reference that resolved to nothing:
+    /// both confirm nothing.
     fn presented_by(
         &mut self,
         party: Party,
         opened: &oneagentgraph::event::TurnStarted,
+        instruction: Option<&str>,
         text: &str,
     ) -> Option<Evidence> {
         let turn = opened.turn;
-        let carries_this_note = opened.instruction.contains(text);
+        let carries_this_note = instruction.is_some_and(|instruction| instruction.contains(text));
         let delivered =
             opened.origin == Some(oneagentgraph::event::Origin::Delivered) && carries_this_note;
         let shown_to_both = Self::NextTurnToOpen {
@@ -1416,6 +1421,24 @@ impl Presentations {
         } else {
             return Vec::new();
         };
+        // llmlint: ignore-block[changed_behavior_has_e2e] the unresolved half — a turn
+        // whose referenced prompt is gone or unreadable at the moment this run reads it —
+        // has no journey, because no interface reaches it on purpose: the linked sibling
+        // resolves the prompt itself before it stamps a reference (`Transcript::available`)
+        // and keeps the bounded copy where it cannot, and this run reads the record the
+        // instant it is relayed, so the file would have to vanish inside that window. The
+        // half is held by `a_referenced_prompt_that_cannot_be_read_confirms_no_note` below,
+        // over this very `observe`, the real resolver and history files oneharness's own
+        // writer wrote; the resolved half by `tests/note`'s past-the-bound journey.
+        let resolved = crate::views::transcript::of_record(&envelope.kind.0, &envelope.payload);
+        let instruction = match &resolved {
+            Some(Ok(crate::views::transcript::Resolved {
+                text: crate::views::transcript::Text::Instruction(instruction),
+                ..
+            })) => Some(instruction.as_str()),
+            _ => None,
+        };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let mut shown = Vec::new();
         for routed in &mut self.routed {
             if started_at < routed.routed_at {
@@ -1424,7 +1447,7 @@ impl Presentations {
             let Some(evidence) =
                 routed
                     .routing
-                    .presented_by(party, &opened, routed.note.text.as_str())
+                    .presented_by(party, &opened, instruction, routed.note.text.as_str())
             else {
                 continue;
             };
@@ -1799,6 +1822,80 @@ mod tests {
     /// A relayed turn, as the producer publishes it.
     fn turn(seq: u64, at: u64, role: &str, turn: u64, origin: Option<&str>) -> Envelope {
         turn_on(seq, at, role, turn, origin, "do it")
+    }
+
+    /// A worker turn whose record references its history confirms a carried
+    /// note only off the prompt that history holds: one whose referenced file is
+    /// gone, or whose prompt cannot be read, confirms nothing — and one whose
+    /// file holds the note's text past the bound a copy was cut to confirms it.
+    #[test]
+    fn a_referenced_prompt_that_cannot_be_read_confirms_no_note() {
+        use oneharness_core::io::history::HistoryWriter;
+        let root = std::env::temp_dir().join(format!("onepipeline-note-ref-{}", crate::sys::pid()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).expect("a project directory");
+        let writer = HistoryWriter::open(
+            &root.join("store"),
+            &project,
+            "worker-skill",
+            oneharness_core::domain::history::HistoryLabels::default(),
+        )
+        .expect("a history session opens");
+        let identity = "claude-code".parse().expect("a harness identity");
+        let prompt = format!(
+            "{}The manager says: stop re-running the tier.",
+            "Read the whole log first.\n".repeat(200)
+        );
+        assert!(prompt
+            .find("stop re-running")
+            .is_some_and(|at| at > crate::event::MAX_PAYLOAD_TEXT_BYTES));
+        let run_id = writer.begin_harness_run(&identity, &prompt);
+        let begun = serde_json::to_value(writer.run_begun(&identity, run_id)).expect("serializes");
+        let reference = |session: &str| {
+            json!({
+                "history_dir": begun["history_dir"],
+                "history_project": begun["history_project"],
+                "history_session": session,
+                "history_id": run_id.to_string(),
+            })
+        };
+        let referencing = |seq: u64, at: u64, turn: u64, reference: Value| {
+            let mut opened = turn_on(seq, at, "assistant", turn, Some("supervisor"), "");
+            opened.payload.remove("instruction");
+            opened.payload.insert("transcript".into(), reference);
+            opened
+        };
+
+        let mut watch = Presentations::default();
+        watch.delivered_while_live(
+            recorded(
+                "stop re-running the tier",
+                Reached::Carried { reason: None },
+            ),
+            5_000,
+            None,
+        );
+        let gone = referencing(1, 5_100, 2, reference("a-session-never-written"));
+        assert!(
+            watch.observe(&gone).is_empty(),
+            "a turn whose referenced history is gone confirmed a note"
+        );
+        let session = begun["history_session"].as_str().expect("a session");
+        std::fs::write(writer.path(), "not a history line\n").expect("the history is corrupted");
+        let corrupt = referencing(2, 5_200, 3, reference(session));
+        assert!(
+            watch.observe(&corrupt).is_empty(),
+            "a turn whose referenced prompt cannot be read confirmed a note"
+        );
+        let _ = std::fs::remove_file(writer.path());
+        let rewritten = writer.begin_harness_run(&identity, &prompt);
+        let mut whole = reference(session);
+        whole["history_id"] = json!(rewritten.to_string());
+        let shown = watch.observe(&referencing(3, 5_300, 4, whole));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(shown.len(), 1, "{shown:?}");
+        assert_eq!(shown[0].evidence, Evidence::InstructionText);
     }
 
     /// The same, opening on `instruction`.

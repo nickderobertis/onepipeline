@@ -62,7 +62,7 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The file in the run's directory a `stop` holds locked for the whole of its
 /// teardown, and a driver's observer watch holds across each restart.
@@ -83,6 +83,10 @@ const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE"
 /// The test failpoint a `stop` meets once it has cancelled the run's observer,
 /// before it signals the run's tree.
 const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
+
+/// The test failpoint a retained driver meets once it has written its claim
+/// into the launch record, before its loop appends anything.
+const DRIVER_CLAIMED_GATE_ENV: &str = "ONEPIPELINE_TEST_DRIVER_CLAIMED_GATE";
 
 /// How often a stop looks again at a restart lock a restart in flight holds.
 const RESTART_LOCK_POLL: Duration = Duration::from_millis(20);
@@ -268,7 +272,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // there that runs `adopt` attached asserts `"settlement":"complete"` on stdout
             // beside the hook's own record — and the order of the two is not a fact stdout
             // carries. Entry 81 of `docs/contract-divergences.md` records the change.
-            let adopted = verbs::adopt(&paths, how)?;
+            let adopted =
+                verbs::adopt_with_writeback_item_budget(&paths, how, args.writeback_item_budget)?;
             println!("{}", verbs::render_adopted(&adopted));
             Ok(adopted.exit_code())
             // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -2307,6 +2312,12 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
+    // Test failpoint only, and nothing at all where its variable is unset: a
+    // journey holds this driver with its claim written and nothing appended
+    // since, so the run's summary still names the process that launched it.
+    if let Err(error) = crate::ordering::meet(DRIVER_CLAIMED_GATE_ENV) {
+        eprintln!("onepipeline: {error}");
+    }
 
     // Scoped, so the watch is joined before this returns rather than left holding
     // the observer of a driver that has finished with it.
@@ -3169,16 +3180,25 @@ pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> 
 /// `onepipeline adopt --detach`: validate, displace the undriven driver, and hand
 /// the run to the program `retain` names.
 ///
-/// Nothing is written here, and the lock is not taken here either. The process
-/// that will drive the run is the one that takes the lock, bumps the adoption,
-/// and names itself — one writer of each — so a reader between this line and
-/// the driver being up sees the run exactly as the refusals left it: undriven,
-/// and adoptable again. A launcher that claimed on the driver's behalf would
+/// An explicit budget is persisted under the ownership lock before spawning.
+/// The process that will drive the run then takes the lock, bumps the adoption,
+/// and names itself — one writer of each. Until that driver claims it, the run
+/// remains undriven and adoptable again. A launcher that claimed on the driver's behalf would
 /// instead be publishing its own pid for a run it is about to walk away from.
 ///
 /// Answers the retained driver's pid once it has claimed the run.
-pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) -> Result<u32> {
+pub(crate) fn adopt_detached(
+    paths: &RunPaths,
+    retain: &crate::verbs::Retain,
+    budget: Option<u64>,
+) -> Result<u32> {
     validate_and_displace_for_adoption(paths)?;
+    if let Some(budget) = budget {
+        let _lock = engine::claim(paths)?;
+        let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
+        record.writeback_item_budget = budget;
+        ledger::write_json(&paths.launch(), &record)?;
+    }
     let mut driver = retain_driver(paths, retain)?;
     let pid = driver.id();
     confirm_driving(paths, &mut driver)?;
@@ -3188,11 +3208,12 @@ pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) ->
 /// `onepipeline adopt`: validate, displace the undriven driver, and drive the run
 /// in this process until it settles.
 ///
-/// Adoption keeps everything the run owns and replaces only the driver: the run
-/// id, the journal, and the ledger are the ones it already had. `said` is told
+/// Adoption keeps the run id, journal, and ledger. An explicit budget replaces
+/// the recorded allowance before this driver projects anything. `said` is told
 /// the settlement as [`attach`] says it.
 pub(crate) fn adopt_attached(
     paths: &RunPaths,
+    budget: Option<u64>,
     said: &mut dyn FnMut(Settlement),
 ) -> Result<Settlement> {
     let (mut record, view) = validate_and_displace_for_adoption(paths)?;
@@ -3202,6 +3223,9 @@ pub(crate) fn adopt_attached(
     // this process while the driver that won carried on.
     let lock = engine::claim(paths)?;
 
+    if let Some(budget) = budget {
+        record.writeback_item_budget = budget;
+    }
     take_the_run_over(paths, &mut record)?;
     ledger::write_json(&paths.launch(), &record)?;
     report_and_journal_adoption(paths, &record, &view)?;

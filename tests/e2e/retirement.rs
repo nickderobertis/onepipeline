@@ -2085,13 +2085,14 @@ fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
             &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
         )
         .exited(0);
-    let driver = taken.arrived_in(&world, "the driver to hold the pass that took the add up");
+    let driver =
+        taken.arrived_within_a_step(&world, "the driver to hold the pass that took the add up");
     assert!(added_late(&world), "{}", world.dump());
     assert!(retired(&world, "live").is_empty(), "{}", world.dump());
 
     std::fs::write(&maintaining, "go").expect("the maintenance is released");
     reading
-        .arrived_in(&world, "the retirement pass to read what the run names")
+        .arrived_within_a_step(&world, "the retirement pass to read what the run names")
         .release();
     driver.release();
     reading.release_the_rest();
@@ -2160,7 +2161,7 @@ fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_se
         Vec::new(),
     );
     reading
-        .arrived_in(
+        .arrived_within_a_step(
             &world,
             "the retirement pass to read what the run names at service",
         )
@@ -2177,13 +2178,14 @@ fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_se
             &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
         )
         .exited(0);
-    let driver = taken.arrived_in(&world, "the driver to hold the pass that took the add up");
+    let driver =
+        taken.arrived_within_a_step(&world, "the driver to hold the pass that took the add up");
     assert!(added_late(&world), "{}", world.dump());
     assert!(retired(&world, "live").is_empty(), "{}", world.dump());
 
     std::fs::write(&go, "go").expect("the origin is released");
     reading
-        .arrived_in(
+        .arrived_within_a_step(
             &world,
             "the retirement pass to read what the run names at tail",
         )

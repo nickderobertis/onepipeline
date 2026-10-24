@@ -1641,11 +1641,11 @@ impl Drop for Writeback {
     }
 }
 
-/// How long the copy is allowed per item, as this run's launch chose.
+/// How long the copy is allowed per item, as the run's launch record names.
 ///
 /// Off the launch record rather than this process's environment, so a driver a fresh
-/// `adopt` starts bounds its copies as the launch resolved them; a record written before
-/// the field existed names none, and runs under the shipped default.
+/// `adopt` starts uses the recorded budget, including an explicit adoption override.
+/// A record written before the field existed names none and uses the shipped default.
 fn per_item_budget(launch: &LaunchRecord) -> NonZeroU64 {
     launch
         .item_budget()
@@ -7625,6 +7625,107 @@ mod tests {
             }
             assert_eq!(assets, expected);
         }
+    }
+
+    /// This process's file-size limit lowered to `bytes` while it is held, and SIGXFSZ ignored,
+    /// so a write past it stops there: the bytes up to the limit land and the rest are refused
+    /// with `EFBIG`, leaving the file that write was writing incomplete for as long as anyone
+    /// cares to read it.
+    ///
+    /// Process-wide, which is safe because nextest runs each test in a process of its own.
+    #[cfg(unix)]
+    struct FileSizeLimit(libc::rlimit);
+
+    #[cfg(unix)]
+    impl FileSizeLimit {
+        fn of(bytes: usize) -> Self {
+            let mut held = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: `held` is a valid `rlimit` for `getrlimit` to fill, and ignoring SIGXFSZ
+            // installs no handler: the refused write returns `EFBIG` instead of ending us.
+            unsafe {
+                libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+                assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut held), 0);
+            }
+            let limited = libc::rlimit {
+                rlim_cur: libc::rlim_t::try_from(bytes).expect("a small limit"),
+                rlim_max: held.rlim_max,
+            };
+            // SAFETY: `limited` is a valid `rlimit` below the hard limit this process holds.
+            assert_eq!(
+                unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limited) },
+                0,
+                "the file-size limit is lowered"
+            );
+            Self(held)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FileSizeLimit {
+        fn drop(&mut self) {
+            // SAFETY: restores the limit `of` read, which never exceeds the hard limit.
+            unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &self.0) };
+        }
+    }
+
+    /// Where `write_shadow` publishes `node`'s shadow task document.
+    fn shadow_task(fixture: &Fixture, node: &str) -> PathBuf {
+        fixture
+            .dir
+            .join("tasks")
+            .join(super::project_file(&fixture.snapshot.project))
+            .join(format!("{}.md", super::task_file(node)))
+    }
+
+    /// The image-carrying step's rewrite of a created task's shadow document — `local-md`'s
+    /// `write_task_with_assets`, carrying no answers — stopped part-way at each byte of the
+    /// document it writes: a reader reading the shadow at that moment, with the write frozen incomplete,
+    /// reads the document `write_shadow` published, whole, because the store writes the
+    /// replacement beside it and renames it into place. The step says it failed, and once the
+    /// limit is lifted the next step lands.
+    #[cfg(unix)]
+    #[test]
+    fn a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands() {
+        let fixture = Fixture::new("rewrite-stopped");
+        let created = std::collections::BTreeSet::from(["design".to_owned()]);
+        let store = crate::taskgraph::Store::isolated(fixture.dir.to_path_buf());
+        let attempt = super::Attempt::open(&store, &fixture.snapshot)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let path = shadow_task(&fixture, "design");
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
+        let whole = std::fs::read_to_string(&path).expect("the published document reads");
+        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        let rewritten = std::fs::read_to_string(&path).expect("the rewritten document reads");
+        for limit in 0..rewritten.len() {
+            write_shadow(&fixture.snapshot, &created, &fixture.ends)
+                .expect("the shadow is written");
+            let stopped = {
+                let _limit = FileSizeLimit::of(limit);
+                super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            };
+            let read = std::fs::read_to_string(&path).expect("the shadow document reads");
+            assert_eq!(
+                read, whole,
+                "a write stopped at byte {limit} left the shadow document incomplete"
+            );
+            let failed = stopped.expect_err("a write stopped part-way fails the step");
+            assert!(
+                failed.reason.contains("File too large"),
+                "the step names the stopped write: {}",
+                failed.reason
+            );
+        }
+        super::write_shadow_assets(&attempt, &fixture.snapshot, &created)
+            .unwrap_or_else(|failed| panic!("{}", failed.reason));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), rewritten);
+        let (front, content) = written(&path);
+        assert_eq!(front["metadata"]["onepipeline.id"], "design");
+        let published = whole.split_once("\n---\n").expect("a whole document").1;
+        assert_eq!(content.trim_end(), published.trim_end());
     }
 
     /// The same engine reads the stable local shadow again after each command ends.

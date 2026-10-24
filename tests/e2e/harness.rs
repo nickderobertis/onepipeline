@@ -3650,102 +3650,6 @@ impl Rendezvous {
         Arrival::of(stream)
     }
 
-    /// [`arrived`](Self::arrived), bounded by [`ONE_STEP`] from the connection through
-    /// the whole announcement: a failpoint the binary never reaches, and a peer that
-    /// connects and never finishes saying its pid, both fail naming `what`, the part
-    /// of the announcement that did arrive and the runs root as it stood, rather than
-    /// waiting on the runner's own backstop.
-    pub fn arrived_in(&self, world: &World, what: &str) -> Arrival {
-        self.announced_within(world, ONE_STEP, what)
-    }
-
-    /// [`arrived_in`](Self::arrived_in), within `patience`: one deadline the
-    /// connection and the announcement after it share.
-    fn announced_within(
-        &self,
-        world: &World,
-        patience: std::time::Duration,
-        what: &str,
-    ) -> Arrival {
-        use std::io::{ErrorKind, Read};
-        self.listener
-            .set_nonblocking(true)
-            .expect("the listener polls");
-        let mut connected: Option<std::net::TcpStream> = None;
-        let mut announced = Vec::new();
-        let mut closed = false;
-        waited_for(patience, std::time::Duration::from_millis(20), || {
-            if connected.is_none() {
-                match self.listener.accept() {
-                    Ok((stream, _)) => {
-                        stream
-                            .set_nonblocking(true)
-                            .expect("the arrival's connection polls");
-                        connected = Some(stream);
-                    }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => return false,
-                    Err(error) => {
-                        panic!("the failpoint's listener failed waiting for {what}: {error}")
-                    }
-                }
-            }
-            let stream = connected.as_mut().expect("a connection is open");
-            let mut chunk = [0; 64];
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => {
-                        closed = true;
-                        return true;
-                    }
-                    Ok(read) => {
-                        announced.extend_from_slice(&chunk[..read]);
-                        if announced.contains(&b'\n') {
-                            return true;
-                        }
-                    }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => return false,
-                    Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                    Err(error) => panic!(
-                        "the failpoint's connection failed waiting for {what}, having announced \
-                         {:?}: {error}",
-                        String::from_utf8_lossy(&announced)
-                    ),
-                }
-            }
-        });
-        self.listener
-            .set_nonblocking(false)
-            .expect("the listener blocks again");
-        let partial = String::from_utf8_lossy(&announced).into_owned();
-        let line = partial.split_once('\n').map(|(line, _)| line.to_owned());
-        let Some(line) = line else {
-            let how = if closed {
-                "the peer closed its connection before it finished announcing its pid"
-            } else if connected.is_some() {
-                "the peer connected and did not finish announcing its pid"
-            } else {
-                "nothing connected"
-            };
-            panic!(
-                "timed out waiting for {what}: {how}; it had announced {partial:?}; the runs \
-                 root held:\n{}",
-                world.dump()
-            );
-        };
-        let pid = line.trim().parse::<u32>().unwrap_or_else(|_| {
-            panic!(
-                "waiting for {what}, a peer announced {partial:?} where a pid was due; the runs \
-                 root held:\n{}",
-                world.dump()
-            )
-        });
-        let stream = connected.expect("an announcement came over a connection");
-        stream
-            .set_nonblocking(false)
-            .expect("the arrival's connection blocks");
-        Arrival { pid, stream }
-    }
-
     /// Let every later arrival go as it comes, for the rest of the test: a failpoint
     /// met again past the ordering a journey drives — another identity, another
     /// sweep, another run — holds nothing.
@@ -3756,52 +3660,100 @@ impl Rendezvous {
     }
 
     /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
-    /// end, a process that never reaches the failpoint fails naming `what` it was waiting
-    /// for, and `seen` — what the journey can say of where things stood — rather than
-    /// blocking until the runner's timeout names only the test.
-    pub fn arrived_within(&self, what: &str, seen: impl FnOnce() -> String) -> Arrival {
+    /// end, a process that never reaches the failpoint, or reaches it and never finishes
+    /// announcing itself, fails naming `what` it was waiting for, what it announced, and
+    /// `seen` — what the journey can say of where things stood — rather than blocking
+    /// until the runner's timeout names only the test.
+    pub fn arrived_within(&self, what: &str, seen: impl Fn() -> String) -> Arrival {
+        self.arrived_by(what, ONE_STEP, seen)
+    }
+
+    /// [`arrived_within`](Self::arrived_within), saying where things stood as
+    /// [`World::until`] does: by what the runs root held.
+    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
+        self.arrived_within(what, || format!("the runs root held:\n{}", world.dump()))
+    }
+
+    /// [`arrived_within`](Self::arrived_within) with the step's deadline given: the
+    /// connection and the announcement after it share one.
+    fn arrived_by(
+        &self,
+        what: &str,
+        patience: std::time::Duration,
+        seen: impl Fn() -> String,
+    ) -> Arrival {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + patience;
         self.listener
             .set_nonblocking(true)
             .expect("the listener can be polled");
-        let deadline = std::time::Instant::now() + ONE_STEP;
-        let mut connected = None;
-        let arrived = waited(|| match self.listener.accept() {
-            Ok((stream, _)) => {
-                connected = Some(stream);
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-            Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
-        });
+        let mut met = None;
+        let arrived = waited_for(
+            patience,
+            std::time::Duration::from_millis(20),
+            || match self.listener.accept() {
+                Ok((stream, _)) => {
+                    met = Some(stream);
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
+            },
+        );
         self.listener
             .set_nonblocking(false)
             .expect("the listener blocks again");
-        let Some(stream) = connected.filter(|_| arrived) else {
-            panic!("timed out waiting for {what}; {}", seen());
+        let Some(mut stream) = met.filter(|_| arrived) else {
+            panic!(
+                "timed out after {patience:?} waiting for {what}; {}",
+                seen()
+            );
         };
-        // Windows hands an accepted socket the listener's mode; the handshake reads blocking,
-        // and within what is left of the step, so a peer that connects and never announces
-        // itself fails here too.
+        // Windows hands an accepted socket the listener's mode.
         stream
             .set_nonblocking(false)
-            .expect("the connection blocks");
-        let left = deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .max(std::time::Duration::from_millis(1));
-        stream
-            .set_read_timeout(Some(left))
-            .expect("the handshake can be bounded");
-        let arrival = Arrival::announced(stream).unwrap_or_else(|error| {
+            .expect("the arrival's connection blocks");
+        // The pid line, a byte at a time so what came of it is kept to report.
+        let mut announced = Vec::new();
+        let stalled = |announced: &[u8], why: &str| -> ! {
             panic!(
-                "waiting for {what}, the arrival did not announce itself: {error}; {}",
+                "timed out after {patience:?} waiting for {what}: the process connected and \
+                 announced {:?} of its pid line, then {why}; {}",
+                String::from_utf8_lossy(announced),
                 seen()
             )
-        });
-        arrival
-            .stream
+        };
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                stalled(&announced, "sent nothing more");
+            }
+            stream
+                .set_read_timeout(Some(left))
+                .expect("the connection takes a read timeout");
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => stalled(&announced, "closed the connection"),
+                Ok(_) if byte[0] == b'\n' => break,
+                Ok(_) => announced.push(byte[0]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => stalled(&announced, &format!("failed: {error}")),
+            }
+        }
+        stream
             .set_read_timeout(None)
-            .expect("the held connection blocks again");
-        arrival
+            .expect("the connection blocks again");
+        let announced = String::from_utf8_lossy(&announced).into_owned();
+        let pid = announced.trim().parse::<u32>().unwrap_or_else(|_| {
+            panic!("waiting for {what}, a process announced {announced:?} where a pid was due")
+        });
+        Arrival { pid, stream }
     }
 }
 
@@ -3835,105 +3787,82 @@ impl Arrival {
     }
 }
 
+/// The bounded arrival ends on a peer that announces itself, and fails — naming
+/// the step and the part of the pid line it had — on one that connects and
+/// never finishes announcing, closes part-way through it, or never connects at
+/// all, rather than hanging.
 // llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
 // not a journey: no failpoint in the binary can be paused between its connect and its
-// announcement, so the peer here is a socket these tests drive byte by byte. The journeys
-// built on it are `retirement.rs`'s two late-named-branch journeys and `maintenance.rs`'s
-// closing-driver journey, and those drive the binary.
-/// What [`Rendezvous::announced_within`] said as it failed, run against a peer that
-/// connects and says `said`, closing its connection after it where `close` asks.
-fn announcement_refused(name: &str, said: &'static [u8], close: bool) -> String {
-    use std::io::Write;
-    let world = World::new(name);
-    let meeting = Rendezvous::failpoint();
-    let mut peer = std::net::TcpStream::connect(meeting.address()).expect("the peer connects");
-    peer.write_all(said).expect("the peer says what it says");
-    if close {
-        drop(peer);
-    } else {
-        // Held open past the wait, saying nothing more.
-        std::mem::forget(peer);
-    }
-    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        meeting.announced_within(
-            &world,
-            std::time::Duration::from_millis(300),
-            "the peer to announce itself",
-        );
-    }))
-    .expect_err("an announcement that never finished was taken as an arrival");
-    refused
-        .downcast_ref::<String>()
-        .expect("the refusal is a message")
-        .clone()
-}
-
-/// A peer that connects and never finishes announcing its pid ends the bounded wait
-/// with the step it was, what of the announcement arrived and that the peer is still
-/// connected — not a read the runner's backstop ends.
+// announcement, so the peer here is a socket this test drives byte by byte. The journeys
+// built on it are the `dispatch` and `note` window journeys, `retirement.rs`'s two
+// late-named-branch journeys and `maintenance.rs`'s closing-driver journey, and those
+// drive the binary.
 #[test]
-fn a_peer_that_withholds_its_announcement_fails_the_wait_naming_the_step() {
-    let said = announcement_refused("rendezvous-withheld", b"4321", false);
-    assert!(said.contains("the peer to announce itself"), "{said}");
-    assert!(said.contains("did not finish announcing"), "{said}");
-    assert!(said.contains("\"4321\""), "{said}");
-}
-
-/// A peer that closes its connection part-way through its announcement fails the
-/// wait at once, naming the step and the part it announced.
-#[test]
-fn a_peer_that_truncates_its_announcement_fails_the_wait_naming_what_it_said() {
-    let said = announcement_refused("rendezvous-truncated", b"98", true);
-    assert!(said.contains("the peer to announce itself"), "{said}");
-    assert!(
-        said.contains("closed its connection before it finished"),
-        "{said}"
-    );
-    assert!(said.contains("\"98\""), "{said}");
-}
-
-/// A whole announcement is an arrival carrying its pid, whose release reaches the
-/// peer.
-#[test]
-fn a_whole_announcement_arrives_within_the_bound() {
+fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
     use std::io::{Read, Write};
-    let world = World::new("rendezvous-announced");
+    let world = World::new("rendezvous-bounded");
+    let patience = std::time::Duration::from_secs(1);
+    let held = || format!("the runs root held:\n{}", world.dump());
+    let failure = |waited: Box<dyn FnOnce() + '_>| -> String {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(waited))
+            .expect_err("the wait returned where it was due to fail");
+        panicked
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| panic!("the wait failed with no message"))
+    };
+
     let meeting = Rendezvous::failpoint();
     let mut peer = std::net::TcpStream::connect(meeting.address()).expect("the peer connects");
-    peer.write_all(b"5150\n")
+    peer.write_all(b"4242\n")
         .expect("the peer announces itself");
-    let arrival = meeting.announced_within(
-        &world,
-        std::time::Duration::from_secs(10),
-        "the peer to announce itself",
-    );
-    assert_eq!(arrival.pid, 5150);
+    let arrival = meeting.arrived_by("the peer to announce itself", patience, held);
+    assert_eq!(arrival.pid, 4242);
     arrival.release();
-    let mut released = [0; 1];
+    let mut released = [0; 2];
     peer.read_exact(&mut released)
-        .expect("the release reaches the peer");
-}
+        .expect("the peer is released");
+    assert_eq!(&released, b"go");
 
-/// A failpoint nothing reaches ends the bounded wait naming the step and saying that
-/// nothing connected.
-#[test]
-fn a_failpoint_nothing_reaches_fails_the_wait_naming_the_step() {
-    let world = World::new("rendezvous-absent");
-    let meeting = Rendezvous::failpoint();
-    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        meeting.announced_within(
-            &world,
-            std::time::Duration::from_millis(300),
-            "a peer that never connects",
-        );
-    }))
-    .expect_err("a failpoint nothing reached was taken as an arrival");
-    let said = refused
-        .downcast_ref::<String>()
-        .expect("the refusal is a message");
-    assert!(said.contains("a peer that never connects"), "{said}");
-    assert!(said.contains("nothing connected"), "{said}");
-    assert!(said.contains("the runs root held"), "{said}");
+    let stalled = Rendezvous::failpoint();
+    let mut half = std::net::TcpStream::connect(stalled.address()).expect("the peer connects");
+    half.write_all(b"42")
+        .expect("the peer announces part of itself");
+    let said = failure(Box::new(|| {
+        stalled.arrived_by("the stalled peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the stalled peer to announce itself")
+            && said.contains("announced \"42\" of its pid line, then sent nothing more")
+            && said.contains("the runs root held"),
+        "the stalled announcement's failure does not name the step, its part, and the run: {said}"
+    );
+    drop(half);
+
+    let truncated = Rendezvous::failpoint();
+    let mut cut = std::net::TcpStream::connect(truncated.address()).expect("the peer connects");
+    cut.write_all(b"98")
+        .expect("the peer announces part of itself");
+    drop(cut);
+    let said = failure(Box::new(|| {
+        truncated.arrived_by("the truncated peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the truncated peer to announce itself")
+            && said.contains("announced \"98\" of its pid line, then closed the connection")
+            && said.contains("the runs root held"),
+        "the truncated announcement's failure does not name the step, its part, and the run: {said}"
+    );
+
+    let absent = Rendezvous::failpoint();
+    let said = failure(Box::new(|| {
+        absent.arrived_by("a peer that never connects", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for a peer that never connects")
+            && said.contains("the runs root held"),
+        "the missing arrival's failure does not name the step and the run: {said}"
+    );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 

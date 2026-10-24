@@ -5794,10 +5794,15 @@ failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
-then the shipped default. It is resolved **once**, at the launch, and retained in
-the launch record beside the pacemaker interval — so a driver a fresh `adopt`
-starts bounds its copies as the launch chose, and a record written before the
-field existed reads and resolves to the default. The value is a positive whole
+then the shipped default. It is resolved at launch and retained in the launch
+record beside the pacemaker interval. `adopt --writeback-item-budget SECONDS`
+replaces it under the ownership lock before the new driver projects anything,
+including before a detached driver is spawned. An adoption naming no budget
+keeps the recorded value and ignores the environment. The additive SDK entry point
+`verbs::adopt_with_writeback_item_budget(paths, how, budget)` accepts an optional
+whole-second budget; `verbs::adopt` and `verbs::Adopt` keep their existing shapes.
+A record written before
+the field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
 config key — by the spelling that carried it, because zero is no budget at all:
 multiplied through, it leaves the floor as the whole deadline for every plan
@@ -5831,6 +5836,7 @@ replays.
 
 ```json
 {
+  "sdk_verbs": ["adopt_with_writeback_item_budget"],
   "budget": {
     "flag": "--writeback-item-budget",
     "environment": "ONEPIPELINE_WRITEBACK_ITEM_BUDGET",
@@ -11945,7 +11951,7 @@ launch setting.
   "store_review_keys": [],
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
-  "checkpoint_schema_version": 13,
+  "checkpoint_schema_version": 14,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
@@ -11956,6 +11962,10 @@ that number and the events bundles `1.5.0` and `1.6.0` first, moved this record 
 to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
 bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
 first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
+The engine's reading of turn content through transcript references, which keeps a
+node's last activity in the checkpoint as the `transcript` reference it recorded, moved
+the checkpoint to version 14 with its golden; the block pins the version this build
+reads, so it moved from 13 to 14 with it.
 
 **What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
 compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s
