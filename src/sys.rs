@@ -4149,13 +4149,17 @@ try {
     #[cfg(unix)]
     #[test]
     fn discovery_settles_or_says_it_did_not_and_pauses_what_it_found() {
+        // The ends meant to settle get a deadline nothing reaches, so a host
+        // whose short sleeps run long — a loaded Mac runner — cannot end them
+        // first; only the ends meant to be ended by the deadline get a short one.
         let soon = || Instant::now().checked_add(std::time::Duration::from_millis(50));
+        let patient = || Instant::now().checked_add(std::time::Duration::from_secs(60));
         let grown = vec![(10, 1), (11, 10), (12, 11)];
         let (mut aimed, mut paused) = (vec![10], Vec::new());
         let settled = discover(
             &mut aimed,
             &mut paused,
-            soon(),
+            patient(),
             |_| true,
             |_| true,
             || Some(grown.clone()),
@@ -4167,7 +4171,14 @@ try {
         );
 
         let (mut aimed, mut paused) = (vec![10], Vec::new());
-        let refused = discover(&mut aimed, &mut paused, soon(), |_| true, |_| true, || None);
+        let refused = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| true,
+            |_| true,
+            || None,
+        );
         assert_eq!(
             (refused, aimed, paused),
             (Discovery::Incomplete, vec![10], vec![10])
@@ -4228,7 +4239,7 @@ try {
         let taken = discover(
             &mut aimed,
             &mut paused,
-            soon(),
+            patient(),
             |_| {
                 pauses += 1;
                 true
