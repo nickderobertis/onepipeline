@@ -705,6 +705,46 @@ pub fn ask_manager(question: &str) {
     }
 }
 
+/// Start `onepipeline stop --force` on the run this process belongs to, with
+/// what it prints going to `<record>.out`, record its pid in `<record>.pid`,
+/// and do not wait for it.
+///
+/// The run is read out of this process's own environment, as [`ask_manager`]
+/// reads it. Not waited for, because the stop ends the process that started
+/// it; `--force` because the dispatch is not the session that launched the run.
+/// The pid is how a reader knows the stop has answered: once that process has
+/// ended, what it printed is all there is.
+pub fn stop_own_run(record: &Path) {
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to stop")),
+    };
+    let cli = match std::env::var(CLI_BIN_ENV) {
+        Ok(cli) if !cli.is_empty() => cli,
+        _ => fail(&format!(
+            "{CLI_BIN_ENV} is unset: no engine to stop it with"
+        )),
+    };
+    // The process that becomes the stop records its own pid first, and then
+    // becomes it: a pid written by this process after the spawn could come too
+    // late, because the stop ends this process.
+    let script = "printf '%s\\n' \"$$\" >\"$2.partial\" && mv \"$2.partial\" \"$2\" \
+        && exec \"$0\" stop \"$1\" --force >\"$3\" 2>&1";
+    let started = std::process::Command::new("sh")
+        .args(["-c", script])
+        .arg(&cli)
+        .arg(&run)
+        .arg(format!("{}.pid", record.display()))
+        .arg(format!("{}.out", record.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Err(error) = started {
+        fail(&format!("cannot run `{cli} stop {run}`: {error}"));
+    }
+}
+
 /// Act as the dag-scope graph's monitor member: observe, and change nothing.
 ///
 /// Exactly what the shipped `monitor` persona is for. It runs **no engine

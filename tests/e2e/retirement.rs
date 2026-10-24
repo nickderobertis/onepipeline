@@ -2039,10 +2039,26 @@ fn an_idle_pass_leaves_what_holds_work() {
 /// retirement pass, which retires the control another run left beside it: the
 /// pass reads what the run names as it reaches an identity, not what it named
 /// when the sweep began.
+///
+/// The pass reads at its worst moment: the driver is held on the pass that took
+/// the add up, with the add applied and answered and nothing else of that pass
+/// done, until the pass has begun reading what the run names — so what the pass
+/// reads is the run as the answered add left it, on every host however fast
+/// either side runs.
 #[cfg(unix)]
 #[test]
 fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
-    let world = sweeping_world("retirement-mid-sweep");
+    // llmlint: ignore-block[tests_mirror_real_usage] the interleaving is the property: no
+    // user-facing input can place a retirement pass's read between a driver answering an
+    // edit and the rest of that driver's pass. The failpoints only order the real binary
+    // over the real linked sibling, and every outcome is asserted on git and the run's
+    // own journal.
+    let taken = crate::harness::Rendezvous::failpoint();
+    let reading = crate::harness::Rendezvous::failpoint();
+    let world = sweeping_world("retirement-mid-sweep")
+        .with_env(EDITS_TAKEN_GATE, &taken.address())
+        .with_env(NAMES_GATE, &reading.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let repo = world.repository("local-direct", &[]);
     let maintaining = world.root.join("maintain.go");
     crate::maintenance::pooled_with_maintenance(&world, Some(&maintaining));
@@ -2069,15 +2085,23 @@ fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
             &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
         )
         .exited(0);
+    let driver =
+        taken.arrived_within_a_step(&world, "the driver to hold the pass that took the add up");
+    assert!(added_late(&world), "{}", world.dump());
+    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
+
+    std::fs::write(&maintaining, "go").expect("the maintenance is released");
+    reading
+        .arrived_within_a_step(&world, "the retirement pass to read what the run names")
+        .release();
+    driver.release();
+    reading.release_the_rest();
     world.until("the driver to take the late node up", |world| {
         world
             .journal("live")
             .iter()
             .any(|event| event["labels"]["node"] == "late")
     });
-    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
-
-    std::fs::write(&maintaining, "go").expect("the maintenance is released");
     until_retired(&world, "live", &[LEFT]);
     assert!(
         holds(&world, &repo.checkout, "keep/late"),
@@ -2099,10 +2123,26 @@ fn a_branch_a_node_comes_to_name_mid_sweep_is_left_by_that_sweeps_pass() {
 /// reads what the run names as it reaches each identity, not once as it begins.
 /// Once `live` is stopped, the next run's pass retires it, which shows the name
 /// was all that kept it.
+///
+/// `tail`'s pass reads at its worst moment: the driver is held on the pass that
+/// took the add up, with the add applied and answered and nothing else of that
+/// pass done, until `tail`'s pass has begun reading what the run names — so what
+/// it reads is the run as the answered add left it, on every host however fast
+/// either side runs.
 #[cfg(unix)]
 #[test]
 fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_second() {
-    let world = sweeping_world("retirement-between-identities");
+    // llmlint: ignore-block[tests_mirror_real_usage] the interleaving is the property: no
+    // user-facing input can place a retirement pass's read between a driver answering an
+    // edit and the rest of that driver's pass. The failpoints only order the real binary
+    // over the real linked sibling, and every outcome is asserted on git and the runs'
+    // own journals.
+    let taken = crate::harness::Rendezvous::failpoint();
+    let reading = crate::harness::Rendezvous::failpoint();
+    let world = sweeping_world("retirement-between-identities")
+        .with_env(EDITS_TAKEN_GATE, &taken.address())
+        .with_env(NAMES_GATE, &reading.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let repo = world.repository("local-direct", &[]);
     let tail = world.extra_repository("tail");
     published_and_superseded(&world, &repo, "done/published", "published.md");
@@ -2120,6 +2160,12 @@ fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_se
         crate::harness::agent("hold", &[]),
         Vec::new(),
     );
+    reading
+        .arrived_within_a_step(
+            &world,
+            "the retirement pass to read what the run names at service",
+        )
+        .release();
     world.until("the retirement pass to reach service's origin", |_| {
         entered.is_file()
     });
@@ -2132,15 +2178,26 @@ fn a_branch_a_node_comes_to_name_between_two_identities_passes_is_left_by_the_se
             &json!({"version": 2, "commands": [{"op": "add", "node": late}]}).to_string(),
         )
         .exited(0);
+    let driver =
+        taken.arrived_within_a_step(&world, "the driver to hold the pass that took the add up");
+    assert!(added_late(&world), "{}", world.dump());
+    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
+
+    std::fs::write(&go, "go").expect("the origin is released");
+    reading
+        .arrived_within_a_step(
+            &world,
+            "the retirement pass to read what the run names at tail",
+        )
+        .release();
+    driver.release();
+    reading.release_the_rest();
     world.until("the driver to take the late node up", |world| {
         world
             .journal("live")
             .iter()
             .any(|event| event["labels"]["node"] == "late")
     });
-    assert!(retired(&world, "live").is_empty(), "{}", world.dump());
-
-    std::fs::write(&go, "go").expect("the origin is released");
     until_retired(&world, "live", &["done/published", "done/tail"]);
     assert!(!holds(&world, &tail.checkout, "done/tail"));
     assert!(
@@ -2435,6 +2492,25 @@ fn origin_hook(repo: &Repository, script: &str) {
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o700))
         .expect("the hook is executable");
 }
+
+/// Whether `live`'s journal records the add of `late` committed.
+#[cfg(unix)]
+fn added_late(world: &World) -> bool {
+    world
+        .events_of("live", "edit-committed")
+        .iter()
+        .any(|event| event["payload"]["command"]["node"]["id"] == "late")
+}
+
+/// The failpoint a driver meets once, on the first pass whose edits moved the run,
+/// before that pass goes on.
+#[cfg(unix)]
+const EDITS_TAKEN_GATE: &str = "ONEPIPELINE_TEST_EDITS_TAKEN_GATE";
+
+/// The failpoint a retirement pass meets at every identity, once it has begun
+/// reading what the run names there and before it retires anything.
+#[cfg(unix)]
+const NAMES_GATE: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
 
 /// Hold every push the origin receives until the journey writes `go`, having
 /// written `entered` on arrival: a retirement pass deleting a published branch

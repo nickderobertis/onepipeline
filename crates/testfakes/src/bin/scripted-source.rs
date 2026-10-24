@@ -34,6 +34,10 @@
 //! * `<key>.<method>@<id>.refuse` — the same, for the calls that name one item alone, where
 //!   `<id>` is that item's native id as `fake::segment` spells a file name: one ticket of
 //!   several refused and the rest written.
+//! * `<key>.set_project_metadata#<metadata key>.refuse` — the same, for the writes of one
+//!   project metadata key alone, where `<metadata key>` is spelled as `fake::segment` spells
+//!   a file name: a board update carrying one key refused while writes of every other key
+//!   land.
 //! * `<key>.<method>.rate-limited` — every call of that method is answered rate limited the
 //!   way a hosted provider answers once its quota is spent, for as long as the file is there.
 //!   The file holds `{"reset_at_ms": <epoch milliseconds> | null}`: before that instant each
@@ -50,6 +54,9 @@
 //!   read or the targeted update answers that the store holds no such item, with no failure
 //!   beside it, for as long as the file is there: what a hosted destination answers for a
 //!   board or an issue somebody deleted.
+//! * `<key>.get_project.without` — every project read is **served** by the real store and
+//!   answered with the project metadata key the file holds left out, for as long as the file
+//!   is there: a board that holds what was written to it and reads back without it.
 //! * `<key>.<method>.malformed` — every call of that method is **served** by the real store,
 //!   so a write it carries is applied, and then answered with a result the plugin protocol
 //!   does not give that method: a plugin that stored what it was asked to and then answered
@@ -407,6 +414,14 @@ impl Scripted {
                 return Ok(json!({"id": request.id, "error": error}));
             }
         }
+        if method == "set_project_metadata" {
+            if let Some(Value::String(key)) = request.params.get("key") {
+                let one = self.scenario(&format!("{method}#{}.refuse", fake::segment(key)));
+                if let Some(error) = refusal(&one)? {
+                    return Ok(json!({"id": request.id, "error": error}));
+                }
+            }
+        }
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {
             return Ok(json!({"id": request.id, "error": error}));
         }
@@ -445,6 +460,18 @@ impl Scripted {
         }
         if let Some(key) = handle(&self.scenario("task.key"))? {
             keyed(method, &mut answered, &key);
+        }
+        if method == "get_project" {
+            if let Some(key) = handle(&self.scenario("get_project.without"))? {
+                if let Some(metadata) = answered
+                    .get_mut("result")
+                    .and_then(|result| result.get_mut("project"))
+                    .and_then(|project| project.get_mut("metadata"))
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove(key.trim());
+                }
+            }
         }
         // Ending a command clears what the source held for it and sends nothing to a hosted
         // destination, so, like `metering`, it is never charged.

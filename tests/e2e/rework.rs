@@ -2146,10 +2146,13 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     read_green(&world, run, &["b"]);
 }
 
-/// A rework cleared for publication before a takeover may finish its push, but
-/// the superseded driver must not begin the descendant restack that push owes.
+/// A rework cleared for publication before a takeover finishes its push. The descendant
+/// restack that push owes may still start — a dispatch reads no claim — but it publishes
+/// nothing: its publication's read finds the takeover, which supersedes the driver, and the
+/// restack settles unpublished with its work kept on b's branch, as every withheld dispatch
+/// keeps its own; no second change request is opened from it.
 #[test]
-fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack() {
+fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
     let world = World::new("rework-takeover")
         .with_env("ONEVCS_BRANCH_PREFIX", "me/")
         .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "10")
@@ -2173,6 +2176,7 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
         &[],
     );
     let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
     let old_head = head_of(&world, &a_branch);
     for marker in [go.clone(), go.with_extension("go.holding")] {
         std::fs::remove_file(marker).expect("the initial publication released its gate");
@@ -2192,10 +2196,14 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the takeover starts");
+    world.until("the successor's claim to reach the store", |world| {
+        world.store_project(&project)["items"][0]["item"]["metadata"]["onepipeline.driver"]["host"]
+            == "takeover-host"
+    });
+    held.release();
     world.until("the first driver to read the takeover", |world| {
         !world.events_of(run, "driver-superseded").is_empty()
     });
-    held.release();
     world.until("the superseded driver to end", |world| {
         world.run_file(run, "result.json").is_file()
     });
@@ -2211,11 +2219,26 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
         old_head,
         "the already cleared push did not finish"
     );
-    assert!(
-        world.events_of(run, "node-restack-started").is_empty(),
-        "a superseded driver began a restack: {:#?}",
-        world.journal(run)
-    );
+    let read = world.events_of(run, "driver-superseded")[0]["ts"]
+        .as_str()
+        .expect("a record's time")
+        .to_owned();
+    for started in world.events_of(run, "node-restack-started") {
+        assert!(
+            started["ts"].as_str().expect("a record's time") <= read.as_str(),
+            "a superseded driver began a restack after it read the takeover: {:#?}",
+            world.journal(run)
+        );
+    }
+    if !world.events_of(run, "node-restack-started").is_empty() {
+        let restacked = settled(&world, run, "b");
+        assert_eq!(restacked["status"], "cancelled", "{restacked}");
+        assert!(
+            text(&restacked["detail"], "b's detail").starts_with("not published"),
+            "a superseded driver published b's restack: {restacked}"
+        );
+    }
+    assert_eq!(opened_from(&world, &b_branch), 1);
     successor.run(&["stop", run]).exited(0);
     assert_eq!(successor.events_of(run, "run-stopped").len(), 1);
     assert_eq!(opened_from(&world, &a_branch), 1);

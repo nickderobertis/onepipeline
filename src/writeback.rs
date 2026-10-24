@@ -817,7 +817,7 @@ impl Failed {
     /// One store call the engine refused to run, with the wait its source asked for.
     fn engine(call: &str, error: &EngineError) -> Self {
         Self {
-            wait: cause_of(error).1.and_then(asked_to_wait),
+            wait: engine_wait(error),
             ..Self::classed(
                 format!("{call} failed: {error}"),
                 Classified::of_engine(error),
@@ -851,10 +851,7 @@ impl Failed {
             // of its waits is that source's own — the wait `store::a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it`
             // drives end to end; `writeback::tests::a_rate_limited_failure_carries_the_wait_its_source_asked_for`
             // holds the longest of several.
-            wait: errors
-                .iter()
-                .filter_map(|failure| asked_to_wait(&failure.error))
-                .max(),
+            wait: failures_wait(errors),
         }
     }
 
@@ -2360,6 +2357,26 @@ fn retry_after(failures: u32) -> Duration {
     FIRST_RETRY_AFTER
         .saturating_mul(RETRY_GROWTH.saturating_pow(failures.saturating_sub(1)))
         .min(RETRY_CEILING)
+}
+
+/// The wait the source behind an engine failure asked for, where it named one.
+pub(crate) fn engine_wait(error: &EngineError) -> Option<Duration> {
+    cause_of(error).1.and_then(asked_to_wait)
+}
+
+/// The longest wait any source of a partial answer asked for: asking sooner asks one that
+/// said not yet.
+pub(crate) fn failures_wait(errors: &[SourceFailure]) -> Option<Duration> {
+    errors
+        .iter()
+        .filter_map(|failure| asked_to_wait(&failure.error))
+        .max()
+}
+
+/// Keep a wait the store asked a read outside write-back for, so that neither this driver's
+/// next read nor its write-back asks the store anything before it has passed.
+pub(crate) fn record_store_wait(run_dir: &Path, wait: Duration) {
+    AskedWait::record(run_dir, wait);
 }
 
 /// A wait the store asked for, kept in the run's directory so every process that projects the
