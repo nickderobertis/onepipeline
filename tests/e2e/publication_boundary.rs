@@ -2235,6 +2235,13 @@ fn private_home_world(name: &str) -> (World, Repository, Repository) {
 
 /// Run the standalone store's own command line under the world's environment.
 fn store_cli(world: &World, args: &[&str]) -> crate::harness::Run {
+    let mut command = store_cli_command(world);
+    command.args(args);
+    world.run_on(command, &format!("onetaskgraph {}", args.join(" ")))
+}
+
+/// The standalone store's own command line, under the world's environment.
+pub(crate) fn store_cli_command(world: &World) -> std::process::Command {
     let template = world.cmd(&[]);
     let mut command = std::process::Command::new(crate::harness::onetaskgraph_binary());
     for (key, value) in template.get_envs() {
@@ -2246,8 +2253,7 @@ fn store_cli(world: &World, args: &[&str]) -> crate::harness::Run {
     if let Some(dir) = template.get_current_dir() {
         command.current_dir(dir);
     }
-    command.args(args);
-    world.run_on(command, &format!("onetaskgraph {}", args.join(" ")))
+    command
 }
 
 /// Author `plan` in the private `draft` source, then have the store copy it into the private

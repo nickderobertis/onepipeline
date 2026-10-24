@@ -496,8 +496,9 @@ fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_pl
 /// The private source is a real `scripted-source` serving an empty folder through the real
 /// `local-md` plugin, declared `visibility: private`, answering every task query with the
 /// authentication failure a hosted tracker answers a reader without its credential with.
-/// The store asks it what it records of each public task a copy landed — the only kind
-/// whose edges a private source may keep — so every node's read names it.
+/// Each public task is one an earlier release's copy landed — the only kind whose edges a
+/// private source may still keep — so the store asks it about each, and every node's read
+/// names it.
 ///
 /// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
 /// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
@@ -524,7 +525,7 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
             ],
         ),
     );
-    landed_by_copy(&world, &project);
+    landed_by_an_earlier_copy(&world, &project);
 
     world
         .run(&["plan", "check", &project])
@@ -710,7 +711,7 @@ fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_
             ],
         ),
     );
-    landed_by_copy(&world, &project);
+    landed_by_an_earlier_copy(&world, &project);
     let build = world
         .store_tasks(&project)
         .into_iter()
@@ -840,7 +841,7 @@ fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
         name,
         &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
     );
-    landed_by_copy(&world, &project);
+    landed_by_an_earlier_copy(&world, &project);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("both nodes to be held", |world| {
         held_for_source(world, name, "design").is_some()
@@ -914,7 +915,7 @@ fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_
             ],
         ),
     );
-    landed_by_copy(&world, &project);
+    landed_by_an_earlier_copy(&world, &project);
 
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("build to be held under its sources", |world| {
@@ -933,6 +934,100 @@ fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_
         "a node was dispatched while the private sources could not be asked about it"
     );
     world.run(&["stop", name]).exited(0);
+}
+
+/// A dependency the store holds opaquely — under the designator of a tracker this host does
+/// not configure — is a prerequisite no read here can ever name, so the plan is refused where
+/// it is read, naming the designator, rather than held for an answer that cannot come or run
+/// as if the prerequisite were not there.
+///
+/// The opaque far end is the store's own: its command line, configured with a private folder
+/// carrying a `public_alias`, writes a plans task's dependency on a task there as that
+/// folder's designator and the task's native id. The engine then reads the plan on a host
+/// configuring no such folder.
+#[test]
+fn a_dependency_on_a_tracker_this_host_does_not_configure_refuses_the_read() {
+    let world = World::new("store-opaque-dependency");
+    let alias = "privatefolder-0001";
+    let vault = world.root.join("vault");
+    world.write_item(
+        &vault.join("projects").join("board.md"),
+        &[("title", json!("Board"))],
+        "",
+    );
+    world.write_item(
+        &vault.join("tasks").join("board").join("t1.md"),
+        &[
+            ("title", json!("A prerequisite kept privately")),
+            ("project", json!("board")),
+        ],
+        "",
+    );
+    let name = "opaque";
+    let project = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    // Declaring a source private opts the store into its boundary, so the write is screened
+    // through the linked `onevcs`'s own commands, as a host configures them.
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let mut command = crate::publication_boundary::store_cli_command(&world);
+    command
+        .env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            format!("{onevcs},boundary,inspect,--input,-,--json"),
+        )
+        .env("ONETASKGRAPH_SOURCES__VAULT__PLUGIN", "local-md")
+        .env("ONETASKGRAPH_SOURCES__VAULT__VISIBILITY", "private")
+        .env("ONETASKGRAPH_SOURCES__VAULT__PUBLIC_ALIAS", alias)
+        .env("ONETASKGRAPH_SOURCES__VAULT__CONFIG__ROOT", &vault)
+        .args([
+            "task",
+            "update",
+            &format!("plans:{identifier}/000-build"),
+            "--depends-on",
+            "vault:board/t1",
+        ]);
+    world
+        .run_on(
+            command,
+            "onetaskgraph task update --depends-on vault:board/t1",
+        )
+        .exited(0);
+    let stored = std::fs::read_to_string(
+        world
+            .store()
+            .join("tasks")
+            .join(identifier)
+            .join("000-build.md"),
+    )
+    .expect("the task");
+    let designator = format!("alias/{alias}");
+    assert!(stored.contains(&designator), "{stored}");
+    assert!(!stored.contains("vault"), "{stored}");
+
+    for verb in [
+        &["plan", "check", project.as_str()][..],
+        &["start", project.as_str(), "--attach"],
+    ] {
+        let refused = world.run(verb);
+        assert_ne!(refused.code, 0, "{}", refused.stdout);
+        assert!(
+            refused.stderr.contains(&format!(
+                "a dependency is recorded under designator {designator}, not configured on this host"
+            )),
+            "{}",
+            refused.stderr
+        );
+    }
+    assert!(
+        !world.runs.join(name).join("events.jsonl").is_file(),
+        "a plan with a prerequisite nobody here can name started a run"
+    );
 }
 
 /// This world, with a second source `vault`: a real `scripted-source` serving its own
@@ -964,12 +1059,16 @@ fn with_private_source(world: World, name: &str) -> World {
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
 }
 
-/// Mark every task of `project` as one a copy landed and did not mark as holding every
-/// edge on its own record — the store's `onetaskgraph.copied_destination_version`, and no
-/// `onetaskgraph.edges_on_record` — which is the only kind of task whose edges a source
-/// declared private may keep on its own side, so the only kind a dependency read asks it
-/// about.
-fn landed_by_copy(world: &World, project: &str) {
+/// Mark every task of `project` as one an earlier release's copy landed: it carries the
+/// store's [`COPIED_DESTINATION_VERSION_KEY`] and not its [`EDGES_ON_RECORD_KEY`], which is
+/// every task a copy landed before the store began marking the second. A dependency read asks
+/// a source declared private what it records of such a task, and of no other, because only a
+/// copy that did not mark it can have kept one of its edges on the private side.
+///
+/// [`COPIED_DESTINATION_VERSION_KEY`]: onetaskgraph_plugin_api::MetadataKey::COPIED_DESTINATION_VERSION_KEY
+/// [`EDGES_ON_RECORD_KEY`]: onetaskgraph_plugin_api::MetadataKey::EDGES_ON_RECORD_KEY
+fn landed_by_an_earlier_copy(world: &World, project: &str) {
+    use onetaskgraph_plugin_api::MetadataKey;
     let identifier = project.strip_prefix("plans:").expect("a plans project");
     let tasks = world.store().join("tasks").join(identifier);
     for entry in std::fs::read_dir(&tasks)
@@ -977,15 +1076,21 @@ fn landed_by_copy(world: &World, project: &str) {
         .flatten()
     {
         let held = std::fs::read_to_string(entry.path()).expect("a task");
+        // llmlint: ignore[tests_mirror_real_usage, contracts_have_one_source_or_a_drift_gate] the state is one no copy of the linked release can make: a 0.12 copy onto a source not declared private marks every task whose edges it kept with `edges_on_record`, and leaves it off only by withholding an edge to an item outside the plan, which would give each journey's node a prerequisite no edit could ever add. It is the state every board an earlier release copied is in, so it is written as that board holds it; the key is the store's own public constant rather than a restatement, and the store reads only whether it is there, never the digest.
         let copied = held.replacen(
             "\nmetadata:\n",
             &format!(
-                "\nmetadata:\n  onetaskgraph.copied_destination_version: sha256:{}\n",
+                "\nmetadata:\n  {}: sha256:{}\n",
+                MetadataKey::COPIED_DESTINATION_VERSION_KEY,
                 "0".repeat(64)
             ),
             1,
         );
         assert_ne!(held, copied, "the task carries no metadata: {held}");
+        assert!(
+            !copied.contains(MetadataKey::EDGES_ON_RECORD_KEY),
+            "{copied}"
+        );
         std::fs::write(entry.path(), copied).expect("the task is marked copied");
     }
 }
