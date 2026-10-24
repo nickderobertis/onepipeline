@@ -1451,6 +1451,50 @@ mod tests {
         let pass = holds.due(reset);
         assert_eq!(pass.sources, both);
         assert_eq!(pass.asked, BTreeMap::from([("joint".to_owned(), both)]));
+
+        // archive beside two nodes waiting out resets 10 and 20 minutes out, and beside one it
+        // can read: it is put off to the earlier reset, and not at all while it reads the third.
+        let hold = |on: Vec<Unanswered>| SourceHold::new(on, Vec::new()).expect("a hold").payload();
+        let ledger = Unanswered {
+            who: Unasked::Source {
+                source: onetaskgraph_plugin_api::SourceName::new("ledger").expect("a source name"),
+                cause: SourceCause::RateLimited {
+                    retry_at_ms: Some(now + 1_200_000),
+                },
+            },
+            reason: "rate limited".to_owned(),
+        };
+        let mut payloads: BTreeMap<String, Vec<Value>> = [
+            (
+                "beta".to_owned(),
+                vec![hold(vec![archive.clone(), limited(Some(now + 600_000))])],
+            ),
+            (
+                "gamma".to_owned(),
+                vec![hold(vec![
+                    archive.clone(),
+                    limited(Some(now + 600_000)),
+                    ledger,
+                ])],
+            ),
+        ]
+        .into();
+        let holds = SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p");
+        let pass = holds.due(holds.schedule["archive"].at_ms);
+        assert!(pass.asked.is_empty(), "{:?}", pass.asked);
+        assert_eq!(
+            pass.later,
+            BTreeMap::from([("archive".to_owned(), now + 600_000 + AFTER_RESET_MS)])
+        );
+        payloads.insert("alpha".to_owned(), vec![hold(vec![archive.clone()])]);
+        let holds = SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p");
+        let pass = holds.due(holds.schedule["archive"].at_ms);
+        assert_eq!(pass.sources, BTreeSet::from(["archive".to_owned()]));
+        assert_eq!(
+            pass.asked,
+            BTreeMap::from([("alpha".to_owned(), BTreeSet::from(["archive".to_owned()]))])
+        );
+        assert!(pass.later.is_empty(), "{:?}", pass.later);
         std::env::remove_var(POLL_ENV);
     }
 

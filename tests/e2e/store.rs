@@ -2258,22 +2258,61 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     });
 }
 
-/// The world, plan and project of a node `joint` edged into the private sources `vault` and
-/// `archive` both, each holding the item it names.
-fn joint_world(label: &str) -> (World, String) {
-    let world = with_tracker(with_tracker(World::new(label), "vault"), "archive");
-    private_item(&world, "vault", "vault-design", "design");
-    private_item(&world, "archive", "archive-design", "design");
-    let mut joint = agent("joint", &["design"]);
-    joint["opaque_deps"] = json!([
-        {"designator": designator_of("vault"), "id": "vault-design"},
-        {"designator": designator_of("archive"), "id": "archive-design"},
-    ]);
-    let project = world.plan(
-        "joint",
-        &plan_of("joint", vec![agent("design", &[]), joint]),
-    );
+/// The world, plan and project of `run`: a node `design`, and each of `held` edged into the
+/// item `<source>-design` of each private source it names, each declared a tracker here.
+fn held_world(label: &str, run: &str, held: &[(&str, &[&str])]) -> (World, String) {
+    let mut sources: Vec<&str> = held.iter().flat_map(|(_, on)| on.iter().copied()).collect();
+    sources.sort_unstable();
+    sources.dedup();
+    let world = sources.iter().fold(World::new(label), |world, source| {
+        with_tracker(world, source)
+    });
+    for source in &sources {
+        private_item(&world, source, &format!("{source}-design"), "design");
+    }
+    let mut nodes = vec![agent("design", &[])];
+    for (id, on) in held {
+        let mut node = agent(id, &["design"]);
+        node["opaque_deps"] = on
+            .iter()
+            .map(|source| json!({"designator": designator_of(source), "id": format!("{source}-design")}))
+            .collect();
+        nodes.push(node);
+    }
+    let project = world.plan(run, &plan_of(run, nodes));
     (world, project)
+}
+
+/// The world, plan and project of a node `joint` edged into the private sources `vault` and
+/// `archive` both.
+fn joint_world(label: &str) -> (World, String) {
+    held_world(label, "joint", &[("joint", &["vault", "archive"])])
+}
+
+/// The instants `run` re-read `node`'s dependencies at.
+fn node_rereads(world: &World, run: &str, node: &str) -> Vec<u64> {
+    world
+        .store_operations(run)
+        .into_iter()
+        .filter(|operation| {
+            operation["phase"] == "re-read"
+                && operation["node"] == node
+                && operation["operation"] == "task-dependencies"
+        })
+        .filter_map(|operation| operation["at_ms"].as_u64())
+        .collect()
+}
+
+/// The reset `node`'s launch hold recorded for `source`.
+fn reset_of(world: &World, run: &str, node: &str, source: &str) -> u64 {
+    let held = first_held_for_source(world, run, node).expect("the node is held");
+    held["unanswered"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|unasked| unasked["source"] == source)
+        .and_then(|unasked| unasked["retry_at_ms"].as_u64())
+        .unwrap_or_else(|| panic!("{source} named no reset: {held}"))
 }
 
 /// A node held on a private source waiting out its provider's reset and on one backing off is
@@ -2382,6 +2421,119 @@ fn nodes_held_on_two_sources_backing_off_are_read_on_each_ones_own_schedule() {
         world.run_file(name, "result.json").is_file()
     });
     assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
+/// A backing-off source whose every node also waits out another source's reset is read with
+/// them at the earliest of those resets, and a node waiting out two resets is read at the
+/// later: neither reset source is asked before its own reset.
+#[test]
+fn a_source_held_behind_resets_is_read_at_the_earliest_and_each_node_at_its_latest() {
+    let run = "resets";
+    let (world, project) = held_world(
+        "store-hold-resets",
+        run,
+        &[
+            ("beta", &["archive", "vault"]),
+            ("gamma", &["archive", "vault", "ledger"]),
+        ],
+    );
+    rate_limit(&world, "archive", None);
+    rate_limit(&world, "vault", Some(now_ms() + 12_000));
+    rate_limit(&world, "ledger", Some(now_ms() + 24_000));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    // Each node's launch read met vault's refusal at its own instant, so the two record the one
+    // reset a few milliseconds apart; the driver schedules it by one of them.
+    let (beta_vault, gamma_vault) = (
+        reset_of(&world, run, "beta", "vault"),
+        reset_of(&world, run, "gamma", "vault"),
+    );
+    let vault = beta_vault.min(gamma_vault);
+    let vault_put_off = vault + 1_000..=beta_vault.max(gamma_vault) + 1_000;
+    let ledger = reset_of(&world, run, "gamma", "ledger");
+    let at_launch = item_reads(&world, "ledger").len();
+    // archive falls due on its backoff with both its nodes waiting out a reset, and is put off
+    // to the earlier of them, vault's — what `status` then says of its next read.
+    world.until_within(Duration::from_secs(20), "archive to be put off", |world| {
+        source_schedule(world, run, "archive")["next_read_ms"]
+            .as_u64()
+            .is_some_and(|at| at > vault)
+    });
+    let put_off = source_schedule(&world, run, "archive")["next_read_ms"].as_u64();
+    assert!(
+        put_off.is_some_and(|at| vault_put_off.contains(&at)),
+        "archive was put off to {put_off:?}, not a second after vault's reset {vault_put_off:?} \
+         (ledger's is {ledger})"
+    );
+    world.until_within(Duration::from_secs(60), "gamma to be read again", |world| {
+        !node_rereads(world, run, "gamma").is_empty()
+    });
+    let beta = node_rereads(&world, run, "beta")[0];
+    let gamma = node_rereads(&world, run, "gamma")[0];
+    assert!(
+        (vault + 1_000..ledger).contains(&beta),
+        "beta was read again at {beta}, not between vault's reset {vault} and ledger's {ledger}"
+    );
+    assert!(
+        gamma >= ledger + 1_000,
+        "gamma was read again at {gamma}, inside ledger's reset {ledger}"
+    );
+    let ledger_reads = item_reads(&world, "ledger");
+    assert_eq!(
+        ledger_reads
+            .iter()
+            .filter(|at| **at < ledger + 1_000)
+            .count(),
+        at_launch,
+        "ledger was asked between the launch and its reset: {ledger_reads:?}"
+    );
+    for source in ["archive", "vault", "ledger"] {
+        world.unscript(&format!("{source}.get_task.rate-limited"));
+    }
+    world.until_within(Duration::from_secs(60), "the run to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// A backing-off source holding one node it can read and one that waits out another source's
+/// reset reads the first on its own schedule: the waiting node neither postpones it nor is
+/// read, so the source waiting out its reset is asked nothing.
+#[test]
+fn a_source_shared_with_a_node_waiting_out_a_reset_reads_its_other_node_on_schedule() {
+    let run = "shared";
+    let (world, project) = held_world(
+        "store-hold-shared",
+        run,
+        &[("alpha", &["archive"]), ("beta", &["archive", "vault"])],
+    );
+    rate_limit(&world, "archive", None);
+    rate_limit(&world, "vault", Some(now_ms() + 600_000));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let vault = reset_of(&world, run, "beta", "vault");
+    let at_launch = item_reads(&world, "vault").len();
+    // What the driver records of archive's next read, sampled while it reads alpha: never put
+    // off to the reset beta waits out.
+    let mut recorded: Vec<Value> = Vec::new();
+    world.until_within(
+        Duration::from_secs(30),
+        "alpha to be read again twice",
+        |world| {
+            recorded.push(source_schedule(world, run, "archive")["next_read_ms"].clone());
+            node_rereads(world, run, "alpha").len() >= 2
+        },
+    );
+    assert!(
+        !recorded.contains(&json!(vault + 1_000)),
+        "archive was put off to vault's reset: {recorded:?}"
+    );
+    assert!(node_rereads(&world, run, "alpha")[0] < vault);
+    assert_eq!(node_rereads(&world, run, "beta"), Vec::<u64>::new());
+    assert_eq!(
+        item_reads(&world, "vault").len(),
+        at_launch,
+        "vault was asked before its reset"
+    );
+    world.run(&["stop", run]).exited(0);
 }
 
 /// A private source that cannot be reached holds the node edged into it saying so, and asks
