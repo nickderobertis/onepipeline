@@ -2249,6 +2249,23 @@ impl World {
         )
     }
 
+    /// A `PATH` whose `ps` runs `answer` in place of saying whether processes are
+    /// stopped, and answers every other question for real.
+    ///
+    /// The fault a teardown meets once it has frozen its tree and asks the host
+    /// whether it took: an answer it cannot trust is not a tree shown stopped.
+    /// Scoped to that one question, as [`listing_plus`] says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_answers_whether_stopped_with(&self, name: &str, answer: &str) -> PathBuf {
+        self.path_with_ps(
+            name,
+            &format!(
+                "case \" $* \" in\n  *stat=*) {answer} ;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
+    }
+
     /// A `PATH` whose `ps` answers with the **real** listing and one row nobody
     /// can read.
     ///

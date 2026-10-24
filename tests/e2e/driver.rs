@@ -4306,6 +4306,76 @@ fn a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it() {
     world.release("build.go");
 }
 
+/// A stop whose host will not show the tree it froze as stopped still ends that
+/// tree and leaves none of it frozen — and refuses to call that a clean stop.
+///
+/// A listing is complete only once every process it descends from is shown
+/// stopped, so each answer here that is not that — a failed `ps`, bytes that are
+/// not text, a row that is not a pid and a state, an answer that leaves a live
+/// target out — keeps the teardown asking until its bound, where it signals what
+/// it found and says its discovery did not finish. A teardown that took any of
+/// them as settled would call the stop clean. Every answer but the last also
+/// shows each target stopped, and the last shows all of them but the first, so
+/// the one fault in it is all that stands between the teardown and that.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_never_shows_its_frozen_tree_stopped_still_ends_it() {
+    // The targets are the comma-separated ids of `ps`'s last argument, split by
+    // the shell alone: the `PATH` this stop is given holds nothing but `ps`.
+    let shown_stopped = |skipped: &str| {
+        format!(
+            "for last; do :; done; IFS=,; set -- $last; {skipped}for id; do echo \"$id T\"; done"
+        )
+    };
+    let all = shown_stopped("");
+    for (fault, answer) in [
+        ("fails", format!("{all}; exit 1")),
+        ("undecodable", format!("{all}; printf '\\377\\n'; exit 0")),
+        ("malformed", format!("{all}; echo 'not a row'; exit 0")),
+        ("omits", format!("{}; exit 0", shown_stopped("shift; "))),
+    ] {
+        let world = World::new(&format!("driver-stop-unshown-{fault}"));
+        world.script("build.wait", "hold");
+        let (run, driver) = start_detached_announcing(
+            &world,
+            &format!("unshown{fault}"),
+            vec![agent("build", &[])],
+        );
+        world.until("a node to be in flight", |world| {
+            !world.events_of(&run, "node-dispatched").is_empty()
+        });
+        world.until("the dispatch to be a process below the driver", |_| {
+            !dispatches(driver).is_empty()
+        });
+        let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+
+        let mut command = world.cmd(&["stop", &run]);
+        command.env(
+            "PATH",
+            world.path_whose_ps_answers_whether_stopped_with(&format!("{fault}-ps"), &answer),
+        );
+        let stopped = world.run_on(command, &format!("stop with a ps whose answer {fault}"));
+        let left: Vec<u32> = tree
+            .iter()
+            .copied()
+            .filter(|pid| !process_ended(*pid))
+            .collect();
+        // Ended here, by the pids read before the stop, before anything is
+        // asserted: a tree left frozen is one nothing else on this host ends.
+        for pid in &left {
+            end_process(*pid);
+        }
+        assert_eq!(stopped.code, REFUSED, "{fault}: {}", stopped.stderr);
+        stopped.err_has("only partly stopped");
+        assert!(
+            left.is_empty(),
+            "{fault}: pids {left:?} of the run's tree {tree:?} were still there once the stop \
+             answered"
+        );
+        world.release("build.go");
+    }
+}
+
 /// A stop whose host refuses the listing that would have found a process the
 /// run's dispatch started after the first one never reports success while that
 /// process is running — and leaves the run beside it running.

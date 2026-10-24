@@ -872,7 +872,9 @@ fn structured(prompt: &str, dir: &std::path::Path) -> serde_json::Value {
     answer
 }
 
-/// Start this double again with `args`, its standard streams on nothing.
+/// Start this double again with `args`, its standard streams on nothing: what
+/// it starts outlives the turn, and one holding the turn's output pipe would
+/// keep whoever reads that output from ever seeing it end.
 fn start_self(args: &[&str]) -> std::process::Child {
     let exe = std::env::current_exe()
         .unwrap_or_else(|error| fake::fail(&format!("fake claude has no image: {error}")));

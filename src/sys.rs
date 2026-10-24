@@ -580,18 +580,18 @@ fn all_stopped(pids: &[u32]) -> bool {
     let mut asked = std::process::Command::new("ps");
     #[cfg(target_os = "linux")]
     asked.arg("-L");
-    let Ok(answered) = asked
+    // `ps -p` fails when none of its ids is a process any more, which is also
+    // the answer of a `ps` that could not start or could not run: asked again
+    // next round.
+    let Some(answered) = asked
         .args(["-o", "pid=,stat=", "-p", &ids])
         .stderr(std::process::Stdio::null())
         .output()
+        .ok()
+        .filter(|answered| answered.status.success())
     else {
         return false;
     };
-    // `ps -p` fails when none of its ids is a process any more, which is also
-    // the answer of a `ps` that could not run: asked again next round.
-    if !answered.status.success() {
-        return false;
-    }
     let Ok(text) = String::from_utf8(answered.stdout) else {
         return false;
     };
