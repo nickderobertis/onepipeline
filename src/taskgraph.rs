@@ -984,7 +984,20 @@ impl Reader {
         let whole = task.to_string();
         let mut deps = Vec::new();
         let (edges, unasked) = self.edges(task)?;
+        // A far end outside the plan in a source that could not be asked is the store's to
+        // name and not this read's to resolve: asking that source for it would be refused the
+        // same way, and the node is held on that source until a read finds it answering.
+        let unasked_sources: BTreeSet<&str> = unasked
+            .iter()
+            .filter_map(|entry| entry.source())
+            .map(|failure| failure.source.as_str())
+            .collect();
         for edge in edges {
+            if unasked_sources.contains(edge.to.id.source.as_str())
+                && !ids.contains_key(&edge.to.id.to_string())
+            {
+                continue;
+            }
             if edge.from.kind != ItemKind::Task {
                 return Err(Error::Sibling {
                     tool: STORE,

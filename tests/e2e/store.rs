@@ -981,6 +981,236 @@ fn held_for_source(world: &World, run: &str, node: &str) -> Option<Value> {
     held
 }
 
+/// The `public_alias` a world's private source `name` declares: the name every host's
+/// configuration of that tracker gives it, which an opaque edge's designator is built from.
+fn alias_of(name: &str) -> String {
+    format!("{name}-tracker-alias")
+}
+
+/// The designator an opaque edge into the private source `name` is recorded under.
+fn designator_of(name: &str) -> String {
+    format!("alias/{}", alias_of(name))
+}
+
+/// This world, with a source `name` declared private that declares a `public_alias`, so an
+/// opaque edge's designator resolves to it, and each source's backoff starting at one second.
+fn with_tracker(world: World, name: &str) -> World {
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", name.to_uppercase());
+    with_private_source(world, name)
+        .with_env(&format!("{prefix}__PUBLIC_ALIAS"), &alias_of(name))
+        .with_env("ONEPIPELINE_SOURCE_POLL_SECONDS", "1")
+}
+
+/// An agent node whose task records an opaque edge to `item`, an item of the private source
+/// `source`: what a copy onto a public board leaves of an edge into a private tracker.
+fn edged(id: &str, deps: &[&str], source: &str, item: &str) -> Value {
+    let mut node = agent(id, deps);
+    node["opaque_deps"] = json!([{"designator": designator_of(source), "id": item}]);
+    node
+}
+
+/// The private source `source`'s item `item`: a private copy of the plan's node `node`, which
+/// is what the far end of an opaque edge resolves to once that source answers.
+fn private_item(world: &World, source: &str, item: &str, node: &str) {
+    world.write_item(
+        &world
+            .root
+            .join(source)
+            .join("tasks")
+            .join(format!("{item}.md")),
+        &[
+            ("title", json!(format!("chore: {node}, kept privately"))),
+            ("metadata", json!({"onepipeline.id": node})),
+        ],
+        "",
+    );
+}
+
+/// Script the private source `source` to answer every item read rate limited, naming
+/// `reset_at_ms` as its reset — or no reset, where it is `None` — as a provider whose quota
+/// is spent does.
+fn rate_limit(world: &World, source: &str, reset_at_ms: Option<u64>) {
+    world.script(
+        &format!("{source}.get_task.rate-limited"),
+        &json!({"reset_at_ms": reset_at_ms}).to_string(),
+    );
+}
+
+/// Every request that reached the private source `source`, in arrival order.
+fn received(world: &World, source: &str) -> Vec<Value> {
+    std::fs::read_to_string(world.fakes.join(format!("{source}.received.jsonl")))
+        .map(|text| {
+            text.lines()
+                .map(|line| serde_json::from_str(line).expect("a received line is JSON"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The arrival instants of the item reads that reached `source`.
+fn item_reads(world: &World, source: &str) -> Vec<u64> {
+    received(world, source)
+        .iter()
+        .filter(|call| call["method"] == "get_task")
+        .filter_map(|call| call["at_ms"].as_u64())
+        .collect()
+}
+
+/// Every store operation `run` has asked for, as its telemetry counted them.
+fn store_operations(world: &World, run: &str) -> Vec<Value> {
+    std::fs::read_to_string(world.run_file(run, "store-operations.jsonl"))
+        .map(|text| {
+            text.lines()
+                .map(|line| serde_json::from_str(line).expect("an operation line is JSON"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The store operations `run` asked for re-reading a node held on `source`.
+fn rereads_of(world: &World, run: &str, source: &str) -> Vec<Value> {
+    store_operations(world, run)
+        .into_iter()
+        .filter(|operation| {
+            operation["phase"] == "re-read"
+                && operation["held_on"]
+                    .as_array()
+                    .is_some_and(|held| held.iter().any(|on| on == source))
+        })
+        .collect()
+}
+
+/// The `source` reason the first `node-held` of `node` in `run` carried: the launch's own.
+fn first_held_for_source(world: &World, run: &str, node: &str) -> Option<Value> {
+    world
+        .events_of(run, "node-held")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .find_map(|event| {
+            event["payload"]["reasons"]
+                .as_array()?
+                .iter()
+                .find(|reason| reason["kind"] == "source")
+                .cloned()
+        })
+}
+
+/// The epoch milliseconds now, as the engine and the scripted source stamp them.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_millis()
+        .try_into()
+        .expect("milliseconds fit")
+}
+
+/// A node whose task carries an opaque edge into a private source answering rate limited is
+/// held on that source alone, recording why and the reset it named; the source is asked
+/// nothing before that reset and a second, is read again then, and the node is released and
+/// dispatched once it answers — while a node beside it naming no private item is dispatched
+/// at once, never held.
+#[test]
+fn a_node_edged_into_a_rate_limited_source_is_read_again_only_after_the_reset_it_named() {
+    let world = with_tracker(World::new("store-hold-reset"), "vault");
+    private_item(&world, "vault", "vault-design", "design");
+    let name = "reset";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                edged("changelog", &["design"], "vault", "vault-design"),
+                agent("service-fix", &[]),
+            ],
+        ),
+    );
+    let reset_at = now_ms() + 6_000;
+    rate_limit(&world, "vault", Some(reset_at));
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("changelog to be held", |world| {
+        held_for_source(world, name, "changelog").is_some()
+    });
+    // The launch's own record of the hold.
+    let held = first_held_for_source(&world, name, "changelog").expect("changelog is held");
+    let unanswered = held["unanswered"]
+        .as_array()
+        .expect("a source hold names its sources");
+    assert_eq!(unanswered.len(), 1, "{held}");
+    assert_eq!(unanswered[0]["source"], "vault", "{held}");
+    assert_eq!(unanswered[0]["cause"], "rate-limited", "{held}");
+    let retry_at = unanswered[0]["retry_at_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a reset the source named is recorded: {held}"));
+    // The source names its reset in whole seconds, rounded up, so the instant recorded is
+    // the reset to the second.
+    assert!(
+        (reset_at..reset_at + 1_000).contains(&retry_at),
+        "retry_at_ms {retry_at} is not the reset {reset_at} the source answered, to the second"
+    );
+    for free in ["design", "service-fix"] {
+        assert!(
+            held_for_source(&world, name, free).is_none(),
+            "{free}, whose task names no private item, was held"
+        );
+    }
+    let launch_reads = item_reads(&world, "vault").len();
+    assert_eq!(
+        launch_reads, 1,
+        "the launch's read asked the source more than once"
+    );
+
+    // Inside the reset: nothing reaches the source, and the free nodes run.
+    world.until("service-fix to settle", |world| {
+        world
+            .events_of(name, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "service-fix")
+    });
+    // The provider's quota returns at its reset.
+    world.until_within(Duration::from_secs(30), "the reset to pass", |_| {
+        now_ms() >= reset_at
+    });
+    world.unscript("vault.get_task.rate-limited");
+    world.until("changelog to be released", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "changelog")
+    });
+    let reads = item_reads(&world, "vault");
+    let rereads = rereads_of(&world, name, "vault");
+    assert_eq!(
+        reads[launch_reads..]
+            .iter()
+            .filter(|at| **at < retry_at + 1_000)
+            .count(),
+        0,
+        "the source was asked before its reset and a second: {reads:?}, reset {retry_at}"
+    );
+    assert_eq!(
+        rereads
+            .iter()
+            .filter(|op| op["operation"] == "task-dependencies")
+            .count(),
+        1,
+        "one dependency re-read, at the reset, released the node: {rereads:?}"
+    );
+    let first = rereads[0]["at_ms"]
+        .as_u64()
+        .expect("an operation's instant");
+    assert!(
+        (retry_at + 1_000..retry_at + 3_000).contains(&first),
+        "the re-read at {first} was not the reset {retry_at} and a second"
+    );
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a
