@@ -1385,6 +1385,8 @@ fn store_operations_records() -> Vec<(&'static str, serde_json::Value)> {
                 "schema_version": 1, "budget": "source-hold-store-operations-per-hour",
                 "workload": {"tasks": 20, "held_nodes": 3, "private_sources": 1,
                     "poll_seconds": 1, "hour_intervals": 60, "reset_after_intervals": 30},
+                "launched_at_ms": 1_000, "window": {"from_ms": 3_000, "to_ms": 61_000},
+                "first_after_hour_ms": 63_000,
                 "passes": [pass(31_000, "reset", 1), pass(32_200, "backoff", 2),
                     pass(34_400, "backoff", 4), pass(38_600, "backoff", 8),
                     pass(46_800, "backoff", 16)],
@@ -1402,6 +1404,7 @@ fn store_operations_records() -> Vec<(&'static str, serde_json::Value)> {
                 "workload": {"tasks": 20, "holds": 0, "concurrency": 4},
                 "dispatches": dispatches, "attempts": attempts,
                 "launch": {"project": 1, "tasks": 1, "task-dependencies": 20},
+                "launch_claim": {"task-update": 20},
             }),
         ),
         (
@@ -1532,6 +1535,21 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
             serde_json::json!(170),
             "not its passes times its held nodes",
         ),
+        (
+            "/passes",
+            serde_json::json!([]),
+            "passes must list the hour's re-reads",
+        ),
+        (
+            "/per_source",
+            serde_json::json!({"vault": 3, "archive": 2}),
+            "must name the workload's 1 private source",
+        ),
+        (
+            "/first_after_hour_ms",
+            serde_json::json!(60_000),
+            "first_after_hour_ms must fall after the hour",
+        ),
     ] {
         let mut wrong = records_of[0].1.clone();
         *wrong.pointer_mut(path).expect("a field of the record") = value;
@@ -1548,6 +1566,17 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
             stderr(&refused)
         );
     }
+    let mut repeated = records_of[1].1.clone();
+    repeated["dispatches"][1]["node"] = serde_json::json!("task-01");
+    write("store-operations-per-dispatch", &repeated);
+    let refused =
+        store_operations_report(&dir, Some("store-operations-per-dispatch"), Some(&result));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("dispatches names a node more than once"),
+        "{}",
+        stderr(&refused)
+    );
     let mut elsewhere = records_of[2].1.clone();
     elsewhere["workload"]["tasks"] = serde_json::json!(5);
     write("store-operations-per-settlement", &elsewhere);

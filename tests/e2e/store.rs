@@ -1775,25 +1775,32 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
     };
     let mut dispatches = Vec::new();
     let mut settlements = Vec::new();
+    // What the run's first projection wrote of each node before any was dispatched: the claim
+    // that every node is queued, the run's at launch and no one dispatch's.
+    let mut launch_claim: Vec<&Value> = Vec::new();
     for i in 1..=20 {
         let node = format!("task-{i:02}");
         let (dispatched, settled) = (
             stamp("node-dispatched", &node),
             stamp("node-settled", &node),
         );
-        let at_dispatch = item_ops(&node, dispatched, settled);
-        let at_settlement = item_ops(&node, settled, u64::MAX);
+        launch_claim.extend(item_ops(&node, 0, dispatched));
+        // A dispatch asks the store nothing before its process starts; its write-back
+        // projection — the node's status moved to running — lands after the record of the
+        // dispatch, from the snapshot that record is folded into, and before the settlement.
+        let dispatch_projection = item_ops(&node, dispatched, settled);
+        let settlement_projection = item_ops(&node, settled, u64::MAX);
         dispatches.push(json!({
             "node": node,
-            "operations": by_kind(at_dispatch.iter().copied()),
-            "total": at_dispatch.len(),
+            "operations": by_kind(dispatch_projection.iter().copied()),
+            "total": dispatch_projection.len(),
         }));
         settlements.push((
             settled,
             json!({
                 "node": node,
-                "operations": by_kind(at_settlement.iter().copied()),
-                "total": at_settlement.len(),
+                "operations": by_kind(settlement_projection.iter().copied()),
+                "total": settlement_projection.len(),
             }),
         ));
     }
@@ -1827,6 +1834,7 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
             "dispatches": dispatches,
             "attempts": attempts,
             "launch": launch,
+            "launch_claim": by_kind(launch_claim.iter().copied()),
         }),
     );
     record_store_operations(
@@ -2122,6 +2130,44 @@ fn a_hold_journalled_before_its_cause_reads_as_it_did() {
         "design: held — source 'vault', declared private, could not be asked what it records \
          of its task: authentication for this source failed: VAULT_TOKEN is missing or empty"
     );
+}
+
+/// A run whose store-operation telemetry cannot be written runs as it would: what it asks the
+/// store for is still asked and answered, and the settlement it writes back lands — the count
+/// is telemetry, and never fails what it counts.
+#[test]
+fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_would() {
+    let world = World::new("store-operations-unrecorded");
+    world.script("design.wait", "hold");
+    let name = "unrecorded";
+    let project = world.plan(name, &plan_of(name, vec![agent("design", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("design to be dispatched", |world| {
+        dispatched(world, name).iter().any(|node| node == "design")
+    });
+    // The file's name taken by a directory, which no append opens.
+    let telemetry = world.run_file(name, "store-operations.jsonl");
+    let _ = std::fs::remove_file(&telemetry);
+    std::fs::create_dir_all(&telemetry).expect("a directory where the telemetry goes");
+    world.release("design.go");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    assert!(telemetry.is_dir(), "a line was written over the directory");
+    world.until("the settlement to be written back", |world| {
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl")).is_ok_and(
+            |records| {
+                records.lines().any(|line| {
+                    serde_json::from_str::<Value>(line).is_ok_and(|record| {
+                        record["outcome"] == "projected"
+                            && record["updated_fields"]["status"].as_u64().is_some()
+                            && record["items"] == json!(["design"])
+                    })
+                })
+            },
+        )
+    });
 }
 
 /// Write-back owns exactly what the plan document declares, and preserves everything the

@@ -84,10 +84,32 @@ function hour(record) {
     hour_intervals: 60,
     reset_after_intervals: 30,
   });
-  if (!Array.isArray(record.passes)) fail("passes must be a list");
+  // The hour itself: a window of exactly the workload's hour from launch, and the first
+  // re-read after it named, so a record of a shorter or unobserved hour is not this figure.
+  const launched = count(record.launched_at_ms, "launched_at_ms");
+  const window = record.window ?? fail("window is missing");
+  const hourEnd = launched + stated.hour_intervals * stated.poll_seconds * 1000;
+  if (count(window.to_ms, "window.to_ms") !== hourEnd) {
+    fail("window.to_ms is not an hour of the workload's intervals after launch");
+  }
+  if (!(count(window.from_ms, "window.from_ms") >= launched && window.from_ms < hourEnd)) {
+    fail("window.from_ms must fall between the launch and the hour's end");
+  }
+  if (!(count(record.first_after_hour_ms, "first_after_hour_ms") > hourEnd)) {
+    fail("first_after_hour_ms must fall after the hour");
+  }
+  if (!Array.isArray(record.passes) || record.passes.length === 0) {
+    fail("passes must list the hour's re-reads: a source rate limited all hour is read at its reset");
+  }
+  if (record.passes[0].by !== "reset") fail("the hour's first re-read must be at the reset");
   const passes = record.passes.map((pass, index) => {
     const name = `passes[${index}]`;
-    count(pass.after_launch_ms, `${name}.after_launch_ms`);
+    if (!(count(pass.at_ms, `${name}.at_ms`) >= window.from_ms && pass.at_ms <= hourEnd)) {
+      fail(`${name}.at_ms falls outside the hour`);
+    }
+    if (pass.at_ms - launched !== count(pass.after_launch_ms, `${name}.after_launch_ms`)) {
+      fail(`${name}.after_launch_ms is not its instant less the launch`);
+    }
     count(pass.wait_intervals, `${name}.wait_intervals`);
     count(pass.gap_ms, `${name}.gap_ms`);
     if (pass.by !== "reset" && pass.by !== "backoff") fail(`${name}.by must be reset or backoff`);
@@ -97,7 +119,10 @@ function hour(record) {
   if (passes.reduce((sum, pass) => sum + pass.total, 0) !== value) {
     fail("total is not the sum of its passes' operations");
   }
-  if (total(kinds(record.per_source, "per_source")) !== value) {
+  if (Object.keys(kinds(record.per_source, "per_source")).length !== stated.private_sources) {
+    fail(`per_source must name the workload's ${stated.private_sources} private source`);
+  }
+  if (total(record.per_source) !== value) {
     fail("per_source does not sum to total");
   }
   if (Object.keys(kinds(record.per_node, "per_node")).length !== stated.held_nodes) {
@@ -134,11 +159,21 @@ function hour(record) {
   ];
 }
 
+/** Each entry's node, held to name one node apiece: no node stands in for another. */
+function distinct(entries, name) {
+  const nodes = entries.map((entry, index) => {
+    if (typeof entry.node !== "string" || entry.node === "") fail(`${name}[${index}].node must name a node`);
+    return entry.node;
+  });
+  if (new Set(nodes).size !== nodes.length) fail(`${name} names a node more than once`);
+}
+
 function dispatch(record) {
   workload(record, { tasks: 20, holds: 0 });
   if (!Array.isArray(record.dispatches) || record.dispatches.length !== 20) {
     fail("dispatches must list the run's 20 dispatches");
   }
+  distinct(record.dispatches, "dispatches");
   const totals = record.dispatches.map((each, index) => {
     const spent = total(kinds(each.operations, `dispatches[${index}].operations`));
     if (count(each.total, `dispatches[${index}].total`) !== spent) {
@@ -155,7 +190,9 @@ function dispatch(record) {
     value,
     `the most store operations one of ${totals.length} dispatches asked for, its write-back ` +
       `projection included: ${value} (each: ${totals.join(", ")}); by kind across them ` +
-      `${said(summed)}; ${overhead(record.attempts)}; the launch's plan read ` +
+      `${said(summed)}; ${overhead(record.attempts)}; the run's first projection, claiming ` +
+      `every node queued at launch and attributed to no dispatch, ` +
+      `${said(kinds(record.launch_claim, "launch_claim"))}; the launch's plan read ` +
       `${said(kinds(record.launch, "launch"))}`,
   ];
 }
@@ -165,6 +202,7 @@ function settlement(record) {
   if (!Array.isArray(record.settlements) || record.settlements.length !== 5) {
     fail("settlements must list five consecutive settlements");
   }
+  distinct(record.settlements, "settlements");
   const totals = record.settlements.map((each, index) => {
     if (each.ordinal !== index + 1) fail(`settlements[${index}].ordinal must be ${index + 1}`);
     const spent = total(kinds(each.operations, `settlements[${index}].operations`));

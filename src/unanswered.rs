@@ -680,6 +680,8 @@ impl SourceHolds {
 
     /// The sources due now, and the nodes a pass over them asks about: each node every source
     /// it is held on is due, and each node held only for a prerequisite once its interval is.
+    /// A node held on two sources waits for the later of them, which
+    /// `store::a_node_held_on_two_sources_is_read_again_once_both_are_due` drives.
     fn due(&self, now: u64) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
         let due: BTreeSet<String> = self
             .schedule
@@ -720,7 +722,8 @@ impl SourceHolds {
         let (due, asked) = self.due(now);
         if asked.is_empty() {
             // Each source due here holds only nodes another source holds too, which is not
-            // due yet: it is read with that one, when the latest of them falls due.
+            // due yet: it is read with that one, when the latest of them falls due — as
+            // `store::a_node_held_on_two_sources_is_read_again_once_both_are_due` drives.
             for source in &due {
                 let with = self
                     .held
@@ -850,6 +853,10 @@ fn wait_surface(
 /// The wait a hold says, its remedy chosen by each source's cause: a rate limit is waited
 /// out and asks nobody for anything; a credential refused asks for the credential; a source
 /// unreachable asks that it be reachable; a tracker configured nowhere here asks that it be.
+/// Each is driven through `next` by `tests/e2e/store.rs`:
+/// `the_launch_status_and_source_wait_name_the_source_its_cause_and_its_next_read` (rate limit
+/// and credential), `a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is`
+/// and `an_edge_into_a_tracker_configured_nowhere_holds_its_node_until_it_is_configured`.
 fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u64>) -> String {
     if hold.unanswered.is_empty() {
         return format!(

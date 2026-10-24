@@ -15,6 +15,7 @@
 //! dropped rather than failing the call it counts.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -77,16 +78,44 @@ impl Operation {
     }
 }
 
-/// Where this process's lines go.
+/// Where this process's lines go: held until it knows its run, then appended to its file.
 struct Sink {
     file: Option<PathBuf>,
-    held: Vec<String>,
+    held: VecDeque<String>,
 }
 
-static SINK: Mutex<Sink> = Mutex::new(Sink {
-    file: None,
-    held: Vec::new(),
-});
+impl Sink {
+    const fn new() -> Self {
+        Self {
+            file: None,
+            held: VecDeque::new(),
+        }
+    }
+
+    /// Take one line: appended where the run is known, and held — the oldest dropped past
+    /// [`HELD`] — where it is not.
+    fn take(&mut self, line: String) {
+        match &self.file {
+            Some(file) => append(file, std::slice::from_ref(&line)),
+            None => {
+                if self.held.len() >= HELD {
+                    self.held.pop_front();
+                }
+                self.held.push_back(line);
+            }
+        }
+    }
+
+    /// Send every line from now to the run whose directory is `dir`, the held ones first.
+    fn attach(&mut self, dir: &Path) {
+        let file = dir.join(FILE);
+        let held: Vec<String> = std::mem::take(&mut self.held).into();
+        append(&file, &held);
+        self.file = Some(file);
+    }
+}
+
+static SINK: Mutex<Sink> = Mutex::new(Sink::new());
 
 thread_local! {
     /// What the operations this thread asks for now are for.
@@ -96,13 +125,9 @@ thread_local! {
 /// Send this process's operations to the run whose directory is `dir`, the ones it asked for
 /// before it knew its run first.
 pub(crate) fn attach(dir: &Path) {
-    let mut sink = SINK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let file = dir.join(FILE);
-    let held = std::mem::take(&mut sink.held);
-    append(&file, &held);
-    sink.file = Some(file);
+    SINK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .attach(dir);
 }
 
 /// Run `within` with every operation it asks for on this thread said to be for `about`: an
@@ -126,18 +151,9 @@ pub(crate) fn about<T>(about: Value, within: impl FnOnce() -> T) -> T {
 /// Count one operation asked for now.
 pub(crate) fn record(operation: Operation) {
     let line = line(operation).to_string();
-    let mut sink = SINK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match &sink.file {
-        Some(file) => append(file, std::slice::from_ref(&line)),
-        None => {
-            if sink.held.len() >= HELD {
-                sink.held.remove(0);
-            }
-            sink.held.push(line);
-        }
-    }
+    SINK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take(line);
 }
 
 /// The line one operation asked for now, on this thread, is written as.
@@ -186,5 +202,49 @@ mod tests {
         let bare = line(Operation::Task);
         assert_eq!(bare.get("phase"), None, "{bare}");
         assert_eq!(bare.get("node"), None, "{bare}");
+    }
+
+    /// Lines held before the run is known are bounded, the oldest dropped first, and reach
+    /// the run's file, in order, once it is.
+    #[test]
+    fn held_lines_are_bounded_and_reach_the_run_once_it_is_known() {
+        let dir = std::env::temp_dir().join(format!("storeops-held-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a run directory");
+        let mut sink = Sink::new();
+        for n in 0..=HELD {
+            sink.take(format!("{{\"n\":{n}}}"));
+        }
+        assert_eq!(sink.held.len(), HELD);
+        assert_eq!(sink.held.front().map(String::as_str), Some("{\"n\":1}"));
+        sink.attach(&dir);
+        sink.take("{\"n\":\"after\"}".to_owned());
+        let written = std::fs::read_to_string(dir.join(FILE)).expect("the run's file");
+        let lines: Vec<&str> = written.lines().collect();
+        assert_eq!(lines.len(), HELD + 1);
+        assert_eq!(lines.first(), Some(&"{\"n\":1}"));
+        assert_eq!(lines.last(), Some(&"{\"n\":\"after\"}"));
+        std::fs::remove_dir_all(&dir).expect("the run directory is removed");
+    }
+
+    /// A line the run's file cannot take is dropped and nothing fails: telemetry never fails
+    /// the operation it counts.
+    #[test]
+    fn a_line_the_run_cannot_take_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("storeops-blocked-{}", std::process::id()));
+        // The file's name is a directory, which no append opens.
+        std::fs::create_dir_all(dir.join(FILE)).expect("a directory where the file goes");
+        let mut sink = Sink::new();
+        sink.take("{\"n\":0}".to_owned());
+        sink.attach(&dir);
+        sink.take("{\"n\":1}".to_owned());
+        assert!(
+            dir.join(FILE).is_dir(),
+            "a line was written over the directory"
+        );
+        assert!(
+            sink.held.is_empty(),
+            "lines stayed held after the run was known"
+        );
+        std::fs::remove_dir_all(&dir).expect("the run directory is removed");
     }
 }
