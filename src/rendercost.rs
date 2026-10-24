@@ -336,6 +336,12 @@ fn inside_a_decision() -> bool {
     INSIDE.with_borrow(|inside| inside.as_ref().is_some_and(|inside| inside.node.is_some()))
 }
 
+/// One lock over every unit test that sets or clears [`RENDER_COST_ENV`], because
+/// the variable is process-wide: each would otherwise turn another's recording off
+/// half-way through it.
+#[cfg(test)]
+pub(crate) static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,11 +390,6 @@ mod tests {
             assert_eq!(act.as_str(), word, "{act:?} is read by another name");
         }
     }
-
-    /// One lock over the two tests below, because the variable they set and
-    /// clear is process-wide: each would otherwise turn the other's recording
-    /// off half-way through it.
-    static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn scratch(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

@@ -576,6 +576,10 @@ pub(crate) enum Message {
     /// That sweep's retirement pass has finished, which ends the sweep, and
     /// this is what it retired.
     Retired(Box<crate::maintenance::Retirements>),
+    /// That sweep's retirement pass has reached an identity, and asks what the run
+    /// names now, to leave alone there. Answered on the loop's thread, from the
+    /// state it applies every edit to before it answers the edit's envelope.
+    Naming(Sender<Vec<crate::maintenance::Named>>),
     /// One receiver's delivery thread's answer: what that receiver's
     /// conversation said of each note the envelope offered it. See
     /// [`NoteDeliveries`].
@@ -1692,6 +1696,7 @@ fn converge(
             derived = None;
             unpublished = true;
             moved = true;
+            crate::ordering::edits_taken()?;
         }
         deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an
@@ -2193,9 +2198,7 @@ fn converge(
             && !readied
             && in_flight.len() < state.graph.concurrency as usize
             && crate::maintenance::host_has_room();
-        maintenance.consider(idle, paths, &tx, || {
-            crate::maintenance::live_branches(state, &statuses)
-        });
+        maintenance.consider(idle, paths, &tx);
 
         // Nothing more to do until something happens — unless this pass is what
         // happened, in which case the next one is due now. The longest this loop
@@ -2545,6 +2548,11 @@ fn converge(
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
                 Message::Retired(retirements) => {
                     maintenance.retired(paths, journal, &retirements)?;
+                }
+                // A pass that has stopped waiting has nobody to answer.
+                Message::Naming(answer) => {
+                    let _ =
+                        answer.send(crate::maintenance::live_branches(state, &state.statuses()));
                 }
                 // A receiver's conversation answered, so its notes are journalled
                 // now — what they record is what an inline delivery would have —
@@ -11895,7 +11903,7 @@ fn watch_for_quiet(
 /// has got to rather than what one round did.
 fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Result<RunResult> {
     let statuses = state.statuses();
-    let landings = landings_after_asking_again(state);
+    let landings = landings_after_asking_again(&paths.run, state);
     let mut nodes: Vec<NodeResult> = state
         .graph
         .iter()
@@ -11976,7 +11984,17 @@ fn record_result(paths: &RunPaths, state: &RunState, settled: GraphState) -> Res
 /// The reads are asked **side by side** — see [`crate::vcs::landings_now`]: this
 /// is the run's close-out, nothing else is left running beside it, and one after
 /// another they were a tail every closing command waited out.
-fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
+///
+/// **Except where an attach stream rendering `run` in this process has just asked
+/// it** — after the run last recorded the node moving, inside the stream's reuse
+/// window, and answered: that read is taken up rather than asked a second time —
+/// see [`crate::views::streamed_for_close_out`]. A branch two nodes name, a rework
+/// and the node it replaced, is answered by a read of either.
+///
+/// And handed to an attach stream rendering `run` in this process, whose last
+/// render reports the same settled run a moment later — see
+/// [`crate::views::closed_out`].
+fn landings_after_asking_again(run: &str, state: &RunState) -> BTreeMap<String, Landing> {
     let mut landings = state.landings.clone();
     // A draft merged into another node's branch lands only with that node: its own
     // merged change request says nothing about the root.
@@ -11990,7 +12008,29 @@ fn landings_after_asking_again(state: &RunState) -> BTreeMap<String, Landing> {
     // Each in the node's own repository, so a branch name two identities both hold
     // is asked about the one this run's work is in rather than refused as an
     // ambiguity the run has already resolved — see `vcs::landings_now`.
-    for (node, read) in crate::vcs::landings_now(state, &asked) {
+    let streamed = crate::vcs::sharing_work(
+        state,
+        &asked,
+        crate::views::streamed_for_close_out(run, &asked),
+    );
+    let unread: Vec<&String> = asked
+        .iter()
+        .copied()
+        .filter(|node| !streamed.contains_key(*node))
+        .collect();
+    let taken = std::time::Instant::now();
+    let read: Vec<(String, crate::vcs::LandingRead, std::time::Instant)> =
+        crate::vcs::landings_now(state, &unread)
+            .into_iter()
+            .map(|(node, read)| (node, read, taken))
+            .chain(
+                streamed
+                    .into_iter()
+                    .map(|(node, (read, asked))| (node, read, asked)),
+            )
+            .collect();
+    crate::views::closed_out(run, &read);
+    for (node, read, _) in read {
         if read.proves_landed() {
             landings.insert(node, Landing::Landed);
         }
