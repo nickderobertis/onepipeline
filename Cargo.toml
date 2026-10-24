@@ -744,6 +744,10 @@ resolver = "2"
 # other needed, which `lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back`
 # ended at with its second node still held.
 #
+# `onevcs` 0.56.9 is the floor because it is the newest release carrying that fix,
+# and it answers an open session's read while another caller only probes its
+# checkout (onevcs #529).
+#
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
 # unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
@@ -840,7 +844,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.7.1"
-onevcs = "0.56.8"
+onevcs = "0.56.9"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1096,7 +1100,7 @@ oneharness-core = "0.28.8"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.18"
+onevcs-testing = "0.19.19"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
