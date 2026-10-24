@@ -148,7 +148,8 @@ pub(crate) fn about<T>(about: Value, within: impl FnOnce() -> T) -> T {
     answer
 }
 
-/// Count one operation asked for now.
+/// Count one operation as it is asked for, before its future is driven: one that never
+/// answers, or is cancelled at its deadline, was still asked of the store and is counted.
 pub(crate) fn record(operation: Operation) {
     let line = line(operation).to_string();
     SINK.lock()

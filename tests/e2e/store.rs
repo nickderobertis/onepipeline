@@ -1071,13 +1071,7 @@ fn item_reads(world: &World, source: &str) -> Vec<u64> {
 
 /// Every store operation `run` has asked for, as its telemetry counted them.
 fn store_operations(world: &World, run: &str) -> Vec<Value> {
-    std::fs::read_to_string(world.run_file(run, "store-operations.jsonl"))
-        .map(|text| {
-            text.lines()
-                .map(|line| serde_json::from_str(line).expect("an operation line is JSON"))
-                .collect()
-        })
-        .unwrap_or_default()
+    world.store_operations(run)
 }
 
 /// The store operations `run` asked for re-reading a node held on `source`.
@@ -4372,6 +4366,16 @@ fn live_added_and_retried_tasks_carry_their_authoring_images() {
             })
         });
         assert_diagram(&world, &project, root);
+        // The author's images read twice, each counted: once as the edit naming them is
+        // checked, and once as the write-back carries them onto the shadow it copies from.
+        for phase in ["edit", "write-back"] {
+            assert!(
+                world.store_operations(run).iter().any(|operation| {
+                    operation["operation"] == "task-assets" && operation["phase"] == phase
+                }),
+                "no task-assets operation was counted in the {phase} phase"
+            );
+        }
         let plain = world
             .store_tasks(&project)
             .into_iter()

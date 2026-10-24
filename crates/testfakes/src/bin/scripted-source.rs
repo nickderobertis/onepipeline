@@ -584,7 +584,8 @@ fn retry_after(reset_at_ms: Option<u64>, now_ms: u64) -> Option<u64> {
     Some(ahead.div_ceil(1_000))
 }
 
-/// The epoch milliseconds now.
+/// The epoch milliseconds now, on the clock the engine stamps a hold's `retry_at_ms` with, so a
+/// scripted reset and the reset the engine records are one instant.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

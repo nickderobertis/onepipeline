@@ -793,10 +793,11 @@ pub fn compile(
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
             let runtime = crate::taskgraph::runtime()
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
-            crate::storeops::record(crate::storeops::Operation::TaskAssets);
-            runtime
-                .block_on(built.engine.task_assets(id))
-                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
+            crate::storeops::about(serde_json::json!({"phase": "edit"}), || {
+                crate::storeops::record(crate::storeops::Operation::TaskAssets);
+                runtime.block_on(built.engine.task_assets(id))
+            })
+            .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
         }
     }
     let operations = compile_into(&mut candidate, frontier, author, &resolved)?;

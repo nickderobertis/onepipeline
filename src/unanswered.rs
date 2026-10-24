@@ -297,7 +297,6 @@ fn when(unasked: &Unanswered, wait: Option<u64>, subject: &str) -> String {
     }
 }
 
-/// `text` with its first letter capitalised, as a sentence starts.
 fn sentence(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {

@@ -334,6 +334,7 @@ impl Store {
         let global = id.global();
         let (content, metadata) = match kind {
             StoredKind::Document => {
+                // llmlint: ignore[changed_behavior_has_e2e] a document is read here only by `template check --item`, which runs outside any run: nothing attaches it, so its count is held and dropped with the process by design (`storeops`'s module says why), and no run's record could show it. The seam it goes through, `Reader::call`, is the one every run journey's store operations are counted at.
                 let read = reader
                     .call(
                         crate::storeops::Operation::Document,
