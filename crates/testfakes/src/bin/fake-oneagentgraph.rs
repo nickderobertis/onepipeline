@@ -698,6 +698,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if let Some(address) = fake::node_script(dir, &key, "rendezvous") {
         fake::meet(&address);
     }
+    // `<key>.stops-its-run` has this dispatch stop the run it belongs to, from
+    // inside it, as an agent of the run running the engine's own `stop` would.
+    // Started and not waited for: the stop ends this dispatch. Its pid is in
+    // `<key>.stopper.pid` and what it said in `<key>.stopper.out`.
+    if dir.join(format!("{key}.stops-its-run")).exists() {
+        fake::stop_own_run(&dir.join(format!("{key}.stopper")));
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {

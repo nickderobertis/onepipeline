@@ -2227,6 +2227,45 @@ impl World {
         self.path_with_ps("failing-ps", "echo '1 0'\nexit 1")
     }
 
+    /// A `PATH` whose `ps` answers the **first** listing with the real one and
+    /// fails every listing after it.
+    ///
+    /// The fault a teardown meets once it has read its tree and frozen it, when
+    /// the host stops answering the listings it reads again: it has a tree to
+    /// end and processes it froze, and neither may be left as they are. Every
+    /// other question `ps` is asked is answered for real, as [`listing_plus`]
+    /// says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_fails_after_its_first_listing(&self) -> PathBuf {
+        let listed = self.root.join("once-listing-ps.listed");
+        self.path_with_ps(
+            "once-listing-ps",
+            &format!(
+                "case \" $* \" in\n  *\" -A \"*) [ -e '{}' ] && exit 1; : >'{}' ;;\nesac\nexec {} \"$@\"",
+                listed.display(),
+                listed.display(),
+                real_ps().display()
+            ),
+        )
+    }
+
+    /// A `PATH` whose `ps` runs `answer` in place of saying whether processes are
+    /// stopped, and answers every other question for real.
+    ///
+    /// The fault a teardown meets once it has frozen its tree and asks the host
+    /// whether it took: an answer it cannot trust is not a tree shown stopped.
+    /// Scoped to that one question, as [`listing_plus`] says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_answers_whether_stopped_with(&self, name: &str, answer: &str) -> PathBuf {
+        self.path_with_ps(
+            name,
+            &format!(
+                "case \" $* \" in\n  *stat=*) {answer} ;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
+    }
+
     /// A `PATH` whose `ps` answers with the **real** listing and one row nobody
     /// can read.
     ///
