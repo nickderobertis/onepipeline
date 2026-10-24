@@ -702,8 +702,9 @@ pub(crate) fn merged_during_rework(tx: &Sender<Message>, node: &str, change: &st
 /// Ask the loop whether a lifecycle node may publish now, and wait for its answer.
 ///
 /// The pass that receives this names the publication on the project's fence and, once that
-/// has landed, reads the claim: it withholds on one naming another run and otherwise
-/// lets the publication proceed, including when the read fails. A loop that has gone without
+/// has landed, reads the claim: it answers on a read that found the project still this
+/// driver's, withholds on one naming another run, and holds the publication to a later
+/// read where the read was not answered. A loop that has gone without
 /// answering answers nothing that could refuse, so the publication goes ahead as it did
 /// before a claim existed.
 pub(crate) fn publication_cleared(tx: &Sender<Message>, node: &str) -> bool {
@@ -1873,7 +1874,7 @@ fn converge(
         // and stops naming each once it has settled: a run taking the project over that finds
         // none named knows none is under way. One that cannot be named yet waits. Once the
         // fence has landed, the claim is read — the one read a running driver makes — and a
-        // publication starts unless the read explicitly names another run.
+        // publication starts only on a read that answered without naming another run.
         unlanded.retain(|node| settlement_unlanded(writeback.as_ref(), node));
         let fenced = claims.as_mut().is_none_or(|watch| {
             let mut nodes = publishing.clone();
@@ -2232,7 +2233,8 @@ fn converge(
                 Duration::MAX,
                 crate::continuation::ClaimWatch::until_adoption_read,
             ),
-            // And when it next retries a refused fence write or clears a lingering fence.
+            // And when it next writes the publications under way the store last refused, or
+            // reads the claim again before a publication after a read that was not answered.
             claims.as_ref().map_or(
                 Duration::MAX,
                 crate::continuation::ClaimWatch::until_fence_retry,

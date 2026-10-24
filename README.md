@@ -235,21 +235,18 @@ adoption's first pass, and once immediately before each publication it starts. I
 reads it on a timer or before a dispatch, and a read that fails, times out, is rate
 limited or finds no claim ends nothing. Before a publication starts, the driver names it
 on the project (`onepipeline.publishing`), and only then reads the claim. A read naming
-another run withholds the publication and stops the driver. A read that fails, times out
-or is rate limited lets the publication start, and is not retried; inside a rate-limit
-wait, the driver starts the publication without asking the store for the claim. Once the
-publication has finished, the name is cleared — ten seconds later where it was the last,
-so the next draft of a restack replaces it in one write. So a takeover waits rather than every driver: `start --take-over` writes
+another run withholds the publication and stops the driver. A read that was not answered
+holds that one publication until a later read is — never sooner than a rate-limited read's
+own wait allows — while dispatches go on starting. Once the publication has finished, the
+name is cleared — ten seconds later where it was the last, so the next draft of a restack
+replaces it in one write. So a takeover waits rather than every driver: `start --take-over` writes
 its claim, and starts nothing until the driver it displaced has stopped and acknowledged
 that on the claim, which that driver does once it has read the takeover at a publication,
 its closeout or its stop. Where it does not, the takeover starts once *that driver's*
 cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`, which its claim states) and ten seconds
 have passed and the project names none of its publications under way. A publication held
-for any length of time holds the takeover with it, whatever the displaced driver's read
-answered. Only a publication that driver fences after the takeover has begun, on a read
-that is not answered, can run beside the adopter's. A driver that has not read the takeover
-yet may still start a dispatch, which publishes nothing where its publication's read finds
-the takeover. While it waits, the takeover
+for any length of time holds the takeover with it. A driver that has not read the takeover
+yet may still start a dispatch, which then publishes nothing. While it waits, the takeover
 reads the claim every tenth of its **claim interval** —
 `ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by default — at least one and at most thirty
 seconds apart; that is all the setting governs. A claim stating no lease — one an older
