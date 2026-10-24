@@ -469,10 +469,11 @@ fn shut_down_while_admitting(
             "the dispatch the driver was admitting to be registered",
             |world| world.dispatch_records(run).len() > usize::from(standing.is_some()),
         );
-        at_the_listing.release();
         // Only the first listing is held: any later one the shutdown makes finds
-        // nothing listening and goes straight on.
+        // nothing listening and goes straight on. Closed before the release, so no
+        // later listing can reach it first.
         drop(listed);
+        at_the_listing.release();
         shutting.join().expect("the shutdown returns")
     });
     // llmlint: ignore-end[tests_mirror_real_usage]

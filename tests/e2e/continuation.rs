@@ -3540,6 +3540,10 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
             !world.events_of(run, "node-dispatched").is_empty()
                 && !world.dispatch_records(run).is_empty()
         });
+        // Only the first listing is held: the one the shutdown makes to end that
+        // dispatch once its driver is gone finds nothing listening and goes on.
+        // Closed before the release, so no later listing can reach it first.
+        drop(listed);
         at_the_listing.release();
         shutting.join().expect("the shutdown returns")
     });
