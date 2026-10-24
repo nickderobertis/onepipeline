@@ -1428,6 +1428,11 @@ mod tests {
     /// rewritten as it changes; the held line then names a backing-off source's next read and
     /// the wait it ends, and a file in another schema, or none, leaves the backoff's first
     /// interval to say.
+    ///
+    /// The file that cannot be read or written at all is driven end to end by
+    /// `store::a_schedule_that_cannot_be_kept_beside_the_record_leaves_the_hold_and_its_reads_as_they_were`;
+    /// a file of another schema is held here, because only a later build writes one and a
+    /// journey could reach it only through a file edited by hand. Both take the one fallback.
     #[test]
     fn a_held_line_names_the_next_read_the_driver_recorded() {
         let _held = crate::vcs::scratch_home_held();

@@ -2390,6 +2390,67 @@ fn an_edge_into_a_tracker_configured_nowhere_holds_its_node_until_it_is_configur
     );
 }
 
+/// A schedule the driver cannot keep beside the record changes nothing about the hold: while
+/// its file cannot be written or read, the driver goes on reading the source again on its
+/// backoff and `status` says the backoff's first interval; once the file can be written again,
+/// the driver writes the schedule it holds and `status` names the next read.
+#[test]
+fn a_schedule_that_cannot_be_kept_beside_the_record_leaves_the_hold_and_its_reads_as_they_were() {
+    let world = with_tracker(World::new("store-hold-unkept"), "vault");
+    private_item(&world, "vault", "vault-design", "design");
+    let name = "unkept";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                edged("changelog", &["design"], "vault", "vault-design"),
+            ],
+        ),
+    );
+    rate_limit(&world, "vault", None);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the driver to record the schedule", |world| {
+        source_schedule(world, name, "vault").is_object()
+    });
+    // The file's name taken by a directory: nothing can write it, nor read it as a file.
+    let file = world.run_file(name, "source-schedule.json");
+    std::fs::remove_file(&file).expect("the schedule is removed");
+    std::fs::create_dir(&file).expect("a directory where the schedule goes");
+    let before = passes_over(&world, name, "vault").len();
+    world.until_within(Duration::from_secs(30), "two more re-reads", |world| {
+        passes_over(world, name, "vault").len() >= before + 2
+    });
+    assert!(file.is_dir(), "the schedule was written over the directory");
+    let status = world.run(&["status", name, "--no-providers"]);
+    status.exited(0);
+    assert!(
+        line_of(&status.stdout, "changelog: held")
+            .contains("no reset time was given, so it is read again on a backoff starting at 1s,"),
+        "{}",
+        status.stdout
+    );
+    // Freed, the next change of schedule is written, and status names the read it schedules.
+    std::fs::remove_dir(&file).expect("the directory is removed");
+    world.until_within(
+        Duration::from_secs(30),
+        "the schedule to be written again",
+        |world| source_schedule(world, name, "vault").is_object(),
+    );
+    let next_read = source_schedule(&world, name, "vault")["next_read_ms"]
+        .as_u64()
+        .expect("a next read");
+    let status = world.run(&["status", name, "--no-providers"]);
+    status.exited(0);
+    let held = line_of(&status.stdout, "changelog: held");
+    assert!(
+        held.contains(&format!("so it is read again at {},", utc(next_read))),
+        "{held}"
+    );
+    world.run(&["stop", name]).exited(0);
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a
