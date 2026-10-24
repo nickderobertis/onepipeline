@@ -6342,6 +6342,12 @@ mod tests {
     /// asking again — only the answered ones, only the run's own, only inside the
     /// window, and only where nothing the stream recorded since moved the node; a
     /// render before the last takes up none of them.
+    ///
+    /// Not a journey, because the last render prints the same line from a read it
+    /// took up as from one it asked again, and a refusal, a lapsed window or a move
+    /// between the two reads is visible only as a landing a person changed inside a
+    /// ten-second window, which no offline journey can time — the reason this
+    /// module's carrying is held here at all.
     #[test]
     fn the_last_render_of_a_stream_takes_up_the_close_out_s_answered_reads() {
         let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
@@ -6397,6 +6403,9 @@ mod tests {
     /// it: never for a run no stream in this process renders, and let go of once
     /// the last render took it up, once it passed its window, and once the stream
     /// ended — while an answer inside all three still reaches that render.
+    ///
+    /// Not a journey, because what is held, and for how long, changes no line any
+    /// command prints: a read let go of is asked again and answers the same.
     #[test]
     fn the_close_out_s_hand_off_is_let_go_of_once_nothing_could_take_it_up() {
         let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
@@ -6461,6 +6470,13 @@ mod tests {
     /// was asked, and only where this process recorded nothing moving the node after
     /// it was asked, whichever side of the read the record landed on; a read asked
     /// outside a stream, and any once the stream ends, is asked again.
+    ///
+    /// Not a journey, for the reason above made sharper: the close-out writes the
+    /// same `result.json` from a read it took up as from one it asked again, and
+    /// the cases that tell them apart — a refusal, a lapsed window, a move recorded
+    /// while the stream's read was out — need a host refusing one call or a record
+    /// landing inside one read, neither of which an offline journey can place. What a
+    /// journey sees is the reads this saves, bounded by `tests/e2e/review_round.rs`.
     #[test]
     fn the_close_out_takes_up_a_stream_s_answered_read_of_a_node_nothing_moved_since() {
         let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);

@@ -4922,6 +4922,10 @@ mod tests {
     /// An answer in hand for one node answers each other node naming the same
     /// branch in the same repository, and no node naming it in another, naming
     /// another branch, or naming none.
+    ///
+    /// Here rather than in a journey for the reason `landings_now`'s own test above
+    /// gives: one read and two of one branch answer the same from outside, and no
+    /// offline journey registers one branch name in two repositories.
     #[test]
     fn an_answer_in_hand_answers_every_node_naming_its_branch_in_its_repository() {
         let mut state = crate::projection::RunState::default();

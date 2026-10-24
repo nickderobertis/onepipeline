@@ -764,23 +764,12 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// the second pass.
 ///
 /// The figure that sets how long this journey takes where starting a process is slow:
-/// on the Windows runner a `git` start costs some twenty times what it does on Linux,
-/// and this round ran 420–540 seconds there against its 540-second bound. Counted on
-/// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
-/// unlanded draft's landing afresh on each of its renders, about forty `git` a read;
-/// carrying those reads across a stream's renders brought it to 11,000–11,700.
-///
-/// `onevcs` 0.56.9, whose open session's read is never refused beside a probe, runs its
-/// checkout reads with `--git-dir` and adds about 3,600 starts over 0.56.7: counted on
-/// Linux the round went from 11,400–11,700 to 15,100–16,400, chiefly `rev-parse
-/// --is-inside-work-tree` and `show-ref --verify` — about thirty of a landing read's
-/// sixty-odd, one pair for every session copy on record — and none of it from the
-/// engine. It starts 11,400–11,800 now: a stream lets go of a carried read only where a
-/// record moves the landing; its last render takes up the reads the driver's close-out
-/// took a moment before; and the close-out takes up the stream's reads of every node
-/// nothing moved since, rather than asking each branch again. The bound sits within a
-/// fifth of that count and below anything the round cost before, so a return to any of
-/// those repeats fails it.
+/// on the Windows runner a `git` start costs some twenty times what it does on Linux.
+/// Counted on Linux the round starts 11,400–11,800, against 15,100–16,400 before the
+/// landing reads it repeats were taken out — a read is some sixty `git`, chiefly
+/// `onevcs` asking every session copy on record whether it holds the branch. The bound
+/// sits within a fifth of the count and below every count before, so a return to those
+/// repeats fails it.
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the count this bounds is
 // what `views`, `engine`, `driver`, `vcs` and the linked `onevcs` start between them, so any
 // change under `src/` can move it, and a project edged narrower than the crate would drop
@@ -790,11 +779,11 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 const GIT_STARTS: usize = 14_000;
 
 /// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
-/// on `onevcs` 0.56.9, before the repeats above were taken out, runs counted
-/// 15,771–16,999 alone and up to 21,874 beside the whole suite on a loaded runner. Taking
-/// them out removed about a quarter of the count off macOS, which puts that spread near
-/// 11,800–16,400; this figure sits about a fifth above its top. Over a spread that wide it
-/// catches only a gross regression; the bound off macOS is the discriminating one.
+/// before those repeats were taken out runs counted 15,771–16,999 alone and up to 21,874
+/// beside the whole suite. Scaled by what taking them out saved on Linux, about a quarter,
+/// that is near 11,800–16,400, and this figure sits about a fifth above its top. Over a
+/// spread that wide it catches only a gross regression; the bound off macOS is the
+/// discriminating one.
 #[cfg(target_os = "macos")]
 const GIT_STARTS: usize = 20_000;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
