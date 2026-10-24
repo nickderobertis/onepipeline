@@ -41,6 +41,19 @@ function kinds(value, name) {
 
 const total = (byKind) => Object.values(byKind).reduce((sum, n) => sum + n, 0);
 
+/** Hold a record's workload to the one its budget states: a figure taken at another is not
+ * this budget's figure, however well formed. */
+function workload(record, stated) {
+  const held = record.workload;
+  if (held === null || typeof held !== "object" || Array.isArray(held)) fail("workload is missing");
+  for (const [key, value] of Object.entries(stated)) {
+    if (held[key] !== value) {
+      fail(`workload.${key} is ${JSON.stringify(held[key])}, where the budget's workload is ${value}`);
+    }
+  }
+  return held;
+}
+
 function said(byKind) {
   const entries = Object.entries(byKind);
   return entries.length === 0 ? "none" : entries.map(([kind, n]) => `${kind} ${n}`).join(", ");
@@ -63,10 +76,14 @@ function overhead(attempts) {
 }
 
 function hour(record) {
-  const workload = record.workload ?? fail("workload is missing");
-  for (const key of ["tasks", "held_nodes", "poll_seconds", "hour_intervals", "reset_after_intervals"]) {
-    count(workload[key], `workload.${key}`);
-  }
+  const stated = workload(record, {
+    tasks: 20,
+    held_nodes: 3,
+    private_sources: 1,
+    poll_seconds: 1,
+    hour_intervals: 60,
+    reset_after_intervals: 30,
+  });
   if (!Array.isArray(record.passes)) fail("passes must be a list");
   const passes = record.passes.map((pass, index) => {
     const name = `passes[${index}]`;
@@ -83,15 +100,27 @@ function hour(record) {
   if (total(kinds(record.per_source, "per_source")) !== value) {
     fail("per_source does not sum to total");
   }
-  kinds(record.per_node, "per_node");
+  if (Object.keys(kinds(record.per_node, "per_node")).length !== stated.held_nodes) {
+    fail(`per_node must name each of the ${stated.held_nodes} held nodes`);
+  }
+  if (total(record.per_node) !== value) fail("per_node does not sum to total");
   const fixed = record.fixed_interval ?? fail("fixed_interval is missing");
-  count(fixed.operations, "fixed_interval.operations");
+  if (fixed.basis !== "arithmetic") fail("fixed_interval.basis must be arithmetic");
+  if (fixed.interval_s !== stated.poll_seconds) {
+    fail("fixed_interval.interval_s must be the workload's poll interval");
+  }
+  if (fixed.passes !== stated.hour_intervals || fixed.held_nodes !== stated.held_nodes) {
+    fail("fixed_interval must re-read every held node once an interval through the hour");
+  }
+  if (count(fixed.operations, "fixed_interval.operations") !== fixed.passes * fixed.held_nodes) {
+    fail("fixed_interval.operations is not its passes times its held nodes");
+  }
   const at = (ms) => `${(ms / 1000).toFixed(1)}s`;
   const resets = passes.filter((pass) => pass.by === "reset").length;
   return [
     value,
-    `${value} store operations over the held hour after launch (${workload.hour_intervals} ` +
-      `poll intervals of ${workload.poll_seconds}s, a reset ${workload.reset_after_intervals} out), ` +
+    `${value} store operations over the held hour after launch (${stated.hour_intervals} ` +
+      `poll intervals of ${stated.poll_seconds}s, a reset ${stated.reset_after_intervals} out), ` +
       `launch excluded: ${resets} re-read at a reset and ${passes.length - resets} on backoff; ` +
       `per source ${said(record.per_source)}; per held node ${said(record.per_node)}; passes ` +
       passes
@@ -106,6 +135,7 @@ function hour(record) {
 }
 
 function dispatch(record) {
+  workload(record, { tasks: 20, holds: 0 });
   if (!Array.isArray(record.dispatches) || record.dispatches.length !== 20) {
     fail("dispatches must list the run's 20 dispatches");
   }
@@ -131,6 +161,7 @@ function dispatch(record) {
 }
 
 function settlement(record) {
+  workload(record, { tasks: 20, holds: 0 });
   if (!Array.isArray(record.settlements) || record.settlements.length !== 5) {
     fail("settlements must list five consecutive settlements");
   }

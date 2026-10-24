@@ -1514,6 +1514,51 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
         "{}",
         stderr(&refused)
     );
+    // A figure taken at another workload, a per-node split that does not add up, and a
+    // fixed-interval comparison whose arithmetic does not hold are each refused by name.
+    for (path, value, said) in [
+        (
+            "/workload/held_nodes",
+            serde_json::json!(2),
+            "workload.held_nodes is 2",
+        ),
+        (
+            "/per_node/held-2",
+            serde_json::json!(1),
+            "per_node does not sum to total",
+        ),
+        (
+            "/fixed_interval/operations",
+            serde_json::json!(170),
+            "not its passes times its held nodes",
+        ),
+    ] {
+        let mut wrong = records_of[0].1.clone();
+        *wrong.pointer_mut(path).expect("a field of the record") = value;
+        write("source-hold-store-operations-per-hour", &wrong);
+        let refused = store_operations_report(
+            &dir,
+            Some("source-hold-store-operations-per-hour"),
+            Some(&result),
+        );
+        assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+        assert!(
+            stderr(&refused).contains(said),
+            "{path}: {}",
+            stderr(&refused)
+        );
+    }
+    let mut elsewhere = records_of[2].1.clone();
+    elsewhere["workload"]["tasks"] = serde_json::json!(5);
+    write("store-operations-per-settlement", &elsewhere);
+    let refused =
+        store_operations_report(&dir, Some("store-operations-per-settlement"), Some(&result));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("workload.tasks is 5"),
+        "{}",
+        stderr(&refused)
+    );
     let unnamed = store_operations_report(&dir, None, Some(&result));
     assert_eq!(unnamed.status.code(), Some(1), "{}", stderr(&unnamed));
     assert!(
