@@ -405,7 +405,10 @@ fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
         return held;
     }
     let channel = crate::channel::ChannelState::new(&view.paths);
-    let delivered = crate::withdrawal::readable(&view.events);
+    // Off the records the fold keeps whole, as the answered-queued notes below
+    // read them: a view opened off the checkpoint carries none of the run's
+    // history, and the answer is among what it covers.
+    let delivered = crate::withdrawal::readable(&view.state.recalled);
     held.into_iter()
         .filter(|note| !lane_answered(view, &channel, &delivered, note))
         .collect()
@@ -442,7 +445,7 @@ fn lane_answered(
                 u32::try_from(index).unwrap_or(u32::MAX),
             )
             .is_some()
-                || refused_note(&view.events, note.envelope, index, command).is_some()
+                || refused_note(&view.state.recalled, note.envelope, index, command).is_some()
         })
 }
 

@@ -362,6 +362,7 @@ pub struct RunState {
     /// whose dispatches [`recalled`](Self::recalled) keeps, so a fold of a node's
     /// notes over those records resets where a fold over the whole journal does.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] by the node id each note record carries, as `held_since` is keyed.
     pub(crate) noted: BTreeSet<String>,
     /// Where the latest `oneagentgraph` record of each node said its turn was:
     /// what a note to a node with no turn in flight is addressed to.
@@ -371,6 +372,7 @@ pub struct RunState {
     /// Every node a `node-dispatched` of this crate's named, whatever became of it
     /// since: what `status` counts a run's own dispatches by.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-dispatched` records carry, which the graph validated when it dispatched them, as `held_since` is keyed.
     pub(crate) dispatched_nodes: BTreeSet<String>,
     /// The `detail` each node's newest `node-settled` carried, where it carried one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -395,6 +397,7 @@ pub struct RunState {
     /// The nodes whose next settlement ends a restack or readjustment no agent turn
     /// was spent on. See [`board_settlements`](Self::board_settlements).
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-settled` records carry, as `board_settlements` beside it is keyed.
     pub(crate) settled_clean: BTreeSet<String>,
     /// The run-end hook's marker the epoch the run is now in carries, if it carries
     /// one: what [`crate::hooks::adoption_starts_epoch`] asks, folded as each

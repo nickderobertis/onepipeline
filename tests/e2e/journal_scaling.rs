@@ -1073,7 +1073,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
-        json!(14)
+        json!(15)
     );
     rebuilt_once(&world, "a deleted checkpoint", length);
 
@@ -1083,7 +1083,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     assert_eq!(read(&world), (nodes.clone(), evidence.clone()));
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
-        json!(14)
+        json!(15)
     );
     rebuilt_once(&world, "a schema-13 checkpoint", length);
 
@@ -1102,7 +1102,7 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     });
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
-        json!(14)
+        json!(15)
     );
     // Every process the adoption started — the verb and the driver, its passes and its
     // attached render — together read the history the rebuild folded once: one read

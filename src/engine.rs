@@ -2984,9 +2984,11 @@ pub(crate) struct InPass {
 #[derive(Debug, Default)]
 struct InPassState {
     /// Nodes the loop has in flight, or is starting.
+    // llmlint: ignore[invalid_states_unrepresentable] the ids of nodes the loop itself dispatched off the validated graph; this crate has no node-id type, and every node-keyed set the loop holds is keyed this way.
     in_flight: BTreeSet<String>,
     /// Nodes an envelope applied here named, which the loop does not start until
     /// it has folded what was applied.
+    // llmlint: ignore[invalid_states_unrepresentable] the names a claimed envelope's commands carry, held only so the loop does not start those nodes before it folds what was applied; a name the graph does not hold is refused when the envelope is applied, and holding it here starts or stops nothing.
     touched: BTreeSet<String>,
     /// Whether anything was applied here the loop has not folded yet.
     applied: bool,
