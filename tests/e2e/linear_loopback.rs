@@ -503,7 +503,8 @@ impl Linear {
             _ => "",
         };
         let data = match operation {
-            Operation::Resolution => json!({
+            Operation::Resolution => {
+                let mut data = json!({
                 "teams": {"nodes": [{"id": "team-1", "states": {
                     "nodes": world.states.iter().map(|named| json!({
                         "id": named.id, "name": named.name, "type": named.kind,
@@ -517,7 +518,18 @@ impl Linear {
                     })).collect::<Vec<_>>(),
                     "pageInfo": {"hasNextPage": false},
                 },
-            }),
+                });
+                // A status write's first read of its issue asks for that issue in the same
+                // request as the names it resolves, and Linear answers every root it was asked.
+                if let Some(issue) = query
+                    .contains("issue(id:")
+                    .then(|| variables["id"].as_str())
+                    .flatten()
+                {
+                    data["issue"] = world.issue(issue);
+                }
+                data
+            }
             Operation::Issue => json!({"issue": world.issue(id)}),
             Operation::IssueRelations => {
                 let description = world
