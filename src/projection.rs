@@ -569,7 +569,7 @@ pub struct NodeActivity {
     /// has recorded something without naming a tool is not a dispatch doing
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
-    pub doing: Option<String>,
+    pub doing: Option<Doing>,
     /// What this node's dispatch has done, once it has done anything.
     ///
     /// Named for progress rather than for events because a heartbeat is an event
@@ -582,6 +582,60 @@ pub struct NodeActivity {
     /// Held apart from [`progress`](Self::progress) because the two answer
     /// opposite questions, and their union answers neither.
     pub last_heartbeat_at: Option<u64>,
+}
+
+/// What a node's dispatch last said it was doing: words read off the record,
+/// or the reference whose description says it.
+///
+/// One value rather than a text beside an optional reference, because the two
+/// are never both the answer. Serialized as the text itself, or as the
+/// reference, so a checkpoint carries whichever the record did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Doing {
+    /// Words the record carried, or a step this crate named.
+    Said(String),
+    /// The last `turn-activity` this dispatch recorded, where it referenced its
+    /// history rather than carrying a copy: described when the readout is drawn
+    /// rather than when the record is folded — a fold reads no history file,
+    /// so a state resumed from a checkpoint never carries an answer the file
+    /// has since changed.
+    Referenced(ActivityReference),
+}
+
+/// A `turn-activity`'s reference into its history, and nothing else: a copy, or
+/// a reference of another kind, is not what a dispatch's last activity can be.
+///
+/// Serialized as `{"activity": …}`, the spelling the same reference has as a
+/// [`crate::views::transcript::TranscriptRef`], so a checkpoint reads the same
+/// either way — and one naming anything else is refused rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityReference {
+    activity: oneagentgraph::event::ActivityTranscript,
+}
+
+impl ActivityReference {
+    /// Wrap the reference a `turn-activity` carried.
+    pub fn new(activity: oneagentgraph::event::ActivityTranscript) -> Self {
+        Self { activity }
+    }
+
+    /// The reference, as the resolver reads one.
+    pub fn transcript(&self) -> crate::views::transcript::TranscriptRef {
+        crate::views::transcript::TranscriptRef::Activity(self.activity.clone())
+    }
+}
+
+impl Doing {
+    /// The words, where the record carried words.
+    #[must_use]
+    pub fn said(&self) -> Option<&str> {
+        match self {
+            Self::Said(said) => Some(said),
+            Self::Referenced(_) => None,
+        }
+    }
 }
 
 /// What one node's dispatch has done that this build can date: how many
@@ -2383,7 +2437,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // end to end by `tests/e2e/views.rs`.
         if !crate::vcs::is_session_opened(&event.kind) {
             if let Some(step) = crate::vcs::usable(&event.kind.0) {
-                activity.doing = Some(format!("publication {step}"));
+                activity.doing = Some(Doing::Said(format!("publication {step}")));
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         return;
@@ -2398,13 +2452,33 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
+    // A record referencing its history carries no copy to read, so what it is
+    // doing is the reference itself, described when the readout is drawn. A
+    // result answers the call already on the line, as below; a reference this
+    // build cannot read says so rather than leaving the last line standing.
+    if event.payload.contains_key("transcript") {
+        if text("kind") == crate::report::TOOL_RESULT {
+            return;
+        }
+        // An activity's `transcript` reads as an activity reference or not at
+        // all, so no other answer reaches the last arm.
+        match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
+            Some(Ok(crate::views::transcript::TranscriptRef::Activity(reference))) => {
+                activity.doing = Some(Doing::Referenced(ActivityReference::new(reference)));
+            }
+            // llmlint: ignore[changed_behavior_has_e2e] a `transcript` that is not a reference is a record no producer in this stack writes — the linked sibling serializes it from its own typed `ActivityTranscript` — so only a store something wearing a producer's clothes left behind reaches this, the ground `fold_refusal` suppresses its own `None` half on; the diagnostic it renders is the resolver's, held by `views::transcript`'s `unreadable_history_names_the_file_and_says_so`.
+            Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
+            Some(Ok(_)) | None => {}
+        }
+        return;
+    }
     // The agent's own words name no tool, and are what it is doing all the
     // same: its text or its reasoning, on the line oneharness draws it on, so a
     // node thinking between two calls reads as thinking rather than as still
     // running the last one.
     if let Some(voice) = crate::report::Voice::of(text("kind")) {
         if let Some(said) = voice.line(text("output")) {
-            activity.doing = Some(said);
+            activity.doing = Some(Doing::Said(said));
         }
         return;
     }
@@ -2423,7 +2497,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .collect::<Vec<_>>()
         .join(" ");
     if !summary.is_empty() {
-        activity.doing = Some(summary);
+        activity.doing = Some(Doing::Said(summary));
     }
 }
 
@@ -4061,6 +4135,44 @@ mod tests {
         );
     }
 
+    /// A dispatch's last activity is an activity reference or words, and a
+    /// checkpoint naming anything else — a copy, or a turn's instruction — is
+    /// refused rather than read back as a reference it cannot be.
+    #[test]
+    fn a_referenced_doing_holds_an_activity_reference_and_nothing_else() {
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 0,
+            "tool_call_id": "call-1",
+        });
+        let doing = Doing::Referenced(ActivityReference::new(
+            serde_json::from_value(reference.clone()).expect("a reference"),
+        ));
+        let written = serde_json::to_value(&doing).expect("a doing serializes");
+        assert_eq!(written, json!({"activity": reference}));
+        assert_eq!(
+            serde_json::from_value::<Doing>(written).expect("an activity reference reads"),
+            doing
+        );
+        for other in [
+            json!({"copy": {"text": {"message": "copied"}, "cut": false}}),
+            json!({"instruction": {
+                "history_dir": "/state/oneharness/history",
+                "history_project": "project",
+                "history_session": "session",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            }}),
+        ] {
+            assert!(
+                serde_json::from_value::<Doing>(other.clone()).is_err(),
+                "a checkpoint read {other} as what a dispatch was doing"
+            );
+        }
+    }
+
     /// The readout an operator decides between cancel, retry, and wait on. A
     /// node in flight for half an hour reads identically to a wedged one
     /// without it, and a healthy node has been reported dead on exactly that.
@@ -4091,7 +4203,10 @@ mod tests {
         ]);
 
         let seen = &state.activity["build"];
-        assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Read src/engine.rs")
+        );
         assert_eq!(
             seen.progress.expect("the activities counted").events(),
             2,
@@ -4239,7 +4354,7 @@ mod tests {
 
         let seen = &state.activity["build"];
         assert_eq!(
-            seen.doing.as_deref(),
+            seen.doing.as_ref().and_then(Doing::said),
             Some("publication push"),
             "a kind carrying a newline reached the line a supervisor reads"
         );
@@ -4299,7 +4414,10 @@ mod tests {
             step(3, closed),
         ]);
         assert_eq!(
-            after_closing.activity["build"].doing.as_deref(),
+            after_closing.activity["build"]
+                .doing
+                .as_ref()
+                .and_then(Doing::said),
             Some("publication session-closed"),
             "the last step of a publication was read as the bracket around it"
         );
@@ -4381,7 +4499,7 @@ mod tests {
 
         let state = fold(&[named, nameless]);
         assert_eq!(
-            state.activity["build"].doing.as_deref(),
+            state.activity["build"].doing.as_ref().and_then(Doing::said),
             Some("Bash just check")
         );
         assert_eq!(
@@ -4460,7 +4578,10 @@ mod tests {
         );
         // And it does not overwrite what the node was last seen doing: a turn
         // that is wedged is still wedged doing something.
-        assert_eq!(seen.doing.as_deref(), Some("Bash just check"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Bash just check")
+        );
     }
 
     /// A cancel of a *running* node leaves a dispatch behind it; a cancel of one

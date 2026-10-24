@@ -694,3 +694,99 @@ fn this_build_reads_a_journal_carrying_a_monitor_edit_surface_as_the_build_that_
         "the fold does not reach the settlement the journal recorded: {stream}"
     );
 }
+
+/// A settled run recorded on this host before turn records referenced their
+/// history: a follow-up dispatch whose opening instruction, tool commands and
+/// outputs were cut to bounded copies, with `/home/<user>` stood in for. Committed
+/// and never regenerated.
+const BEFORE_TRANSCRIPT_REFS: &str = include_str!("../golden/journal-before-transcript-refs.jsonl");
+
+/// What the build before references rendered that journal as, verb by verb:
+/// `monitor --all`, `transcript`, and `watch --all --timeout 0`'s two streams.
+const BEFORE_TRANSCRIPT_REFS_RENDERED: [(&[&str], &str, &str); 3] = [
+    (
+        &["monitor", "--all"],
+        include_str!("../golden/journal-before-transcript-refs.monitor"),
+        "",
+    ),
+    (
+        &["transcript"],
+        include_str!("../golden/journal-before-transcript-refs.transcript"),
+        "",
+    ),
+    (
+        &["watch", "--all", "--timeout", "0"],
+        include_str!("../golden/journal-before-transcript-refs.watch"),
+        include_str!("../golden/journal-before-transcript-refs.watch-stderr"),
+    ),
+];
+
+/// **Transcript references.** A journal whose turn records carry bounded copies
+/// and no reference — every journal written before references, and every turn
+/// with history off — renders through `monitor`, `watch` and `transcript` exactly
+/// as the build before references rendered it: the copies read through the same
+/// resolver a reference does, with their cut flags kept, and nothing that only a
+/// reference adds.
+#[test]
+fn this_build_renders_a_journal_of_bounded_copies_as_the_build_before_references_did() {
+    let world = World::new("compat-before-transcript-refs");
+    let root = world.fakes.join("before-transcript-refs-root");
+    let run = "before-transcript-refs";
+    let dir = root.join(run);
+    // llmlint: ignore-block[tests_mirror_real_usage] the journal under test was written by a
+    // build **before** turn records referenced their history, and no invocation of this
+    // build writes bounded copies over a history-backed turn — which is the whole of what
+    // this journey proves. Its journal is the committed recording, byte for byte; the launch
+    // record beside it is the one file a view opens a run by, with a pid no process holds
+    // so the run reads as nothing driving it, as it did when its rendering was taken.
+    std::fs::create_dir_all(&dir).expect("a run directory");
+    std::fs::write(
+        dir.join("launch.json"),
+        json!({
+            "run_id": run,
+            "plan": "plan.json",
+            "launcher": "claude-code",
+            "session": "session-compat",
+            "pid": 2_147_483_000u32,
+            "host": "compat",
+            "started_at": "2026-10-10T13:15:00.000Z",
+            "heartbeat_interval": 1_800,
+        })
+        .to_string(),
+    )
+    .expect("a launch record");
+    std::fs::write(dir.join("events.jsonl"), BEFORE_TRANSCRIPT_REFS).expect("a journal");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!(
+        BEFORE_TRANSCRIPT_REFS.contains("\"instruction_truncated\":true")
+            && BEFORE_TRANSCRIPT_REFS.contains("\"output_truncated\":true")
+            && !BEFORE_TRANSCRIPT_REFS.contains("\"transcript\":"),
+        "the fixture carries no cut copy, or carries a reference, so it holds nothing this \
+         journey is about"
+    );
+
+    for (verb, stdout, stderr) in BEFORE_TRANSCRIPT_REFS_RENDERED {
+        let mut args = vec![verb[0], run];
+        args.extend_from_slice(&verb[1..]);
+        let rendered = world
+            .cmd(&args)
+            .env("ONEPIPELINE_RUNS_DIR", &root)
+            .output()
+            .expect("the view runs");
+        assert_eq!(
+            String::from_utf8_lossy(&rendered.stdout),
+            stdout,
+            "`onepipeline {}` renders a journal of bounded copies differently from the build \
+             before references",
+            args.join(" ")
+        );
+        if !stderr.is_empty() {
+            assert_eq!(
+                String::from_utf8_lossy(&rendered.stderr),
+                stderr,
+                "`onepipeline {}` says something different beside it",
+                args.join(" ")
+            );
+        }
+    }
+}

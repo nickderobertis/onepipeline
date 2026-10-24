@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.88.1](https://github.com/nickderobertis/onepipeline/compare/v0.88.0...v0.88.1) - 2026-10-24
+
+### Fixed
+
+- *(writeback)* never show a reader a torn shadow task document ([#1130](https://github.com/nickderobertis/onepipeline/pull/1130))
+- *(journal)* let another process append to a run's journal on Windows while a driver holds it ([#1129](https://github.com/nickderobertis/onepipeline/pull/1129))
+
 ## [0.88.0](https://github.com/nickderobertis/onepipeline/compare/v0.87.1...v0.88.0) - 2026-10-23
 
 ### Added
