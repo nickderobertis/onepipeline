@@ -782,10 +782,12 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 const GIT_STARTS: usize = 17_000;
 
 /// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
-/// on `onevcs` 0.56.9 one run counted 18,200 beside the whole suite and 15,771–16,999
-/// alone. It comes back down with the other once those `--git-dir` reads do.
+/// on `onevcs` 0.56.9 runs counted 15,771–16,999 alone and up to 21,874 beside the whole
+/// suite on a loaded runner. Over a spread that wide this figure catches only a gross
+/// regression; the bound off macOS is the discriminating one. It comes back down with
+/// the other once those `--git-dir` reads do.
 #[cfg(target_os = "macos")]
-const GIT_STARTS: usize = 20_000;
+const GIT_STARTS: usize = 25_000;
 
 /// Hold the round to [`GIT_STARTS`].
 ///
