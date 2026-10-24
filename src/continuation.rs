@@ -104,7 +104,7 @@ pub(crate) const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
 
 /// The longest one read of the claim may take before the driver goes on without its answer
-/// — a publication waiting on it waits for the next: a reconcile pass that waited on a store
+/// — the publication then starts: a reconcile pass that waited on a store
 /// for longer would hold every settlement behind a board.
 pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 
@@ -121,8 +121,7 @@ const TAKEOVER_POLLS_PER_INTERVAL: u32 = 10;
 const TAKEOVER_POLL_MIN: Duration = Duration::from_secs(1);
 const TAKEOVER_POLL_MAX: Duration = Duration::from_secs(30);
 
-/// How soon a driver writes its publications under way again after the store refused it,
-/// and reads the claim again before a publication after a read that was not answered.
+/// How soon a driver writes its publications under way again after the store refused it.
 const FENCE_RETRY: Duration = Duration::from_secs(5);
 
 /// How long a driver whose last publication has settled leaves its fence naming it before it
@@ -139,9 +138,8 @@ const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_G
 /// read the store as the displaced driver left it before the takeover has seen it.
 const TAKEOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_READ_GATE";
 
-/// The test failpoint met before the first read a driver makes ahead of a publication, so a
-/// journey can record a takeover between the fence naming that publication landing and the
-/// read that clears it.
+/// The test failpoint met before the read a driver makes ahead of a publication, once the
+/// fence naming it has landed, so a journey can record a takeover between the two.
 const BEFORE_PUBLICATION_GATE_ENV: &str = "ONEPIPELINE_TEST_BEFORE_PUBLICATION_CLAIM_GATE";
 
 /// The test failpoint met at the moment a driver would start a dispatch of the node
@@ -741,9 +739,6 @@ pub(crate) struct ClaimWatch {
     /// When this driver's last publication under way settled, while the fence still names
     /// it: cleared once [`FENCE_LINGER`] has passed, unless a publication replaces it first.
     lingering: Option<Instant>,
-    /// When the read before a publication last went unanswered, so the loop wakes to read
-    /// again.
-    read_unanswered: Option<Instant>,
     /// The run's term scope, which a public boundary checks this driver's writes over.
     // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
     term_scope: Vec<String>,
@@ -765,12 +760,9 @@ enum Standing {
 /// What the read immediately before a publication lets the driver do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BeforePublishing {
-    /// The read found the project this driver's — its own claim, the one it took over, or
-    /// none: the publications go ahead.
+    /// The read found no successor, failed, or was not made during a store wait:
+    /// the publications go ahead.
     Publish,
-    /// The read failed, outlasted its deadline, or was not made inside a wait the store asked
-    /// for: the publications wait, and the read is made again once [`FENCE_RETRY`] has passed.
-    Wait,
     /// The read found another run's claim, which supersedes this driver.
     Superseded(DriverClaim),
 }
@@ -806,7 +798,6 @@ impl ClaimWatch {
             fenced: launched.then(std::collections::BTreeSet::new),
             fence_refused: None,
             lingering: None,
-            read_unanswered: None,
             term_scope,
         })
     }
@@ -875,55 +866,29 @@ impl ClaimWatch {
         }
     }
 
-    /// Read the claim immediately before a publication starts, once the fence naming it has
-    /// landed: only a claim naming another run holds it back, for good, and a read that was
-    /// not answered holds it until a later read is.
-    ///
-    /// A read finding no claim publishes: the claim may never have reached the board, and a
-    /// run that took the project over and finished it has nothing left this driver could
-    /// publish beside.
+    /// Read the claim at most once immediately before a publication starts, after its
+    /// fence has landed. Only an explicit successor claim withholds the publication.
+    /// Failed or absent answers do not stop it; a store's rate-limit wait is respected
+    /// by proceeding without a read.
     pub(crate) fn before_publishing(&mut self) -> BeforePublishing {
-        if self.read_unanswered.is_none() {
-            let _ = crate::ordering::meet(BEFORE_PUBLICATION_GATE_ENV);
-        }
-        if self
-            .read_unanswered
-            .is_some_and(|at| at.elapsed() < FENCE_RETRY)
-        {
-            return BeforePublishing::Wait;
-        }
-        // Inside a wait the store asked for, as the fence's own write is not made in one.
-        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
-            eprintln!(
-                "onepipeline: run '{}' waits {}s, as the store asked, to read the claim on {} \
-                 before it publishes",
-                self.run,
-                left.as_secs(),
-                self.project.as_str()
-            );
-            self.read_unanswered = Some(Instant::now());
-            return BeforePublishing::Wait;
+        let _ = crate::ordering::meet(BEFORE_PUBLICATION_GATE_ENV);
+        if crate::writeback::store_wait_left(&self.run_dir).is_some() {
+            return BeforePublishing::Publish;
         }
         match self.read() {
             Ok(Some(claim)) if self.supersedes(&claim) => {
-                self.read_unanswered = None;
                 self.standing = Standing::Superseded;
                 BeforePublishing::Superseded(claim)
             }
-            Ok(_) => {
-                self.read_unanswered = None;
-                BeforePublishing::Publish
-            }
+            Ok(_) => BeforePublishing::Publish,
             Err(why) => {
                 eprintln!(
                     "onepipeline: run '{}' could not read the claim on {} before it publishes: \
-                     {why}; the publication waits, and it reads again in {}s",
+                     {why}; the publication goes ahead without another claim read",
                     self.run,
-                    self.project.as_str(),
-                    FENCE_RETRY.as_secs()
+                    self.project.as_str()
                 );
-                self.read_unanswered = Some(Instant::now());
-                BeforePublishing::Wait
+                BeforePublishing::Publish
             }
         }
     }
@@ -946,13 +911,10 @@ impl ClaimWatch {
         !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
     }
 
-    /// How long until a write of this driver's publications the store refused, a read
-    /// before a publication it did not answer, or the clearing of a fence left naming a
-    /// settled publication, is due again.
+    /// How long until a refused fence write or the clearing of a lingering fence is due.
     pub(crate) fn until_fence_retry(&self) -> Duration {
         [
             self.fence_refused.map(|at| at + FENCE_RETRY),
-            self.read_unanswered.map(|at| at + FENCE_RETRY),
             self.lingering.map(|at| at + FENCE_LINGER),
         ]
         .into_iter()
@@ -1163,8 +1125,8 @@ pub(crate) enum HandedOver {
 ///
 /// No publication of the displaced driver runs beside this run's: that driver writes the
 /// fence naming a publication, and only once it has landed reads the claim, publishing only
-/// on a read that answered and did not find `mine`; this run writes `mine`, and only once it
-/// has landed reads the fence. So one of the two reads finds the other's write. A dispatch is
+/// unless the read finds `mine`; this run writes `mine`, and only once it has landed reads
+/// the fence, which remains standing even if the displaced driver's claim read fails. A dispatch is
 /// not fenced: a displaced driver that has not read `mine` yet may still start one, which
 /// publishes nothing once it does.
 ///
@@ -1883,7 +1845,7 @@ mod tests {
         );
         assert_eq!(
             block["unanswered_read_before_publication"],
-            json!({"holds": "that publication", "retry_seconds": FENCE_RETRY.as_secs()})
+            json!({"publishes": true, "retries": false})
         );
         assert_eq!(
             block["takeover_wait"],
