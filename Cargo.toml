@@ -1170,9 +1170,17 @@ onevcs-testing = "0.19.19"
 # The write-back's image step rewrites a created task's shadow document that way, so on
 # 0.11.0 a reader listing the shadow could open it empty or half-written
 # (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
-onetaskgraph-core = "=0.11.1"
-onetaskgraph-plugin-api = "=0.11.1"
-onetaskgraph-local-md = "=0.11.1"
+# **0.12.0 reads a task's dependencies from its own record**: a read consults the task's own
+# source and, per recorded edge, the source that edge names — an opaque
+# `{"designator", "id", "kind"}` edge resolved to whichever configured source its tracker is,
+# one no source is answered in `unanswered` — and asks a private source what it records of a
+# task only for a copy lacking `onetaskgraph.edges_on_record`. A source that answered rate
+# limited with a reset fails later calls in the process locally until it passes. Breaking:
+# `unanswered` holds the store's `Unanswered` rather than `SourceFailure`; `src/unanswered.rs`
+# keeps its cause and reset and holds a node only on what its own read names (entry 131).
+onetaskgraph-core = "=0.12.0"
+onetaskgraph-plugin-api = "=0.12.0"
+onetaskgraph-local-md = "=0.12.0"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

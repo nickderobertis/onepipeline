@@ -187,6 +187,7 @@ pub(crate) fn complete(store: &Store, landing: &Landing, within: Duration) -> An
             ))
         }
     };
+    crate::storeops::record(crate::storeops::Operation::CompleteIssues);
     let answered = runtime.block_on(async {
         tokio::time::timeout(
             within,

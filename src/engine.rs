@@ -1584,6 +1584,7 @@ fn converge(
     // The nodes the launch's read could not ask a private source about, seeded from the
     // record because no driver repeats that read, and re-read on a paced timer until the
     // source answers.
+    crate::storeops::attach(&paths.dir);
     let mut sources =
         crate::unanswered::SourceHolds::of_run(&state.holds, &launch.dir, &launch.project);
     let mut stacking = StackingPlacement::of(&state.graph);

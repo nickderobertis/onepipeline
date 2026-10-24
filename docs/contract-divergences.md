@@ -12076,54 +12076,95 @@ the launch of every plan beside it.
 What this build does is the block below, and the block is the source.
 
 **The read.** `taskgraph` asks each task's edges with `Completeness::NamingUnasked`; a
-failure in `errors` is still refused as a partial answer, and a source in `unanswered` is
-kept beside the node it was reported for. The plan loads.
+failure in `errors` is still refused as a partial answer, and each entry of `unanswered` is
+kept beside the node it was reported for, structured rather than as text. The plan loads.
+Since `onetaskgraph` 0.12.0 a task's read consults only its own source and, per recorded
+edge, the source that edge names — an opaque edge's designator resolved to whichever
+configured source that tracker is — and asks a private source what it records of the task
+only for a copy that does not carry `onetaskgraph.edges_on_record`; so a node is held only on
+the sources its own read reported, and a plan whose records name no private item holds
+nothing and asks no private source anything.
 
 **The hold.** `start` journals, after `run-started`, one `node-held` per such node carrying
-a `source` entry, and says on stderr, per source, the source, why it did not answer and the
-nodes it holds; `plan check` says the same on stderr and keeps its stdout and exit code.
-The driver seeds the holds from the record — no driver repeats the launch's read — keeps
-each node out of `start_ready` as it does a release hold, and re-reads the held nodes'
-edges through the store configured from the launch directory, off the loop's thread, every
-`ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or is not a positive
-whole number of seconds, and longer only where a host sets it longer. A re-read that asks every
-source and resolves no prerequisite the run's graph does not already give the node clears
-the hold. One that resolves such a prerequisite keeps the node held with it in `missing`,
-because starting the node then would start it before that prerequisite; an edit giving the
-node the edge — a `reparent` — is what the next read clears it on. A read the store fails
-outright leaves the holds as they are. A node that leaves the waiting statuses holds
-nothing. Nothing times a hold out, and a run whose remaining nodes are held this way is
-neither terminal nor `awaiting-planner`.
+a `source` entry, and says on stderr, per source, the source, why it did not answer, the
+nodes it holds and when it is read again; `plan check` says the same on stderr and keeps its
+stdout and exit code. Each `unanswered[]` element keeps `source` and `reason` and carries
+`cause` — `rate-limited`, `auth`, `unavailable` (unreachable, or refused for any reason no
+wait or credential is known to fix), or `unconfigured` (an opaque edge's designator no
+configured source resolves, named in `source` by that designator) — and, only where the
+provider gave a reset, `retry_at_ms`: the epoch milliseconds the reset falls at, the read's
+instant plus its `retry_after_seconds`. A `node-held` written before these fields carries
+neither, and reads and renders exactly as it did. An element naming a `cause` this build has
+no word for is not read.
+
+**The schedule is per source, not per node.** The driver seeds the holds from the record —
+no driver repeats the launch's read — and keeps each node out of `start_ready` as it does a
+release hold. A source whose hold records `retry_at_ms` is read again one second after it,
+whichever driver journalled it, an adopting one included. Any other is read again after a
+backoff that starts at `ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or
+is not a positive whole number of seconds — doubles after each re-read that source still does
+not answer, stops doubling at thirty intervals, and returns to one interval once it answers;
+the launch's own refusal counts as the first, so its first re-read is one interval out. No
+source is read on a fixed interval. A pass re-reads, in node-id order and off the loop's
+thread, every held node whose every source is due, through the store configured from the
+launch directory, and stops asking a source the moment it refuses again: a node held on it
+not yet read keeps its hold, restated with that refusal, so one pass costs a source that still
+cannot answer one store operation however many nodes it holds. A source due whose every node
+waits on another source too is read with that one. A node held only for a `missing`
+prerequisite is read once an interval. A re-read that asks every source and resolves no
+prerequisite the run's graph does not already give the node clears the hold. One that resolves
+such a prerequisite keeps the node held with it in `missing`, because starting the node then
+would start it before that prerequisite; an edit giving the node the edge — a `reparent` — is
+what the next read clears it on. A read the store fails outright leaves the holds as they are
+and puts each source it set out to ask on its next backoff. A node that leaves the waiting
+statuses holds nothing. Nothing times a hold out, and a run whose remaining nodes are held this
+way is neither terminal nor `awaiting-planner`.
 
 **The surface.** A held node raises `source-wait`, non-blocking, source proposal,
-workstream the node, on the cadence `release-wait` uses, naming the source, its reason or
-the missing prerequisite, what clears it, and that nothing times it out. `status` renders
-the hold on the node's line.
+workstream the node, on the cadence `release-wait` uses, naming the source, its cause and
+reason or the missing prerequisite, when it is read again — the reset as a UTC time where the
+provider gave one, otherwise the backoff's next wait in seconds — what else would clear it,
+chosen by `cause` (a credential for `auth`, reachability for `unavailable`, configuring the
+tracker for `unconfigured`, and nothing for `rate-limited`, which is waited out), and that
+nothing times it out. `status` renders the hold on the node's line, naming the reset or the
+backoff's first interval and cap.
 
-Driven end to end by `tests/e2e/store.rs`: a plan in a public source beside a private
-`scripted-source` answering every task query with an authentication failure loads, `plan
-check` exits 0 naming the source and nodes, nothing is dispatched across several re-reads,
-`status` and the surface name the source, and the run completes in edge order once the
-source answers; and a private task carrying a plan node's id and recording another node as
-its dependent keeps that node held naming the prerequisite after the source answers, until
-a `reparent` gives it the edge, after which it starts only once the prerequisite settles.
+Driven end to end by `tests/e2e/store.rs` against local Markdown plans and a private
+`scripted-source`: a plan whose records name no private item launches holding nothing while
+that source is configured and rate limited, and the source is asked nothing; a task with an
+opaque edge into it is held on it alone with `cause` and `retry_at_ms`, read again only after
+the reset and then on the backoff, and released once it answers; three nodes held on one
+source cost it one operation a pass; two sources on different schedules are each read on
+their own; an adopted run honours a journalled reset; a journal written before these fields
+reads unchanged; and authentication and prerequisite holds behave as above.
 `unanswered::tests` holds the block below against the types.
 
 ```json
 {
   "hold": {
     "kind": "source",
-    "unanswered": [{"source": "vault", "reason": "authentication for this source failed: VAULT_TOKEN is missing or empty"}]
+    "unanswered": [{"source": "vault", "reason": "authentication for this source failed: VAULT_TOKEN is missing or empty", "cause": "auth"}]
+  },
+  "hold_with_reset": {
+    "kind": "source",
+    "unanswered": [{"source": "vault", "reason": "rate limited, retry after 1800s", "cause": "rate-limited", "retry_at_ms": 1777895400000}]
   },
   "hold_with_missing": {
     "kind": "source",
     "unanswered": [],
     "missing": ["review"]
   },
+  "hold_before_cause": {
+    "kind": "source",
+    "unanswered": [{"source": "vault", "reason": "authentication for this source failed: VAULT_TOKEN is missing or empty"}]
+  },
+  "causes": ["rate-limited", "auth", "unavailable", "unconfigured"],
   "surface_kind": "source-wait",
   "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
   "poll_env": "ONEPIPELINE_SOURCE_POLL_SECONDS",
   "default_poll_seconds": 60,
+  "backoff_cap_intervals": 30,
+  "after_reset_ms": 1000,
   "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
 }
 ```

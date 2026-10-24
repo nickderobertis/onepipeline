@@ -1746,6 +1746,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     }
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
+    // The store operations the launch's read asked for, and every one after, are this run's.
+    crate::storeops::attach(&paths.dir);
     ledger::write_json(&paths.plan(), &plan)?;
     // The flow this launch is a member of, recorded in the flow before the run's
     // own record names it, so no record names a flow that cannot see the run.

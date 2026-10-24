@@ -335,14 +335,20 @@ impl Store {
         let (content, metadata) = match kind {
             StoredKind::Document => {
                 let read = reader
-                    .call(reader.engine.document(&global))
+                    .call(
+                        crate::storeops::Operation::Document,
+                        reader.engine.document(&global),
+                    )
                     .map_err(|error| failed("document show", id.as_str(), &error))?;
                 let found = one(&global, "document show", read)?;
                 (found.item.content, found.item.metadata)
             }
             StoredKind::Project => {
                 let read = reader
-                    .call(reader.engine.project(&global))
+                    .call(
+                        crate::storeops::Operation::Project,
+                        reader.engine.project(&global),
+                    )
                     .map_err(|error| failed("project show", id.as_str(), &error))?;
                 let found = one(&global, "project show", read)?;
                 (found.item.content, found.item.metadata)
@@ -382,7 +388,9 @@ impl Store {
         let reader = Reader::over(built)?;
         let global = id.global();
         let read = reader
-            .call(async { tokio::time::timeout(within, reader.engine.project(&global)).await })
+            .call(crate::storeops::Operation::Project, async {
+                tokio::time::timeout(within, reader.engine.project(&global)).await
+            })
             .map_err(|_| Error::Sibling {
                 tool: STORE,
                 message: format!(
@@ -437,7 +445,7 @@ impl Store {
         })?;
         let global = id.global();
         reader
-            .call(async {
+            .call(crate::storeops::Operation::ProjectMetadataSet, async {
                 tokio::time::timeout(
                     within,
                     reader.engine.set_project_metadata(&global, &named, value),
@@ -460,6 +468,11 @@ impl Store {
     /// was launched from `project`: what a run holding a node its launch could not read whole
     /// asks, to learn whether every source now answers and what the node's edges then say.
     ///
+    /// `asked` names, beside each node, the sources it is held on. Nodes are read in id order,
+    /// and once one source refuses a read, no node held on it is read again in this pass: the
+    /// pass costs a source that is still refusing one request, however many nodes wait on it.
+    /// A node passed over is absent from the answer, and its hold stands.
+    ///
     /// A node is found by the task its `task_record` names — in its own `source`, or the
     /// project's where it names none — and an edge's far end is resolved against every node
     /// of `nodes` the same way, so a prerequisite reads back as the node id the run knows it
@@ -473,7 +486,7 @@ impl Store {
         &self,
         project: &QualifiedId,
         nodes: &[Node],
-        asked: &BTreeSet<String>,
+        asked: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<BTreeMap<String, Reread>> {
         let built = self
             .engine(&Layer::default())
@@ -500,14 +513,26 @@ impl Store {
             .filter_map(|node| Some((task_of(node)?.to_string(), node.id.clone())))
             .collect();
         let mut read = BTreeMap::new();
-        for node in nodes.iter().filter(|node| asked.contains(&node.id)) {
+        let mut refused: BTreeSet<String> = BTreeSet::new();
+        let by_id: BTreeMap<&str, &Node> =
+            nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+        for (id, held_on) in asked {
+            let Some(node) = by_id.get(id.as_str()) else {
+                continue;
+            };
+            if !held_on.is_disjoint(&refused) {
+                continue;
+            }
             let Some(task) = task_of(node) else {
                 continue;
             };
             // The graph is the launched one: what it withdrew was settled at its read.
-            let (deps, unanswered) = reader
-                .deps(&task, &ids, &Withdrawn::new())
-                .map_err(Error::from)?;
+            let (deps, unanswered) = crate::storeops::about(
+                serde_json::json!({"phase": "re-read", "node": node.id, "held_on": held_on}),
+                || reader.deps(&task, &ids, &Withdrawn::new()),
+            )
+            .map_err(Error::from)?;
+            refused.extend(unanswered.iter().map(|unasked| unasked.source.clone()));
             read.insert(node.id.clone(), Reread { deps, unanswered });
         }
         Ok(read)
@@ -523,7 +548,9 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
-        Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
+        crate::storeops::about(serde_json::json!({"phase": "launch"}), || {
+            Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
+        })
     }
 }
 
@@ -590,8 +617,10 @@ impl Reader {
         })
     }
 
-    /// Drive one of the engine's futures to its end on this read's runtime.
-    fn call<T>(&self, future: impl Future<Output = T>) -> T {
+    /// Drive one of the engine's futures to its end on this read's runtime, counting it as
+    /// the store operation `operation`.
+    fn call<T>(&self, operation: crate::storeops::Operation, future: impl Future<Output = T>) -> T {
+        crate::storeops::record(operation);
         self.runtime.block_on(future)
     }
 
@@ -1036,20 +1065,23 @@ impl Reader {
             };
             deps.push(resolved);
         }
-        Ok((deps, Unanswered::of(&unasked)))
+        Ok((deps, Unanswered::of(&unasked, crate::sys::now_millis())))
     }
 
     fn project(&self, project: &QualifiedId) -> Result<Qualified<Project>> {
         let id = project.global();
         let read = self
-            .call(self.engine.project(&id))
+            .call(
+                crate::storeops::Operation::Project,
+                self.engine.project(&id),
+            )
             .map_err(|error| failed("project show", project.as_str(), &error))?;
         one(&id, "project show", read)
     }
 
     fn show(&self, task: &GlobalId) -> Result<Qualified<Task>> {
         let read = self
-            .call(self.engine.task(task))
+            .call(crate::storeops::Operation::Task, self.engine.task(task))
             .map_err(|error| failed("task show", &task.to_string(), &error))?;
         one(task, "task show", read)
     }
@@ -1071,25 +1103,30 @@ impl Reader {
     /// still be named.
     fn tasks(&self, project: &QualifiedId, members: &[GlobalId]) -> Result<Vec<Qualified<Task>>> {
         let selector = selector(&self.engine, project);
-        let tasks = self.paged("task list", project.as_str(), |token| {
-            let request = TaskRequest {
-                sources: Vec::new(),
-                filters: Filters::default(),
-                priorities: Vec::new(),
-                metadata: Vec::new(),
-                origin: None,
-                project: selector.clone(),
-                commented_since: None,
-                // Asked only of a home that names members: the store learns them by reading the
-                // home again, and a plan of one source needs no second read of it.
-                include_members: !members.is_empty(),
-                paging: Paging {
-                    limit: self.page,
-                    token,
-                },
-            };
-            async move { self.engine.tasks(&request).await }
-        })?;
+        let tasks = self.paged(
+            crate::storeops::Operation::Tasks,
+            "task list",
+            project.as_str(),
+            |token| {
+                let request = TaskRequest {
+                    sources: Vec::new(),
+                    filters: Filters::default(),
+                    priorities: Vec::new(),
+                    metadata: Vec::new(),
+                    origin: None,
+                    project: selector.clone(),
+                    commented_since: None,
+                    // Asked only of a home that names members: the store learns them by reading the
+                    // home again, and a plan of one source needs no second read of it.
+                    include_members: !members.is_empty(),
+                    paging: Paging {
+                        limit: self.page,
+                        token,
+                    },
+                };
+                async move { self.engine.tasks(&request).await }
+            },
+        )?;
         for task in &tasks {
             if let Some(elsewhere) = stranger(task, project, members) {
                 return Err(Error::Sibling {
@@ -1107,19 +1144,27 @@ impl Reader {
 
     /// One task's dependency edges, and the sources declared private that could not be asked
     /// what they record of it.
-    fn edges(&self, task: &GlobalId) -> Result<(Vec<QualifiedEdge>, Vec<SourceFailure>)> {
-        self.walk("task deps", &task.to_string(), |token| {
-            let request = DependencyRequest {
-                id: task.clone(),
-                direction: Direction::DependsOn,
-                completeness: Completeness::NamingUnasked,
-                paging: Paging {
-                    limit: self.page,
-                    token,
-                },
-            };
-            async move { self.engine.task_dependencies(&request).await }
-        })
+    fn edges(
+        &self,
+        task: &GlobalId,
+    ) -> Result<(Vec<QualifiedEdge>, Vec<onetaskgraph_core::Unanswered>)> {
+        self.walk(
+            crate::storeops::Operation::Dependencies,
+            "task deps",
+            &task.to_string(),
+            |token| {
+                let request = DependencyRequest {
+                    id: task.clone(),
+                    direction: Direction::DependsOn,
+                    completeness: Completeness::NamingUnasked,
+                    paging: Paging {
+                        limit: self.page,
+                        token,
+                    },
+                };
+                async move { self.engine.task_dependencies(&request).await }
+            },
+        )
     }
 
     /// Every page of one query, walked to its end.
@@ -1131,13 +1176,33 @@ impl Reader {
     /// A partial answer is not accepted: a source that could not answer is a plan this
     /// process cannot read, and a launch that proceeded on the sources that did answer
     /// would execute a graph missing whatever the absent one held.
-    fn paged<T, F, Fut>(&self, query: &str, about: &str, page: F) -> Result<Vec<T>>
+    fn paged<T, F, Fut>(
+        &self,
+        operation: crate::storeops::Operation,
+        query: &str,
+        about: &str,
+        page: F,
+    ) -> Result<Vec<T>>
     where
         F: Fn(Option<PageToken>) -> Fut,
         Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
     {
-        let (all, unasked) = self.walk(query, about, page)?;
-        partial(query, about, &unasked)?;
+        let (all, unasked) = self.walk(operation, query, about, page)?;
+        // Only a dependency read fills `unanswered`, so a query answering one anyway is
+        // answering in part, and refused as one.
+        if !unasked.is_empty() {
+            let named: Vec<String> = unasked
+                .iter()
+                .map(|entry| format!("{entry} could not be asked"))
+                .collect();
+            return Err(Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "`{query}` of '{about}' answered in part: {}",
+                    named.join("; ")
+                ),
+            });
+        }
         Ok(all)
     }
 
@@ -1146,10 +1211,11 @@ impl Reader {
     /// than refusing them. A failure in `errors` is refused as it is there.
     fn walk<T, F, Fut>(
         &self,
+        operation: crate::storeops::Operation,
         query: &str,
         about: &str,
         page: F,
-    ) -> Result<(Vec<T>, Vec<SourceFailure>)>
+    ) -> Result<(Vec<T>, Vec<onetaskgraph_core::Unanswered>)>
     where
         F: Fn(Option<PageToken>) -> Fut,
         Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
@@ -1160,7 +1226,7 @@ impl Reader {
         let mut walked: std::collections::HashSet<PageToken> = std::collections::HashSet::new();
         loop {
             let response = self
-                .call(page(token.clone()))
+                .call(operation, page(token.clone()))
                 .map_err(|error| failed(query, about, &error))?;
             partial(query, about, &response.errors)?;
             all.extend(response.items);
@@ -1416,33 +1482,110 @@ pub(crate) struct Read {
     pub unanswered: BTreeMap<String, Vec<Unanswered>>,
 }
 
-/// A source declared private that a dependency read could not ask, and why.
+/// What a dependency read could not ask, and why: a source declared private, or a tracker an
+/// opaque edge names that no source configured here is.
 ///
-/// The store's own [`SourceFailure`], reduced to what a run records and says: the source's
-/// name and the store's own account of why it did not answer — a credential absent or
-/// refused, a source unreachable or rate-limited.
+/// The store's own [`onetaskgraph_core::Unanswered`], kept structured rather than reduced to
+/// text: the hold record's `cause` and, for a rate limit naming its reset, the instant the
+/// source may be asked again are what the run decides when to read it again by.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Unanswered {
-    /// The source's name, as its configuration spells it.
-    pub source: SourceName,
+    /// The source's name, as its configuration spells it — or, for an `unconfigured` one,
+    /// the designator no configured source is.
+    pub source: String,
     /// Why it did not answer, in the store's own words.
     pub reason: String,
+    /// What kind of not answering it was; `None` only for a hold a build before this field
+    /// journalled, which is read and said exactly as it was.
+    pub cause: Option<Cause>,
+    /// The epoch milliseconds the source said it may be asked again — now plus its
+    /// `retry_after_seconds` — where it was rate limited and said; `None` otherwise.
+    pub retry_at_ms: Option<u64>,
+}
+
+/// Why a source could not be asked, as a `node-held` record's `cause` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Cause {
+    /// It asked the reader to slow down.
+    RateLimited,
+    /// Its credential was absent, malformed or refused.
+    Auth,
+    /// It could not be reached, or answered in a way no wait or credential is known to fix.
+    Unavailable,
+    /// The tracker an edge names is no source configured here.
+    Unconfigured,
+}
+
+impl Cause {
+    /// Every cause, in the order the record's vocabulary lists them.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::RateLimited,
+        Self::Auth,
+        Self::Unavailable,
+        Self::Unconfigured,
+    ];
+
+    /// The word the record carries.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate-limited",
+            Self::Auth => "auth",
+            Self::Unavailable => "unavailable",
+            Self::Unconfigured => "unconfigured",
+        }
+    }
+
+    /// The cause a recorded word names, or `None` for a word this build does not know.
+    pub(crate) fn of_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|cause| cause.as_str() == word)
+    }
+
+    /// The cause of one source failure. A configuration the source refused, or an answer it
+    /// could not give, is `unavailable`: no wait and no credential is known to change it.
+    fn of_error(error: &onetaskgraph_plugin_api::SourceError) -> Self {
+        use onetaskgraph_plugin_api::SourceError;
+        match error {
+            SourceError::RateLimited { .. } => Self::RateLimited,
+            SourceError::Auth { .. } => Self::Auth,
+            SourceError::Unavailable { .. }
+            | SourceError::Refused { .. }
+            | SourceError::Malformed { .. }
+            | SourceError::Config { .. } => Self::Unavailable,
+        }
+    }
 }
 
 impl Unanswered {
-    /// Each source the failures name, once, in name order: a read that walked several pages
-    /// meets the same source on each.
-    fn of(failures: &[SourceFailure]) -> Vec<Self> {
-        let mut named: BTreeMap<SourceName, String> = BTreeMap::new();
-        for failure in failures {
-            named
-                .entry(failure.source.clone())
-                .or_insert_with(|| failure.error.to_string());
+    /// Each source or tracker the store's answer names, once, in name order: a read that
+    /// walked several pages meets the same source on each, and the first account of it
+    /// stands. A rate limit naming how long to wait is stamped with the instant that ends,
+    /// counted from `now_ms`.
+    pub(crate) fn of(unanswered: &[onetaskgraph_core::Unanswered], now_ms: u64) -> Vec<Self> {
+        let mut named: BTreeMap<String, Self> = BTreeMap::new();
+        for entry in unanswered {
+            let read = match entry {
+                onetaskgraph_core::Unanswered::Source(failure) => Self {
+                    source: failure.source.to_string(),
+                    reason: failure.error.to_string(),
+                    cause: Some(Cause::of_error(&failure.error)),
+                    retry_at_ms: match &failure.error {
+                        onetaskgraph_plugin_api::SourceError::RateLimited {
+                            retry_after_seconds: Some(seconds),
+                            ..
+                        } => Some(now_ms.saturating_add(seconds.saturating_mul(1_000))),
+                        _ => None,
+                    },
+                },
+                onetaskgraph_core::Unanswered::Designator(unresolved) => Self {
+                    source: unresolved.designator.to_string(),
+                    reason: unresolved.reason.as_str().to_owned(),
+                    cause: Some(Cause::Unconfigured),
+                    retry_at_ms: None,
+                },
+            };
+            named.entry(read.source.clone()).or_insert(read);
         }
-        named
-            .into_iter()
-            .map(|(source, reason)| Self { source, reason })
-            .collect()
+        named.into_values().collect()
     }
 }
 
@@ -2833,19 +2976,24 @@ mod tests {
     /// meets one twice, and nothing in its contract promises it never will.
     #[test]
     fn a_source_named_on_several_pages_is_one_unanswered_source() {
-        let failure = |source: &str, message: &str| SourceFailure {
-            source: SourceName::new(source).expect("a source name"),
-            error: onetaskgraph_plugin_api::SourceError::Auth {
-                message: message.to_owned(),
-            },
+        let failure = |source: &str, message: &str| {
+            onetaskgraph_core::Unanswered::Source(SourceFailure {
+                source: SourceName::new(source).expect("a source name"),
+                error: onetaskgraph_plugin_api::SourceError::Auth {
+                    message: message.to_owned(),
+                },
+            })
         };
-        let named: Vec<(String, String)> = Unanswered::of(&[
-            failure("vault", "first page"),
-            failure("archive", "first page"),
-            failure("vault", "second page"),
-        ])
+        let named: Vec<(String, String)> = Unanswered::of(
+            &[
+                failure("vault", "first page"),
+                failure("archive", "first page"),
+                failure("vault", "second page"),
+            ],
+            0,
+        )
         .into_iter()
-        .map(|unanswered| (unanswered.source.to_string(), unanswered.reason))
+        .map(|unanswered| (unanswered.source, unanswered.reason))
         .collect();
         assert_eq!(
             named,
@@ -2858,6 +3006,65 @@ mod tests {
                     "vault".to_owned(),
                     "authentication for this source failed: first page".to_owned()
                 ),
+            ]
+        );
+    }
+
+    /// The store's structured answer is kept: each source's cause, a rate limit's reset as the
+    /// instant it falls at, and a designator no configured source is as `unconfigured`.
+    #[test]
+    fn an_unanswered_source_keeps_its_cause_and_a_rate_limit_its_reset() {
+        use onetaskgraph_plugin_api::SourceError;
+        let source = |name: &str, error: SourceError| {
+            onetaskgraph_core::Unanswered::Source(SourceFailure {
+                source: SourceName::new(name).expect("a source name"),
+                error,
+            })
+        };
+        let designator =
+            onetaskgraph_plugin_api::Designator::of_alias("an-alias-of-sixteen").expect("an alias");
+        let read = Unanswered::of(
+            &[
+                source(
+                    "limited",
+                    SourceError::RateLimited {
+                        retry_after_seconds: Some(1_800),
+                        message: None,
+                    },
+                ),
+                source(
+                    "unreset",
+                    SourceError::RateLimited {
+                        retry_after_seconds: None,
+                        message: None,
+                    },
+                ),
+                source(
+                    "down",
+                    SourceError::Unavailable {
+                        message: "no route".to_owned(),
+                    },
+                ),
+                onetaskgraph_core::Unanswered::Designator(
+                    onetaskgraph_core::UnresolvedDesignator {
+                        designator: designator.clone(),
+                        reason: onetaskgraph_core::UnresolvedReason::NotConfigured,
+                    },
+                ),
+            ],
+            1_000,
+        );
+        let said: Vec<(&str, Option<Cause>, Option<u64>)> = read
+            .iter()
+            .map(|unasked| (unasked.source.as_str(), unasked.cause, unasked.retry_at_ms))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("alias/an-alias-of-sixteen", Some(Cause::Unconfigured), None),
+                ("down", Some(Cause::Unavailable), None),
+                ("limited", Some(Cause::RateLimited), Some(1_801_000)),
+                ("unreset", Some(Cause::RateLimited), None),
             ]
         );
     }
