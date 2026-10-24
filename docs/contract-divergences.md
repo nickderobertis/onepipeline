@@ -11519,12 +11519,14 @@ What a read answers:
   go ahead. No claim can mean the claim never reached the board, or that a run that took
   the project over has finished and released it;
 - **a read that fails, outlasts its deadline, or is not made inside a wait the store
-  asked for** lets the publications go ahead without another read. No dispatch is ended,
-  no dispatch is kept from starting, and no publication already under way is interrupted.
-  An adoption's own first read that fails is said on its log, and the adoption goes on driving.
+  asked for** holds the publications it was made for, and only those. The read is made
+  again five seconds later, or once the store's wait has passed, until one answers. No
+  dispatch is ended, no dispatch is kept from starting, and no publication already under
+  way is interrupted. An adoption's own first read that fails is said on its log, and the
+  adoption goes on driving.
 
-The landed fence keeps a takeover waiting on publications even when the displaced driver's
-claim read fails. Only an explicit successor claim withholds the publication.
+The hold is what keeps the two drivers' publications apart, below. A read that publishes
+regardless of its answer would let a displaced driver publish beside its adopter.
 
 **The fence.** Before any publication starts, the driver writes the project's
 `onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose publications
@@ -11605,8 +11607,9 @@ driver settled while it was being taken over is continued rather than dispatched
 and its write-back starts from it.
 
 **Why the fence keeps publications apart.** The displaced driver writes its fence, and
-reads the claim only once the fence has landed. It publishes unless that read names the
-adopter. The adopter writes its claim, and reads the fence only once its claim has landed. If the claim read fails, the fence still stands. Either the
+reads the claim only once the fence has landed. It publishes only on a read that answered
+without naming the adopter. The adopter writes its claim, and reads the fence only once its
+claim has landed. So of the two reads, at least one finds the other's write. Either the
 displaced driver finds the adopter's claim and withholds, or the adopter finds the fence
 and waits for it to clear. A publication is not bounded by any wait — its push and its
 change request are with the host — so this is what holds it. The wait itself proves
@@ -11646,7 +11649,7 @@ its next look, which is the safe end of that race.
   "max_claim_interval_seconds": 86400,
   "claim_read_deadline_seconds": 20,
   "claim_reads": {"timed": false, "before_dispatch": false, "adoption": "its first pass", "before_publication": "once, after its fence has landed"},
-  "unanswered_read_before_publication": {"publishes": true, "retries": false},
+  "unanswered_read_before_publication": {"holds": "that publication", "retry_seconds": 5},
   "takeover_wait": {"cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10, "terms": "the displaced claim's lease", "without_terms": "acknowledgement only"},
   "takeover_poll": {"per_interval": 10, "min_seconds": 1, "max_seconds": 30},
   "settlement_landing_wait_seconds": 20,
@@ -11683,15 +11686,12 @@ seam shared by every host, with two real drivers on two hosts:
   dispatch reads nothing;
 - the four answers, each on a run with a dispatch in flight for longer than the old lapse,
   each showing the dispatch is not ended, a later dispatch still starts, another starts
-  and settles beside that one's publication, and the publication starts while the failure
-  persists, with exactly one claim read:
-  `a_claim_read_that_fails_ends_no_dispatch_and_publishes`,
-  `a_claim_read_that_times_out_ends_no_dispatch_and_publishes`,
-  `a_rate_limited_claim_read_ends_no_dispatch_and_publishes` and
+  and settles while that one's publication waits, and the publication goes ahead once a read
+  answers:
+  `a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication`,
+  `a_claim_read_that_times_out_ends_no_dispatch_and_holds_only_its_publication`,
+  `a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication` and
   `a_claim_read_finding_no_claim_ends_no_dispatch_and_publishes`;
-  `a_publication_inside_an_existing_store_wait_starts_without_a_claim_read` establishes
-  a write-back rate-limit wait after the fence lands and proves publication starts
-  inside that wait, with no claim read or other store call;
 - the takeover of a live driver mid-dispatch:
   `a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over`, which shows
   the displaced driver withholding at its publication's read, starting nothing after it,
@@ -11700,6 +11700,12 @@ seam shared by every host, with two real drivers on two hosts:
 - the gap: `a_displaced_driver_that_has_not_read_the_takeover_publishes_nothing_it_starts_after_it`
   has the adopter start once its wait has passed while the displaced driver still runs, and
   shows the dispatch that driver starts after it withheld at its publication's read;
+- the order: `a_takeover_recorded_before_an_unanswered_read_ahead_of_a_publication_publishes_nothing_of_the_displaced_driver`
+  holds the displaced driver at a failpoint between its fence landing and its read, records
+  the takeover there, and has the board refuse that read — the order a Windows run of
+  `rework::a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished` reached
+  on a build that published on such a read. The publication waits, the next read finds the
+  adopter's claim, and the displaced driver publishes nothing;
 - a dead driver: `a_takeover_whose_displaced_driver_died_proceeds_once_its_wait_has_passed`,
   and `an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over`;
 - the fence: `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`

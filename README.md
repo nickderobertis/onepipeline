@@ -235,9 +235,8 @@ adoption's first pass, and once immediately before each publication it starts. I
 reads it on a timer or before a dispatch, and a read that fails, times out, is rate
 limited or finds no claim ends nothing. Before a publication starts, the driver names it
 on the project (`onepipeline.publishing`), and only then reads the claim. A read naming
-another run withholds the publication and stops the driver. A read that fails, times out
-or is rate limited lets the publication start; it is never retried for that publication. Inside a rate-limit wait, the driver starts the publication
-without asking the store for the claim. Once the publication has finished, the
+another run withholds the publication and stops the driver. A read that was not answered
+holds that one publication until a later read is. Once the publication has finished, the
 name is cleared — ten seconds later where it was the last, so the next draft of a restack
 replaces it in one write. So a takeover waits rather than every driver: `start --take-over` writes
 its claim, and starts nothing until the driver it displaced has stopped and acknowledged
