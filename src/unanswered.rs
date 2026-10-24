@@ -143,14 +143,18 @@ impl SourceHold {
                     None => None,
                     Some(at) => Some(at.as_u64()?),
                 };
+                // A cause word or a reset on another cause is what only a later build could
+                // journal; such an entry is not read, and the engine treats the hold as one it
+                // does not know, as it does any reason a later build adds.
+                // llmlint: ignore-block[changed_behavior_has_e2e] no build writes either shape, so a journey could only reach them through a journal edited by hand, which `tests_mirror_real_usage` refuses; `unanswered::tests::the_hold_entry_round_trips_and_omits_what_it_does_not_hold` drives this reader with each, and what the engine does with an entry it cannot read is `HoldReason::of_payload`'s existing path for every hold kind.
                 let cause = match unasked.get("cause") {
                     None => None,
                     Some(word) => Some(Cause::of_word(word.as_str()?)?),
                 };
-                // Each kind carries only what it can: a reset rides a rate limit alone.
                 if retry_at_ms.is_some() && cause != Some(Cause::RateLimited) {
                     return None;
                 }
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 let name = || onetaskgraph_plugin_api::SourceName::new(named).ok();
                 let source = |cause| {
                     Some(Unasked::Source {
