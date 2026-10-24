@@ -748,14 +748,17 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // reference or a read that asks for every edge; a write-back does neither.
         EngineError::PrivateReferenceContent { .. } => decided("private-reference-content"),
         EngineError::DesignatorNotConfigured { .. } => decided("designator-not-configured"),
-        // A public projection is the store's own view of a canonical task, made by a project
-        // copy the engine never asks for; the canonical status write mirrors onto one only
-        // where such a copy recorded it, and a mirror that failed has already set the
-        // canonical status, so asking again is the store's own recovery, not this worker's.
-        EngineError::ProjectionReference { .. } => decided("projection-reference"),
-        EngineError::ProjectionsMalformed { .. } => decided("projections-malformed"),
-        EngineError::ProjectionNotMirrored { .. } => decided("projection-not-mirrored"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        // A public projection is the store's own view of a canonical task in a private home.
+        // A status write the canonical task took and its view did not, and a created task whose
+        // view the store refuses to write, are each refused as the store classes them: the
+        // canonical side is already right, and the store's own next step is the planner's next
+        // project copy (`publication_boundary::a_projection_the_store_refuses_is_a_write_back_failure_and_the_run_goes_on`).
+        // So is a creation under a projection map the store cannot read
+        // (`publication_boundary::a_projection_map_of_an_unsupported_version_refuses_the_next_creation`).
+        EngineError::ProjectionReference { .. } => decided("projection-reference"),
+        EngineError::ProjectionNotMirrored { .. } => decided("projection-not-mirrored"),
+        EngineError::ProjectionsMalformed { .. } => decided("projections-malformed"),
         EngineError::DestinationUnavailable { error, .. }
         | EngineError::SourceRefused { error, .. }
         | EngineError::SourceUnavailable { error, .. }
@@ -4320,6 +4323,11 @@ fn write_shadow(
 }
 
 /// Preserve the existing home while a full copy creates its first routed member project.
+///
+/// Its classification too: a private coordinating plan's home is classified private, and the
+/// store lands every task of such a plan canonically in that home — a public one with the
+/// neutral view it makes of it — where a home restated as public would have each public task
+/// routed by its repositories into a public source as a full item of the plan.
 fn restate_shadow_project(snapshot: &Snapshot, project: &Project) -> Result<(), String> {
     let mut metadata = project.metadata.clone();
     metadata.insert(
@@ -4333,6 +4341,9 @@ fn restate_shadow_project(snapshot: &Snapshot, project: &Project) -> Result<(), 
     });
     if !project.repositories.is_empty() {
         front["repositories"] = json!(project.repositories);
+    }
+    if !project.classification.is_public() {
+        front["classification"] = json!(project.classification.as_str());
     }
     document(
         &snapshot

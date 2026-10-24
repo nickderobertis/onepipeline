@@ -2677,6 +2677,183 @@ fn a_private_home_still_refuses_public_tasks_carrying_private_terms_and_private_
     world.release("keep.go");
 }
 
+/// In a private home, every task the run writes is canonical there and the store owns each
+/// public view: a public task the run adds is created in the home with the neutral view the
+/// store makes of it, never in the public source itself. What the store refuses about a view
+/// reaches the run as a write-back failure in its own words and nothing else about the run
+/// changes — a view a person deleted leaves its canonical task's status set and the mirror
+/// refused, and an added task whose body links a local path is refused before anything is
+/// written.
+#[test]
+fn a_projection_the_store_refuses_is_a_write_back_failure_and_the_run_goes_on() {
+    let home = Home::Private;
+    let (world, _, _) = home.world("boundary-projection-refusals");
+    world.script("shown.work", "the public task's work\n");
+    world.script("keep.wait", "hold");
+    let mut shown = home.public("shown", &[]);
+    shown["title"] = json!("feat: show the examples");
+    // A parked private task of the private repository homes the plan privately.
+    let mut inner = home.producer("inner", &[]);
+    inner["parked"] = json!(true);
+    let plan = mixed_plan(
+        "projected",
+        vec![inner, shown, crate::harness::agent("keep", &[])],
+        vec![],
+    );
+    let project = home.project(&world, "projected", &plan);
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    // A person deletes the public view before the run starts.
+    let views = world.root.join("views-store");
+    let view = files_under(&views)
+        .into_iter()
+        .find(|(path, _)| path.starts_with("tasks"))
+        .expect("the public task's view")
+        .0;
+    std::fs::remove_file(views.join(&view)).expect("the view is deleted");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    until_settled(&world, "projected", "shown");
+    world.until("the mirror's refusal to be recorded", |world| {
+        projections(world, "projected").contains("\"kind\":\"projection-not-mirrored\"")
+    });
+    // The canonical task takes its settled status; only the view the person deleted does not.
+    let canonical = world
+        .store()
+        .join("tasks")
+        .join(identifier)
+        .join("001-shown.md");
+    world.until("the canonical task to be done", |_| {
+        std::fs::read_to_string(&canonical).is_ok_and(|held| held.contains("status: done"))
+    });
+    assert!(
+        !views.join(&view).exists(),
+        "the store wrote the deleted view back"
+    );
+
+    // A public task the run adds is created canonically in the private home, and the store
+    // gives it its neutral view: nothing the run writes lands in the public source but that.
+    let canonical_tasks = world.store().join("tasks").join(identifier);
+    let mut added = home.public("added", &[]);
+    added["parked"] = json!(true);
+    reply(&world, "projected", json!([{"op": "add", "node": added}]));
+    world.until("the added task's canonical item and its view", |_| {
+        files_under(&canonical_tasks)
+            .iter()
+            .any(|(_, held)| held.contains("onepipeline.id: added"))
+            && files_under(&views)
+                .iter()
+                .any(|(_, held)| held.contains("title: 'feat: ship added'"))
+    });
+    // One whose body links a local path a view could never carry is refused before anything
+    // is written, in the store's words.
+    let mut linked = home.public("linked", &[]);
+    linked["parked"] = json!(true);
+    linked["task"] = json!(
+        "## What\nShip linked, as [the notes](./notes.md) say.\n\n## Acceptance criteria\n- linked is published."
+    );
+    reply(&world, "projected", json!([{"op": "add", "node": linked}]));
+    world.until("the local link's refusal to be recorded", |world| {
+        projections(world, "projected").contains("\"kind\":\"projection-reference\"")
+    });
+    assert!(
+        !files_under(&canonical_tasks)
+            .iter()
+            .any(|(_, held)| held.contains("onepipeline.id: linked")),
+        "the refused creation was written"
+    );
+    for line in projections(&world, "projected").lines() {
+        let record: Value = serde_json::from_str(line).expect("a projection record");
+        if record["outcome"] == "failed" {
+            assert_eq!(record["class"], "refused", "{record}");
+        }
+    }
+    // Every public item is a neutral view: no engine metadata, no origin, no name of the
+    // private plan, and no local path.
+    for (path, held) in files_under(&views) {
+        for private in [
+            "onepipeline.",
+            "onetaskgraph.origin",
+            identifier,
+            "notes.md",
+        ] {
+            assert!(!held.contains(private), "{path} carries {private}:\n{held}");
+        }
+    }
+    let dispatched: Vec<Value> = world
+        .events_of("projected", "node-dispatched")
+        .iter()
+        .map(|event| event["labels"]["node"].clone())
+        .collect();
+    assert!(
+        dispatched
+            .iter()
+            .all(|node| node == "shown" || node == "keep"),
+        "{dispatched:?}"
+    );
+    world.release("keep.go");
+    world.until("the run to settle", |world| {
+        world.run_file("projected", "result.json").is_file()
+    });
+    assert_eq!(
+        settled(&world, "projected", "shown")["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+}
+
+/// A projection map of a version the store does not read is refused before a creation the run
+/// asks for is written, rather than given a second, unmapped view.
+#[test]
+fn a_projection_map_of_an_unsupported_version_refuses_the_next_creation() {
+    let home = Home::Private;
+    let (world, _, _) = home.world("boundary-projection-map");
+    world.script("keep.wait", "hold");
+    let mut inner = home.producer("inner", &[]);
+    inner["parked"] = json!(true);
+    let mut shown = home.public("shown", &[]);
+    shown["parked"] = json!(true);
+    let plan = mixed_plan(
+        "mapped-home",
+        vec![inner, shown, crate::harness::agent("keep", &[])],
+        vec![],
+    );
+    let project = home.project(&world, "mapped-home", &plan);
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        world
+            .events_of("mapped-home", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "keep")
+    });
+    let home_file = world
+        .store()
+        .join("projects")
+        .join(format!("{identifier}.md"));
+    let held = std::fs::read_to_string(&home_file).expect("the private home");
+    let broken = held.replacen("    schema_version: 1\n", "    schema_version: 9\n", 1);
+    assert_ne!(held, broken, "the home records no projection map:\n{held}");
+    std::fs::write(&home_file, broken).expect("the map is broken");
+    let mut mapped = home.public("mapped", &[]);
+    mapped["parked"] = json!(true);
+    reply(
+        &world,
+        "mapped-home",
+        json!([{"op": "add", "node": mapped}]),
+    );
+    world.until("the broken map's refusal to be recorded", |world| {
+        projections(world, "mapped-home").contains("\"kind\":\"projections-malformed\"")
+    });
+    assert!(
+        !files_under(&world.root.join("views-store"))
+            .iter()
+            .any(|(_, held)| held.contains("feat: ship mapped")),
+        "a view was written under a map the store cannot read"
+    );
+    world.release("keep.go");
+}
+
 /// One task written through the standalone store's own command line — its configured
 /// `write_policy` commands, run as the `onevcs` binary — under the world's environment.
 fn store_cli_create(
