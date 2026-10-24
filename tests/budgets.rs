@@ -1386,7 +1386,7 @@ fn store_operations_records() -> Vec<(&'static str, serde_json::Value)> {
                 "workload": {"tasks": 20, "held_nodes": 3, "private_sources": 1,
                     "poll_seconds": 1, "hour_intervals": 60, "reset_after_intervals": 30},
                 "launched_at_ms": 1_000, "window": {"from_ms": 3_000, "to_ms": 61_000},
-                "first_after_hour_ms": 63_000,
+                "first_after_hour_ms": 64_000,
                 "passes": [pass(31_000, "reset", 1), pass(32_200, "backoff", 2),
                     pass(34_400, "backoff", 4), pass(38_600, "backoff", 8),
                     pass(46_800, "backoff", 16)],
@@ -1664,6 +1664,26 @@ fn the_store_operations_reporter_refuses_every_record_it_cannot_vouch_for() {
             0,
             |r| r["fixed_interval"]["basis"] = serde_json::json!("measured"),
             "basis must be arithmetic",
+        ),
+        (
+            0,
+            |r| r["window"]["from_ms"] = serde_json::json!(40_000),
+            "the reset the launch's read learned of",
+        ),
+        (
+            0,
+            |r| r["passes"][1]["gap_ms"] = serde_json::json!(5_000),
+            "passes[1].gap_ms is not the time to the re-read after it",
+        ),
+        (
+            0,
+            |r| r["passes"][1]["wait_intervals"] = serde_json::json!(4),
+            "passes[1].gap_ms is shorter than the wait",
+        ),
+        (
+            0,
+            |r| r["passes"][2]["at_ms"] = serde_json::json!(32_000),
+            "passes[1] does not come before the re-read after it",
         ),
         (
             0,

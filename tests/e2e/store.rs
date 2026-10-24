@@ -1804,6 +1804,26 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
             .filter(|op| (from..to).contains(&op["at_ms"].as_u64().unwrap_or(0)))
             .collect()
     };
+    // Every node is ready from the run's start, having no dependency.
+    let ready = millis(
+        world.events_of(name, "run-started")[0]["ts"]
+            .as_str()
+            .expect("the run's start is stamped"),
+    );
+    // Anything asked of the store outside the launch's read and the write-back's projections:
+    // what readying or starting a node would ask, if it asked anything.
+    let preparing = |from: u64, to: u64| -> Vec<&Value> {
+        operations
+            .iter()
+            .filter(|op| {
+                !matches!(
+                    op["phase"].as_str(),
+                    Some("launch" | "write-back" | "release")
+                )
+            })
+            .filter(|op| (from..=to).contains(&op["at_ms"].as_u64().unwrap_or(0)))
+            .collect()
+    };
     let mut dispatches = Vec::new();
     let mut settlements = Vec::new();
     // What the run's first projection wrote of each node before any was dispatched: the claim
@@ -1816,15 +1836,16 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
             stamp("node-settled", &node),
         );
         launch_claim.extend(item_ops(&node, 0, dispatched));
-        // A dispatch asks the store nothing before its process starts; its write-back
-        // projection — the node's status moved to running — lands after the record of the
+        // From readiness to its process starting: what preparing it asked, and its write-back
+        // projection — the node's status moved to running — which lands after the record of the
         // dispatch, from the snapshot that record is folded into, and before the settlement.
-        let dispatch_projection = item_ops(&node, dispatched, settled);
+        let mut dispatch_operations = preparing(ready, dispatched);
+        dispatch_operations.extend(item_ops(&node, dispatched, settled));
         let settlement_projection = item_ops(&node, settled, u64::MAX);
         dispatches.push(json!({
             "node": node,
-            "operations": by_kind(dispatch_projection.iter().copied()),
-            "total": dispatch_projection.len(),
+            "operations": by_kind(dispatch_operations.iter().copied()),
+            "total": dispatch_operations.len(),
         }));
         settlements.push((
             settled,

@@ -92,8 +92,11 @@ function hour(record) {
   if (count(window.to_ms, "window.to_ms") !== hourEnd) {
     fail("window.to_ms is not an hour of the workload's intervals after launch");
   }
-  if (!(count(window.from_ms, "window.from_ms") >= launched && window.from_ms < hourEnd)) {
-    fail("window.from_ms must fall between the launch and the hour's end");
+  // The window opens where the launch's read ended, which is before the reset it learned of:
+  // a later start would leave re-reads out of the hour.
+  const resetAt = launched + stated.reset_after_intervals * stated.poll_seconds * 1000;
+  if (!(count(window.from_ms, "window.from_ms") >= launched && window.from_ms < resetAt)) {
+    fail("window.from_ms must fall between the launch and the reset the launch's read learned of");
   }
   if (!(count(record.first_after_hour_ms, "first_after_hour_ms") > hourEnd)) {
     fail("first_after_hour_ms must fall after the hour");
@@ -110,8 +113,16 @@ function hour(record) {
     if (pass.at_ms - launched !== count(pass.after_launch_ms, `${name}.after_launch_ms`)) {
       fail(`${name}.after_launch_ms is not its instant less the launch`);
     }
-    count(pass.wait_intervals, `${name}.wait_intervals`);
-    count(pass.gap_ms, `${name}.gap_ms`);
+    // Each gap is measured to the next re-read, the hour's last to the first after it, and is
+    // never shorter than the wait the schedule chose.
+    const next = index + 1 < record.passes.length ? record.passes[index + 1].at_ms : record.first_after_hour_ms;
+    if (!(next > pass.at_ms)) fail(`${name} does not come before the re-read after it`);
+    if (count(pass.gap_ms, `${name}.gap_ms`) !== next - pass.at_ms) {
+      fail(`${name}.gap_ms is not the time to the re-read after it`);
+    }
+    if (pass.gap_ms < count(pass.wait_intervals, `${name}.wait_intervals`) * stated.poll_seconds * 1000) {
+      fail(`${name}.gap_ms is shorter than the wait the schedule chose`);
+    }
     if (pass.by !== "reset" && pass.by !== "backoff") fail(`${name}.by must be reset or backoff`);
     return { ...pass, total: total(kinds(pass.operations, `${name}.operations`)) };
   });
