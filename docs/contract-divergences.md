@@ -6,7 +6,7 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107, 117 and 135** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107, 117, 135 and 139** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
@@ -12620,3 +12620,68 @@ read/write/copy seam covers the otherwise unreachable creation branch. Live
 `add`, a retry replacement with `assets_from`, an image-free add without it, and
 the unreadable-source, missing-image and plan-metadata refusals are exercised
 through the compiled binary and its real channel in `tests/e2e/store.rs`.
+
+## 139. A public task of a private coordinating project was made private by its project — RESOLVED
+
+**Ruling: the store owns task visibility, and the contract is amended on this plan's approved
+proposal** (the plan carrying screened generalize-and-export work). `docs/contract.md`'s node
+**classification** bullet and the publication boundary's guidance sentence and fenced block now
+say what this entry says; no new human approval was asked.
+
+**What was wrong.** The read took a node's classification as the stricter of its task's and its
+project's, so a private project made every task in it private. A plan that coordinates private
+work and the public task consuming its export needs a private home — its graph names private
+work — so its public consumer was refused as "an export consumer must be a public lifecycle
+node", and the only plans that loaded were the ones whose board was not private.
+
+**The rule.** A node's classification is its task's own `classification` as the linked store
+answers it: onetaskgraph 0.12.1 classifies a task by its own declaration and its own
+repositories, never by its project, and keeps a project holding a private task private. The
+engine reads that value and adds no second inheritance rule, no classification mode, setting or
+metadata key, no refusal for a missing one and no repair that enables one. A task recorded or
+copied private stays private — the read does not loosen what the store holds, and a retry
+replacement, a requeue amendment and an adopting driver's replay keep the stricter of the
+node's classification and what it replaces, as before. The engine's own repository clearance
+(`src/boundary.rs`) is unchanged and stays defense in depth: a public task naming a private or
+unknown repository is private there whatever the store says. A single-visibility plan reads and
+dispatches exactly as before.
+
+**One canonical graph, and public projections that are only views.** The run reads the home
+project and its members; a public task's neutral public projection, which the store makes in a
+public source when it copies a private plan and records on the home's
+`onetaskgraph.public_projections`, is never a member and never read as a node. The engine
+writes status to the canonical task, and the store mirrors only that status to the view; the
+engine neither restates that map's schema nor copies, sanitizes or writes a view itself.
+
+**The guidance**, `onepipeline boundary guidance [--json]`, is raised to `schema_version` 2. It
+keeps its four `steps`, its `producer` requirements — a change outside the edge's
+`source_directory` refuses the export, commit subjects and messages are screened with the files,
+and the producer's opaque `<host prefix>export/<opaque id>` branch keeps its name — and its
+`summary`, and adds `coordination`, saying one private plan's canonical home holds the whole
+graph and the export dependency, that visibility is each task's own with no plan-level setting,
+that a public task's projection carries no private dependency or backlink, and that screening
+stays on; and `example`, a synthetic private `publish: "preserve"` producer and public consumer
+joined by an `onepipeline.export_edges` entry naming `from`, `to`, `source_directory` and
+`target_directory`, with the consumer's neutral projection. The version is raised because a
+reader of version 1 knows neither field.
+
+**The store's 0.12 release, linked.** Its dependency read names, beside a private source it
+could not ask, a far end recorded under a tracker this host does not configure; such a
+prerequisite can never be named by a re-read here, so the read refuses it rather than holding
+the node. Its five new refusals are named by the write-back in the store's own words.
+
+**Release.** Breaking, the next minor: the public `Node.classification` and
+`TaskRecord.source` carry the store's `Classification` and `SourceName`, and the store moved a
+minor under them.
+
+**Proof.** `tests/contract.rs`'s
+`the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prints` holds the
+amended block to the binary. `tests/e2e/publication_boundary.rs`'s
+`a_private_coordinating_project_runs_its_public_consumer_from_a_screened_export` authors a plan
+privately, has the released store CLI route it into a private home with screening on — which
+makes the consumer's projection — and checks, launches and settles it through the compiled
+binary over real git and `onevcs`, and
+`the_guidance_coordinates_one_private_plan_by_each_tasks_own_visibility` reads the guidance as
+the host does. `src/taskgraph.rs`'s
+`the_boundary_fields_reconcile_with_the_records_they_are_read_from` reads a private project
+holding a public and a private task.

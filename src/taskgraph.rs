@@ -44,8 +44,8 @@ use onetaskgraph_core::{
     SourceFailure, TaskRequest,
 };
 use onetaskgraph_plugin_api::{
-    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
-    SourceName, StatusCategory, Task,
+    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project, SourceName,
+    StatusCategory, Task,
 };
 use serde_json::{Map, Value};
 
@@ -2162,7 +2162,10 @@ mod tests {
             .collect();
         assert_eq!(
             classes,
-            BTreeMap::from([("a", Classification::Public), ("b", Classification::Private)])
+            BTreeMap::from([
+                ("a", Classification::Public),
+                ("b", Classification::Private)
+            ])
         );
 
         // And the field is the task's, never a reserved key.
