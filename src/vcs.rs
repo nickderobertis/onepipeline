@@ -4807,6 +4807,15 @@ mod tests {
     ///
     /// Counted off the render record [`crate::rendercost`] writes, which is the
     /// account of every read a render takes.
+    ///
+    /// Here rather than in a journey because nothing outside the process can count
+    /// it: the reads this saves are the driver's close-out's, which runs outside any
+    /// render, so no record a journey reads names them — and from outside, one read
+    /// and two of the same branch answer the same. The journey that takes this path,
+    /// a rework closing out beside the node it replaced, is
+    /// `tests/e2e/review_round.rs`, which holds its cost only as the round's whole
+    /// count of `git` processes; telling the repositories apart is held here alone,
+    /// because no offline journey registers one branch name in two repositories.
     #[test]
     fn landings_now_reads_a_branch_two_nodes_name_once() {
         let _home = super::scratch_home_held();
