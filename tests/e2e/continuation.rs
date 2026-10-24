@@ -3534,8 +3534,11 @@ fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once
             )
         });
         admitting.release();
+        // Registered as well as journalled, so the shutdown, reading the registry
+        // again once its driver is gone, finds it there on any host.
         world.until("the dispatch the driver was admitting to start", |world| {
             !world.events_of(run, "node-dispatched").is_empty()
+                && !world.dispatch_records(run).is_empty()
         });
         at_the_listing.release();
         shutting.join().expect("the shutdown returns")
