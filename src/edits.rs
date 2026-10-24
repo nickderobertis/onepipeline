@@ -793,7 +793,7 @@ pub fn compile(
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
             let runtime = crate::taskgraph::runtime()
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
-            crate::storeops::about(serde_json::json!({"phase": "edit"}), || {
+            crate::storeops::about(crate::storeops::Scope::Edit, || {
                 crate::storeops::record(crate::storeops::Operation::TaskAssets);
                 runtime.block_on(built.engine.task_assets(id))
             })

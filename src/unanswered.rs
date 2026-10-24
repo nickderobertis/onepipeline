@@ -1261,6 +1261,64 @@ mod tests {
         std::env::remove_var(POLL_ENV);
     }
 
+    /// A pass the store failed outright, and one whose worker ended without an answer, leave
+    /// every hold as it stood and put each source the pass set out to ask on its next backoff,
+    /// rather than asking it again at once.
+    ///
+    /// Held here rather than end to end for the second: only a panic inside the store's read
+    /// ends the worker without an answer, and no input a journey can give the linked store
+    /// raises one. The first is driven end to end — the hold and the driver's line — by
+    /// `store::a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers`.
+    #[test]
+    fn a_pass_that_failed_or_never_answered_keeps_the_holds_and_backs_off() {
+        let _held = crate::vcs::scratch_home_held();
+        std::env::set_var(POLL_ENV, "10");
+        let payloads: BTreeMap<String, Vec<Value>> = [(
+            "alpha".to_owned(),
+            vec![SourceHold::new(vec![limited(None)], Vec::new())
+                .expect("a hold")
+                .payload()],
+        )]
+        .into();
+        for outcome in ["failed", "ended"] {
+            let mut holds = SourceHolds::of_run(&payloads, std::path::Path::new("."), "plans:p");
+            let standing = holds.held.clone();
+            let (answer, reading) = mpsc::channel();
+            holds.reading = Some(Reading {
+                answer: reading,
+                due: BTreeSet::from(["vault".to_owned()]),
+                asked: BTreeMap::from([("alpha".to_owned(), BTreeSet::from(["vault".to_owned()]))]),
+            });
+            match outcome {
+                "failed" => answer
+                    .send(Err(crate::error::Error::Sibling {
+                        tool: "onetaskgraph",
+                        message: "the store refused this read".to_owned(),
+                    }))
+                    .expect("the pass answers"),
+                _ => drop(answer),
+            }
+            let before = crate::sys::now_millis();
+            assert!(!holds.take_up(|_| Some(Vec::new())), "{outcome}");
+            assert!(
+                holds.reading.is_none(),
+                "{outcome}: the pass is still under way"
+            );
+            assert_eq!(holds.held, standing, "{outcome}: a hold moved");
+            let scheduled = holds.schedule["vault"];
+            assert_eq!(
+                (scheduled.backoffs, scheduled.wait),
+                (1, Some(10)),
+                "{outcome}"
+            );
+            assert!(
+                scheduled.at_ms >= before + 10_000,
+                "{outcome}: {scheduled:?}"
+            );
+        }
+        std::env::remove_var(POLL_ENV);
+    }
+
     /// The launch notice names the source, its cause and its next read, in one line with no
     /// run of spaces in it; a rate-limited hold asks for no credential, and an
     /// authentication one does.

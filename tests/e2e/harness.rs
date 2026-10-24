@@ -3489,12 +3489,12 @@ impl World {
         })
     }
 
-    /// One run's merged event store.
     /// Every store operation `run` has asked for, as its `store-operations.jsonl` counted them.
     pub fn store_operations(&self, run: &str) -> Vec<Value> {
         read_jsonl(&self.runs.join(run).join("store-operations.jsonl"))
     }
 
+    /// One run's merged event store.
     pub fn journal(&self, run: &str) -> Vec<Value> {
         read_jsonl(&self.runs.join(run).join("events.jsonl"))
     }

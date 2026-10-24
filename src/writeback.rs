@@ -1860,8 +1860,9 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
-    let attempted =
-        crate::storeops::about(json!({"phase": "release", "projection_at": at}), || {
+    let attempted = crate::storeops::about(
+        crate::storeops::Scope::Release { projection_at: &at },
+        || {
             project(
                 &store,
                 &mut None,
@@ -1870,7 +1871,8 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
                 &mut baseline,
                 Scope::Release,
             )
-        });
+        },
+    );
     append_record(
         &paths.dir,
         &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
@@ -2001,8 +2003,9 @@ fn worker(
         let started = Instant::now();
         // Each operation this attempt asks for is counted against it, by the stamp its
         // projection record carries.
-        let attempted =
-            crate::storeops::about(json!({"phase": "write-back", "projection_at": at}), || {
+        let attempted = crate::storeops::about(
+            crate::storeops::Scope::WriteBack { projection_at: &at },
+            || {
                 project(
                     &store,
                     &mut retained,
@@ -2011,7 +2014,8 @@ fn worker(
                     baseline,
                     Scope::Driven,
                 )
-            });
+            },
+        );
         append_record(
             &run_dir,
             &ProjectionRecord::of(at, &snapshot.project, started.elapsed(), &attempted),
@@ -3412,7 +3416,7 @@ fn update(
         baseline.save();
         return Ok(());
     }
-    let answer = crate::storeops::about(json!({"item": root}), || {
+    let answer = crate::storeops::about(crate::storeops::Scope::Item(root), || {
         attempt.call(
             StoreCall::TaskUpdate,
             Deadline::Write { per_item, items: 1 },

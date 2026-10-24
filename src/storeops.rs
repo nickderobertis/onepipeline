@@ -20,7 +20,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 /// The file, in a run's directory, each operation is appended to.
 pub(crate) const FILE: &str = "store-operations.jsonl";
@@ -117,9 +117,71 @@ impl Sink {
 
 static SINK: Mutex<Sink> = Mutex::new(Sink::new());
 
+/// What one stretch of work asks the store for operations for: the phase, and the node or the
+/// item the operations concern, where they concern one.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Scope<'a> {
+    /// The launch's read of the plan.
+    Launch,
+    /// A re-read of `node`'s edges, held on the sources `held_on` names.
+    Reread {
+        node: &'a str,
+        held_on: &'a std::collections::BTreeSet<String>,
+    },
+    /// The write-back attempt started at `projection_at`, as its projection record stamps it.
+    WriteBack { projection_at: &'a str },
+    /// A stop's release attempt started at `projection_at`.
+    Release { projection_at: &'a str },
+    /// The one item an attempt's operations now concern, inside that attempt.
+    Item(&'a str),
+    /// The check of an edit a planner sent.
+    Edit,
+}
+
+/// What the operations this thread asks for now are for: each field set by the scope that
+/// names it, an inner scope's over an outer one's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+struct Context {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    held_on: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<String>,
+}
+
+impl Context {
+    fn within(&self, scope: Scope<'_>) -> Self {
+        let mut inner = self.clone();
+        match scope {
+            Scope::Launch => inner.phase = Some("launch"),
+            Scope::Reread { node, held_on } => {
+                inner.phase = Some("re-read");
+                inner.node = Some(node.to_owned());
+                inner.held_on = Some(held_on.iter().cloned().collect());
+            }
+            Scope::WriteBack { projection_at } => {
+                inner.phase = Some("write-back");
+                inner.projection_at = Some(projection_at.to_owned());
+            }
+            Scope::Release { projection_at } => {
+                inner.phase = Some("release");
+                inner.projection_at = Some(projection_at.to_owned());
+            }
+            Scope::Item(item) => inner.item = Some(item.to_owned()),
+            Scope::Edit => inner.phase = Some("edit"),
+        }
+        inner
+    }
+}
+
 thread_local! {
     /// What the operations this thread asks for now are for.
-    static ABOUT: RefCell<Map<String, Value>> = RefCell::new(Map::new());
+    static ABOUT: RefCell<Context> = RefCell::new(Context::default());
 }
 
 /// Send this process's operations to the run whose directory is `dir`, the ones it asked for
@@ -130,18 +192,13 @@ pub(crate) fn attach(dir: &Path) {
         .attach(dir);
 }
 
-/// Run `within` with every operation it asks for on this thread said to be for `about`: an
-/// object whose members each line carries beside the operation, nested scopes' members
-/// standing over the outer ones' for their length.
-pub(crate) fn about<T>(about: Value, within: impl FnOnce() -> T) -> T {
-    let Value::Object(members) = about else {
-        return within();
-    };
+/// Run `within` with every operation it asks for on this thread said to be for `scope`, an
+/// inner scope's fields standing over the outer ones' for its length.
+pub(crate) fn about<T>(scope: Scope<'_>, within: impl FnOnce() -> T) -> T {
     let outer = ABOUT.with(|current| {
         let mut current = current.borrow_mut();
-        let outer = current.clone();
-        current.extend(members);
-        outer
+        let inner = current.within(scope);
+        std::mem::replace(&mut *current, inner)
     });
     let answer = within();
     ABOUT.with(|current| *current.borrow_mut() = outer);
@@ -159,15 +216,20 @@ pub(crate) fn record(operation: Operation) {
 
 /// The line one operation asked for now, on this thread, is written as.
 fn line(operation: Operation) -> Value {
-    let mut line = Map::new();
-    line.insert("at_ms".to_owned(), json!(crate::sys::now_millis()));
-    line.insert("operation".to_owned(), json!(operation.as_str()));
+    #[derive(serde::Serialize)]
+    struct Line<'a> {
+        at_ms: u64,
+        operation: &'static str,
+        #[serde(flatten)]
+        context: &'a Context,
+    }
     ABOUT.with(|about| {
-        for (key, value) in about.borrow().iter() {
-            line.insert(key.clone(), value.clone());
-        }
-    });
-    Value::Object(line)
+        json!(Line {
+            at_ms: crate::sys::now_millis(),
+            operation: operation.as_str(),
+            context: &about.borrow(),
+        })
+    })
 }
 
 /// Append `lines` to `file`, dropping them where it cannot be written: telemetry never fails
@@ -194,12 +256,28 @@ mod tests {
     /// one's, and none outlives its scope.
     #[test]
     fn a_line_carries_the_scope_it_was_asked_for_in() {
-        let read = about(json!({"phase": "re-read", "node": "a"}), || {
-            about(json!({"node": "b"}), || line(Operation::Dependencies))
-        });
-        assert_eq!(read["operation"], "task-dependencies");
-        assert_eq!(read["phase"], "re-read");
-        assert_eq!(read["node"], "b");
+        let held_on = std::collections::BTreeSet::from(["vault".to_owned()]);
+        let read = about(
+            Scope::WriteBack {
+                projection_at: "2026-10-24T14:02:46.658Z",
+            },
+            || about(Scope::Item("design"), || line(Operation::TaskUpdate)),
+        );
+        assert_eq!(
+            read,
+            json!({"at_ms": read["at_ms"], "operation": "task-update", "phase": "write-back",
+                   "projection_at": "2026-10-24T14:02:46.658Z", "item": "design"})
+        );
+        let reread = about(
+            Scope::Reread {
+                node: "build",
+                held_on: &held_on,
+            },
+            || line(Operation::Dependencies),
+        );
+        assert_eq!(reread["phase"], "re-read");
+        assert_eq!(reread["node"], "build");
+        assert_eq!(reread["held_on"], json!(["vault"]));
         let bare = line(Operation::Task);
         assert_eq!(bare.get("phase"), None, "{bare}");
         assert_eq!(bare.get("node"), None, "{bare}");

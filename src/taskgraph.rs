@@ -529,7 +529,10 @@ impl Store {
             };
             // The graph is the launched one: what it withdrew was settled at its read.
             let (deps, unanswered) = crate::storeops::about(
-                serde_json::json!({"phase": "re-read", "node": node.id, "held_on": held_on}),
+                crate::storeops::Scope::Reread {
+                    node: &node.id,
+                    held_on,
+                },
                 || reader.deps(&task, &ids, &Withdrawn::new()),
             )
             .map_err(Error::from)?;
@@ -549,7 +552,7 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
-        crate::storeops::about(serde_json::json!({"phase": "launch"}), || {
+        crate::storeops::about(crate::storeops::Scope::Launch, || {
             Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
         })
     }
@@ -994,11 +997,6 @@ impl Reader {
             .map(|failure| failure.source.as_str())
             .collect();
         for edge in edges {
-            if unasked_sources.contains(edge.to.id.source.as_str())
-                && !ids.contains_key(&edge.to.id.to_string())
-            {
-                continue;
-            }
             if edge.from.kind != ItemKind::Task {
                 return Err(Error::Sibling {
                     tool: STORE,
@@ -1029,6 +1027,11 @@ impl Reader {
             // A plan's `deps` are the blocking ones; a `related` edge is a link the store
             // draws and not an ordering, so it is passed over rather than refused.
             if edge.kind != DependencyKind::Blocks {
+                continue;
+            }
+            if unasked_sources.contains(edge.to.id.source.as_str())
+                && !ids.contains_key(&edge.to.id.to_string())
+            {
                 continue;
             }
             let far = &edge.to;
