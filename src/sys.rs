@@ -199,11 +199,25 @@ pub enum Stop {
 /// signals at all, because a teardown that cannot see what it must end has to
 /// say so rather than end half of it.
 ///
-/// The table is read a moment before the signals go out, so a child started
-/// inside that moment is missed; signalling the root first is what closes that
-/// in practice.
+/// On Unix a child started after the table was read is not missed: the tree is
+/// frozen, shown stopped, and listed again until a listing finds nothing new,
+/// and only then signalled — see the Unix `platform_stop`. On Windows the table
+/// is read once, so a child started between that reading and the signals is
+/// still missed: a known platform limitation, not yet closed there.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
-    platform_stop(&[pid], how).0
+    let (established, _, _, discovery) = platform_stop(&[pid], how);
+    as_discovered(established, discovery)
+}
+
+/// What a teardown may claim once it is known whether its discovery finished:
+/// a tree it signalled whole is only partly signalled if it stopped looking
+/// before the listings settled. The one rule [`stop`] and [`confirmed`] both
+/// apply, so neither can report a clean stop the other would refuse.
+fn as_discovered(established: Teardown, discovery: Discovery) -> Teardown {
+    match (established, discovery) {
+        (Teardown::Signalled, Discovery::Incomplete) => Teardown::PartlySignalled,
+        (established, _) => established,
+    }
 }
 
 /// Ask several trees to stop **together**, and then watch until they are gone.
@@ -223,13 +237,13 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// was in a tree reported [`Teardown::Signalled`] all the same, and was not ended
 /// by this teardown.
 pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardown, Vec<u32>) {
-    let (established, aimed, delivered) = platform_stop(pids, how);
+    let (established, aimed, delivered, discovery) = platform_stop(pids, how);
     let roots = delivered
         .into_iter()
         .filter(|pid| pids.contains(pid))
         .collect();
     (
-        confirmed(established, || gone_within(&aimed, patience)),
+        confirmed(established, discovery, || gone_within(&aimed, patience)),
         roots,
     )
 }
@@ -273,12 +287,15 @@ pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardow
 // `a_confirmed_stop_answers_only_once_every_descendant_is_gone` and
 // `a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed`, and through the
 // binary in `tests/e2e/driver.rs`.
-fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
-    match established {
+fn confirmed(established: Teardown, discovery: Discovery, gone: impl FnOnce() -> bool) -> Teardown {
+    let confirmed = match established {
         // A tree that is gone within the patience was reached, however the
         // per-process asks read at the instant they were made; one still
         // standing when it runs out is the run the operator has to be told is
-        // still running.
+        // still running. And a tree whose discovery did not finish is never
+        // confirmed clean, however soon what was found is gone: the probe
+        // watches only what was found, and what was not found is exactly what
+        // may still be running.
         Teardown::Signalled | Teardown::PartlySignalled => {
             if gone() {
                 Teardown::Signalled
@@ -287,7 +304,8 @@ fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
             }
         }
         established => established,
-    }
+    };
+    as_discovered(confirmed, discovery)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -350,9 +368,73 @@ fn listed() {
     let _ = crate::ordering::meet(STOP_LISTED_GATE_ENV);
 }
 
-/// What one round of signalling established, the pids it aimed at, and the pids
-/// its signal was delivered to.
-type Signalling = (Teardown, Vec<u32>, Vec<u32>);
+/// The test failpoint a teardown meets once its discovery has answered, before
+/// it signals anything.
+#[cfg(unix)]
+const STOP_DISCOVERED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_DISCOVERED_GATE";
+
+/// Meet [`STOP_DISCOVERED_GATE_ENV`]: a journey holds a teardown here so what a
+/// process its discovery could not hold starts is placed after the last listing.
+/// Nothing at all where the variable is unset.
+#[cfg(unix)]
+fn discovered() {
+    let _ = crate::ordering::meet(STOP_DISCOVERED_GATE_ENV);
+}
+
+/// What one round of signalling established, the pids it aimed at, the pids its
+/// signal was delivered to, and whether what it aimed at is the whole tree.
+type Signalling = (Teardown, Vec<u32>, Vec<u32>, Discovery);
+
+/// Whether a teardown found every process in the tree it signalled.
+///
+/// Carried beside what the signals established rather than folded into it,
+/// because the confirmation after them only watches the pids that were found:
+/// a teardown that stopped looking before its listings settled can watch every
+/// one of those go and still have left a process nobody found running, and
+/// that must reach the caller as a stop that did not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// The last listing found nothing the teardown did not already hold.
+    Complete,
+    /// The teardown signalled before a listing had settled: one was refused,
+    /// or it ran out of [`FREEZE_BOUND`] while the tree was still growing.
+    Incomplete,
+}
+
+/// The processes a teardown has paused, let go again when this is dropped —
+/// on every way out of the teardown, a panic included.
+///
+/// A paused process reads as running to every view and ends nothing, and a
+/// teardown that returned with one still paused would leave it so for good.
+#[cfg(unix)]
+struct Paused(Vec<u32>);
+
+#[cfg(unix)]
+impl Drop for Paused {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            let _ = signal_one(*pid, libc::SIGCONT);
+        }
+    }
+}
+
+/// How long a teardown keeps freezing what each new listing finds before it
+/// signals what it has.
+///
+/// A frozen process starts nothing, so the listings settle as soon as the tree
+/// is frozen, which is a listing or two. What this bounds is a tree with a
+/// process in it that does not stop — one this user may not stop, or one that
+/// took the signal and runs on — and that may keep starting more: the teardown
+/// signals what it found rather than waiting on it, and answers that its
+/// discovery did not finish.
+#[cfg(unix)]
+const FREEZE_BOUND: Duration = Duration::from_secs(2);
+
+/// How long discovery waits before asking again whether what it paused has
+/// stopped: a stop signal takes effect when its target is next scheduled, which
+/// is a moment rather than at once.
+#[cfg(unix)]
+const STOPPED_POLL: Duration = Duration::from_millis(5);
 
 #[cfg(unix)]
 fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
@@ -362,37 +444,210 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     };
     let mut aimed = aimable(roots);
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     // The table is read **before** anything is signalled: a process whose parent
     // has died is reparented at once, so a table read after any root is gone no
     // longer descends to what was under it.
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new(), Vec::new());
+        return (
+            Teardown::NotAttempted,
+            Vec::new(),
+            Vec::new(),
+            Discovery::Incomplete,
+        );
     };
     listed();
-    // The roots first, so what is left has stopped growing while its members are
-    // taken down.
-    for root in aimed.clone() {
-        for descendant in descended_from(&table, root) {
-            if !aimed.contains(&descendant) {
-                aimed.push(descendant);
-            }
-        }
-    }
+    aim_at_descent(&mut aimed, &table, self::pid());
+    // Frozen before anything is signalled, and listed again until a listing
+    // finds nothing new. One listing is a moment old by the time its signals go
+    // out, and a dispatch that starts its next turn inside that moment starts a
+    // process no walk of it found: the dispatch dies of the signal, the turn is
+    // handed to `init`, and it runs on — spending what the stop was asked to
+    // stop. A stopped process starts nothing, and a stopped parent is still the
+    // parent of what it did start, so once the tree is frozen a listing is
+    // complete. A stop signal that was delivered is not yet a stopped process,
+    // so a listing counts only once the host shows every process it descends
+    // from as stopped. Nothing outside descent is frozen, and every process that
+    // is frozen is let go again once it has been signalled, by `Paused`.
+    let mut frozen = Paused(Vec::new());
+    let discovery = discover(
+        &mut aimed,
+        &mut frozen.0,
+        Instant::now().checked_add(FREEZE_BOUND),
+        |pid| signal_one(pid, libc::SIGSTOP) == Reached::Delivered,
+        all_stopped,
+        process_table,
+    );
+    discovered();
     // Every answer is kept: one process this user may not signal is one still
     // running, and a teardown that reported the tree as reached anyway would be
     // the same false completion in a smaller place. And a walk that found
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
     let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
+    // The signal waits on a stopped process until it runs again, so letting
+    // the tree go is what delivers it.
+    drop(frozen);
     let delivered = aimed
         .iter()
         .zip(&answers)
         .filter(|(_, answer)| **answer == Reached::Delivered)
         .map(|(pid, _)| *pid)
         .collect();
-    (established(&answers), aimed, delivered)
+    (established(&answers), aimed, delivered, discovery)
+}
+
+/// Pause everything in `aimed`, wait until the host shows all of it stopped,
+/// list again, and add what the listing finds, until a listing finds nothing
+/// new — and say whether it got there.
+///
+/// Every pid `pause` reports paused is recorded in `paused`, which the caller
+/// holds for letting them go. `pause` is asked again on every round, since a
+/// delivered stop signal is not a stopped process: what `stopped` cannot show
+/// stopped is asked again, and no listing is taken until it can. Discovery is
+/// [`Discovery::Incomplete`] when a listing is refused, and when `deadline`
+/// passes first — while what was paused has not all been shown stopped, or while
+/// the tree is still growing: in both the caller signals what it has, and what it
+/// does not have is what may still be running. Takes its pausing, its check and
+/// its listing so the decision can be driven to each of its ends, the deadline
+/// above all — a process that takes the signal and runs on is one a real host
+/// gives only to a fixture that traces it.
+#[cfg(unix)]
+fn discover(
+    aimed: &mut Vec<u32>,
+    paused: &mut Vec<u32>,
+    deadline: Option<Instant>,
+    mut pause: impl FnMut(u32) -> bool,
+    mut stopped: impl FnMut(&[u32]) -> bool,
+    mut list: impl FnMut() -> Option<Vec<(u32, u32)>>,
+) -> Discovery {
+    loop {
+        for pid in aimed.iter() {
+            if pause(*pid) && !paused.contains(pid) {
+                paused.push(*pid);
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Discovery::Incomplete;
+        }
+        if !stopped(aimed) {
+            std::thread::sleep(STOPPED_POLL);
+            continue;
+        }
+        let Some(table) = list() else {
+            return Discovery::Incomplete;
+        };
+        let found = aimed.len();
+        aim_at_descent(aimed, &table, self::pid());
+        if aimed.len() == found {
+            return Discovery::Complete;
+        }
+    }
+}
+
+/// Whether the host shows every process in `pids` that is still there as
+/// stopped, and so starting nothing — and `false` whenever it cannot say.
+///
+/// A process that has exited is stopped for this purpose, and so is one that
+/// has exited and not been reaped. One that is there but which this user may
+/// not signal is never shown stopped by anything this did, so it is `false`
+/// for as long as it runs. Only a group stop counts: a process held by a tracer
+/// is one the tracer may let go at any moment. On Linux every thread is asked,
+/// because a process's other threads are still running until the last of them
+/// has taken the stop.
+#[cfg(unix)]
+fn all_stopped(pids: &[u32]) -> bool {
+    let there: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| signal_one(*pid, 0) != Reached::Absent)
+        .collect();
+    if there.is_empty() {
+        return true;
+    }
+    let ids = there
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::rendercost::process_spawned("ps");
+    let mut asked = std::process::Command::new("ps");
+    #[cfg(target_os = "linux")]
+    asked.arg("-L");
+    let Ok(answered) = asked
+        .args(["-o", "pid=,stat=", "-p", &ids])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    // `ps -p` fails when none of its ids is a process any more, which is also
+    // the answer of a `ps` that could not run: asked again next round.
+    if !answered.status.success() {
+        return false;
+    }
+    let Ok(text) = String::from_utf8(answered.stdout) else {
+        return false;
+    };
+    let mut shown: Vec<u32> = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut columns = line.split_whitespace();
+        let (Some(Ok(pid)), Some(state), None) = (
+            columns.next().map(str::parse::<u32>),
+            columns.next(),
+            columns.next(),
+        ) else {
+            return false;
+        };
+        if !matches!(state.chars().next(), Some('T' | 'Z' | 'X')) {
+            return false;
+        }
+        shown.push(pid);
+    }
+    // One the answer leaves out is stopped only if it has gone since: still
+    // there and unshown is not a process anybody can say has stopped.
+    there
+        .iter()
+        .all(|pid| shown.contains(pid) || signal_one(*pid, 0) == Reached::Absent)
+}
+
+/// Add to `aimed` every process `table` shows descended from what it already
+/// holds — but never `me`, nor anything reached only through it.
+///
+/// The roots stay first and in their order, so what is signalled first is
+/// what would otherwise go on starting more. Every member is walked, not the
+/// roots alone, so a member whose parent exited before it was frozen still
+/// reaches what it starts afterwards. `me` is the stopping process: a stop run
+/// from inside the tree it ends — an agent of the run stopping its own run —
+/// must not freeze itself, which would leave it and the whole run stopped for
+/// good, nor end itself before it has signalled the rest. What it started is
+/// the `ps` it lists with, a new one every listing, so not walking through it
+/// is also what lets the listings settle. A stop that is the roots' *parent*
+/// is above the walk and changes nothing about it.
+#[cfg(unix)]
+fn aim_at_descent(aimed: &mut Vec<u32>, table: &[(u32, u32)], me: u32) {
+    // Without its own row, `me` is a process no walk reaches, and so is
+    // everything it started.
+    let without_me: Vec<(u32, u32)> = table
+        .iter()
+        .copied()
+        .filter(|(pid, _)| *pid != me)
+        .collect();
+    let mut walked = 0;
+    while walked < aimed.len() {
+        for descendant in descended_from(&without_me, aimed[walked]) {
+            if !aimed.contains(&descendant) {
+                aimed.push(descendant);
+            }
+        }
+        walked += 1;
+    }
 }
 
 /// What the answers from one round of signalling establish about the tree.
@@ -604,10 +859,20 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed_roots.is_empty() {
-        return (Teardown::NothingToStop, aimed_roots, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed_roots,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new(), Vec::new());
+        return (
+            Teardown::NotAttempted,
+            Vec::new(),
+            Vec::new(),
+            Discovery::Incomplete,
+        );
     };
     listed();
     let mut tree = aimed_roots.clone();
@@ -624,7 +889,12 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     // Every process is asked separately, because `taskkill` takes one root, and
     // the answers are folded the way a teardown of several trees has to be: one
@@ -677,7 +947,10 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         (false, true) => Teardown::PartlySignalled,
         (false, false) => Teardown::NotAttempted,
     };
-    (established, aimed, delivered)
+    // One listing and nothing after it, so what it found is all this arm can
+    // know of; a root's child started since is the gap the Unix arm's freeze
+    // closes, and this one does not yet.
+    (established, aimed, delivered, Discovery::Complete)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2901,6 +3174,45 @@ mod tests {
         false
     }
 
+    /// What a teardown aims at is descent from what it already holds — kept in
+    /// order, roots first — and never the stopping process or what it started,
+    /// while a stop that is the roots' own parent still reaches all of it.
+    ///
+    /// A stop run from inside the run it ends is a descendant of that run's
+    /// roots, and the teardown freezes what it aims at: aiming at itself would
+    /// leave it, and the run with it, stopped for good, and aiming at the `ps`
+    /// it lists with would find a new process every listing. A member held
+    /// from an earlier listing is walked too, so a process whose parent exited
+    /// before it was frozen still reaches what it starts afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_aims_at_descent_and_never_at_the_stop_or_what_it_started() {
+        // 10 is the root; 12 is the stop, under 11; 13 is its `ps`. 20 was
+        // found under the root before and has since been handed to `init`.
+        let table = [
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (13, 12),
+            (14, 11),
+            (15, 14),
+            (20, 1),
+            (21, 20),
+        ];
+        let mut aimed = vec![10, 20];
+        aim_at_descent(&mut aimed, &table, 12);
+        assert_eq!(aimed[..2], [10, 20], "the roots were not kept first");
+        let mut rest = aimed[2..].to_vec();
+        rest.sort_unstable();
+        assert_eq!(rest, [11, 14, 15, 21]);
+        // A stop that started the roots itself is above the walk, and reaches
+        // all of it.
+        let mut aimed = vec![11];
+        aim_at_descent(&mut aimed, &table, 10);
+        aimed.sort_unstable();
+        assert_eq!(aimed, [11, 12, 13, 14, 15]);
+    }
+
     /// A live process, a process already gone, and an id that is not a process
     /// each answer differently.
     ///
@@ -3919,14 +4231,185 @@ try {
     #[test]
     fn a_descendant_the_tree_kill_already_ended_is_a_clean_stop() {
         assert_eq!(
-            confirmed(Teardown::PartlySignalled, || true),
+            confirmed(Teardown::PartlySignalled, Discovery::Complete, || true),
             Teardown::Signalled,
             "a teardown whose tree was gone within the patience refused a stop it had made"
         );
         assert_eq!(
-            confirmed(Teardown::Signalled, || true),
+            confirmed(Teardown::Signalled, Discovery::Complete, || true),
             Teardown::Signalled,
             "a teardown that reached its whole tree was not reported as one"
+        );
+    }
+
+    /// Discovery reaches each of its ends, and pauses everything it found on the
+    /// way to any of them.
+    ///
+    /// Settled: a listing that finds nothing new, taken only once everything
+    /// paused is shown stopped. Incomplete: a listing the host refuses, a deadline
+    /// passed while the tree is still growing, and a deadline passed while a
+    /// process it paused — or could not pause — is not shown stopped. The last
+    /// two need a host that will not settle, which a real one gives only to a
+    /// process this user may not pause or one a tracer keeps running, so the
+    /// pausing, the check and the listing are handed in.
+    #[cfg(unix)]
+    #[test]
+    fn discovery_settles_or_says_it_did_not_and_pauses_what_it_found() {
+        // The ends meant to settle get a deadline nothing reaches, so a host
+        // whose short sleeps run long — a loaded Mac runner — cannot end them
+        // first; only the ends meant to be ended by the deadline get a short one.
+        let soon = || Instant::now().checked_add(std::time::Duration::from_millis(50));
+        let patient = || Instant::now().checked_add(std::time::Duration::from_secs(60));
+        let grown = vec![(10, 1), (11, 10), (12, 11)];
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let settled = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| true,
+            |_| true,
+            || Some(grown.clone()),
+        );
+        assert_eq!(settled, Discovery::Complete);
+        assert_eq!(
+            (aimed.clone(), paused.clone()),
+            (vec![10, 11, 12], vec![10, 11, 12])
+        );
+
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let refused = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| true,
+            |_| true,
+            || None,
+        );
+        assert_eq!(
+            (refused, aimed, paused),
+            (Discovery::Incomplete, vec![10], vec![10])
+        );
+
+        // A tree that grows at every listing never settles, so only the
+        // deadline ends it: whatever was found by then is paused, and the
+        // answer is that discovery did not finish.
+        let mut next = 100;
+        let mut growing = || {
+            next += 1;
+            Some((101..=next).map(|pid| (pid, 10)).chain([(10, 1)]).collect())
+        };
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let bounded = discover(
+            &mut aimed,
+            &mut paused,
+            soon(),
+            |_| true,
+            |_| true,
+            &mut growing,
+        );
+        assert_eq!(bounded, Discovery::Incomplete);
+        assert!(
+            aimed.len() > 1,
+            "the tree never grew, so the bound was not what ended it"
+        );
+        assert_eq!(
+            paused, aimed,
+            "something found before the bound was left unpaused"
+        );
+
+        // A process the pause did not reach is not recorded as paused, and is
+        // never shown stopped, so no listing is taken and the deadline ends it.
+        let (mut aimed, mut paused, mut listings) = (vec![10], Vec::new(), 0);
+        let unpaused = discover(
+            &mut aimed,
+            &mut paused,
+            soon(),
+            |pid| pid != 10,
+            |pids| !pids.contains(&10),
+            || {
+                listings += 1;
+                Some(grown.clone())
+            },
+        );
+        assert_eq!(unpaused, Discovery::Incomplete);
+        assert_eq!(
+            (aimed, paused, listings),
+            (vec![10], Vec::new(), 0),
+            "a pid the pause did not reach was recorded as paused, or listed past"
+        );
+
+        // A stop that was delivered and has not yet taken is waited on and
+        // asked about again — every round pausing anew — and the listing is
+        // taken only once it has, so what it shows is a frozen tree.
+        let (mut aimed, mut paused, mut asked, mut pauses) = (vec![10], Vec::new(), 0, 0);
+        let taken = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| {
+                pauses += 1;
+                true
+            },
+            |_| {
+                asked += 1;
+                asked > 2
+            },
+            || Some(vec![(10, 1)]),
+        );
+        assert_eq!(taken, Discovery::Complete);
+        assert_eq!((aimed, paused), (vec![10], vec![10]));
+        assert_eq!(
+            (asked, pauses),
+            (3, 3),
+            "a delivered stop was trusted as taken"
+        );
+    }
+
+    /// A live process this user has not stopped is not shown stopped; one it
+    /// has stopped is, and so is one that is gone.
+    ///
+    /// Asked of the host itself, because the answer is the host's: a child of
+    /// this test, running, then stopped, then ended and reaped.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_is_shown_stopped_only_once_the_host_says_it_has_stopped() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child to ask about");
+        let pid = child.id();
+        assert!(!all_stopped(&[pid]), "a running process was shown stopped");
+        assert_eq!(signal_one(pid, libc::SIGSTOP), Reached::Delivered);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !all_stopped(&[pid]) {
+            assert!(
+                Instant::now() < deadline,
+                "a stopped process was never shown stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(all_stopped(&[pid]), "a process that is gone was not");
+        assert!(all_stopped(&[]));
+    }
+
+    /// A teardown whose discovery did not finish is never confirmed clean, even
+    /// once everything it found is gone: what it did not find is what may
+    /// still be running. And the answers that say nothing was signalled keep
+    /// their own meaning.
+    #[test]
+    fn a_teardown_that_stopped_looking_is_never_confirmed_clean() {
+        for established in [Teardown::Signalled, Teardown::PartlySignalled] {
+            assert_eq!(
+                confirmed(established, Discovery::Incomplete, || true),
+                Teardown::PartlySignalled,
+                "{established:?} over an unfinished discovery was confirmed as a clean stop"
+            );
+        }
+        assert_eq!(
+            confirmed(Teardown::NotAttempted, Discovery::Incomplete, || true),
+            Teardown::NotAttempted
         );
     }
 
@@ -3942,12 +4425,12 @@ try {
     #[test]
     fn a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal() {
         assert_eq!(
-            confirmed(Teardown::PartlySignalled, || false),
+            confirmed(Teardown::PartlySignalled, Discovery::Complete, || false),
             Teardown::PartlySignalled,
             "a stop that left part of the run running reported a clean teardown"
         );
         assert_eq!(
-            confirmed(Teardown::Signalled, || false),
+            confirmed(Teardown::Signalled, Discovery::Complete, || false),
             Teardown::PartlySignalled,
             "a signalled tree that was still there when the patience ran out was reported as \
              gone"
@@ -3964,18 +4447,18 @@ try {
         // about was the only thing to see, after the leg that reads it here had
         // gone green.
         assert_eq!(
-            confirmed(Teardown::NotAttempted, || true),
+            confirmed(Teardown::NotAttempted, Discovery::Complete, || true),
             Teardown::NotAttempted,
             "a teardown that never began was reported as one that reached the tree"
         );
         #[cfg(unix)]
         assert_eq!(
-            confirmed(Teardown::Refused, || true),
+            confirmed(Teardown::Refused, Discovery::Complete, || true),
             Teardown::Refused,
             "a teardown every ask of which was refused was reported as one that reached the tree"
         );
         assert_eq!(
-            confirmed(Teardown::NothingToStop, || true),
+            confirmed(Teardown::NothingToStop, Discovery::Complete, || true),
             Teardown::NothingToStop,
             "a teardown that found no tree to aim at was reported as one that ended a run"
         );
