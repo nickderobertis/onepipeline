@@ -1,16 +1,16 @@
-//! `budgets.yaml` and the command behind its one budget, held to the checker that reads them:
+//! `budgets.yaml` and the commands behind its budgets, held to the checker that reads them:
 //! `onebudgetspec-core`, the library the `onebudgetspec` binary is built from, at the release
 //! `justfile` installs that binary at.
 //!
-//! The command runs a whole e2e journey, which `just budgets` measures; what is held here is
-//! everything around that journey — the file loading as the budget it states, the result the
-//! journey writes being one the checker parses as a value, and the command refusing to report a
-//! measurement it did not take.
+//! What is held here is everything around the journeys a budget's figure comes from — each
+//! file loading as the budget it states, a result a journey writes being one the checker
+//! parses as a value, and each command refusing to report a measurement it did not take.
 //!
 //! `host-view-time` is held here the same way: its entry, its command — which runs no
 //! journey at all, only reads the record `scripts/host-view-measure.mjs` leaves — reporting
 //! that record and refusing one it cannot vouch for, and the measurement refusing to record a
-//! read that failed.
+//! read that failed. So are the three store-operation budgets, whose one reporter reads the
+//! records the e2e tier's store journeys leave.
 
 #[cfg(unix)]
 #[path = "e2e/budget_result.rs"]
@@ -21,11 +21,6 @@ use std::path::PathBuf;
 use onebudgetspec_core::{Direction, Measure};
 #[cfg(unix)]
 use onebudgetspec_core::{Selection, Verdict};
-
-const BUDGET: &str = "linear-requests-per-writeback-settlement";
-
-const JOURNEY: &str =
-    "linear_writeback::the_costliest_linear_settlement_after_the_first_is_reported_as_measured";
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -38,38 +33,6 @@ fn scratch(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     dir
-}
-
-/// The file loads under the pinned checker, and registers the budget as it is meant: the
-/// requests a Linear settlement write-back sends, reported by its command, at most two.
-#[test]
-fn the_budgets_file_registers_the_linear_writeback_budget_for_the_pinned_checker() {
-    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
-        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
-    let budget = loaded
-        .files()
-        .iter()
-        .flat_map(|file| &file.contents.budgets)
-        .find(|budget| budget.id == BUDGET)
-        .unwrap_or_else(|| panic!("budgets.yaml registers no {BUDGET}"));
-    assert_eq!(budget.measure, Measure::Reported);
-    assert_eq!(budget.unit, "requests");
-    assert_eq!(budget.direction, Direction::Max);
-    assert!(
-        (budget.threshold - 2.0).abs() < f64::EPSILON,
-        "{}",
-        budget.threshold
-    );
-    assert_eq!(
-        budget.command,
-        ["bash", "scripts/linear-writeback-budget.sh"],
-        "the budget's command is not the committed script"
-    );
-    let description = budget.description.as_deref().unwrap_or_default();
-    assert!(
-        description.contains("production Linear key") && description.contains("no check may reach"),
-        "{description}"
-    );
 }
 
 /// The checker library linked here is the release `just budgets` installs, so what this file
@@ -96,9 +59,9 @@ fn the_linked_checker_is_the_release_the_justfile_installs() {
     assert_eq!(installed, linked);
 }
 
-/// What the journey writes is a value to the checker: measured through the library's own
-/// `check`, over a budget whose command writes exactly the result the journey builds. That
-/// command is a POSIX shell line, as the budget's own is, so it runs where a shell does.
+/// What a journey writes through `budget_result` is a value to the checker: measured through
+/// the library's own `check`, over a budget whose command writes exactly the result a journey
+/// builds. That command is a POSIX shell line, so it runs where a shell does.
 #[cfg(unix)]
 #[test]
 fn the_result_the_journey_writes_is_a_value_the_checker_measures() {
@@ -131,18 +94,9 @@ fn the_result_the_journey_writes_is_a_value_the_checker_measures() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The command, run with `just` standing in for the journey it hands to: `behaviour` is the
-/// stand-in's shell body, and `result` the file the command is told to write to, if any.
-#[cfg(unix)]
-fn command(name: &str, behaviour: &str, result: Option<&std::path::Path>) -> std::process::Output {
-    command_for(
-        "scripts/linear-writeback-budget.sh",
-        name,
-        behaviour,
-        result,
-    )
-}
-
+/// The budget command `script`, run with `just` standing in for the journey it hands to:
+/// `behaviour` is the stand-in's shell body, and `result` the file the command is told to write
+/// to, if any.
 #[cfg(unix)]
 fn command_for(
     script: &str,
@@ -170,83 +124,6 @@ fn command_for(
         run.env("ONEBUDGETSPEC_RESULT", result);
     }
     run.output().expect("the budget command runs")
-}
-
-/// Run outside the checker, the command refuses before it runs anything; run by it, a journey
-/// that fails, or passes and writes nothing, fails the command rather than reporting a value it
-/// never measured, and one that writes its result passes.
-#[cfg(unix)]
-#[test]
-fn the_budget_command_reports_only_a_measurement_its_journey_took() {
-    let stderr =
-        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
-
-    let unset = command("unset", "echo ran >&2; exit 0", None);
-    assert_eq!(unset.status.code(), Some(2), "{}", stderr(&unset));
-    assert!(
-        stderr(&unset).contains("ONEBUDGETSPEC_RESULT is not set"),
-        "{}",
-        stderr(&unset)
-    );
-    assert!(
-        !stderr(&unset).contains("ran"),
-        "it ran the journey with nowhere to write"
-    );
-
-    let dir = scratch("results");
-    let failing = command("failing", "exit 4", Some(&dir.join("failing.json")));
-    assert_eq!(failing.status.code(), Some(4), "{}", stderr(&failing));
-
-    let silent = dir.join("silent.json");
-    std::fs::write(&silent, "").expect("a fresh, empty result file");
-    let silent = command("silent", "exit 0", Some(&silent));
-    assert_eq!(silent.status.code(), Some(1), "{}", stderr(&silent));
-    assert!(
-        stderr(&silent).contains("wrote no result"),
-        "{}",
-        stderr(&silent)
-    );
-
-    // The stand-in writes a result only when it was asked for exactly the journey that measures
-    // this budget, through the recipe that runs e2e journeys, with the result file reaching it.
-    let measured = dir.join("measured.json");
-    std::fs::write(&measured, "").expect("a fresh, empty result file");
-    let wrote = command(
-        "wrote",
-        &format!(
-            "[ \"$1\" = test-e2e ] && [ \"$2\" = 'test(={JOURNEY})' ] && [ $# -eq 2 ] \\\n  \
-             && printf '{{\"value\": 2}}' > \"$ONEBUDGETSPEC_RESULT\""
-        ),
-        Some(&measured),
-    );
-    assert_eq!(wrote.status.code(), Some(0), "{}", stderr(&wrote));
-    assert_eq!(
-        std::fs::read_to_string(&measured).expect("the result reads"),
-        r#"{"value": 2}"#
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The journey the command asks for is one the e2e binary has: a filter naming a test that is
-/// not there would select nothing.
-#[test]
-fn the_budget_command_names_a_journey_the_e2e_binary_holds() {
-    let journeys = std::fs::read_to_string(root().join("tests/e2e/linear_writeback.rs"))
-        .expect("the journeys read");
-    let (module, name) = JOURNEY
-        .split_once("::")
-        .expect("a module-qualified journey");
-    assert_eq!(module, "linear_writeback");
-    assert!(
-        journeys.contains(&format!("#[test]\nfn {name}()")),
-        "tests/e2e/linear_writeback.rs holds no journey {name}"
-    );
-    let script = std::fs::read_to_string(root().join("scripts/linear-writeback-budget.sh"))
-        .expect("the command reads");
-    assert!(
-        script.contains(&format!("journey='{JOURNEY}'")),
-        "the command runs another journey than {JOURNEY}"
-    );
 }
 
 /// The view budget, as `budgets.yaml` registers it: one `onepipeline host` read, reported by
@@ -1336,4 +1213,321 @@ fn the_settlement_budget_command_refuses_a_missing_result_and_propagates_failure
         43
     );
     std::fs::remove_dir_all(dir).expect("the command fixture is removed");
+}
+
+/// The three store-operation budgets, each as `budgets.yaml` registers it with the workload it
+/// states: reported in store operations by the one reporter off the records the e2e tier's
+/// store journeys leave — records the tier declares among its outputs — naming no backend, and
+/// with the Linear request budget they replace gone.
+#[test]
+fn the_budgets_file_registers_the_store_operation_budgets() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
+    let budgets: Vec<_> = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .collect();
+    assert!(
+        budgets
+            .iter()
+            .all(|budget| budget.id != "linear-requests-per-writeback-settlement"),
+        "the Linear request budget is still registered"
+    );
+    let journeys =
+        std::fs::read_to_string(root().join("tests/e2e/store.rs")).expect("the journeys read");
+    let reporter = std::fs::read_to_string(root().join("scripts/store-operations-budget.mjs"))
+        .expect("the reporter reads");
+    for (id, threshold, workload) in [
+        (
+            "source-hold-store-operations-per-hour",
+            5.0,
+            &[
+                "20-task plan",
+                "3 tasks each with one opaque edge",
+                "a reset 30 minutes out during the first half hour and none during the second",
+                "ONEPIPELINE_SOURCE_POLL_SECONDS=1",
+            ][..],
+        ),
+        (
+            "store-operations-per-dispatch",
+            1.0,
+            &["20-task plan", "no holds", "20 dispatches counted"][..],
+        ),
+        (
+            "store-operations-per-settlement",
+            1.0,
+            &["five consecutive settlement write-backs including the first"][..],
+        ),
+    ] {
+        let budget = budgets
+            .iter()
+            .find(|budget| budget.id == id)
+            .unwrap_or_else(|| panic!("budgets.yaml registers no {id}"));
+        assert_eq!(budget.measure, Measure::Reported, "{id}");
+        assert_eq!(budget.unit, "operations", "{id}");
+        assert_eq!(budget.direction, Direction::Max, "{id}");
+        assert!(
+            (budget.threshold - threshold).abs() < f64::EPSILON,
+            "{id}: {}",
+            budget.threshold
+        );
+        assert_eq!(
+            budget.command,
+            ["node", "scripts/store-operations-budget.mjs"],
+            "{id}'s command is not the committed reporter"
+        );
+        assert!(budget.labels.is_empty(), "{id}: {:?}", budget.labels);
+        // A folded scalar: its lines are joined by single spaces.
+        let description = budget.description.as_deref().unwrap_or_default();
+        for said in workload {
+            assert!(
+                description.contains(said),
+                "{id} does not state its workload {said:?}: {description}"
+            );
+        }
+        let lower = description.to_lowercase();
+        for backend in ["linear", "github", "jira"] {
+            assert!(!lower.contains(backend), "{id} names the backend {backend}");
+        }
+        assert!(
+            reporter.contains(&format!("\"{id}\":")),
+            "the reporter knows no {id}"
+        );
+    }
+    for journey in [
+        "a_held_hour_asks_the_store_what_its_reset_and_backoff_schedule_and_nothing_more",
+        "each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operations_it_asked_for",
+    ] {
+        assert!(
+            journeys.contains(&format!("#[test]\nfn {journey}()")),
+            "tests/e2e/store.rs holds no journey {journey}"
+        );
+        assert!(
+            reporter.contains(&format!("store::{journey}")),
+            "the reporter names another journey than {journey}"
+        );
+    }
+    let records = "target/budget-records/store-operations";
+    assert!(reporter.contains(&format!("const directory = \"{records}\";")));
+    assert!(journeys.contains(&format!(
+        "const STORE_OPERATIONS_RECORDS: &str = \"{records}\";"
+    )));
+    let e2e: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("tests/e2e/project.json"))
+            .expect("tests/e2e/project.json"),
+    )
+    .expect("tests/e2e/project.json parses");
+    assert!(
+        e2e["targets"]["test"]["outputs"]
+            .as_array()
+            .expect("the e2e tier names its outputs")
+            .contains(&serde_json::json!(format!("{{workspaceRoot}}/{records}"))),
+        "the e2e tier's outputs leave out {records}, so a cached replay of it restores no record"
+    );
+    let project: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("project.json")).expect("project.json"),
+    )
+    .expect("project.json parses");
+    assert!(project["targets"]["budgets"]["inputs"]
+        .as_array()
+        .expect("the budgets target names its inputs")
+        .contains(&serde_json::json!(
+            "{workspaceRoot}/scripts/store-operations-budget.mjs"
+        )));
+}
+
+/// The store-operation reporter, run from `cwd` for `budget`, the result going to `result`
+/// when one is named.
+#[cfg(unix)]
+fn store_operations_report(
+    cwd: &std::path::Path,
+    budget: Option<&str>,
+    result: Option<&std::path::Path>,
+) -> std::process::Output {
+    let mut command = std::process::Command::new("node");
+    command
+        .arg(root().join("scripts/store-operations-budget.mjs"))
+        .current_dir(cwd)
+        .env_remove("ONEBUDGETSPEC_RESULT")
+        .env_remove("ONEBUDGETSPEC_BUDGET_ID");
+    if let Some(budget) = budget {
+        command.env("ONEBUDGETSPEC_BUDGET_ID", budget);
+    }
+    if let Some(result) = result {
+        command.env("ONEBUDGETSPEC_RESULT", result);
+    }
+    command.output().expect("node runs the committed reporter")
+}
+
+/// The records the store journeys write, shaped as they write them.
+#[cfg(unix)]
+fn store_operations_records() -> Vec<(&'static str, serde_json::Value)> {
+    let pass = |after: u64, by: &str, wait: u64| {
+        serde_json::json!({"at_ms": 1_000 + after, "after_launch_ms": after,
+            "operations": {"task-dependencies": 1}, "nodes": ["held-1"], "by": by,
+            "wait_intervals": wait, "gap_ms": wait * 1_000 + 200})
+    };
+    let attempts = serde_json::json!([
+        {"projection_at": "2026-10-24T14:12:44.069Z", "items": 20,
+         "shared": {"end-command": 1, "project-metadata-set": 1}},
+        {"projection_at": "2026-10-24T14:12:45.037Z", "items": 4, "shared": {"end-command": 1}},
+    ]);
+    let one = |node: String| serde_json::json!({"node": node, "operations": {"task-update": 1}, "total": 1});
+    let mut dispatches: Vec<serde_json::Value> =
+        (1..=20).map(|i| one(format!("task-{i:02}"))).collect();
+    dispatches[7] = serde_json::json!({"node": "task-08",
+        "operations": {"task-update": 1, "task": 1}, "total": 2});
+    vec![
+        (
+            "source-hold-store-operations-per-hour",
+            serde_json::json!({
+                "schema_version": 1, "budget": "source-hold-store-operations-per-hour",
+                "workload": {"tasks": 20, "held_nodes": 3, "private_sources": 1,
+                    "poll_seconds": 1, "hour_intervals": 60, "reset_after_intervals": 30},
+                "passes": [pass(31_000, "reset", 1), pass(32_200, "backoff", 2),
+                    pass(34_400, "backoff", 4), pass(38_600, "backoff", 8),
+                    pass(46_800, "backoff", 16)],
+                "operations": {"task-dependencies": 5}, "per_source": {"vault": 5},
+                "per_node": {"held-1": 5, "held-2": 0, "held-3": 0},
+                "fixed_interval": {"basis": "arithmetic", "interval_s": 1, "passes": 60,
+                    "held_nodes": 3, "operations": 180},
+                "total": 5,
+            }),
+        ),
+        (
+            "store-operations-per-dispatch",
+            serde_json::json!({
+                "schema_version": 1, "budget": "store-operations-per-dispatch",
+                "workload": {"tasks": 20, "holds": 0, "concurrency": 4},
+                "dispatches": dispatches, "attempts": attempts,
+                "launch": {"project": 1, "tasks": 1, "task-dependencies": 20},
+            }),
+        ),
+        (
+            "store-operations-per-settlement",
+            serde_json::json!({
+                "schema_version": 1, "budget": "store-operations-per-settlement",
+                "workload": {"tasks": 20, "holds": 0, "concurrency": 4},
+                "settlements": (1..=5).map(|i| {
+                    let mut settled = one(format!("task-{i:02}"));
+                    settled["ordinal"] = serde_json::json!(i);
+                    settled
+                }).collect::<Vec<_>>(),
+                "attempts": attempts,
+            }),
+        ),
+    ]
+}
+
+/// The reporter reports each budget from its own record alone: the held hour's total, the
+/// costliest dispatch, the costliest of five settlements, each with its detail by kind and the
+/// write-back attempts' shared overhead beside it. A record missing, another budget's, or one
+/// whose totals do not add up is refused, and so is a run naming no budget or outside the
+/// checker — never a value nobody measured.
+#[cfg(unix)]
+#[test]
+fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
+    let dir = scratch("store-operations-report");
+    let records = dir.join("target/budget-records/store-operations");
+    std::fs::create_dir_all(&records).expect("the records' directory");
+    let stderr =
+        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+    let write = |id: &str, record: &serde_json::Value| {
+        std::fs::write(records.join(format!("{id}.json")), record.to_string())
+            .expect("a record is staged");
+    };
+    let result = dir.join("result.json");
+
+    // Nothing recorded yet: refused, naming the journey that records it.
+    let missing =
+        store_operations_report(&dir, Some("store-operations-per-dispatch"), Some(&result));
+    assert_eq!(missing.status.code(), Some(1), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("missing")
+            && stderr(&missing).contains("each_dispatch_and_settlement_of_a_twenty_task_run"),
+        "{}",
+        stderr(&missing)
+    );
+
+    for (id, record) in store_operations_records() {
+        write(id, &record);
+    }
+    for (id, value, said) in [
+        (
+            "source-hold-store-operations-per-hour",
+            5.0,
+            "1 re-read at a reset and 4 on backoff; per source vault 5",
+        ),
+        (
+            "store-operations-per-dispatch",
+            2.0,
+            "2 write-back attempts spent end-command 2, project-metadata-set 1",
+        ),
+        (
+            "store-operations-per-settlement",
+            1.0,
+            "the run's first settlement 1, then 1, 1, 1, 1",
+        ),
+    ] {
+        let _ = std::fs::remove_file(&result);
+        let reported = store_operations_report(&dir, Some(id), Some(&result));
+        assert_eq!(
+            reported.status.code(),
+            Some(0),
+            "{id}: {}",
+            stderr(&reported)
+        );
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&result).expect("the result is written"))
+                .expect("the result is JSON");
+        assert_eq!(written["value"].as_f64(), Some(value), "{id}: {written}");
+        let detail = written["detail"].as_str().expect("a detail");
+        assert!(detail.contains(said), "{id}: {detail}");
+    }
+
+    // Refused: another budget's record, totals that do not add up, no budget named, and a
+    // run outside the checker.
+    let records_of = store_operations_records();
+    let mut foreign = records_of[1].1.clone();
+    foreign["budget"] = serde_json::json!("store-operations-per-settlement");
+    write("store-operations-per-dispatch", &foreign);
+    let refused =
+        store_operations_report(&dir, Some("store-operations-per-dispatch"), Some(&result));
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("not store-operations-per-dispatch's"),
+        "{}",
+        stderr(&refused)
+    );
+    let mut unsummed = records_of[0].1.clone();
+    unsummed["total"] = serde_json::json!(4);
+    write("source-hold-store-operations-per-hour", &unsummed);
+    let refused = store_operations_report(
+        &dir,
+        Some("source-hold-store-operations-per-hour"),
+        Some(&result),
+    );
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(
+        stderr(&refused).contains("total is not the sum"),
+        "{}",
+        stderr(&refused)
+    );
+    let unnamed = store_operations_report(&dir, None, Some(&result));
+    assert_eq!(unnamed.status.code(), Some(1), "{}", stderr(&unnamed));
+    assert!(
+        stderr(&unnamed).contains("ONEBUDGETSPEC_BUDGET_ID"),
+        "{}",
+        stderr(&unnamed)
+    );
+    write("store-operations-per-settlement", &records_of[2].1);
+    let outside = store_operations_report(&dir, Some("store-operations-per-settlement"), None);
+    assert_eq!(outside.status.code(), Some(1), "{}", stderr(&outside));
+    assert!(
+        stderr(&outside).contains("ONEBUDGETSPEC_RESULT is missing"),
+        "{}",
+        stderr(&outside)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
