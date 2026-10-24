@@ -48,7 +48,9 @@ function workload(record, stated) {
   if (held === null || typeof held !== "object" || Array.isArray(held)) fail("workload is missing");
   for (const [key, value] of Object.entries(stated)) {
     if (held[key] !== value) {
-      fail(`workload.${key} is ${JSON.stringify(held[key])}, where the budget's workload is ${value}`);
+      fail(
+        `workload.${key} is ${JSON.stringify(held[key])}, where the budget's workload is ${value}`,
+      );
     }
   }
   return held;
@@ -102,7 +104,9 @@ function hour(record) {
     fail("first_after_hour_ms must fall after the hour");
   }
   if (!Array.isArray(record.passes) || record.passes.length === 0) {
-    fail("passes must list the hour's re-reads: a source rate limited all hour is read at its reset");
+    fail(
+      "passes must list the hour's re-reads: a source rate limited all hour is read at its reset",
+    );
   }
   if (record.passes[0].by !== "reset") fail("the hour's first re-read must be at the reset");
   const passes = record.passes.map((pass, index) => {
@@ -115,12 +119,18 @@ function hour(record) {
     }
     // Each gap is measured to the next re-read, the hour's last to the first after it, and is
     // never shorter than the wait the schedule chose.
-    const next = index + 1 < record.passes.length ? record.passes[index + 1].at_ms : record.first_after_hour_ms;
+    const next =
+      index + 1 < record.passes.length
+        ? record.passes[index + 1].at_ms
+        : record.first_after_hour_ms;
     if (!(next > pass.at_ms)) fail(`${name} does not come before the re-read after it`);
     if (count(pass.gap_ms, `${name}.gap_ms`) !== next - pass.at_ms) {
       fail(`${name}.gap_ms is not the time to the re-read after it`);
     }
-    if (pass.gap_ms < count(pass.wait_intervals, `${name}.wait_intervals`) * stated.poll_seconds * 1000) {
+    if (
+      pass.gap_ms <
+      count(pass.wait_intervals, `${name}.wait_intervals`) * stated.poll_seconds * 1000
+    ) {
       fail(`${name}.gap_ms is shorter than the wait the schedule chose`);
     }
     if (pass.by !== "reset" && pass.by !== "backoff") fail(`${name}.by must be reset or backoff`);
@@ -173,7 +183,8 @@ function hour(record) {
 /** Each entry's node, held to name one node apiece: no node stands in for another. */
 function distinct(entries, name) {
   const nodes = entries.map((entry, index) => {
-    if (typeof entry.node !== "string" || entry.node === "") fail(`${name}[${index}].node must name a node`);
+    if (typeof entry.node !== "string" || entry.node === "")
+      fail(`${name}[${index}].node must name a node`);
     return entry.node;
   });
   if (new Set(nodes).size !== nodes.length) fail(`${name} names a node more than once`);
