@@ -2535,6 +2535,142 @@ fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_expor
     assert!(view.contains("status: done"), "{view}");
 }
 
+/// In a private canonical home, a public task stays subject to every refusal it always was:
+/// the store refuses to project one carrying a private term, the engine refuses it at load and
+/// at a live edit in neutral words, and an ordinary dependency or a private repository still
+/// keeps private work out of public output. A neutral public task is a live edit like any
+/// other, with nothing set on the plan.
+#[test]
+fn a_private_home_still_refuses_public_tasks_carrying_private_terms_and_private_context() {
+    let home = Home::Private;
+    let (world, private, _) = home.world("boundary-private-home-refusals");
+    declare_terms(&world, &private, &["zephyrine"]);
+    let named = |title: &str| {
+        let mut consumer = home.public("examples", &["generalize"]);
+        consumer["title"] = json!(title);
+        mixed_plan(
+            "named",
+            vec![home.producer("generalize", &[]), consumer],
+            vec![edge("generalize", "examples")],
+        )
+    };
+
+    // The store screens the projection a routed copy would write, and writes no view.
+    let drafted = world.plan_in(
+        &world.root.join("draft-store"),
+        "screened",
+        &named("feat: add zephyrine examples"),
+    );
+    for root in [world.store(), world.root.join("views-store")] {
+        std::fs::create_dir_all(root).expect("a source root");
+    }
+    let copied = store_cli(
+        &world,
+        &[
+            "project",
+            "copy",
+            &drafted.replacen("plans:", "draft:", 1),
+            "--to",
+            "plans",
+            "--no-link",
+        ],
+    );
+    assert_ne!(copied.code, 0, "{}", copied.stdout);
+    assert!(
+        copied
+            .stderr
+            .contains("carries a term of a private repository"),
+        "{}",
+        copied.stderr
+    );
+    assert!(
+        files_under(&world.root.join("views-store"))
+            .iter()
+            .all(|(_, held)| !held.contains("zephyrine")),
+        "a view carries the private term"
+    );
+
+    // Written straight into the private home, the engine refuses it at load, naming nothing.
+    let reason = refused_by_check(&world, "named", &named("feat: add zephyrine examples"));
+    assert!(reason.contains("must be neutral"), "{reason}");
+    names_none(&world, &reason, &["zephyrine"]);
+    // An ordinary dependency into the public task, and a consumer naming the private
+    // repository, are refused as they always were.
+    let reason = refused_by_check(
+        &world,
+        "ordinary",
+        &mixed_plan(
+            "ordinary",
+            vec![
+                home.producer("generalize", &[]),
+                home.public("examples", &["generalize"]),
+            ],
+            vec![],
+        ),
+    );
+    assert!(reason.contains("ordinary dependency"), "{reason}");
+    let mut leaking = home.public("examples", &["generalize"]);
+    leaking["repo"] = json!("github.com/owner/service");
+    let reason = refused_by_check(
+        &world,
+        "leaking",
+        &mixed_plan(
+            "leaking",
+            vec![home.producer("generalize", &[]), leaking],
+            vec![edge("generalize", "examples")],
+        ),
+    );
+    assert!(
+        reason.contains("an export consumer must be a public lifecycle node"),
+        "{reason}"
+    );
+
+    // A live edit: the mixed plan loads with nothing set on it, a public task carrying the
+    // term is refused before anything is committed, and a neutral one is taken.
+    world.script("keep.wait", "hold");
+    let mut plan = home.exported_plan("edited");
+    plan["tasks"][1]["parked"] = json!(true);
+    plan["tasks"]
+        .as_array_mut()
+        .expect("the plan's nodes")
+        .push(crate::harness::agent("keep", &[]));
+    let project = home.project(&world, "edited", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        world
+            .events_of("edited", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "keep")
+    });
+    let mut termed = home.public("more-examples", &[]);
+    termed["title"] = json!("feat: more zephyrine examples");
+    termed["parked"] = json!(true);
+    let refused = world.run_with_stdin(
+        &["reply", "edited"],
+        &json!({"version": 3, "commands": [{"op": "add", "node": termed}]}).to_string(),
+    );
+    assert_eq!(refused.code, REFUSED, "{}", refused.stdout);
+    assert!(
+        refused
+            .stderr
+            .contains("the publication boundary refused `add` for a public node"),
+        "{}",
+        refused.stderr
+    );
+    assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
+    assert!(
+        world.events_of("edited", "edit-committed").is_empty(),
+        "a refused edit was committed"
+    );
+    let mut neutral = home.public("more-examples", &[]);
+    neutral["parked"] = json!(true);
+    reply(&world, "edited", json!([{"op": "add", "node": neutral}]));
+    world.until("the neutral edit to commit", |world| {
+        !world.events_of("edited", "edit-committed").is_empty()
+    });
+    world.release("keep.go");
+}
+
 /// One task written through the standalone store's own command line — its configured
 /// `write_policy` commands, run as the `onevcs` binary — under the world's environment.
 fn store_cli_create(
