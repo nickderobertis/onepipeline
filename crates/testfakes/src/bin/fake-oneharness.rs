@@ -574,22 +574,25 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             "oneharness run requires the prompt, on `--prompt-file -` or on `--prompt`",
         );
     };
-    // Streaming is the agent side's, and only its: onejudge asks for it there and
-    // reads the buffered document everywhere else, so a judgement is never
-    // streamed and an agent turn always is.
-    let side = if args.iter().any(|arg| arg == "--stream") {
-        Side::Agent
-    } else {
+    // The judge side is the one whose prompt opens on a judge's brief — the
+    // supervisor's decision or the evaluator's verdict. Since onejudge 0.21 no
+    // flag tells the two apart: both sides stream, so each says where its
+    // history is as its run begins, and a judge whose posture can change the
+    // tree asks for its events as the agent does.
+    let side = if prompt.contains(SUPERVISOR_OPENING) || prompt.contains(fake::EVALUATOR_OPENING) {
         Side::Judge
+    } else {
+        Side::Agent
     };
+    let streamed = args.iter().any(|arg| arg == "--stream");
     let view = match View::of(args) {
         Ok(view) => view,
         Err(refusal) => return fake::refuse(&refusal),
     };
-    // The agent side's events are what its stream carries, so a stream asked
-    // for without them is a turn whose activity nothing could relay.
-    if side == Side::Agent && !args.iter().any(|arg| arg == "--events") {
-        return fake::refuse("oneharness run was asked to stream with no --events");
+    // The agent side's events are what its stream carries, so its turn is one
+    // the sibling reads as it happens.
+    if side == Side::Agent && !streamed {
+        return fake::refuse("oneharness run was asked for --events with no --stream");
     }
     // The config is something `oneagentgraph` composed rather than passed
     // through, and both sides carry one: the judge side names its own, and the
@@ -679,6 +682,7 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
             history.as_ref(),
             mode,
             view,
+            streamed,
         ),
     };
     control::close();
@@ -977,6 +981,18 @@ impl View {
         };
         println!("{line}");
         Ok(true)
+    }
+
+    /// Say where a candidate's history is being written, before its events: the
+    /// JSON stream's `run-started` line. The text view draws nothing for it.
+    fn begun(self, begun: &oneharness_core::domain::history::RunBegun) -> Result<(), String> {
+        if let Self::Json { .. } = self {
+            println!(
+                "{}",
+                document(&RunStreamEnvelope::RunStarted(begun.clone()))?
+            );
+        }
+        Ok(())
     }
 
     /// The report that closes a stream: the text report, set off by a blank line
@@ -1297,14 +1313,39 @@ fn work(
 
     // What the agent thought before it acted, then the exchange: the order a
     // real turn reaches them in, and every kind a person watching it reads.
+    // A streamed turn with history on begins its history run before its first
+    // event and says where on the stream, as the real CLI does: the opening line
+    // carrying the whole prompt is on disk, and the `run-started` line is what
+    // lets the sibling stamp each record it relays with a reference into it.
+    let begun = match (history, view) {
+        (Some(history), View::Json { .. }) => {
+            let begun = history.begin(std::path::Path::new(cwd), prompt, &ran.identity)?;
+            view.begun(&begun.0.run_begun(&begun.1, begun.2))?;
+            Some(begun)
+        }
+        _ => None,
+    };
     let mut events = vec![
         spoken(0, "reasoning", REASONED),
         call(1, "echo the turn ran"),
         observation(2),
     ];
     let mut drew_any = false;
+    // Each event is on disk before it is drawn, as the real CLI appends every
+    // normalized event to the session before it reaches the stream: a record
+    // the sibling relays off this stream resolves the moment it is relayed.
+    let mut persisted = std::collections::BTreeSet::new();
+    let mut draw = |event: &ActionEvent| -> Result<bool, String> {
+        if let Some((writer, identity, run_id)) = &begun {
+            writer
+                .append_event(*run_id, identity.as_str(), event.clone())
+                .map_err(|error| format!("cannot append a live history event: {error}"))?;
+            persisted.insert(event.index);
+        }
+        view.event(event)
+    };
     for event in &events {
-        drew_any |= view.event(event)?;
+        drew_any |= draw(event)?;
     }
     // A worker turn that reports again after a hold: what a live readout of a
     // running dispatch is read against. The first event proves the stream
@@ -1333,9 +1374,18 @@ fn work(
         ran_on.clone_from(&redirect.input);
         redirect.delivered();
     } else if let Some([go, settle]) = gates {
-        let held = [call(3, "cargo llvm-cov --workspace"), observation(4)];
+        // The call a held turn makes once released: a journey names its command
+        // with `turn.held-call`, and it is `cargo llvm-cov --workspace` otherwise;
+        // and what it returned with `turn.held-output`, [`OBSERVED`] otherwise.
+        let command = fake::node_script(dir, "turn", "held-call")
+            .unwrap_or_else(|| "cargo llvm-cov --workspace".to_string());
+        let mut answered = observation(4);
+        if let Some(output) = fake::node_script(dir, "turn", "held-output") {
+            answered.output = Some(output);
+        }
+        let held = [call(3, &command), answered];
         for event in &held {
-            drew_any |= view.event(event)?;
+            drew_any |= draw(event)?;
         }
         events.extend(held);
         // Held again, so the node is *still in flight* when the second reading
@@ -1365,7 +1415,7 @@ fn work(
     // The agent's own last words close the turn, as a real turn's final
     // message does: the same text its report answers with.
     let said = spoken(events.len(), "message", outcome.text());
-    drew_any |= view.event(&said)?;
+    drew_any |= draw(&said)?;
     events.push(said);
 
     fake::record(dir, TURN_ENDED, &[ran_on.clone()]);
@@ -1402,8 +1452,13 @@ fn work(
         report.results.insert(0, refused);
     }
     if let Some(history) = history {
-        report.history_file =
-            Some(history.write(std::path::Path::new(cwd), &ran_on, mode, &report.results)?);
+        report.history_file = Some(history.write(
+            std::path::Path::new(cwd),
+            &ran_on,
+            mode,
+            &report.results,
+            begun.map(|begun| (begun, persisted)),
+        )?);
     }
     view.closing(report, drew_any)?;
     Ok(outcome)
@@ -1600,15 +1655,14 @@ impl History {
         prompt: &str,
         mode: PermissionMode,
         results: &[RunResult],
+        begun: Option<(Begun, std::collections::BTreeSet<usize>)>,
     ) -> Result<String, String> {
-        let writer = HistoryWriter::open(&self.store, project, &self.name, self.labels.clone())
-            .map_err(|error| {
-                format!(
-                    "cannot open a history session under {}: {error}",
-                    self.store.display()
-                )
-            })?
-            .with_pointer_file(self.pointer_file.clone());
+        let (writer, mut begun) = match begun {
+            Some(((writer, identity, run_id), persisted)) => {
+                (writer, Some((identity, run_id, persisted)))
+            }
+            None => (self.open(project)?, None),
+        };
         for result in results {
             // The identity the pointer line names, parsed by the library's own
             // grammar: a result naming a harness oneharness does not know is a
@@ -1619,7 +1673,20 @@ impl History {
                     result.harness_id
                 )
             })?;
-            let run_id = writer.begin_harness_run(&identity);
+            // The candidate the stream already announced keeps the id it was
+            // announced under, so what was relayed resolves to what is written.
+            let (run_id, persisted) = match begun.take() {
+                Some((announced, run_id, persisted)) if announced == identity => {
+                    (run_id, persisted)
+                }
+                other => {
+                    begun = other;
+                    (
+                        writer.begin_harness_run(&identity, prompt),
+                        std::collections::BTreeSet::new(),
+                    )
+                }
+            };
             writer
                 .append_streamed(
                     run_id,
@@ -1627,7 +1694,7 @@ impl History {
                     result.model.as_deref(),
                     prompt,
                     result,
-                    &std::collections::BTreeSet::new(),
+                    &persisted,
                 )
                 .map_err(|error| {
                     format!(
@@ -1638,7 +1705,48 @@ impl History {
         }
         Ok(writer.path().display().to_string())
     }
+
+    /// Open this run's session file, as the real CLI does once per invocation.
+    fn open(&self, project: &std::path::Path) -> Result<HistoryWriter, String> {
+        Ok(
+            HistoryWriter::open(&self.store, project, &self.name, self.labels.clone())
+                .map_err(|error| {
+                    format!(
+                        "cannot open a history session under {}: {error}",
+                        self.store.display()
+                    )
+                })?
+                .with_pointer_file(self.pointer_file.clone()),
+        )
+    }
+
+    /// Begin the candidate that runs: its opening line and pointer line written,
+    /// and the id its events will be recorded under.
+    fn begin(
+        &self,
+        project: &std::path::Path,
+        prompt: &str,
+        identity: &Identity,
+    ) -> Result<Begun, String> {
+        let writer = self.open(project)?;
+        let identity: HarnessIdentity = identity.as_str().parse().map_err(|error| {
+            format!(
+                "the running harness id '{}' is not a harness identity: {error}",
+                identity.as_str()
+            )
+        })?;
+        let run_id = writer.begin_harness_run(&identity, prompt);
+        Ok((writer, identity, run_id))
+    }
 }
+
+/// A candidate whose history run began before its events: the session's
+/// writer, the candidate, and the id it was begun under.
+type Begun = (
+    HistoryWriter,
+    HarnessIdentity,
+    oneharness_core::domain::history::HistoryId,
+);
 
 /// The side that supervises: one buffered document carrying the answer.
 ///
@@ -1646,6 +1754,10 @@ impl History {
 /// so the prompt is the only thing that tells them apart. A third is refused
 /// rather than guessed at: onejudge reads each answer strictly, and one given to
 /// the wrong question is a protocol failure it reports as the *member* dying.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one judgement's whole context, as `agent_turn` carries one turn's"
+)]
 fn judge_turn(
     prompt: &str,
     cwd: Option<&str>,
@@ -1654,7 +1766,32 @@ fn judge_turn(
     history: Option<&History>,
     mode: PermissionMode,
     view: View,
+    streamed: bool,
 ) -> ExitCode {
+    let project = match cwd {
+        Some(cwd) => std::path::PathBuf::from(cwd),
+        None => match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                return fake::refuse(&format!("this process has no working directory: {error}"))
+            }
+        },
+    };
+    // A streamed judgement says where its history is before it answers, as the
+    // agent side does — which is what lets a judge's own words be relayed as a
+    // reference into its own session.
+    let begun = match (history, view, streamed) {
+        (Some(history), View::Json { .. }, true) => {
+            match history.begin(&project, prompt, identity).and_then(|begun| {
+                view.begun(&begun.0.run_begun(&begun.1, begun.2))?;
+                Ok(begun)
+            }) {
+                Ok(begun) => Some(begun),
+                Err(refusal) => return fake::refuse(&refusal),
+            }
+        }
+        _ => None,
+    };
     let mut ran_on = prompt.to_string();
     let answer = if prompt.contains(SUPERVISOR_OPENING) {
         match hold_the_supervisor(dir) {
@@ -1696,14 +1833,21 @@ fn judge_turn(
     let recorded = answer.and_then(|answer| {
         let mut report = report(&answer, None, Outcome::Answered, identity, mode);
         if let Some(history) = history {
-            let project = match cwd {
-                Some(cwd) => std::path::PathBuf::from(cwd),
-                None => std::env::current_dir()
-                    .map_err(|error| format!("this process has no working directory: {error}"))?,
-            };
-            report.history_file = Some(history.write(&project, prompt, mode, &report.results)?);
+            report.history_file = Some(history.write(
+                &project,
+                prompt,
+                mode,
+                &report.results,
+                begun.map(|begun| (begun, std::collections::BTreeSet::new())),
+            )?);
         }
-        view.report(&report)
+        // Streamed, the answer is the stream's terminal `result` line; buffered,
+        // it is the one document.
+        if streamed {
+            view.closing(report, false).map(|()| String::new())
+        } else {
+            view.report(&report)
+        }
     });
     match recorded {
         Ok(document) => {

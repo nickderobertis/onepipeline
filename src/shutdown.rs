@@ -598,6 +598,7 @@ fn shut_one_down(root: &Path, view: &RunView, request: &ShutdownRequest) -> RunS
     let waited = wait_for_them(paths, from, &asked, asked_at, asks, request.grace);
 
     let teardown = tear_the_run_down(paths, view);
+    let teardown = end_what_it_started_meanwhile(paths, &asked, teardown);
 
     // Read again, because what a publication had reached is what the report
     // names, and one may have begun after the shutdown did.
@@ -1037,6 +1038,64 @@ fn tear_the_run_down(paths: &RunPaths, view: &RunView) -> StopTeardown {
             );
             StopTeardown::NotAttempted
         }
+    }
+}
+
+/// End every dispatch the driver started while this shutdown was reading the
+/// run, now that the driver is gone and nothing is left to start another.
+///
+/// The driver asks whether a shutdown has begun before it admits a node, and
+/// the dispatch's process starts only once its workspace is open — so a node
+/// admitted just before the hold was written starts after this shutdown read
+/// the registry, and can start after the teardown listed the tree it ends.
+/// Ending the driver ends no process it had already started, so that dispatch
+/// outlived the shutdown that reported its run put down: running on with
+/// nobody driving it, and on Windows holding the handle it inherited to the
+/// run's own driver log, so the run's directory could be neither moved nor
+/// removed. The driver is the only process that starts a run's work, so once
+/// the teardown has ended it the registry names every dispatch there is; read
+/// again, each live one this shutdown did not already act on is ended as
+/// `stop` ends a tree. A tree that would not go is the run's answer.
+fn end_what_it_started_meanwhile(
+    paths: &RunPaths,
+    acted_on: &[(Watched, String, String)],
+    teardown: StopTeardown,
+) -> StopTeardown {
+    // A registry this cannot read is one the teardown could not read either, and
+    // its answer already says so: `an_unreadable_registry_is_reported_and_the_rest_of_
+    // the_host_is_still_shut_down` holds that it stays `not-attempted` here.
+    let Ok(live) = live_dispatches(paths) else {
+        return teardown;
+    };
+    let started: Vec<DispatchRecord> = live
+        .into_iter()
+        .filter(|record| {
+            !acted_on
+                .iter()
+                .any(|(watched, _, _)| watched.record.pid == record.pid)
+        })
+        .collect();
+    if started.is_empty() {
+        return teardown;
+    }
+    for record in &started {
+        eprintln!(
+            "onepipeline: run '{}': '{}' (pid {}) started while this shutdown was reading the \
+             run, so it is ended with its driver",
+            paths.run, record.node, record.pid
+        );
+    }
+    let pids: Vec<u32> = started.iter().map(|record| record.pid).collect();
+    let (ended, _) = sys::stop_and_confirm(&pids, sys::Stop::Politely, driver::TEARDOWN_PATIENCE);
+    match (teardown, driver::established(Some(ended))) {
+        (
+            StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere,
+            StopTeardown::Signalled | StopTeardown::NothingToStop,
+        ) => StopTeardown::Signalled,
+        (StopTeardown::Signalled | StopTeardown::NothingToStop | StopTeardown::Elsewhere, _) => {
+            StopTeardown::PartlySignalled
+        }
+        (teardown, _) => teardown,
     }
 }
 

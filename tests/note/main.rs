@@ -105,11 +105,10 @@ fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
         match event["kind"].as_str() {
             Some("node-dispatched") => dispatched.push(Vec::new()),
             Some("turn-started") => {
-                if let (Some(turns), Some(instruction)) = (
-                    dispatched.last_mut(),
-                    event["payload"]["instruction"].as_str(),
-                ) {
-                    turns.push(instruction.to_string());
+                if let (Some(turns), Some(instruction)) =
+                    (dispatched.last_mut(), instruction_of(&event))
+                {
+                    turns.push(instruction);
                 }
             }
             _ => {}
@@ -118,7 +117,25 @@ fn dispatches_of(world: &World, run: &str, node: &str) -> Vec<Vec<String>> {
     dispatched
 }
 
+/// The whole prompt one relayed `turn-started` opened its turn on, read through
+/// the engine's own resolver: out of the history file a reference names, or the
+/// copy a record without one carries.
+fn instruction_of(event: &Value) -> Option<String> {
+    let payload = event["payload"].as_object()?;
+    match onepipeline::views::transcript::of_record("turn-started", payload)? {
+        Ok(resolved) => match resolved.text {
+            onepipeline::views::transcript::Text::Instruction(instruction) => Some(instruction),
+            other => panic!("a turn opening resolved to something other than a prompt: {other:?}"),
+        },
+        Err(unresolved) => panic!("a relayed turn opening did not resolve: {unresolved}: {event}"),
+    }
+}
+
 /// Every turn one node opened, read back through the producer's own payload type.
+///
+/// Its `instruction` is the whole prompt the turn opened on, resolved through
+/// [`instruction_of`] wherever the record references its history instead of
+/// carrying a copy.
 ///
 /// Through that type rather than by field name, because `deny_unknown_fields`
 /// on it is what makes this an assertion about the *whole* payload this engine
@@ -131,11 +148,22 @@ fn openings_of(world: &World, run: &str, node: &str) -> Vec<TurnStarted> {
         .iter()
         .filter(|event| event["labels"]["node"] == node && event["kind"] == "turn-started")
         .map(|event| {
-            serde_json::from_value(event["payload"].clone()).unwrap_or_else(|error| {
-                panic!("a relayed turn-started is not the payload the linked oneagentgraph declares: {error}: {event}")
-            })
+            let mut opening: TurnStarted = serde_json::from_value(event["payload"].clone())
+                .unwrap_or_else(|error| {
+                    panic!("a relayed turn-started is not the payload the linked oneagentgraph declares: {error}: {event}")
+                });
+            opening.instruction = instruction_of(event);
+            opening
         })
         .collect()
+}
+
+/// Whether one turn opened on a prompt carrying `text`.
+fn carries(opening: &TurnStarted, text: &str) -> bool {
+    opening
+        .instruction
+        .as_deref()
+        .is_some_and(|instruction| instruction.contains(text))
 }
 
 /// Every word a party of one node said, read back the same way.
@@ -512,7 +540,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
     };
     let delivered = by_origin(Origin::Delivered);
     assert!(
-        delivered.len() == 1 && delivered[0].instruction.contains(NOTE),
+        delivered.len() == 1 && carries(delivered[0], NOTE),
         "the turn that carried the manager's note is not stamped as a delivery:\n{openings:#?}"
     );
     assert_eq!(
@@ -530,7 +558,7 @@ fn a_note_into_a_live_dispatch_reaches_both_parties_before_the_judges_verdict() 
         !supervised.is_empty()
             && supervised
                 .iter()
-                .all(|opening| opening.instruction.contains("Run the check again")),
+                .all(|opening| carries(opening, "Run the check again")),
         "the turn the supervisor sent the worker back on is not stamped as the \
          supervisor's own:\n{openings:#?}"
     );
@@ -772,6 +800,98 @@ fn position_of(journal: &[Value], kind: &str, node: Option<&str>) -> Option<usiz
     journal.iter().position(|event| {
         event["kind"] == kind && node.is_none_or(|node| event["labels"]["node"] == node)
     })
+}
+
+/// **A note past the bound a journal copy holds is still confirmed.** The note is
+/// carried — `deliver: next`, so no live turn takes it — and the supervising
+/// side reads it into the worker's next turn behind more than the 4,096 bytes a
+/// turn record's copy was ever cut to, so the only place its text appears is past
+/// that bound. The turn's record carries a reference into the worker's history
+/// instead of a copy, and the run confirms the presentation off the whole prompt
+/// the reference resolves to — from the words, as a carried note is — and then
+/// the judge's with the turn that answered. Matched against a copy cut at the
+/// bound, the same turn confirms nothing.
+#[test]
+fn a_note_past_the_bound_of_a_copy_is_confirmed_off_the_whole_prompt() {
+    let world = World::new("note-past-the-bound");
+    let run = "pastbound";
+    let preamble = "Read the whole log before answering, line by line.\n".repeat(90);
+    assert!(preamble.len() > onepipeline::event::MAX_PAYLOAD_TEXT_BYTES);
+    world.script("judge.asks-again", &format!("{preamble}{NOTE}"));
+    world.script("turn.hold", "hold");
+    supervised_run(&world, run, vec![agent("build", &[])]);
+    world.until("the worker's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+
+    let releasing = release_once_admitted(&world, run, &["turn.go", "turn.settle"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("build", NOTE, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the releasing thread finishes");
+    assert_eq!(recorded(&world, run)["reached"], json!("carried"));
+    world.until("the run to settle", |world| {
+        !world.events_of(run, "node-settled").is_empty()
+    });
+
+    // The turn that carried it: a reference and no copy, whose whole prompt
+    // holds the note only past the bound.
+    let opening = world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "build" && event["kind"] == "turn-started")
+        .filter(|event| event["payload"]["role"] == "assistant")
+        .find(|event| instruction_of(event).is_some_and(|prompt| prompt.contains(NOTE)))
+        .unwrap_or_else(|| panic!("no worker turn opened on the note's text"));
+    assert!(
+        opening["payload"].get("transcript").is_some()
+            && opening["payload"].get("instruction").is_none(),
+        "the turn's record is not a reference: {opening}"
+    );
+    let prompt = instruction_of(&opening).expect("the turn opened on a prompt");
+    let at = prompt.find(NOTE).expect("the prompt carries the note");
+    assert!(
+        at >= onepipeline::event::MAX_PAYLOAD_TEXT_BYTES,
+        "the note starts at byte {at}, inside the bound a copy holds, so this proves \
+         nothing about a note past it"
+    );
+    let mut copy = prompt.clone();
+    copy.truncate(onepipeline::event::MAX_PAYLOAD_TEXT_BYTES);
+    assert!(
+        !copy.contains(NOTE),
+        "a copy cut at the bound would carry the note too"
+    );
+
+    let shown = presentations_of(&world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| {
+                (
+                    event["payload"]["party"].clone(),
+                    event["payload"]["evidence"].clone(),
+                    event["payload"]["turn"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                json!("worker"),
+                json!("instruction-text"),
+                opening["payload"]["turn"].clone()
+            ),
+            (
+                json!("supervisor"),
+                json!("answering-turn"),
+                opening["payload"]["turn"].clone()
+            ),
+        ],
+        "a note past the bound was not confirmed shown off the whole prompt:\n{shown:#?}"
+    );
 }
 
 /// A note waiting on a turn that takes it only as it ends leaves the run
@@ -2875,10 +2995,12 @@ fn an_envelope_is_answered_as_its_note_is_queued_and_the_receiver_takes_its_note
         !world.run(&["status", run]).stdout.contains("inbox:")
     });
     assert!(inbox_reading(&world, run).is_empty());
-    assert!(
-        sidecar_of(&world, run).is_empty(),
-        "deliveries.json still lists a taken note"
-    );
+    // `status` reads a note the journal answers as answered, and the driver
+    // rewrites its sidecar only after journalling, so the sidecar may still list
+    // the taken notes when `status` has dropped them: it is waited on, not read once.
+    world.until("deliveries.json to list neither taken note", |world| {
+        sidecar_of(world, run).is_empty()
+    });
     let status = world.run(&["status", run]);
     status.exited(0);
     for (id, index) in [(first_id, 1), (second_id, 0)] {
@@ -3400,6 +3522,192 @@ fn a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it
     release(&world.fakes, "turn.settle");
     world.until("the run to settle", |world| {
         world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// The same refusal read while the driver has **journalled it and not yet
+/// rewritten its delivery sidecar**: `status` shows each note's refusal and no
+/// longer names the note as waiting in its receiver's inbox.
+///
+/// A lane's answer is two writes, in order: its records into the journal, then the
+/// sidecar the driver keeps of what it still holds. A reader between the two read
+/// the note off the sidecar as still queued in `build`'s inbox — and so as not yet
+/// answered, which hid the refusal the journal already held: the Windows lane's
+/// `status does not show note 1's refusal` beside `2 edit-rejected`.
+///
+/// The driver is held between the two writes rather than raced to them, so the
+/// window is the journey's order on any host.
+#[test]
+fn a_queued_notes_refusal_journalled_before_its_sidecar_is_rewritten_is_shown_refused() {
+    // llmlint: ignore-block[tests_mirror_real_usage] where the driver is held is the
+    // property, and no user-facing input can place it. The failpoint only orders the
+    // real binary; the run, the conversation, the reply and `status` are its own.
+    let recorded = harness::Rendezvous::failpoint();
+    let world = World::new("note-refused-before-sidecar")
+        .with_env("ONEPIPELINE_TEST_NOTE_RECORDED_GATE", &recorded.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let run = "refusedbeforesidecar";
+    world.script("turn.hold-each", "");
+    held_heartbeating_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("after", &["build"])],
+    );
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until(
+        "the dependent's turn to open while build is settled",
+        |world| {
+            world
+                .events_of(run, "turn-started")
+                .iter()
+                .any(|event| event["labels"]["node"] == "after")
+        },
+    );
+
+    let queued = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &json!({"version": 2, "commands": [
+            {"op": "amend", "id": "after", "text": AFTER_RULING},
+            note_op("build", "worker", NOTE, None),
+            note_op("build", "worker", SKIPPED_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    queued.exited(0);
+    let id = queued_id_of(&world, run, AFTER_RULING);
+    let held = recorded.arrived_within_a_step(&world, "the driver to record build's lane");
+    // The window this journey is about: both records are journalled, and the
+    // sidecar still holds the note in build's inbox.
+    for index in [1, 2] {
+        assert_eq!(
+            note_records_of(&world, run, id, index),
+            1,
+            "note {index} is not journalled once at the hold"
+        );
+    }
+    let sidecar = std::fs::read_to_string(world.run_file(run, "channel/deliveries.json"))
+        .expect("the driver wrote its delivery sidecar");
+    assert!(
+        sidecar.contains("\"build\""),
+        "the sidecar no longer holds build's note, so there is no window to read: {sidecar}"
+    );
+
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    for (index, said) in [(1, "was not delivered"), (2, "never offered")] {
+        let shown = status.stdout.lines().any(|line| {
+            line.trim_start().starts_with(&format!(
+                "note: envelope {id}'s note {index} to build, answered queued — refused: "
+            )) && line.contains(said)
+        });
+        assert!(
+            shown,
+            "status does not show note {index}'s refusal:\n{}",
+            status.stdout
+        );
+    }
+    assert!(
+        !status.stdout.contains("inbox: build holds envelope"),
+        "status names a note the run has refused as waiting in build's inbox:\n{}",
+        status.stdout
+    );
+    assert_eq!(
+        inbox_reading(&world, run),
+        Vec::<(String, String, String)>::new(),
+        "status --json names a note the run has refused as waiting in an inbox"
+    );
+
+    held.release();
+    std::fs::remove_file(world.fakes.join("turn.hold")).expect("the hold is lifted");
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// A receiver's note **delivered**, read while the driver has journalled it and
+/// not yet rewritten its delivery sidecar: `status` drops that receiver from its
+/// inbox and shows the note delivered, and still names the other receiver, whose
+/// note the journal has not answered.
+///
+/// The delivered half of the window
+/// [`a_queued_notes_refusal_journalled_before_its_sidecar_is_rewritten_is_shown_refused`]
+/// holds open for a refusal, over the envelope
+/// [`status_names_each_receivers_inbox_and_drops_each_as_it_answers`] sends.
+#[test]
+fn a_delivered_notes_record_journalled_before_its_sidecar_is_rewritten_drops_only_its_receiver() {
+    // llmlint: ignore-block[tests_mirror_real_usage] where the driver is held is the
+    // property, and no user-facing input can place it. The failpoint only orders the
+    // real binary; the run, the conversations, the reply and `status` are its own.
+    let recorded = harness::Rendezvous::failpoint();
+    let world = World::new("note-delivered-before-sidecar")
+        .with_env("ONEPIPELINE_TEST_NOTE_RECORDED_GATE", &recorded.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let run = "deliveredbeforesidecar";
+    held_apart(&world, run, vec![agent("build", &[]), agent("lint", &[])]);
+    let both = submitted(
+        &world,
+        run,
+        &json!({"version": 2, "commands": [
+            note_op("build", "worker", BUILD_NOTE, None),
+            note_op("lint", "worker", LINT_NOTE, None),
+        ]})
+        .to_string(),
+    );
+    world.until("both notes to wait in their inboxes", |world| {
+        awaiting_an_answer(world, run) == 2
+    });
+    assert_eq!(receipt(both)["state"], json!("applied"));
+    let id = queued_id_of(&world, run, BUILD_NOTE);
+
+    release_turn_of(&world, run, "build");
+    let held = recorded.arrived_within_a_step(&world, "the driver to record build's lane");
+    // The window this journey is about: build's note is journalled delivered,
+    // and the sidecar still holds it in build's inbox.
+    assert_eq!(
+        note_records_of(&world, run, id, 0),
+        1,
+        "build's note is not journalled once at the hold"
+    );
+    assert!(
+        sidecar_of(&world, run)
+            .iter()
+            .any(|(envelope, delivery)| *envelope == id
+                && serde_json::to_value(delivery).expect("a delivery")["node"] == "build"),
+        "the sidecar no longer holds build's note, so there is no window to read"
+    );
+
+    let held_by = |node: &str| format!("inbox: {node} holds envelope {id}'s note, queued since ");
+    let status = world.run(&["status", run]);
+    status.exited(0);
+    assert!(
+        !status.stdout.contains(&held_by("build")) && status.stdout.contains(&held_by("lint")),
+        "status does not drop build's delivered note and keep lint's waiting one:\n{}",
+        status.stdout
+    );
+    assert!(
+        status.stdout.contains(&format!(
+            "note: envelope {id}'s note 0 to build, answered queued — note-delivered"
+        )),
+        "status does not show build's note's result:\n{}",
+        status.stdout
+    );
+    assert_eq!(
+        inbox_reading(&world, run),
+        vec![(id.to_string(), "queued".to_owned(), "lint".to_owned())],
+        "status --json does not name lint's note alone as waiting"
+    );
+
+    held.release();
+    release_turn_of(&world, run, "lint");
+    note_recorded(&world, run, id, 1);
+    world.until("status to name no inbox", |world| {
+        !world.run(&["status", run]).stdout.contains("inbox:")
+    });
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() == 2
     });
 }
 
@@ -4157,7 +4465,7 @@ fn a_note_recorded_carried_whose_text_a_turn_then_opens_on_is_recorded_as_shown(
     let openings = openings_of(&world, run, "build");
     let read_in = openings
         .iter()
-        .find(|opening| opening.instruction.contains(NOTE))
+        .find(|opening| carries(opening, NOTE))
         .unwrap_or_else(|| panic!("no worker turn opened on the note's text:\n{openings:#?}"));
     assert_eq!(read_in.origin, Some(Origin::Supervisor), "{read_in:?}");
     let shown = presentations_of(&world, run, "build");
@@ -4326,7 +4634,7 @@ fn two_notes_in_one_envelope_are_each_recorded_on_the_turn_that_opened_on_them()
     let turn_carrying = |text: &str| -> u64 {
         let carrying: Vec<&TurnStarted> = openings
             .iter()
-            .filter(|opening| opening.instruction.contains(text))
+            .filter(|opening| carries(opening, text))
             .collect();
         assert_eq!(
             carrying.len(),
@@ -4832,7 +5140,7 @@ fn a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node() {
     let openings = openings_of(&world, run, "service");
     let second_opening = openings
         .iter()
-        .find(|turn| turn.instruction.contains("## Manager notes"))
+        .find(|turn| carries(turn, "## Manager notes"))
         .expect("the second dispatch's opening turn is in the store");
     assert_eq!(second_opening.turn, 1, "{second_opening:?}");
     assert_eq!(

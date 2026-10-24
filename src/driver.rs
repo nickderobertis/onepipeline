@@ -62,7 +62,7 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The file in the run's directory a `stop` holds locked for the whole of its
 /// teardown, and a driver's observer watch holds across each restart.
@@ -83,6 +83,10 @@ const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE"
 /// The test failpoint a `stop` meets once it has cancelled the run's observer,
 /// before it signals the run's tree.
 const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
+
+/// The test failpoint a retained driver meets once it has written its claim
+/// into the launch record, before its loop appends anything.
+const DRIVER_CLAIMED_GATE_ENV: &str = "ONEPIPELINE_TEST_DRIVER_CLAIMED_GATE";
 
 /// How often a stop looks again at a restart lock a restart in flight holds.
 const RESTART_LOCK_POLL: Duration = Duration::from_millis(20);
@@ -2308,6 +2312,12 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
+    // Test failpoint only, and nothing at all where its variable is unset: a
+    // journey holds this driver with its claim written and nothing appended
+    // since, so the run's summary still names the process that launched it.
+    if let Err(error) = crate::ordering::meet(DRIVER_CLAIMED_GATE_ENV) {
+        eprintln!("onepipeline: {error}");
+    }
 
     // Scoped, so the watch is joined before this returns rather than left holding
     // the observer of a driver that has finished with it.

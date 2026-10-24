@@ -1922,10 +1922,10 @@ fn write_record(path: &Path, file: &mut fs::File, line: &str) -> Result<()> {
     // answer is the boundary this append starts on, which is what a failure
     // restores.
     let boundary = file.seek(SeekFrom::End(0)).map_err(ledger)?;
+    crate::ordering::journal_held(path, line)?;
     let receipt = crate::appendstamp::before(path, file);
-    let written = file
-        .write_all(format!("{line}\n").as_bytes())
-        .and_then(|()| file.flush());
+    let written =
+        crate::sys::append_all(file, format!("{line}\n").as_bytes()).and_then(|()| file.flush());
     match written {
         Ok(()) => {
             crate::appendstamp::after(path, file, receipt);
