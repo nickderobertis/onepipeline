@@ -878,9 +878,106 @@ fn until_settled(world: &World, run: &str, node: &str) {
     });
 }
 
+/// Where a journey's plan is kept: a plans source not declared private, or the private
+/// canonical home of [`private_home_world`], which keeps the consumer's public projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Home {
+    Shared,
+    Private,
+}
+
+impl Home {
+    fn world(self, name: &str) -> (World, Repository, Repository) {
+        match self {
+            Self::Shared => mixed_world(name),
+            Self::Private => private_home_world(name),
+        }
+    }
+
+    /// A private producer, which in the private home names the private repository by its
+    /// origin and is classified private on its own task.
+    fn producer(self, id: &str, deps: &[&str]) -> Value {
+        let mut node = producer(id, deps);
+        if self == Self::Private {
+            node["repo"] = json!("github.com/owner/service");
+            node["classification"] = json!("private");
+        }
+        node
+    }
+
+    /// A public node, which in the private home names the public repository by its origin,
+    /// so the store routes its projection.
+    fn public(self, id: &str, deps: &[&str]) -> Value {
+        let mut node = public(id, deps);
+        if self == Self::Private {
+            node["repo"] = json!("github.com/owner/library");
+        }
+        node
+    }
+
+    fn exported_plan(self, name: &str) -> Value {
+        mixed_plan(
+            name,
+            vec![
+                self.producer("generalize", &[]),
+                self.public("examples", &["generalize"]),
+            ],
+            vec![edge("generalize", "examples")],
+        )
+    }
+
+    fn project(self, world: &World, name: &str, plan: &Value) -> String {
+        match self {
+            Self::Shared => world.plan(name, plan),
+            Self::Private => routed_into_private_home(world, name, plan),
+        }
+    }
+
+    /// In the private home: the consumer's projection is still one view, never a node of
+    /// the run, and holds the status its canonical task settled with.
+    fn kept_one_view(self, world: &World, run: &str, nodes: &[&str]) {
+        if self != Self::Private {
+            return;
+        }
+        let dispatched: std::collections::BTreeSet<String> = world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_owned))
+            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            nodes.iter().map(|node| (*node).to_owned()).collect();
+        assert!(
+            dispatched.is_subset(&expected),
+            "{dispatched:?} is not within {expected:?}"
+        );
+        let views: Vec<(String, String)> = files_under(&world.root.join("views-store"))
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("tasks"))
+            .collect();
+        assert_eq!(views.len(), 1, "{views:?}");
+        assert!(views[0].1.contains("status: done"), "{views:?}");
+        assert!(!views[0].1.contains("depends_on"), "{views:?}");
+    }
+}
+
 #[test]
 fn the_export_base_holds_through_supersession_retry_and_resume() {
-    let (world, _, library) = mixed_world("boundary-lineage");
+    export_base_holds(Home::Shared);
+}
+
+/// The same lineage over a private canonical home: every replacement, the requeue and the
+/// resumed session start from the one export, and the consumer's public projection is never
+/// read as a node however often the plan is read again.
+#[test]
+fn the_export_base_holds_through_supersession_retry_and_resume_in_a_private_home() {
+    export_base_holds(Home::Private);
+}
+
+fn export_base_holds(home: Home) {
+    let (world, _, library) = home.world(match home {
+        Home::Shared => "boundary-lineage",
+        Home::Private => "boundary-lineage-private",
+    });
     // The first producer fails its task; its replacement keeps the example.
     world.script("generalize.fail", "1");
     world.script("generalize-2.work-at", "examples/generic/sample.md");
@@ -893,25 +990,25 @@ fn the_export_base_holds_through_supersession_retry_and_resume() {
     // A node held open for the whole journey keeps the driver attending the run while
     // each failure waits for its retry.
     world.script("keep.wait", "hold");
-    let mut plan = exported_plan("lineage");
+    let mut plan = home.exported_plan("lineage");
     plan["tasks"]
         .as_array_mut()
         .expect("the plan's nodes")
         .push(crate::harness::agent("keep", &[]));
-    let project = world.plan("lineage", &plan);
+    let project = home.project(&world, "lineage", &plan);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     until_settled(&world, "lineage", "generalize");
     reply(
         &world,
         "lineage",
-        json!([{"op": "retry", "id": "generalize", "node": producer("generalize-2", &[])}]),
+        json!([{"op": "retry", "id": "generalize", "node": home.producer("generalize-2", &[])}]),
     );
     until_settled(&world, "lineage", "examples");
     reply(
         &world,
         "lineage",
-        json!([{"op": "retry", "id": "examples", "node": public("examples-2", &[])}]),
+        json!([{"op": "retry", "id": "examples", "node": home.public("examples-2", &[])}]),
     );
     world.until("the replacement consumer to hold its session", |world| {
         world
@@ -1019,6 +1116,17 @@ fn the_export_base_holds_through_supersession_retry_and_resume() {
             &["show", "origin/main:examples/sample.md"]
         ),
         "the replacement's generic example"
+    );
+    home.kept_one_view(
+        &world,
+        "lineage",
+        &[
+            "generalize",
+            "generalize-2",
+            "examples",
+            "examples-2",
+            "keep",
+        ],
     );
 }
 
@@ -3783,12 +3891,26 @@ fn a_change_request_description_is_written_over_the_run_scope() {
 #[cfg(unix)]
 #[test]
 fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorded() {
-    let (world, _, library) = mixed_world("boundary-adopted");
+    adopted_from_the_recorded_export(Home::Shared);
+}
+
+/// The same takeover over a private canonical home: the adopter reads the canonical graph,
+/// never the consumer's projection, and resumes from the export the record holds.
+#[test]
+fn an_adopting_driver_resumes_a_consumer_from_the_recorded_export_in_a_private_home() {
+    adopted_from_the_recorded_export(Home::Private);
+}
+
+fn adopted_from_the_recorded_export(home: Home) {
+    let (world, _, library) = home.world(match home {
+        Home::Shared => "boundary-adopted",
+        Home::Private => "boundary-adopted-private",
+    });
     world.script("generalize.work-at", "examples/generic/sample.md");
     world.script("generalize.work", "a generic example\n");
     world.script("examples.work", "built on it\n");
     world.script("examples.wait", "hold");
-    let project = world.plan("adopted", &exported_plan("adopted"));
+    let project = home.project(&world, "adopted", &home.exported_plan("adopted"));
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the consumer to hold its session", |world| {
         !branches_of(world, "adopted", "examples").is_empty()
@@ -3822,6 +3944,7 @@ fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorde
         ),
         "a generic example"
     );
+    home.kept_one_view(&world, "adopted", &["generalize", "examples"]);
 }
 
 #[test]
