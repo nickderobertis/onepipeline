@@ -1170,15 +1170,11 @@ onevcs-testing = "0.19.19"
 # The write-back's image step rewrites a created task's shadow document that way, so on
 # 0.11.0 a reader listing the shadow could open it empty or half-written
 # (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
-# **0.12.1 is the floor: the store owns task visibility.** A task is classified by its own
-# declaration and its repositories, never by its project, so a public task of a private
-# coordinating project stays public; the store makes neutral public projections of such
-# tasks and mirrors their status, and never lists one as a task of the private project.
-# `src/taskgraph.rs` takes each node's classification as the store answers it, with no
-# second inheritance rule (entry 139 of `docs/contract-divergences.md`). It is breaking:
-# 0.12.0 reads dependencies from a task's own record, so a dependency read names a far end
-# under a tracker the host does not configure in `unanswered`, and adds five refusals
-# `src/writeback.rs` names in the store's words.
+# **0.12.1 is the floor: the store owns task visibility** — what that changes here is entry
+# 139 of `docs/contract-divergences.md`. It is breaking: 0.12.0 reads dependencies from a
+# task's own record, so a dependency read names a far end under a tracker the host does not
+# configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
+# words.
 onetaskgraph-core = "=0.12.1"
 onetaskgraph-plugin-api = "=0.12.1"
 onetaskgraph-local-md = "=0.12.1"
