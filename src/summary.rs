@@ -1021,7 +1021,7 @@ impl Maintainer {
             return;
         };
         let summary = self.derived(&launch, (self.accounted, journal_stamp(&self.paths).1));
-        let _ = ledger::write_json(&self.paths.summary(), &summary);
+        let _ = ledger::write_json_derived(&self.paths.summary(), &summary);
     }
 
     /// The run's launch record, as the row's attribution needs it — or `None`
@@ -1338,6 +1338,45 @@ mod tests {
         assert!(
             cached_cost < fold_cost,
             "the cached read cost {cached_cost} against a fold's {fold_cost}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An append rewrites the summary and the append receipt beside the journal
+    /// and asks the disk to sync neither: both are checked against the journal
+    /// before they are trusted, and the append itself syncs nothing, so a sync per
+    /// record was only latency on the relay that writes them one at a time.
+    #[test]
+    fn an_append_rewrites_what_it_derives_without_syncing_it() {
+        let root = scratch("derived-unsynced");
+        let paths = recorded(&root, "demo", 1);
+        let before = RunSummary::of(&paths).expect("the run reads");
+
+        let watch = crate::ledger::disk::watching(None);
+        emit(
+            &mut Journal::open(&paths),
+            PipelineKind::NodeReady,
+            Some("ship"),
+            "demo",
+        );
+        let asked = watch.asked();
+        drop(watch);
+
+        assert!(
+            asked.contains(&crate::ledger::disk::Step::Publish),
+            "the append rewrote nothing beside the journal: {asked:?}"
+        );
+        assert!(
+            !asked.iter().any(|step| matches!(
+                step,
+                crate::ledger::disk::Step::Contents | crate::ledger::disk::Step::Entry
+            )),
+            "an append asked the disk to sync what it derives: {asked:?}"
+        );
+        let after = RunSummary::of(&paths).expect("the run reads");
+        assert_ne!(
+            after, before,
+            "the summary did not take the appended record"
         );
         std::fs::remove_dir_all(&root).ok();
     }

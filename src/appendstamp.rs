@@ -110,7 +110,7 @@ pub(crate) fn after(path: &Path, file: &File, receipt: Option<Receipt>) {
         return;
     };
     receipt.stamp = stamp;
-    if let Err(error) = ledger::write_json(&receipt_path(path), &receipt) {
+    if let Err(error) = ledger::write_json_derived(&receipt_path(path), &receipt) {
         eprintln!("onepipeline: append receipt: {error}");
     }
 }

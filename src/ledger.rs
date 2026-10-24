@@ -1475,6 +1475,21 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     write_atomic(path, body.as_bytes(), Durability::Record)
 }
 
+/// [`write_json`] for a document its run's journal rebuilds: published by the same
+/// rename, with no disk sync.
+///
+/// For the files a journal append rewrites — its summary, its append receipt, its
+/// liveness file — every one a cache a reader checks against the journal before it
+/// trusts it. The append they follow does not sync the journal, so a sync of what is
+/// derived from it bought no durability the record itself has, and it cost every
+/// relayed record its share of the host's sync latency on a thread that writes them
+/// one at a time.
+pub fn write_json_derived<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    write_atomic(path, body.as_bytes(), Durability::Projection)
+}
+
 /// What a write is asked to survive, beyond the reader it is already safe from.
 ///
 /// Every write through [`write_atomic`] is published by a rename. A directory

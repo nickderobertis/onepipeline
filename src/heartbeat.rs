@@ -187,7 +187,7 @@ pub(crate) fn clear(paths: &RunPaths) {
 /// costs a reader the beats since the journal last carried one, and nothing else.
 // llmlint: ignore[changed_behavior_has_e2e] a liveness file that cannot be written needs a run directory the driver itself writes and may not, which is host sabotage rather than a journey; what a reader does with no usable file — read the journal's beats — is driven by `journal_scaling::journalled_heartbeats_with_no_liveness_file_read_as_they_did`.
 fn write(paths: &RunPaths, liveness: &Liveness) {
-    let _ = ledger::write_json(&paths.liveness(), liveness);
+    let _ = ledger::write_json_derived(&paths.liveness(), liveness);
 }
 
 /// Take what the file says onto a folded state: each node's last heartbeat is the
