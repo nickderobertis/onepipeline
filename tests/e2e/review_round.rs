@@ -779,12 +779,19 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// bound follows it, still below what the round cost before, and comes back down once
 /// `onevcs` makes those reads cost near what they did.
 ///
+// llmlint: ignore-block[comments_earn_their_place] the planner's ruling for this change
+// requires the bound's comment to say it was raised to admit the change and that separate
+// planned work will reduce it, so a reader knows the figure is provisional, not a target.
 /// Raised from 17,000 to admit the change that took the driver's timed claim reads out:
 /// on a loaded Linux host the round counted 17,326 on the base and 18,312 on that change.
 /// Separate planned work will reduce the round's starts and bring the bound back down.
 #[cfg(all(unix, not(target_os = "macos")))]
 const GIT_STARTS: usize = 22_000;
+// llmlint: ignore-end[comments_earn_their_place]
 
+// llmlint: ignore-block[comments_earn_their_place] the planner's ruling for this change
+// requires the bound's comment to say it was raised to admit the change and that separate
+// planned work will reduce it, so a reader knows the figure is provisional, not a target.
 /// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
 /// on `onevcs` 0.56.9 runs counted 15,771–16,999 alone and up to 21,874 beside the whole
 /// suite on a loaded runner. Over a spread that wide this figure catches only a gross
@@ -793,6 +800,7 @@ const GIT_STARTS: usize = 22_000;
 /// the other.
 #[cfg(target_os = "macos")]
 const GIT_STARTS: usize = 32_000;
+// llmlint: ignore-end[comments_earn_their_place]
 
 /// Hold the round to [`GIT_STARTS`].
 ///

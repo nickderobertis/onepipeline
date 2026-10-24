@@ -2474,13 +2474,13 @@ fn a_claim_read_finding_its_landed_claim_gone_ends_no_dispatch_and_publishes() {
     a_claim_read_answering("claim-read-claim-gone", ClaimAnswer::ClaimGone);
 }
 
-/// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
-/// the moment `x` is in flight: `w` is held until `y`'s publication is waiting, so `z` starts
-/// while it waits.
 /// The wait a rate-limited claim read names: well past the eleven seconds the journey watches
 /// for a read inside it.
 const RATE_LIMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
 
+/// Drive `answer` on a run of `x` and then `y`, which publishes, beside `w` and then `z`, from
+/// the moment `x` is in flight: `w` is held until `y`'s publication is waiting, so `z` starts
+/// while it waits.
 fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
     use std::time::Duration;
     // The interval the claim's old lease ran on: it lapsed at two of them and a read's
