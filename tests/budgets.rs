@@ -1588,6 +1588,14 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
         "{}",
         stderr(&refused)
     );
+    // A name the reporters' object only inherits is no budget either.
+    let inherited = store_operations_report(&dir, Some("constructor"), Some(&result));
+    assert_eq!(inherited.status.code(), Some(1), "{}", stderr(&inherited));
+    assert!(
+        stderr(&inherited).contains("\"constructor\" names none of"),
+        "{}",
+        stderr(&inherited)
+    );
     let unnamed = store_operations_report(&dir, None, Some(&result));
     assert_eq!(unnamed.status.code(), Some(1), "{}", stderr(&unnamed));
     assert!(
@@ -1603,6 +1611,20 @@ fn the_store_operations_reporter_reports_each_budget_from_its_record_alone() {
         "{}",
         stderr(&outside)
     );
+    // A result that cannot be written is a failure, never a value reported elsewhere.
+    let unwritable = dir.join("absent/result.json");
+    let unwritten = store_operations_report(
+        &dir,
+        Some("store-operations-per-settlement"),
+        Some(&unwritable),
+    );
+    assert_eq!(unwritten.status.code(), Some(1), "{}", stderr(&unwritten));
+    assert!(
+        stderr(&unwritten).contains("ENOENT"),
+        "{}",
+        stderr(&unwritten)
+    );
+    assert!(!unwritable.exists(), "a result was written");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1689,6 +1711,59 @@ fn the_store_operations_reporter_refuses_every_record_it_cannot_vouch_for() {
             0,
             |r| r["per_node"] = serde_json::json!({"held-1": 5}),
             "must name each of the 3 held nodes",
+        ),
+        (
+            0,
+            |r| {
+                r.as_object_mut().expect("a record").remove("workload");
+            },
+            "workload is missing",
+        ),
+        (
+            0,
+            |r| {
+                r.as_object_mut().expect("a record").remove("window");
+            },
+            "window is missing",
+        ),
+        (
+            0,
+            |r| r["per_source"] = serde_json::json!({"vault": 4}),
+            "per_source does not sum to total",
+        ),
+        (
+            0,
+            |r| {
+                r.as_object_mut()
+                    .expect("a record")
+                    .remove("fixed_interval");
+            },
+            "fixed_interval is missing",
+        ),
+        (
+            0,
+            |r| r["fixed_interval"]["interval_s"] = serde_json::json!(60),
+            "interval_s must be the workload's poll interval",
+        ),
+        (
+            0,
+            |r| r["fixed_interval"]["passes"] = serde_json::json!(59),
+            "must re-read every held node once an interval",
+        ),
+        (
+            0,
+            |r| r["fixed_interval"]["held_nodes"] = serde_json::json!(2),
+            "must re-read every held node once an interval",
+        ),
+        (
+            1,
+            |r| r["dispatches"][0]["node"] = serde_json::json!(""),
+            "dispatches[0].node must name a node",
+        ),
+        (
+            2,
+            |r| r["settlements"][0]["node"] = serde_json::json!(7),
+            "settlements[0].node must name a node",
         ),
         (
             1,

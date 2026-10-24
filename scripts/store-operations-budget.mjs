@@ -255,7 +255,8 @@ let next =
   "run this through 'onebudgetspec check budgets.yaml --id <budget>', which names the budget in " +
   "ONEBUDGETSPEC_BUDGET_ID";
 try {
-  const reporter = REPORTERS[id];
+  // Own keys only: an inherited name such as `constructor` is no budget of this file's.
+  const reporter = Object.hasOwn(REPORTERS, id ?? "") ? REPORTERS[id] : undefined;
   if (reporter === undefined) {
     throw new Error(
       `ONEBUDGETSPEC_BUDGET_ID ${JSON.stringify(id ?? null)} names none of ` +
