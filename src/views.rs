@@ -1208,15 +1208,19 @@ impl Carried {
 /// this is held.
 ///
 /// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
-/// nothing else, so no other view ever reuses a read.
-pub(crate) struct StreamReads(());
+/// nothing else, so no other view ever reuses a read. It names the run it renders,
+/// which is what lets that run's close-out hand it its reads — see [`closed_out`].
+//
+// llmlint: ignore[invalid_states_unrepresentable] a run id is the plain string this whole crate spells it as, for the reason the suppression on `READ_THIS_RENDER` records.
+pub(crate) struct StreamReads(String);
 
 impl StreamReads {
-    /// Begin carrying reads across this thread's renders.
-    pub(crate) fn begin() -> Self {
+    /// Begin carrying reads across this thread's renders of `run`.
+    pub(crate) fn begin(run: &str) -> Self {
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
         RENDERING.set(Renders::AsOneStream);
-        Self(())
+        *handoff().streamed.entry(run.to_owned()).or_default() += 1;
+        Self(run.to_owned())
     }
 
     /// Make ready for the render of `fresh`, the records the stream is about to
@@ -1230,11 +1234,12 @@ impl StreamReads {
     pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
         // First, so a close-out read the run moved past is not what its last render
         // takes up, whichever of the two branches below that render is.
-        let mut closed = closed_out_held();
+        let mut handed = handoff();
+        handed.let_go_of_lapsed(std::time::Instant::now());
         for node in fresh.iter().filter_map(|event| moved_by(event)) {
-            closed.remove(&(run.to_owned(), node.to_owned()));
+            handed.reads.remove(&(run.to_owned(), node.to_owned()));
         }
-        drop(closed);
+        drop(handed);
         if concluded {
             self.start_from_close_out(run);
         } else {
@@ -1246,21 +1251,23 @@ impl StreamReads {
     /// reporting the run as it settled — except the reads the run's own close-out
     /// took in this process, after its loop's last settlement, still inside
     /// [`STREAM_READ_REUSE`] and moved by nothing the stream recorded since: see
-    /// [`closed_out`].
+    /// [`closed_out`]. Taken up, they are the stream's own to carry, and the
+    /// hand-off lets go of them.
     fn start_from_close_out(&self, run: &str) {
-        let now = std::time::Instant::now();
-        let settled: Vec<((String, String), Carried)> = closed_out_held()
-            .iter()
-            .filter(|((closed, _), _)| closed == run)
+        let mut handed = handoff();
+        handed.let_go_of_lapsed(std::time::Instant::now());
+        let settled: Vec<((String, String), Carried)> = handed
+            .taken_up(run)
+            .into_iter()
             .map(|(key, (read, taken))| {
                 let carried = Carried {
-                    read: std::rc::Rc::new(read.clone()),
-                    taken: *taken,
+                    read: std::rc::Rc::new(read),
+                    taken,
                 };
-                (key.clone(), carried)
+                (key, carried)
             })
-            .filter(|(_, carried)| carried.still_carried(now))
             .collect();
+        drop(handed);
         READ_THIS_RENDER.with_borrow_mut(|reads| {
             reads.clear();
             reads.extend(settled);
@@ -1321,12 +1328,20 @@ fn moved_by(event: &Envelope) -> Option<&str> {
 /// answer — inside [`STREAM_READ_REUSE`] of when it was `taken`, only where the
 /// sibling answered it, and only where the stream recorded nothing that moves the
 /// node since — and reads the rest.
+///
+/// Held only for a run an attach stream in this process is rendering, so a
+/// detached driver's close-out, and `readjust`'s, hold nothing; and let go of when
+/// that render takes them up, when they pass the window, and when the stream ends.
 pub(crate) fn closed_out(run: &str, taken: std::time::Instant, reads: &[(String, LandingRead)]) {
-    let mut held = closed_out_held();
-    held.retain(|(closed, _), _| closed != run);
+    let mut handed = handoff();
+    handed.let_go_of_lapsed(std::time::Instant::now());
+    if !handed.streamed.contains_key(run) {
+        return;
+    }
+    handed.reads.retain(|(closed, _), _| closed != run);
     // A refusal is not handed over: the last render asks again rather than repeat
     // that nothing could decide it a moment ago.
-    held.extend(
+    handed.reads.extend(
         reads
             .iter()
             .filter(|(_, read)| matches!(read, LandingRead::Answered(_)))
@@ -1334,19 +1349,50 @@ pub(crate) fn closed_out(run: &str, taken: std::time::Instant, reads: &[(String,
     );
 }
 
-/// The close-out reads [`closed_out`] handed over, keyed by run and node, and when
-/// each was taken.
+/// The close-out reads [`closed_out`] hands an attach stream, and the runs a stream
+/// in this process is rendering.
 ///
 /// Process-wide rather than per thread like [`READ_THIS_RENDER`], because the
 /// close-out runs on the engine's thread and the stream renders on the driver's.
+//
 // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as, for the reason the suppression on `READ_THIS_RENDER` above records.
-static CLOSED_OUT: std::sync::Mutex<BTreeMap<(String, String), (LandingRead, std::time::Instant)>> =
-    std::sync::Mutex::new(BTreeMap::new());
+struct Handoff {
+    /// Each run an attach stream is rendering, and how many streams render it.
+    streamed: BTreeMap<String, usize>,
+    /// Each read handed over and not yet taken up, keyed by run and node, and when
+    /// it was taken.
+    reads: BTreeMap<(String, String), (LandingRead, std::time::Instant)>,
+}
 
-/// [`CLOSED_OUT`], whoever panicked while holding it: each entry is a whole read.
-fn closed_out_held(
-) -> std::sync::MutexGuard<'static, BTreeMap<(String, String), (LandingRead, std::time::Instant)>> {
-    CLOSED_OUT
+impl Handoff {
+    /// Let go of every read past [`STREAM_READ_REUSE`] at `now`, which no render
+    /// would take up.
+    fn let_go_of_lapsed(&mut self, now: std::time::Instant) {
+        self.reads
+            .retain(|_, (_, taken)| now.saturating_duration_since(*taken) < STREAM_READ_REUSE);
+    }
+
+    /// Every read held for `run`, let go of here.
+    fn taken_up(
+        &mut self,
+        run: &str,
+    ) -> Vec<((String, String), (LandingRead, std::time::Instant))> {
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.reads)
+            .into_iter()
+            .partition(|((closed, _), _)| closed == run);
+        self.reads = kept.into_iter().collect();
+        taken
+    }
+}
+
+static HANDOFF: std::sync::Mutex<Handoff> = std::sync::Mutex::new(Handoff {
+    streamed: BTreeMap::new(),
+    reads: BTreeMap::new(),
+});
+
+/// [`HANDOFF`], whoever panicked while holding it: each entry is a whole read.
+fn handoff() -> std::sync::MutexGuard<'static, Handoff> {
+    HANDOFF
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1355,6 +1401,18 @@ impl Drop for StreamReads {
     fn drop(&mut self) {
         RENDERING.set(Renders::EachAlone);
         READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        let mut handed = handoff();
+        let last = match handed.streamed.get_mut(&self.0) {
+            Some(streams) if *streams > 1 => {
+                *streams -= 1;
+                false
+            }
+            _ => true,
+        };
+        if last {
+            handed.streamed.remove(&self.0);
+            handed.reads.retain(|(closed, _), _| *closed != self.0);
+        }
     }
 }
 
@@ -5941,7 +5999,7 @@ mod tests {
     /// the stream ends.
     #[test]
     fn a_stream_render_keeps_its_reads_inside_their_window_and_no_other_render_does() {
-        let stream = StreamReads::begin();
+        let stream = StreamReads::begin("demo");
         holding(&["fresh"]);
         let stale = std::time::Instant::now()
             .checked_sub(STREAM_READ_REUSE)
@@ -5990,7 +6048,7 @@ mod tests {
     /// node, which no offline journey can time inside the window.
     #[test]
     fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
-        let stream = StreamReads::begin();
+        let stream = StreamReads::begin("demo");
         for (lets_go, record) in [
             (
                 true,
@@ -6091,7 +6149,7 @@ mod tests {
         let stale = now
             .checked_sub(STREAM_READ_REUSE)
             .expect("an instant a window ago");
-        let stream = StreamReads::begin();
+        let stream = StreamReads::begin("closing");
 
         closed_out(
             "closing",
@@ -6131,8 +6189,80 @@ mod tests {
             "a read past its window was taken up"
         );
         drop(stream);
-        closed_out("closing", now, &[]);
-        closed_out("other", now, &[]);
+    }
+
+    /// What the close-out hands over is held no longer than a render could want
+    /// it: never for a run no stream in this process renders, and let go of once
+    /// the last render took it up, once it passed its window, and once the stream
+    /// ended — while an answer inside all three still reaches that render.
+    #[test]
+    fn the_close_out_s_hand_off_is_let_go_of_once_nothing_could_take_it_up() {
+        let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
+        let now = std::time::Instant::now();
+        let stale = now
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+
+        // A run no stream renders — a detached driver's, `readjust`'s — holds nothing.
+        closed_out("unwatched", now, &[("a".into(), answered())]);
+        assert!(
+            handed_over("unwatched").is_empty(),
+            "an unwatched run held its reads"
+        );
+
+        let stream = StreamReads::begin("reclaimed");
+        // Past its window, a read is let go of by the next hand-off or render.
+        closed_out("reclaimed", stale, &[("old".into(), answered())]);
+        assert_eq!(handed_over("reclaimed"), ["old"]);
+        stream.before_render("reclaimed", &[], false);
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "a lapsed read was held"
+        );
+
+        closed_out(
+            "reclaimed",
+            now,
+            &[("a".into(), answered()), ("b".into(), answered())],
+        );
+        assert_eq!(
+            handed_over("reclaimed"),
+            ["a", "b"],
+            "what the close-out handed over"
+        );
+        stream.before_render("reclaimed", &[], false);
+        assert_eq!(
+            handed_over("reclaimed"),
+            ["a", "b"],
+            "a render before the last let go of what the last will want"
+        );
+        stream.before_render("reclaimed", &[], true);
+        assert_eq!(reads_held(), ["a", "b"], "the last render's reads");
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "taken up, and still held"
+        );
+
+        // Handed over again and never taken up: the stream's end lets go of it.
+        closed_out("reclaimed", now, &[("c".into(), answered())]);
+        assert_eq!(handed_over("reclaimed"), ["c"]);
+        drop(stream);
+        assert!(handed_over("reclaimed").is_empty(), "outlived its stream");
+        closed_out("reclaimed", now, &[("d".into(), answered())]);
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "held after its stream ended"
+        );
+    }
+
+    /// The nodes the close-out's hand-off holds for `run`.
+    fn handed_over(run: &str) -> Vec<String> {
+        handoff()
+            .reads
+            .keys()
+            .filter(|(closed, _)| closed == run)
+            .map(|(_, node)| node.clone())
+            .collect()
     }
 
     /// A read is carried inside its window and taken again once the window has

@@ -769,7 +769,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// Linux it started 18,300–19,500 of them, nearly half the attach stream reading every
 /// unlanded draft's landing afresh on each of its renders, about forty `git` a read;
 /// carrying those reads across a stream's renders brought it to 11,000–11,700. It
-/// starts 9,000–9,300 now: a stream lets go of a carried read only where a record moves
+/// starts 8,900–9,300 now: a stream lets go of a carried read only where a record moves
 /// the landing, rather than at every step of a restacked draft's publication; its last
 /// render takes up the reads the driver's close-out took a moment before rather than
 /// asking every branch again; and the close-out reads a branch a rework shares with
@@ -781,7 +781,7 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 // the journey out of `nx affected` for the very changes the bound exists to catch — the
 // ground `change_telemetry.rs` carries for its own.
 #[cfg(unix)]
-const GIT_STARTS: usize = 10_800;
+const GIT_STARTS: usize = 10_750;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// Hold the round to [`GIT_STARTS`].

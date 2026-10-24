@@ -2996,7 +2996,7 @@ fn attach(
     let mut chains = engine::ChainRecords::default();
     // Held for the whole stream, on the thread that renders it: see
     // [`views::StreamReads`] for what it carries and when it lets go.
-    let carried = views::StreamReads::begin();
+    let carried = views::StreamReads::begin(&paths.run);
 
     let driving = paths.clone();
     let letting_go = watch.letting_go();
