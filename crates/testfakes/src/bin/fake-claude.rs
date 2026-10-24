@@ -449,6 +449,27 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
             start_self(&["late-parent", &dir.to_string_lossy()]);
             fake::wait_for(&dir.join("turn.late-spawner.pid"));
         }
+        // `turn.ptracer` holds the pid of a process this turn lets trace it, and
+        // the late-child turn waits until that tracer says it is attached: a turn
+        // that takes a stop signal and runs on, since its tracer may keep it
+        // running, as a stop can meet one that has not yet stopped.
+        #[cfg(target_os = "linux")]
+        if fake::node_script(dir, "turn", "late-child")
+            .is_some_and(|what| what_the_task_says(&prompt) == what)
+        {
+            if let Some(tracer) = fake::node_script(dir, "turn", "ptracer") {
+                let tracer: libc::c_ulong = tracer.trim().parse().unwrap_or_else(|_| {
+                    fake::fail(&format!("turn.ptracer is not a pid: {tracer}"))
+                });
+                // SAFETY: `PR_SET_PTRACER` takes a pid by value and touches no
+                // memory this call owns.
+                if unsafe { libc::prctl(libc::PR_SET_PTRACER, tracer, 0, 0, 0) } != 0 {
+                    fake::fail("cannot name this turn's tracer");
+                }
+                record_own_pid(&dir.join("turn.traceable.pid"));
+                fake::wait_for(&dir.join("turn.traced"));
+            }
+        }
         fake::wait_for(&dir.join("turn.go"));
         // `turn.late-child` names a task, and that task's released turn starts a
         // process of its own and records its pid in `turn.late-child.pid`: a

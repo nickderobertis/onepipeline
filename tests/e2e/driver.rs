@@ -4402,6 +4402,166 @@ fn a_stop_whose_relisting_fails_never_reports_success_beside_a_child_it_missed()
     );
 }
 
+/// A stop never reports success while a child is running that was started by a
+/// process its stop signal reached and did not stop — and leaves the run beside
+/// it running.
+///
+/// A stop signal that was delivered is not a stopped process: it takes effect
+/// when its target next runs, and until then the target can start another. A
+/// teardown that took the delivery as the stop would list a tree that was still
+/// growing and call it settled. The turn here is traced by this test, which
+/// swallows every stop signal it is sent, so the turn takes the signal and runs
+/// on for as long as the journey needs; the stop is held once its discovery has
+/// answered, and the turn starts its child only then, after the last listing on
+/// any host.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_never_reports_success_beside_a_child_of_a_process_its_stop_signal_did_not_stop() {
+    let world = World::new("driver-stop-unstopped");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    world.script("turn.ptracer", &std::process::id().to_string());
+    let (run, beside) = ("unstopped", "besideunstopped");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let traceable = world.fakes.join("turn.traceable.pid");
+    world.until("the turn to name its tracer", |_| traceable.is_file());
+    let turn: u32 = std::fs::read_to_string(&traceable)
+        .expect("the turn recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let swallowed = world.fakes.join("turn.stop-swallowed");
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] a process that takes a stop signal and
+    // runs on is the property, and only a tracer can keep one running on demand; which side
+    // of the stop's last listing it starts its child on cannot be placed by any user-facing
+    // input either. The tracer and the failpoint only order the real binaries; the launch,
+    // the stop, the dispatch and every outcome asserted are the binaries' own.
+    let tracer = {
+        let (swallowed, attached) = (swallowed.clone(), world.fakes.join("turn.traced"));
+        std::thread::spawn(move || keep_running_through_stops(turn, &swallowed, &attached))
+    };
+    let discovered = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env(
+        "ONEPIPELINE_TEST_STOP_DISCOVERED_GATE",
+        discovered.address(),
+    );
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop unstopped"));
+        let at_the_signals = discovered.arrived_within_a_step(&world, "the stop's discovery");
+        assert!(
+            swallowed.is_file(),
+            "the stop's discovery answered without sending the turn a stop signal"
+        );
+        world.release("turn.go");
+        world.until(
+            "the turn to start a process after the stop's last listing",
+            |_| late_child.is_file(),
+        );
+        at_the_signals.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up, by the
+    // pids the processes recorded themselves.
+    let survived = !process_ended(child);
+    for pid in [child, turn] {
+        if !process_ended(pid) {
+            end_process(pid);
+        }
+    }
+    tracer.join().expect("the tracer lets the turn go");
+    assert!(
+        !(stopped.code == 0 && survived),
+        "the stop reported success while pid {child}, started by a turn its stop signal did \
+         not stop, was still running:\n{}",
+        stopped.stdout
+    );
+    stopped.exited(REFUSED).err_has("only partly stopped");
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
+}
+
+/// Trace `pid` from this thread and keep it running through every stop signal
+/// it is sent, writing `swallowed` the first time one is; every other signal is
+/// passed on as it came. `attached` is written once the trace has begun.
+///
+/// What a stop is at its target's end — a signal it acts on when it next runs
+/// — held open for as long as the target lives. Returns once it has ended.
+#[cfg(target_os = "linux")]
+fn keep_running_through_stops(pid: u32, swallowed: &std::path::Path, attached: &std::path::Path) {
+    let raw = libc::pid_t::try_from(pid).expect("a pid");
+    let none = std::ptr::null_mut::<libc::c_void>();
+    // SAFETY: `PTRACE_SEIZE` takes a pid and two unused pointers, and the turn
+    // has named this process as its tracer.
+    let seized = unsafe { libc::ptrace(libc::PTRACE_SEIZE, raw, none, none) };
+    assert_eq!(
+        seized,
+        0,
+        "cannot trace the turn, pid {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    std::fs::write(attached, "go").expect("the turn is told it is traced");
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a live integer this call writes once.
+        if unsafe { libc::waitpid(raw, &mut status, libc::__WALL) } != raw
+            || libc::WIFEXITED(status)
+            || libc::WIFSIGNALED(status)
+        {
+            return;
+        }
+        if !libc::WIFSTOPPED(status) {
+            continue;
+        }
+        // Only a signal on its way in is the tracer's to pass on or swallow;
+        // any other stop of the trace is resumed with nothing.
+        let signal = libc::WSTOPSIG(status);
+        let passed = if status >> 16 != 0 {
+            0
+        } else if signal == libc::SIGSTOP {
+            std::fs::write(swallowed, "swallowed").expect("the swallowed stop is recorded");
+            0
+        } else {
+            signal
+        };
+        // SAFETY: `PTRACE_CONT` takes the tracee and the signal to deliver in the
+        // data argument, and touches no memory this call owns.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_CONT,
+                raw,
+                none,
+                passed as usize as *mut libc::c_void,
+            )
+        };
+    }
+}
+
 /// A stop run from **inside** the run it ends — an agent of the run stopping
 /// its own run — ends the run and answers, rather than freezing or ending
 /// itself on the way.
