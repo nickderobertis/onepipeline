@@ -1,0 +1,31 @@
+{
+  "schema_version": 3,
+  "goal": {
+    "text": "Deliver source-hold-before-cause"
+  },
+  "name": "source-hold-before-cause",
+  "concurrency": 4,
+  "tasks": [
+    {
+      "id": "design",
+      "task": "## What\nDo design.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- design is done.",
+      "persona": "engineer",
+      "task_record": {
+        "id": "source-hold-before-cause-board/000-design",
+        "title": ""
+      }
+    },
+    {
+      "id": "changelog",
+      "task": "## What\nDo changelog.\n\n## Why\nSo the run can settle.\n\n## Acceptance criteria\n- changelog is done.",
+      "persona": "engineer",
+      "deps": [
+        "design"
+      ],
+      "task_record": {
+        "id": "source-hold-before-cause-board/001-changelog",
+        "title": ""
+      }
+    }
+  ]
+}
