@@ -16,7 +16,8 @@
 //!
 //! Exits 70 without running `git` when its own setup fails: no `HELD_GIT_REAL`, a hold
 //! missing `HELD_GIT_CLONE` or `HELD_GIT_DIR`, a held clone or working directory that
-//! does not resolve, a pause file it cannot write, or a `git` that does not start. A
+//! does not resolve, a pause file it cannot write, a hold whose `HELD_GIT_DIR` is removed
+//! before its release, or a `git` that does not start. A
 //! `git` killed by a signal, which has no exit code, exits 1.
 
 use std::path::{Path, PathBuf};
@@ -73,6 +74,14 @@ fn hold() -> std::io::Result<()> {
     std::fs::write(&inside, std::process::id().to_string())?;
     let release = control.join("release");
     while !release.exists() {
+        // A journey that ends without releasing — a failed assertion, its world removed
+        // — takes the control directory with it, and nothing will ever release this.
+        if !control.is_dir() {
+            return Err(std::io::Error::other(format!(
+                "{} was removed before the release",
+                control.display()
+            )));
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     Ok(())

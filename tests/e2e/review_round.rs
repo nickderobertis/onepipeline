@@ -1826,6 +1826,57 @@ fn held_git_holds_only_the_first_start_inside_its_clone() {
     );
 }
 
+/// A hold whose control directory is removed before its release — a journey that failed
+/// with the read still held, its world cleaned up — gives up with 70 rather than waiting
+/// for a release nothing can write any more, and runs no `git`.
+#[test]
+fn held_git_gives_up_a_hold_whose_control_directory_is_removed() {
+    let world = World::new("held-git-control-removed");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let clone = world.root.join("clone");
+    let control = world.root.join("held");
+    for directory in [&clone, &control] {
+        std::fs::create_dir_all(directory).expect("a directory for the hold");
+    }
+    let held = std::process::Command::new(crate::harness::double("held-git"))
+        .arg("--version")
+        .current_dir(&clone)
+        .env("HELD_GIT_REAL", &real)
+        .env("HELD_GIT_HOLD", "1")
+        .env("HELD_GIT_CLONE", &clone)
+        .env("HELD_GIT_DIR", &control)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("held-git starts");
+    world.until("the start to claim the pause", |_| {
+        control.join("inside").exists()
+    });
+    std::fs::remove_dir_all(&control).expect("the control directory is removed");
+    let mut held = Some(held);
+    world.until("the orphaned hold to give up", |_| {
+        held.as_mut()
+            .is_some_and(|held| matches!(held.try_wait(), Ok(Some(_))))
+    });
+    let held = held
+        .take()
+        .expect("the hold")
+        .wait_with_output()
+        .expect("the hold's output");
+    let stderr = String::from_utf8_lossy(&held.stderr);
+    assert_eq!(held.status.code(), Some(70), "{stderr}");
+    assert!(
+        stderr.contains("was removed before the release"),
+        "the hold did not say why it gave up: {stderr}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&held.stdout).contains("git version"),
+        "an orphaned hold ran the real git"
+    );
+}
+
 /// A `git` started outside the held clone that names the clone's `.git` with `--git-dir`
 /// works on it, and is held, as `onevcs` 0.56.8 and later run a read of a session's
 /// repository — in either spelling, and behind a global option that takes a value; one
