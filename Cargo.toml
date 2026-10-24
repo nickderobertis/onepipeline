@@ -726,26 +726,21 @@ resolver = "2"
 # `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
 # no 0.56.x.
 #
-# `onevcs` 0.56.5 is the floor because landing-status readers finish before
-# session close checks the clone for running processes. This prevents an engine
-# read from refusing its own stack-base cleanup during a busy review round.
-#
-# `onevcs` 0.56.6 is the floor because a checkout reader holds a shared lease on
-# the checkout it reads and a session close holds that checkout's lease
-# exclusively, so a read that reaches a closing checkout finds it absent instead
-# of running git inside a directory the close is removing. It also matches the
-# workspaces' `runs` and `pool` directories without regard to case, so Windows
-# paths take the same leases. Together these stop a busy review round from
-# stalling on a stack-base read during its own session close.
-#
-# `onevcs` 0.56.8 is the floor because a session open queueing for its pool's
-# placement serial yields its checkout reads lease while it waits. Under 0.56.6
-# two concurrent opens on one pooled identity each held one of the two locks the
-# other needed, which `lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back`
-# ended at with its second node still held.
-#
-# `onevcs` 0.56.9 is the floor because it is the newest release carrying that fix,
-# and it answers an open session's read while another caller only probes its
+# `onevcs` 0.56.9 is the floor because a busy review round and a pooled identity
+# need these of its checkout reads and sessions, and it is the newest release
+# carrying them all. A read of a session's refs and objects runs from outside every run
+# root, and a session close holds that checkout's lease exclusively against its
+# readers' shared ones, so a close neither refuses over an engine read nor removes
+# the directory under it
+# (`review_round::a_session_close_waits_for_an_onevcs_read_working_inside_its_clone`).
+# Reads of one identity run beside each other rather than queueing
+# (`review_round::a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone`),
+# and the workspaces' `runs` and `pool` directories match without regard to case,
+# so Windows paths take the same leases. A session open queueing for its pool's
+# placement yields its reads lease, so two opens on one pooled identity cannot each
+# hold the lock the other needs
+# (`lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back`).
+# And an open session's read is answered while another caller only probes its
 # checkout (onevcs #529).
 #
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
