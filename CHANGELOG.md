@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.3](https://github.com/nickderobertis/onepipeline/compare/v0.89.2...v0.89.3) - 2026-10-24
+
+### Fixed
+
+- *(driver)* stop reading the project claim on a timer and never end work over a failed read ([#1116](https://github.com/nickderobertis/onepipeline/pull/1116))
+
 ## [0.89.2](https://github.com/nickderobertis/onepipeline/compare/v0.89.1...v0.89.2) - 2026-10-24
 
 ### Fixed
