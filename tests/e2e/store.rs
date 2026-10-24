@@ -2170,6 +2170,189 @@ fn a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_wo
     });
 }
 
+/// A node held on two private sources at once is read again only once both are due: the
+/// backing-off source is not asked on its own schedule while the node also waits out the
+/// other's reset, and the one read at that reset asks each source once.
+#[test]
+fn a_node_held_on_two_sources_is_read_again_once_both_are_due() {
+    let world = with_tracker(
+        with_tracker(World::new("store-hold-joint"), "vault"),
+        "archive",
+    );
+    private_item(&world, "vault", "vault-design", "design");
+    private_item(&world, "archive", "archive-design", "design");
+    let mut joint = agent("joint", &["design"]);
+    joint["opaque_deps"] = json!([
+        {"designator": designator_of("vault"), "id": "vault-design"},
+        {"designator": designator_of("archive"), "id": "archive-design"},
+    ]);
+    let name = "joint";
+    let project = world.plan(name, &plan_of(name, vec![agent("design", &[]), joint]));
+    rate_limit(&world, "vault", Some(now_ms() + 8_000));
+    rate_limit(&world, "archive", None);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let held = first_held_for_source(&world, name, "joint").expect("joint is held");
+    let sources: Vec<&str> = held["unanswered"]
+        .as_array()
+        .expect("a source hold names its sources")
+        .iter()
+        .filter_map(|unasked| unasked["source"].as_str())
+        .collect();
+    assert_eq!(sources, ["archive", "vault"], "{held}");
+    let retry_at = held["unanswered"][1]["retry_at_ms"]
+        .as_u64()
+        .expect("vault named its reset");
+    assert_eq!(held["unanswered"][0].get("retry_at_ms"), None, "{held}");
+
+    world.until_within(Duration::from_secs(30), "joint to be read again", |world| {
+        !rereads_of(world, name, "archive").is_empty()
+    });
+    let reread = rereads_of(&world, name, "archive")[0]["at_ms"]
+        .as_u64()
+        .expect("an instant");
+    assert!(
+        reread >= retry_at + 1_000,
+        "joint was read again at {reread}, inside vault's reset {retry_at}, on archive's backoff"
+    );
+    for source in ["archive", "vault"] {
+        let reads = item_reads(&world, source);
+        assert_eq!(
+            reads.iter().filter(|at| **at < retry_at + 1_000).count(),
+            1,
+            "{source} was asked other than once — at the launch — before the reset: {reads:?}"
+        );
+        assert_eq!(
+            reads
+                .iter()
+                .filter(|at| (reread..reread + 1_000).contains(*at))
+                .count(),
+            1,
+            "the read at the reset asked {source} other than once: {reads:?}"
+        );
+    }
+    world.unscript("vault.get_task.rate-limited");
+    world.unscript("archive.get_task.rate-limited");
+    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
+/// A private source that cannot be reached holds the node edged into it saying so, and asks
+/// for it to be reachable — no credential, no wait — and the node is released once it is.
+#[test]
+fn a_source_that_cannot_be_reached_is_said_so_and_its_node_released_once_it_is() {
+    let world = with_tracker(World::new("store-hold-unreached"), "vault");
+    private_item(&world, "vault", "vault-design", "design");
+    let name = "unreached";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                edged("changelog", &["design"], "vault", "vault-design"),
+            ],
+        ),
+    );
+    world.script(
+        "vault.get_task.refuse",
+        &json!({"kind": "unavailable", "message": "connection refused"}).to_string(),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let held = first_held_for_source(&world, name, "changelog").expect("changelog is held");
+    assert_eq!(held["unanswered"][0]["cause"], "unavailable", "{held}");
+    let message = source_wait(&world, name, "changelog");
+    assert!(
+        message.starts_with(
+            "node 'changelog' is held: source 'vault', declared private, could not be reached, \
+             so it could not be asked what it records of this task: the source could not be \
+             reached: connection refused, so it may have a prerequisite this run cannot see. \
+             Check that 'vault' can be reached, or correct its configuration. It is read again \
+             in 1s,"
+        ) && message
+            .ends_with("Nothing times this out and nothing will fail the node; or stop the run."),
+        "{message}"
+    );
+    assert!(!message.contains("credential"), "{message}");
+    world.unscript("vault.get_task.refuse");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+}
+
+/// An opaque edge recorded under a designator no source configured here is holds its node on
+/// that tracker, `unconfigured`, naming it by its designator and asking that it be configured;
+/// once a configuration layer declares a source as that tracker, the next read resolves the
+/// edge through it and the node is released — with no relaunch.
+#[test]
+fn an_edge_into_a_tracker_configured_nowhere_holds_its_node_until_it_is_configured() {
+    let world = with_private_source(
+        with_tracker(World::new("store-hold-unconfigured"), "vault"),
+        "elsewhere",
+    );
+    private_item(&world, "elsewhere", "elsewhere-design", "design");
+    let name = "unconfigured";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                edged("changelog", &["design"], "elsewhere", "elsewhere-design"),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let held = first_held_for_source(&world, name, "changelog").expect("changelog is held");
+    let designator = designator_of("elsewhere");
+    assert_eq!(
+        held["unanswered"],
+        json!([{
+            "source": designator,
+            "reason": "not configured on this host",
+            "cause": "unconfigured",
+        }]),
+        "{held}"
+    );
+    let message = source_wait(&world, name, "changelog");
+    assert!(
+        message.starts_with(&format!(
+            "node 'changelog' is held: tracker '{designator}', which no source configured here \
+             is, could not be asked about the item this task's edge names there: not configured \
+             on this host, so it may have a prerequisite this run cannot see. Configure the \
+             tracker '{designator}' names on this host"
+        )),
+        "{message}"
+    );
+    assert_eq!(received(&world, "elsewhere"), Vec::<Value>::new());
+
+    // The host's user layer declares `elsewhere` as that tracker.
+    let layer = world
+        .root
+        .join("xdg")
+        .join("onetaskgraph")
+        .join("config.yaml");
+    std::fs::create_dir_all(layer.parent().expect("a directory")).expect("the user layer's home");
+    std::fs::write(
+        &layer,
+        format!(
+            "sources:\n  elsewhere:\n    public_alias: \"{}\"\n",
+            alias_of("elsewhere")
+        ),
+    )
+    .expect("a user layer naming the tracker");
+    world.until_within(Duration::from_secs(30), "the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    assert!(
+        item_reads(&world, "elsewhere").len() >= 1,
+        "the resolved edge was never read through the source it names"
+    );
+}
+
 /// Write-back owns exactly what the plan document declares, and preserves everything the
 /// plan does not model. Drive that rule through the installed CLI and a real local-md
 /// store: a settlement must arrive without renaming the project, without changing a
