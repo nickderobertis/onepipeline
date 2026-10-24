@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.0](https://github.com/nickderobertis/onepipeline/compare/v0.88.1...v0.89.0) - 2026-10-24
+
+### Added
+
+- *(deps)* [**breaking**] link the agent graph whose turn records point at the transcript, and onevcs's check times ([#1120](https://github.com/nickderobertis/onepipeline/pull/1120))
+
+### Fixed
+
+- *(watch)* never return a cursor past a record the watch did not emit ([#1134](https://github.com/nickderobertis/onepipeline/pull/1134))
+- *(tests)* keep the three-manager landing and public-id claim journeys reliable ([#1132](https://github.com/nickderobertis/onepipeline/pull/1132))
+
 ## [0.88.1](https://github.com/nickderobertis/onepipeline/compare/v0.88.0...v0.88.1) - 2026-10-24
 
 ### Fixed

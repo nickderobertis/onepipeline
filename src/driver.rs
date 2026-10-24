@@ -62,7 +62,7 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
 
 /// The file in the run's directory a `stop` holds locked for the whole of its
 /// teardown, and a driver's observer watch holds across each restart.
@@ -2996,7 +2996,7 @@ fn attach(
     let mut chains = engine::ChainRecords::default();
     // Held for the whole stream, on the thread that renders it: see
     // [`views::StreamReads`] for what it carries and when it lets go.
-    let carried = views::StreamReads::begin();
+    let carried = views::StreamReads::begin(&paths.run);
 
     let driving = paths.clone();
     let letting_go = watch.letting_go();

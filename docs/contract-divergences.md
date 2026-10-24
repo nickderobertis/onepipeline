@@ -1158,11 +1158,26 @@ starting a process is slow that round ran past its journey's bound. So within
 one attach stream a node's read is carried across the stream's consecutive
 renders for at most a short, fixed window (`views::STREAM_READ_REUSE`), and is
 taken again at once after the stream records a settlement or restack of that
-node, or any record of its session — its publication and landing among them.
-The stream's final render — the one reporting the run as it settled, made once
-the run's loop has finished or, where the driver's exit was printed before
-that, the render printing it — carries nothing and reads every landing it
-reports afresh.
+node, or its change merging. The rest of a session's records — a fetch, a
+push, the publication itself — are steps whose outcome the run records as that
+settlement or restack; letting go at each of them read a restacked node again
+on every render of its publication, half of what was left of a busy attached
+command's reads. The stream's final render — the one reporting the run as it
+settled, made once the run's loop has finished or, where the driver's exit was
+printed before that, the render printing it — carries nothing from the renders
+before it. What it reports was read once the run's loop had settled: the
+driver's close-out (`engine::landings_after_asking_again`) reads every
+unlanded node a moment earlier in the same process, and the final render takes
+those answers up (`views::closed_out`) rather than asking each branch a second
+time — inside the same window, only where the sibling answered, and only where
+the stream recorded nothing that moved the node since — and reads the rest.
+The hand-off runs the other way too: the stream reads a node again just after
+the run records it settling or restacking, so the close-out a moment later
+takes up the stream's read of each node rather than asking its branch again
+(`views::streamed_for_close_out`) — inside the same window of when the stream
+asked it, only where the sibling answered, and only where the driver recorded
+nothing moving the node after it was asked — and reads the rest. The close-out
+reads a branch two nodes name, a rework and the node it replaced, once.
 `status`, `results` and `watch` carry nothing and read on every render.
 Whichever view it is, the summary takes the reads it needs side by side rather
 than one after another, as the driver's own close-out does, and each is still
@@ -1198,6 +1213,15 @@ already been decided against fails there by name. **Proposal (for `onevcs`): a
 landing read that takes a repository and several references — or a resolved-repository handle
 that answers them — so a render pays one open for a repository however many of its
 nodes it prints.**
+
+`onevcs` 0.56.9 publishes that read, `landing_statuses(references, repo)`, and it
+shares the registry, the repository and its base across the references. It does not
+yet share what costs most: each reference still asks every session copy on record
+whether it is a repository and holds the branch (`status::holders_of`), about thirty
+of a read's sixty-odd `git` processes. Measured over the busy review round in
+`tests/e2e/review_round.rs`, taking this crate's reads through it started 5,596 `git`
+processes for landing reads against about 5,600 one at a time, so this crate still
+takes them one at a time, and the proposal stands for those per-copy checks.
 
 **What is still open on this side is the contract's wording.** It describes a
 landing as what the settlement observed; nothing in it says a view reads again, or

@@ -603,7 +603,14 @@ impl Summary {
 fn read_run(paths: &RunPaths, cursor: &mut Cursor) -> Result<(RunView, Vec<Envelope>)> {
     let _render = crate::rendercost::rendering(crate::rendercost::Rendered::Watch, &paths.run);
     let view = RunView::open(paths)?;
-    Ok((view, tail(paths, cursor)))
+    // Test failpoints only, and nothing at all where their variables are unset: a
+    // journey holds this read with the view read and the journal not yet tailed,
+    // and again with the journal tailed and the cursor not yet handed back, to
+    // finish a half-written record inside each window.
+    crate::ordering::meet("ONEPIPELINE_TEST_WATCH_TAIL_GATE")?;
+    let fresh = tail(paths, cursor);
+    crate::ordering::meet("ONEPIPELINE_TEST_WATCH_TAILED_GATE")?;
+    Ok((view, fresh))
 }
 
 /// How long the wait may block before this watch has something of its own to
