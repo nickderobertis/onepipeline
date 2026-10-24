@@ -5386,6 +5386,11 @@ fn answered_release_status(
     answered.expect("the wait ends on an answer")
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the condition is a Windows append's
+// exclusive lock on a stream a read resolves from (job 118885600571), which no command
+// can hold open on a Unix host and no CLI input produces; this stands in for it for the
+// one squash-merge journey that reads past a refused read, which otherwise drives only
+// the compiled binary and a real `onevcs`.
 /// The event streams of `world`'s `onevcs` home, made unreadable until
 /// [`restore`](UnreadableStreams::restore) gives each back the mode it had.
 ///
@@ -5426,6 +5431,7 @@ impl UnreadableStreams {
         }
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Run one pasted `onevcs …` line through `sh`, the way a person pasting it does,
 /// with this world's `onevcs` standing in for the one on their `PATH`.
