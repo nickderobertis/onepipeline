@@ -1090,6 +1090,7 @@ mod tests {
         for key in [
             "hold",
             "hold_with_reset",
+            "hold_unconfigured",
             "hold_with_missing",
             "hold_before_cause",
         ] {
