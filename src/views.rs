@@ -1236,7 +1236,7 @@ impl StreamReads {
         }
         drop(closed);
         if concluded {
-            self.forget_all(run);
+            self.start_from_close_out(run);
         } else {
             self.forget_moved(run, fresh);
         }
@@ -1247,7 +1247,7 @@ impl StreamReads {
     /// took in this process, after its loop's last settlement, still inside
     /// [`STREAM_READ_REUSE`] and moved by nothing the stream recorded since: see
     /// [`closed_out`].
-    fn forget_all(&self, run: &str) {
+    fn start_from_close_out(&self, run: &str) {
         let now = std::time::Instant::now();
         let settled: Vec<((String, String), Carried)> = closed_out_held()
             .iter()
@@ -1283,7 +1283,7 @@ impl StreamReads {
         if events.iter().any(|event| {
             event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
         }) {
-            self.forget_all(run);
+            self.start_from_close_out(run);
             return;
         }
         READ_THIS_RENDER.with_borrow_mut(|reads| {
