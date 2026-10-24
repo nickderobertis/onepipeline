@@ -40,6 +40,7 @@
 //!   answer carries `retry_after_seconds`, the whole seconds still to wait, rounded up; at or
 //!   after it, or where the provider named none, the answer carries no reset at all — a quota
 //!   that stays spent past its reset is answered with nothing to wait for.
+//! * `<key>.<method>@<id>.rate-limited` — the same, for the calls that name that one item.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
 //! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
 //!   source is handed in a command, which the real store answers; `end_command` starts the
@@ -408,6 +409,12 @@ impl Scripted {
         }
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {
             return Ok(json!({"id": request.id, "error": error}));
+        }
+        if !item.is_empty() {
+            let one = self.scenario(&format!("{method}@{}.rate-limited", fake::segment(&item)));
+            if let Some(error) = rate_limited(&one)? {
+                return Ok(json!({"id": request.id, "error": error}));
+            }
         }
         if let Some(error) = rate_limited(&self.scenario(&format!("{method}.rate-limited")))? {
             return Ok(json!({"id": request.id, "error": error}));

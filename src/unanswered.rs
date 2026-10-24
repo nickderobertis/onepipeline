@@ -165,9 +165,18 @@ impl SourceHold {
     }
 
     /// What holds the node, on one line, as a view says it: each source, why it could not
-    /// answer, and when it is read again.
+    /// answer, and when it is read again — and that nothing times the hold out.
     pub(crate) fn describe(&self) -> String {
-        self.said(&|_| None)
+        let said = self.said(&|_| None);
+        if self
+            .unanswered
+            .iter()
+            .any(|unasked| unasked.cause.is_none())
+        {
+            // A hold journalled before the cause was recorded reads as it always did.
+            return said;
+        }
+        format!("{said}; nothing times this out")
     }
 
     /// What holds the node, saying of each source the backoff wait `wait` gives it.
@@ -176,7 +185,6 @@ impl SourceHold {
             .unanswered
             .iter()
             .map(|unasked| match unasked.cause {
-                // A hold journalled before the cause was recorded reads as it always did.
                 None => format!(
                     "source '{}', declared private, could not be asked what it records of \
                      its task: {}",
@@ -186,7 +194,7 @@ impl SourceHold {
                     "{}: {}; {}",
                     what(&unasked.source, cause),
                     unasked.reason,
-                    when(unasked, wait(unasked))
+                    when(unasked, wait(unasked), "it")
                 ),
             })
             .collect();
@@ -235,13 +243,14 @@ fn what(source: &str, cause: Cause) -> String {
 
 /// When `unasked` is read again: one second after the reset its provider gave, or on its
 /// backoff — `wait` seconds from when it last did not answer, where the one saying it holds
-/// the source's schedule, and from the backoff's first interval where it does not.
-fn when(unasked: &Unanswered, wait: Option<u64>) -> String {
+/// the source's schedule, and from the backoff's first interval where it does not. `subject`
+/// is what the sentence calls the source: `it`, or its quoted name beside another's.
+fn when(unasked: &Unanswered, wait: Option<u64>, subject: &str) -> String {
     let poll = poll_seconds();
     let cap = poll.saturating_mul(BACKOFF_CAP_INTERVALS);
     if let Some(at) = unasked.retry_at_ms {
         return format!(
-            "it is read again at {}, the reset the provider gave",
+            "{subject} is read again at {}, the reset the provider gave",
             utc(at)
         );
     }
@@ -252,15 +261,23 @@ fn when(unasked: &Unanswered, wait: Option<u64>) -> String {
     };
     match wait {
         Some(wait) => format!(
-            "{given}it is read again in {wait}s, the wait doubling each time it still does not \
-             answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll intervals)"
+            "{given}{subject} is read again in {wait}s, the wait doubling each time it still \
+             does not answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll intervals)"
         ),
         None => format!(
-            "{given}it is read again on a backoff starting at {poll}s, the wait doubling each \
-             time it still does not answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll \
+            "{given}{subject} is read again on a backoff starting at {poll}s, the wait doubling \
+             each time it still does not answer, up to {cap}s ({BACKOFF_CAP_INTERVALS} poll \
              intervals)"
         ),
     }
+}
+
+/// `text` with its first letter capitalised, as a sentence starts.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// An instant as a person reads it: `2026-05-04 11:50:00 UTC`.
@@ -333,7 +350,7 @@ pub(crate) fn notice(held: &BTreeMap<String, SourceHold>) -> Option<String> {
                      times this out.",
                     quoted(&nodes),
                     unasked.reason,
-                    when(&unasked, first)
+                    when(&unasked, first, "it")
                 )
             })
             .collect::<Vec<_>>()
@@ -859,16 +876,46 @@ fn message(node: &str, hold: &SourceHold, wait: &dyn Fn(&Unanswered) -> Option<u
             quoted(&unconfigured)
         ));
     }
+    let many = hold.unanswered.len() > 1;
+    let what: Vec<String> = hold
+        .unanswered
+        .iter()
+        .map(|unasked| {
+            let cause = unasked.cause.unwrap_or(Cause::Unavailable);
+            format!("{}: {}", self::what(&unasked.source, cause), unasked.reason)
+        })
+        .collect();
+    let next: Vec<String> = hold
+        .unanswered
+        .iter()
+        .map(|unasked| {
+            let subject = if many {
+                format!("'{}'", unasked.source)
+            } else {
+                "it".to_owned()
+            };
+            when(unasked, wait(unasked), &subject)
+        })
+        .collect();
+    let missing = if hold.missing.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; and the store records it depending on {}, which this run's graph does not",
+            quoted(&hold.missing)
+        )
+    };
     let remedy = if remedies.is_empty() {
         String::new()
     } else {
         format!("{} ", remedies.join(" "))
     };
     format!(
-        "node '{node}' is held: {}, so it may have a prerequisite this run cannot see. {remedy}It \
-         dispatches the pass a read of its edges is answered and finds nothing missing. Nothing \
-         times this out and nothing will fail the node; or stop the run.",
-        hold.said(wait)
+        "node '{node}' is held: {}{missing}, so it may have a prerequisite this run cannot see. \
+         {remedy}{}; it dispatches the pass a read of its edges is answered and finds nothing \
+         missing. Nothing times this out and nothing will fail the node; or stop the run.",
+        what.join("; "),
+        sentence(&next.join("; "))
     )
 }
 
@@ -1128,7 +1175,7 @@ mod tests {
             auth_surface
                 .message
                 .contains("Supply the credential 'vault' needs")
-                && auth_surface.message.contains("it is read again in 120s"),
+                && auth_surface.message.contains("It is read again in 120s"),
             "{}",
             auth_surface.message
         );
