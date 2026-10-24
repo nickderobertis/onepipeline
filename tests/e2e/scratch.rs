@@ -1436,24 +1436,28 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
         let record = serde_json::json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":0, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
         // On Windows the live driver appends under a share mode that admits no
         // second writer, so an open landing inside one of its appends is a sharing
-        // violation: wait it out, as the engine's own appender does.
-        let waiting_since = std::time::Instant::now();
-        let mut journal = loop {
-            match std::fs::OpenOptions::new()
-                .append(true)
-                .open(world.run_file(run, "events.jsonl"))
-            {
-                Err(e)
-                    if cfg!(windows)
-                        && e.raw_os_error() == Some(32)
-                        && waiting_since.elapsed() < std::time::Duration::from_secs(30) =>
+        // violation: wait it out, as the engine's own appender does. The handle is
+        // closed at the end of this block, before any wait for the driver below,
+        // so it can never be the second writer that blocks one of its appends.
+        {
+            let waiting_since = std::time::Instant::now();
+            let mut journal = loop {
+                match std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(world.run_file(run, "events.jsonl"))
                 {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    Err(e)
+                        if cfg!(windows)
+                            && e.raw_os_error() == Some(32)
+                            && waiting_since.elapsed() < std::time::Duration::from_secs(30) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                    opened => break opened.unwrap(),
                 }
-                opened => break opened.unwrap(),
-            }
-        };
-        journal.write_all(format!("{record}\n").as_bytes()).unwrap();
+            };
+            journal.write_all(format!("{record}\n").as_bytes()).unwrap();
+        }
         // llmlint: ignore-end[tests_mirror_real_usage]
         if automatic {
             world.release("build.go");
@@ -1462,6 +1466,19 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
                     && !world.run_file(run, "owner.lock").exists()
             });
             assert!(world.events_of(run, "scratch-removed").is_empty());
+            // The driver went on appending after the fixture's record while the
+            // test waited, so nothing the test held kept it out of its journal.
+            let journal = world.journal(run);
+            let fixture = journal
+                .iter()
+                .position(|event| event["stream"] == "future-producer")
+                .expect("the fixture's record is in the journal");
+            assert!(
+                journal[fixture + 1..]
+                    .iter()
+                    .any(|event| event["kind"] == "turn-completed"),
+                "the driver appended nothing after the fixture's record: {journal:?}"
+            );
         }
         assert_eq!(snapshot(&world.run_file(run, "scratch")), before);
         let (status, _) = read_views(&world, run);
