@@ -1450,7 +1450,7 @@ impl CloneReads {
         Started(read.spawn().expect("the read starts"))
     }
 
-    /// Whether the read logged as `log` has its `git` held inside the clone.
+    /// Whether the read logged as `log` has its `git` held on the clone.
     fn inside(&self, log: &str) -> bool {
         std::fs::read_to_string(self.control(log).join("inside")).is_ok_and(|pid| !pid.is_empty())
     }
@@ -1490,16 +1490,18 @@ impl CloneReads {
         .expect("the session record is JSON")
     }
 
-    /// Hold the read logged as `log` at its `git` inside the clone.
+    /// Hold the read logged as `log` at its `git` on the clone: started inside it by the
+    /// `onevcs` releases before 0.56.8, and naming its `.git` from outside every run root
+    /// since, which `held-git` holds alike.
     fn held_inside(&self, log: &str) -> Started {
         let mut read = self.held_read(log, &[]);
         self.world
-            .until("the read's git to start inside the session's clone", |_| {
+            .until("the read's git to start on the session's clone", |_| {
                 self.inside(log) || !Self::running(&mut read)
             });
         assert!(
             Self::running(&mut read),
-            "the read finished without a git inside the session's clone: {:?}",
+            "the read finished without a git on the session's clone: {:?}",
             self.said(log)
         );
         read
@@ -1513,7 +1515,7 @@ impl CloneReads {
 /// On macOS the busy round's stack-base close was refused for a process working inside
 /// that session's clone: a `git` an `onevcs` landing-status read had started there. This
 /// is that ordering on any platform, against the `onevcs` this crate links: a real
-/// `onevcs status` is held with its `git` inside the clone while a real `onevcs session
+/// `onevcs status` is held at its `git` on the clone while a real `onevcs session
 /// close` runs, and the read is let go only after that close has exited.
 ///
 /// The close's exit is the rendezvous. It is given [`CLOSE_LOCK_WAIT`] for any lock it
@@ -1598,11 +1600,11 @@ const CLOSE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The busy round's four drivers and its commands read one identity at once: each
 /// view render and reconcile asks `onevcs` for landings (`vcs::landing_now`,
 /// `vcs::landings_now`), each driver asks it for session holders, and every one of those
-/// reads runs `git` inside the identity's checkouts. Reads that each took the identity
+/// reads runs `git` on the identity's checkouts. Reads that each took the identity
 /// alone would queue every one of them behind whichever is running its `git`, which is
 /// where the round's time goes on a host whose `git` starts are dear.
 ///
-/// So a second real `onevcs status` of the identity must reach its own `git` inside the
+/// So a second real `onevcs status` of the identity must reach its own `git` on the
 /// clone while a first is held at its `git` there. It is given [`READ_LOCK_WAIT`] for
 /// any lock, so a read that queues behind the first says which lock it waited on and
 /// exits; either its held `git` or that refusal ends the wait, never time alone.
@@ -1621,7 +1623,7 @@ fn a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone() {
     eprintln!(
         "second read: {}",
         if beside {
-            "its git is inside the clone".to_owned()
+            "its git is on the clone".to_owned()
         } else {
             second_said.trim().to_owned()
         }
@@ -1687,6 +1689,209 @@ fn held_git_refuses_a_hold_whose_clone_does_not_resolve() {
     assert!(
         !control.join("inside").exists(),
         "a refused hold claimed the pause"
+    );
+}
+
+/// `held-git` answers with the real `git`'s own exit code, so a held read whose `git`
+/// fails fails as it would unheld rather than reading as a success.
+#[test]
+fn held_git_answers_with_the_real_gits_failing_exit_code() {
+    let world = World::new("held-git-failing-git");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let outside = world.root.join("not-a-repository");
+    std::fs::create_dir_all(&outside).expect("a directory outside any repository");
+    let direct = std::process::Command::new(&real)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&outside)
+        .env("GIT_CEILING_DIRECTORIES", &world.root)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the real git runs");
+    let held = std::process::Command::new(crate::harness::double("held-git"))
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(&outside)
+        .env("GIT_CEILING_DIRECTORIES", &world.root)
+        .env("HELD_GIT_REAL", &real)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    let stderr = String::from_utf8_lossy(&held.stderr);
+    assert!(
+        !direct.status.success() && direct.status.code() != Some(70),
+        "the real git did not fail outside a repository as this test needs: {:?}",
+        direct.status
+    );
+    assert_eq!(held.status.code(), direct.status.code(), "{stderr}");
+    assert_eq!(
+        stderr,
+        String::from_utf8_lossy(&direct.stderr),
+        "held-git did not pass the real git's own refusal through"
+    );
+}
+
+/// A real `git` killed by a signal has no exit code, and `held-git` exits 1 for it rather
+/// than 0, so a read whose `git` died is never taken for one that answered.
+#[cfg(unix)]
+#[test]
+fn held_git_fails_when_the_real_git_is_killed_by_a_signal() {
+    let world = World::new("held-git-signalled-git");
+    let killed = world.root.join("killed-git");
+    onepipeline_testfakes::executable(&killed, "#!/bin/sh\nkill -KILL $$\n");
+    let held = std::process::Command::new(crate::harness::double("held-git"))
+        .arg("status")
+        .current_dir(&world.root)
+        .env("HELD_GIT_REAL", &killed)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("held-git runs");
+    assert_eq!(
+        held.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+}
+
+/// Only the first start inside the held clone waits for the release: a second one while
+/// the first is still held runs its `git` straight away, so a journey holds one read and
+/// every other `git` of the round goes on.
+#[test]
+fn held_git_holds_only_the_first_start_inside_its_clone() {
+    let world = World::new("held-git-first-start");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let clone = world.root.join("clone");
+    let control = world.root.join("held");
+    for directory in [&clone, &control] {
+        std::fs::create_dir_all(directory).expect("a directory for the hold");
+    }
+    let start = || {
+        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        command
+            .arg("--version")
+            .current_dir(&clone)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &clone)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+    let mut first = start().spawn().expect("the first held-git starts");
+    world.until("the first start to claim the pause", |_| {
+        control.join("inside").exists()
+    });
+    let mut second = start().spawn().expect("the second held-git starts");
+    world.until("the second start to run its git without waiting", |_| {
+        matches!(second.try_wait(), Ok(Some(_)))
+    });
+    let second = second
+        .wait_with_output()
+        .expect("the second start's output");
+    assert!(
+        second.status.success() && String::from_utf8_lossy(&second.stdout).contains("git version"),
+        "the second start did not run the real git: {second:?}"
+    );
+    assert!(
+        matches!(first.try_wait(), Ok(None)),
+        "the first start stopped holding before its release"
+    );
+    assert_eq!(
+        std::fs::read_to_string(control.join("inside")).expect("the pause names its holder"),
+        first.id().to_string(),
+        "the pause names a start other than the first"
+    );
+    std::fs::write(control.join("release"), "").expect("the release");
+    let first = first.wait_with_output().expect("the first start's output");
+    assert!(
+        first.status.success() && String::from_utf8_lossy(&first.stdout).contains("git version"),
+        "the released start did not run the real git: {first:?}"
+    );
+}
+
+/// A `git` started outside the held clone that names the clone's `.git` with `--git-dir`
+/// works on it, and is held, as `onevcs` 0.56.8 and later run a read of a session's
+/// repository; one naming another repository's, or asking `rev-parse --git-dir` as its
+/// subcommand, is not, and runs straight away.
+#[test]
+fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
+    let world = World::new("held-git-named-git-dir");
+    let real =
+        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let control = world.root.join("held");
+    let outside = world.root.join("outside");
+    for directory in [&control, &outside] {
+        std::fs::create_dir_all(directory).expect("a directory for the hold");
+    }
+    let [clone, other] = ["clone", "other"].map(|name| {
+        let repository = world.root.join(name);
+        let made = std::process::Command::new(&real)
+            .args(["init", "--quiet"])
+            .arg(&repository)
+            .status()
+            .expect("git init runs");
+        assert!(made.success(), "git init {name} failed");
+        repository
+    });
+    let start = |args: &[&std::ffi::OsStr]| {
+        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        command
+            .args(args)
+            .current_dir(&outside)
+            .env("GIT_CEILING_DIRECTORIES", &world.root)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &clone)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        command
+    };
+    let git_dir = std::ffi::OsStr::new("--git-dir");
+    let other_git = other.join(".git");
+    let unheld = [
+        vec![
+            git_dir,
+            other_git.as_os_str(),
+            "symbolic-ref".as_ref(),
+            "HEAD".as_ref(),
+        ],
+        vec!["rev-parse".as_ref(), git_dir],
+    ];
+    for args in unheld {
+        let ran = start(&args).output().expect("held-git runs");
+        assert!(
+            !control.join("inside").exists(),
+            "{args:?} was held though it does not work on the clone"
+        );
+        assert_ne!(ran.status.code(), Some(70), "{ran:?}");
+    }
+    let clone_git = clone.join(".git");
+    let mut held = start(&[
+        git_dir,
+        clone_git.as_os_str(),
+        "symbolic-ref".as_ref(),
+        "HEAD".as_ref(),
+    ])
+    .spawn()
+    .expect("the held start starts");
+    world.until(
+        "the start naming the clone's git directory to claim the pause",
+        |_| control.join("inside").exists() || !matches!(held.try_wait(), Ok(None)),
+    );
+    assert!(
+        matches!(held.try_wait(), Ok(None)),
+        "the start naming the clone's git directory ran without being held"
+    );
+    std::fs::write(control.join("release"), "").expect("the release");
+    let held = held.wait_with_output().expect("the held start's output");
+    assert!(
+        held.status.success() && String::from_utf8_lossy(&held.stdout).starts_with("refs/heads/"),
+        "the released start did not run the real git on the clone: {held:?}"
     );
 }
 

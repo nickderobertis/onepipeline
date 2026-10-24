@@ -4,11 +4,15 @@
 //! **Not a double for anything in this stack**: every invocation runs the real `git`
 //! that `HELD_GIT_REAL` names, with its argv, environment, directory and exit code
 //! untouched once it runs. What it adds is one pause. The first invocation started with
-//! `HELD_GIT_HOLD` set whose working directory is `HELD_GIT_CLONE` writes its pid to
+//! `HELD_GIT_HOLD` set that works on the `HELD_GIT_CLONE` repository writes its pid to
 //! `HELD_GIT_DIR/inside` and waits for `HELD_GIT_DIR/release` before running `git`, so
-//! a journey can hold a real `onevcs` read with a `git` child inside a session's clone
-//! for as long as it needs. A compiled program rather than a shell script, so the same
-//! pause holds on Windows, where a `git` on `PATH` must be an executable.
+//! a journey can hold a real `onevcs` read at its `git` on a session's clone for as long
+//! as it needs. A `git` works on the clone when its working directory is the clone, or
+//! when its global options name the clone's `.git` with `--git-dir` from anywhere else:
+//! `onevcs` 0.56.8 and later address a read of a session's repository that way, from
+//! outside every run root, where earlier releases ran it inside the clone. A compiled
+//! program rather than a shell script, so the same pause holds on Windows, where a `git`
+//! on `PATH` must be an executable.
 //!
 //! Exits 70 without running `git` when its own setup fails: no `HELD_GIT_REAL`, a hold
 //! missing `HELD_GIT_CLONE` or `HELD_GIT_DIR`, a held clone or working directory that
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Wait for the release, when this is the first start inside the held checkout.
+/// Wait for the release, when this is the first start working on the held clone.
 fn hold() -> std::io::Result<()> {
     let variable = |name: &str| {
         std::env::var_os(name)
@@ -53,7 +57,7 @@ fn hold() -> std::io::Result<()> {
     };
     let clone = variable("HELD_GIT_CLONE")?;
     let control = variable("HELD_GIT_DIR")?;
-    if !same(&std::env::current_dir()?, &clone)? {
+    if !works_on(&clone)? {
         return Ok(());
     }
     // `create_new` makes the claim atomic, so of several starts only the first waits.
@@ -74,9 +78,11 @@ fn hold() -> std::io::Result<()> {
     Ok(())
 }
 
-/// Whether `here` is the held `clone`. Either one that cannot be resolved is an error
+/// Whether this `git` works on the held `clone`: started inside it, or naming its `.git`
+/// with `--git-dir`. The clone or a working directory that cannot be resolved is an error
 /// rather than a mismatch, so a hold set up wrongly refuses instead of quietly not holding.
-fn same(here: &Path, clone: &Path) -> std::io::Result<bool> {
+/// A named git directory that does not resolve is the real `git`'s to refuse.
+fn works_on(clone: &Path) -> std::io::Result<bool> {
     let resolved = |path: &Path| {
         path.canonicalize().map_err(|error| {
             std::io::Error::new(
@@ -85,5 +91,35 @@ fn same(here: &Path, clone: &Path) -> std::io::Result<bool> {
             )
         })
     };
-    Ok(resolved(here)? == resolved(clone)?)
+    let clone = resolved(clone)?;
+    if resolved(&std::env::current_dir()?)? == clone {
+        return Ok(true);
+    }
+    Ok(named_git_dir().is_some_and(|named| {
+        let named = named.canonicalize().ok();
+        named.is_some() && named == clone.join(".git").canonicalize().ok()
+    }))
+}
+
+/// The `--git-dir` among `git`'s global options: those before its subcommand, where a
+/// subcommand's own `--git-dir` (`rev-parse --git-dir`, a question) is never read.
+fn named_git_dir() -> Option<PathBuf> {
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        if text == "--git-dir" {
+            return args.next().map(PathBuf::from);
+        }
+        if let Some(dir) = text.strip_prefix("--git-dir=") {
+            return Some(PathBuf::from(dir));
+        }
+        if !text.starts_with('-') {
+            return None;
+        }
+        // The global options that take their value as the next argument.
+        if matches!(text.as_ref(), "-C" | "-c" | "--work-tree" | "--namespace") {
+            args.next();
+        }
+    }
+    None
 }
