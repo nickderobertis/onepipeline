@@ -4803,6 +4803,16 @@ enum Spelling {
     ChangeRequest,
 }
 
+/// How the reconciled baseline's `onevcs release status` read meets its streams.
+#[derive(Clone, Copy)]
+enum BaselineRead {
+    /// Whenever the driver's own asks leave them.
+    AsItComes,
+    /// Unreadable for the first read, the way a Windows append's lock leaves them.
+    #[cfg(unix)]
+    RefusedFirst,
+}
+
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
 /// A node settled from evidence says **where the work landed**, and that is what
 /// the release question is put about — re-read as the run goes on, rather than
@@ -5350,9 +5360,14 @@ fn release_status(world: &World, reference: &str) -> Result<onevcs::ReleaseStatu
 /// streams this read resolves the landing from. Each append holds its stream under an
 /// exclusive lock, which Windows enforces against readers too: a read that meets one
 /// finds that stream unreadable and can be refused, with nothing on stdout. That is not
-/// an answer to assert on, so it is waited past and said; whatever the command answers is
-/// returned, to be asserted on whole.
-fn answered_release_status(world: &World, reference: &str) -> onevcs::ReleaseStatus {
+/// an answer to assert on, so it is waited past and said, and `on_refused` is handed
+/// what the command printed; whatever the command answers is returned, to be asserted
+/// on whole.
+fn answered_release_status(
+    world: &World,
+    reference: &str,
+    mut on_refused: impl FnMut(&str),
+) -> onevcs::ReleaseStatus {
     let mut answered = None;
     world.until_store(
         &format!("`onevcs release status {reference}` to answer"),
@@ -5363,11 +5378,53 @@ fn answered_release_status(world: &World, reference: &str) -> onevcs::ReleaseSta
             }
             Err(refused) => {
                 eprintln!("`onevcs release status {reference}` printed no answer: {refused}");
+                on_refused(&refused);
                 false
             }
         },
     );
     answered.expect("the wait ends on an answer")
+}
+
+/// The event streams of `world`'s `onevcs` home, made unreadable until
+/// [`restore`](UnreadableStreams::restore) gives each back the mode it had.
+///
+/// Unix stands in for the Windows lock this way: a read of a stream an append holds
+/// there fails to read it, and a read of a stream with no read permission fails here,
+/// each before `onevcs` prints an answer.
+#[cfg(unix)]
+struct UnreadableStreams(Vec<(std::path::PathBuf, std::fs::Permissions)>);
+
+#[cfg(unix)]
+impl UnreadableStreams {
+    fn of(world: &World) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let streams = world.onevcs_home().join("streams");
+        let held: Vec<_> = std::fs::read_dir(&streams)
+            .expect("the onevcs home has streams")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".ndjson"))
+            })
+            .map(|path| {
+                let mode = std::fs::metadata(&path).expect("a stream").permissions();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+                    .expect("a stream made unreadable");
+                (path, mode)
+            })
+            .collect();
+        assert!(!held.is_empty(), "no stream under {}", streams.display());
+        Self(held)
+    }
+
+    fn restore(&mut self) {
+        for (path, mode) in self.0.drain(..) {
+            std::fs::set_permissions(&path, mode).expect("a stream's mode restored");
+        }
+    }
 }
 
 /// Run one pasted `onevcs …` line through `sh`, the way a person pasting it does,
@@ -5428,7 +5485,11 @@ fn arrived_version(world: &World, run: &str, node: &str) -> Value {
 /// has stated a change request, a later commit `onevcs` cannot resolve is asked
 /// again at that change request — `docs/contract-divergences.md` entry 40 — and
 /// what the line says and names is that change request's answer.
-fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
+fn a_landing_with_no_release_baseline_is_answered_at_the_settle(
+    name: &str,
+    spelling: Spelling,
+    read: BaselineRead,
+) {
     let (world, run, engine_repo, branch, answer) = a_released_landing_nobody_published(name);
     let url = change_url_of(&world, &run, "landed");
     let landing = match spelling {
@@ -5569,7 +5630,26 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
         // The baseline is the sibling's record and not this crate's inference: it
         // is what `onevcs` itself answers about the change request, asked once the
         // run has been seen holding against it, beside the driver still asking.
-        match answered_release_status(&world, &url) {
+        let status = match read {
+            BaselineRead::AsItComes => answered_release_status(&world, &url, |_| {}),
+            #[cfg(unix)]
+            BaselineRead::RefusedFirst => {
+                let mut unreadable = UnreadableStreams::of(&world);
+                let mut refused = Vec::new();
+                let status = answered_release_status(&world, &url, |said| {
+                    refused.push(said.to_owned());
+                    unreadable.restore();
+                });
+                unreadable.restore();
+                assert_eq!(
+                    refused.len(),
+                    1,
+                    "the read was refused once, while its streams were unreadable: {refused:?}"
+                );
+                status
+            }
+        };
+        match status {
             onevcs::ReleaseStatus::NotReleased { at_landing, .. } => assert_eq!(
                 at_landing,
                 onevcs::Baseline::At {
@@ -5642,6 +5722,7 @@ fn a_change_request_settled_with_no_release_baseline_is_answered_with_the_comman
     a_landing_with_no_release_baseline_is_answered_at_the_settle(
         "adoption-nobaseline-change",
         Spelling::ChangeRequest,
+        BaselineRead::AsItComes,
     );
 }
 
@@ -5651,6 +5732,20 @@ fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the
     a_landing_with_no_release_baseline_is_answered_at_the_settle(
         "adoption-nobaseline-squash",
         Spelling::Commit,
+        BaselineRead::AsItComes,
+    );
+}
+
+/// The same squash-merge journey with the baseline's first `onevcs release status` read
+/// refused, as one meeting a release watch's append on Windows is: the read is waited
+/// past rather than taken for the answer, and the journey ends as it does unrefused.
+#[cfg(unix)]
+#[test]
+fn a_squash_merge_commit_answered_at_the_settle_waits_past_a_refused_baseline_read() {
+    a_landing_with_no_release_baseline_is_answered_at_the_settle(
+        "adoption-nobaseline-refused",
+        Spelling::Commit,
+        BaselineRead::RefusedFirst,
     );
 }
 
