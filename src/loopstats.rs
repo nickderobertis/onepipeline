@@ -45,6 +45,14 @@ static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
 /// Reads of the project's driver claim this driver asked its plan store for — each one a
 /// board call, so the count a quota is spent by.
 static CLAIM_READS: AtomicU64 = AtomicU64::new(0);
+/// Claims of a run's command queue this process made.
+///
+/// Counted because a claim costs the whole queue's length — the bus reads its log
+/// through to the cursor each time — and a queue holds every envelope its run was
+/// ever sent, so a pass that claims whatever the queue holds pays the run's history
+/// where one that finds the queue unmoved pays nothing. No other reading tells the
+/// two apart: neither writes anything.
+static QUEUE_CLAIMS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +97,10 @@ pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
 
 pub(crate) fn claim_read() {
     CLAIM_READS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn queue_claimed() {
+    QUEUE_CLAIMS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -213,6 +225,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
         (CLAIM_READS_KEY): CLAIM_READS.load(Ordering::Relaxed),
+        "queue_claims": QUEUE_CLAIMS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
         "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });
@@ -285,6 +298,7 @@ mod tests {
         release_asked();
         maintenance_sweep_started();
         claim_read();
+        queue_claimed();
         store_read(7);
         records_folded(3);
         flush(&paths).expect("the counts are written");
@@ -302,6 +316,7 @@ mod tests {
             "release_asks",
             "maintenance_sweeps",
             "claim_reads",
+            "queue_claims",
             "store_bytes",
             "records_folded",
         ] {

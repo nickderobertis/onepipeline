@@ -12,7 +12,9 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::harness::{agent, epoch_millis, now_millis, plan_of, World};
+use crate::harness::{
+    agent, counts, epoch_millis, now_millis, plan_of, reporting, World, LOOP_STATS_ENV,
+};
 use serde_json::{json, Value};
 
 // llmlint: ignore-block[tests_mirror_real_usage] the criteria for this node require a journey that holds the reconcile pass by a failpoint the way the repository's existing journeys hold one; no verb holds a pass, and the hold is the debug build's own seam.
@@ -218,6 +220,67 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
         on_the_board(world, &path, "later")
             .is_some_and(|item| item["onepipeline.settlement"]["status"] == "done")
     });
+    world.release("build.go");
+}
+
+/// A pass claims the run's command queue only once the queue has moved: a claim
+/// costs the queue's whole length, and a queue holds every envelope its run was ever
+/// sent, so a pass claiming an unmoved queue would pay the run's history. Twenty
+/// passes with nothing queued claim nothing; a reply is claimed and answered; and
+/// twenty passes after it claim nothing again.
+#[test]
+fn a_pass_claims_the_command_queue_only_once_it_has_moved() {
+    let world = World::new("scaling-queue-claims").with_env(LOOP_STATS_ENV, "1");
+    let run = "unmoved";
+    a_held_member(&world, "build", true);
+    let path = world.plan(
+        run,
+        &plan_of(run, vec![agent("build", &[]), agent("later", &["build"])]),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    reporting(&world, run);
+    world.until("the member's turn to open", |world| {
+        !world.events_of(run, "turn-started").is_empty()
+    });
+    // Twenty passes, the member's activity driving each, from a point past the
+    // driver's opening claim.
+    let twenty_passes = |world: &World| {
+        let from = counts(world, run);
+        world.until("twenty more passes", |world| {
+            counts(world, run).passes >= from.passes + 20
+        });
+        counts(world, run).since(from)
+    };
+    twenty_passes(&world);
+    let unmoved = twenty_passes(&world);
+    assert_eq!(
+        unmoved.queue_claims, 0,
+        "passes over a queue nothing was added to claimed it: {unmoved:?}"
+    );
+
+    let before = counts(&world, run);
+    let replied = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 2, "commands": [
+            {"op": "settle", "id": "later", "outcome": "done",
+             "evidence": "settled by hand while its dependency runs"},
+        ]})
+        .to_string(),
+    );
+    replied.exited(0);
+    let receipt: Value = replied.json();
+    assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+    twenty_passes(&world);
+    let moved = counts(&world, run).since(before);
+    assert!(
+        moved.queue_claims >= 1,
+        "the reply was answered with no claim of the queue: {moved:?}"
+    );
+    let settled = twenty_passes(&world);
+    assert_eq!(
+        settled.queue_claims, 0,
+        "passes after the reply was claimed claimed the queue again: {settled:?}"
+    );
     world.release("build.go");
 }
 

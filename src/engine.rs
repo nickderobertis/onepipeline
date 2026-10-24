@@ -4067,7 +4067,10 @@ fn reconcile_edits(
         .unwrap_or_default();
     // Claimed before what an earlier pass kept is taken, so a queue that refuses
     // the claim leaves it for the next pass rather than dropped with the error.
-    fresh.extend(channel.claim_commands_answering()?);
+    fresh.extend(match deliveries.as_deref_mut() {
+        Some(deliveries) => channel.claim_commands_moved(&mut deliveries.queue_seen)?,
+        None => channel.claim_commands_answering()?,
+    });
     let (mut claimed, mut owed) = deliveries
         .as_deref_mut()
         .map(|deliveries| {
@@ -6607,6 +6610,10 @@ pub(crate) struct NoteDeliveries {
     /// written there — see [`crate::channel::deliveries`]. `None` for a
     /// reconciler with no run of its own to report on.
     sidecar: Option<Sidecar>,
+    /// The command queue's change token as it stood before this driver's last
+    /// claim, so a pass whose queue has not moved claims nothing — see
+    /// [`ChannelState::claim_commands_moved`].
+    queue_seen: Option<onemessagebus::Fingerprint>,
 }
 
 /// The live-delivery sidecar one driver keeps current.
@@ -6774,6 +6781,7 @@ impl NoteDeliveries {
                 paths: paths.clone(),
                 written: None,
             }),
+            queue_seen: None,
         }
     }
 
@@ -15948,6 +15956,7 @@ mod tests {
             owed: std::collections::VecDeque::new(),
             recovered: BTreeMap::new(),
             sidecar: None,
+            queue_seen: None,
         }
     }
 
