@@ -206,6 +206,13 @@ mod tests {
 
     /// Lines held before the run is known are bounded, the oldest dropped first, and reach
     /// the run's file, in order, once it is.
+    ///
+    /// Held here, on the sink itself, rather than by a journey: reaching the bound through the
+    /// CLI needs a process asking the store for more than ten thousand operations before its
+    /// run exists — a launch reading a plan of thousands of tasks — for a defect that costs
+    /// telemetry lines and never a run; the journey
+    /// `store::a_run_whose_store_operations_cannot_be_recorded_runs_and_writes_back_as_it_would`
+    /// holds the other half, a run whose lines cannot be written running as it would.
     #[test]
     fn held_lines_are_bounded_and_reach_the_run_once_it_is_known() {
         let dir = std::env::temp_dir().join(format!("storeops-held-{}", std::process::id()));
