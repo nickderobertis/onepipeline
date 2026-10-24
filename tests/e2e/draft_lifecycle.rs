@@ -630,6 +630,27 @@ fn a_skipped_required_check_is_named_and_never_shown_as_passed() {
     for event in &lint {
         assert_eq!(event["payload"]["state"], "skipped", "{event}");
     }
+    // And when the host says it ran, relayed as `onevcs` recorded it: the start
+    // and the conclusion of the run it reported — the ready change's, since it
+    // opened ready — unchanged.
+    let concluded: Vec<&Value> = checks
+        .iter()
+        .filter(|event| !event["payload"]["conclusion"].is_null())
+        .collect();
+    assert!(!concluded.is_empty(), "{}", why(&world, run));
+    for event in &concluded {
+        assert_eq!(
+            (
+                &event["payload"]["started_at"],
+                &event["payload"]["completed_at"]
+            ),
+            (
+                &json!("2026-01-01T00:05:00Z"),
+                &json!("2026-01-01T00:08:00Z")
+            ),
+            "a relayed change-check lost or changed the times its check ran over: {event}"
+        );
+    }
     // And the view that renders them shows `skipped`, never `passed`, for it.
     let monitor = world.run(&["monitor", run, "--all"]);
     monitor.exited(0);

@@ -124,6 +124,10 @@ use crate::projection::{self, RunState};
 /// carries that provenance's reason, instruction and superseded head (entry 130):
 /// a version-12 fold holds none of them, and resumed from it a host would draft a
 /// lineage's replies with no reason and none of the commits its rework added.
+/// Version 14 keeps a node's last activity as the `transcript` reference it
+/// recorded rather than as a copy, resolved when the readout is drawn: a
+/// version-13 fold holds no reference, and resumed from it a node whose dispatch
+/// references its history would read as still doing whatever its last copy said.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -131,7 +135,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 13;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 14;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -1655,7 +1659,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v13.json");
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v14.json");
 
     /// The digest of the journal bytes the golden's marker covers.
     const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
@@ -1704,6 +1708,27 @@ mod tests {
             // Written only for a node that kept its branch, and pinned for the same
             // reason.
             remotes: BTreeMap::from([("kept".to_string(), onevcs::Preservation::Pushed)]),
+            // Written only for a node whose last activity referenced its history,
+            // and pinned for the same reason.
+            activity: BTreeMap::from([(
+                "build".to_string(),
+                crate::projection::NodeActivity {
+                    doing: Some(crate::projection::Doing::Referenced(
+                        crate::projection::ActivityReference::new(
+                            serde_json::from_value(json!({
+                                "history_dir": "/state/oneharness/history",
+                                "history_project": "project",
+                                "history_session": "session",
+                                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+                                "index": 0,
+                                "tool_call_id": "call-1",
+                            }))
+                            .expect("a reference"),
+                        ),
+                    )),
+                    ..crate::projection::NodeActivity::default()
+                },
+            )]),
             strict: true,
             ..RunState::default()
         };
@@ -1737,14 +1762,15 @@ mod tests {
     /// later stated commit, the one before it kept the run-wide node overrides,
     /// the one before it kept the closure rule's facts, and the one before it kept
     /// each node's base and the branches its driver retired, the one before it
-    /// kept what putting a kept branch on its origin found to do, and the one
-    /// before a reparent cleared a waiting approval's recorded wait.
+    /// kept what putting a kept branch on its origin found to do, the one before
+    /// a reparent cleared a waiting approval's recorded wait, and the one before
+    /// a node's activity kept the `transcript` reference it recorded.
     ///
     /// What proves each fold change is a version and not a quiet re-reading: each
     /// is a real document, byte-for-byte the shape this build writes, and the
     /// reader has to refuse it rather than resume from a fold it would not have
     /// computed.
-    const GOLDEN_EARLIER: [(u32, &str); 12] = [
+    const GOLDEN_EARLIER: [(u32, &str); 13] = [
         (1, include_str!("../tests/golden/checkpoint-v1.json")),
         (2, include_str!("../tests/golden/checkpoint-v2.json")),
         (3, include_str!("../tests/golden/checkpoint-v3.json")),
@@ -1757,6 +1783,7 @@ mod tests {
         (10, include_str!("../tests/golden/checkpoint-v10.json")),
         (11, include_str!("../tests/golden/checkpoint-v11.json")),
         (12, include_str!("../tests/golden/checkpoint-v12.json")),
+        (13, include_str!("../tests/golden/checkpoint-v13.json")),
     ];
 
     #[test]
@@ -1773,13 +1800,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_13_document_is_the_shape_the_golden_pins() {
+    fn a_schema_14_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
         if std::env::var_os("ONEPIPELINE_WRITE_CHECKPOINT_GOLDEN").is_some() {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/tests/golden/checkpoint-v13.json"
+                    "/tests/golden/checkpoint-v14.json"
                 ),
                 format!("{rendered}\n"),
             )
@@ -1789,12 +1816,12 @@ mod tests {
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v13.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v14.json together"
         );
     }
 
     #[test]
-    fn a_schema_13_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_14_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the

@@ -1485,6 +1485,9 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
         // external journal fixture; the real driver and compiled discard reader
         // consume it, without substituting their fold or filesystem operations.
         let record = serde_json::json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":0, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
+        // The handle is a temporary dropped at the end of this statement, before
+        // any wait for the driver below, so it can never be the second writer
+        // that blocks one of the driver's appends.
         append_beside_the_driver(&world.run_file(run, "events.jsonl"))
             .write_all(format!("{record}\n").as_bytes())
             .unwrap();
@@ -1496,6 +1499,19 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
                     && !world.run_file(run, "owner.lock").exists()
             });
             assert!(world.events_of(run, "scratch-removed").is_empty());
+            // The driver went on appending after the fixture's record while the
+            // test waited, so nothing the test held kept it out of its journal.
+            let journal = world.journal(run);
+            let fixture = journal
+                .iter()
+                .position(|event| event["stream"] == "future-producer")
+                .expect("the fixture's record is in the journal");
+            assert!(
+                journal[fixture + 1..]
+                    .iter()
+                    .any(|event| event["kind"] == "turn-completed"),
+                "the driver appended nothing after the fixture's record: {journal:?}"
+            );
         }
         assert_eq!(snapshot(&world.run_file(run, "scratch")), before);
         let (status, _) = read_views(&world, run);

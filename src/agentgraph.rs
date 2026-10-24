@@ -3716,6 +3716,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A turn record carrying a `transcript` reference is journalled byte for
+    /// byte as its producer wrote it — whichever path relayed it, and however
+    /// long a text beside the reference is: the ingest re-bound is for records
+    /// still carrying a copy, and a reference record carries none.
+    #[test]
+    fn a_relayed_reference_record_is_journalled_byte_for_byte_as_received() {
+        let reference: oneagentgraph::event::ActivityTranscript =
+            serde_json::from_value(serde_json::json!({
+                "history_dir": "/state/oneharness/history",
+                "history_project": "home-operator-worktree",
+                "history_session": "node-scope-1-worker-skill-20261023T000000Z-1",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+                "index": 3,
+                "tool_call_id": "toolu_3",
+            }))
+            .expect("the sibling's reference shape");
+        let activity = oneagentgraph::event::TurnActivity {
+            transcript: Some(reference),
+            kind: "tool_call".into(),
+            // Past the payload bound: a copy record's text this long is cut at
+            // ingest, and a reference record's is not.
+            name: Some(format!(
+                "mcp__{}",
+                "x".repeat(crate::event::MAX_PAYLOAD_TEXT_BYTES)
+            )),
+            detail: None,
+            truncated: false,
+            output: None,
+            output_truncated: false,
+            tool_call_id: Some("toolu_3".into()),
+            index: 3,
+        };
+        let serde_json::Value::Object(payload) =
+            serde_json::to_value(&activity).expect("the sibling's payload serialises")
+        else {
+            panic!("a turn activity serialises as an object");
+        };
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-10-23T06:00:00.123Z".into(),
+            stream: "node-scope-1".into(),
+            seq: 12,
+            source: oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD),
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
+            labels: oneagentgraph::event::Labels {
+                run_id: Some("node-scope-1".into()),
+                member: Some("worker".into()),
+                ..oneagentgraph::event::Labels::default()
+            },
+            payload,
+            artifacts: Vec::new(),
+        };
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        assert!(line.contains(r#""transcript":{"history_dir""#), "{line}");
+
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-relayed-reference-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "relayed-reference");
+        paths.create().expect("a scratch run root");
+        let mut journal = crate::journal::Journal::open(&paths);
+        journal
+            .relay(&off_the_wire)
+            .expect("the journal appends the reference relayed as a line");
+        journal
+            .relay(&in_process)
+            .expect("the journal appends the reference relayed as a value");
+        let written = std::fs::read_to_string(paths.journal()).expect("the journal reads");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            written,
+            format!("{line}\n{line}\n"),
+            "a relayed reference record reached the journal in bytes its producer did not write"
+        );
+    }
+
     /// `oneagentgraph` publishes its terminal event before its final process
     /// reap. The sender held here is that still-running teardown: settlement
     /// must be available while disconnection is deliberately impossible.

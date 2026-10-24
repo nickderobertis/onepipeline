@@ -55,7 +55,7 @@ oneharness-core = { workspace = true }
 # `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` drives
 # that real process — over the one `oneharness-core` above, since 0.25.2 requires
 # `^0.28.2` — with only `codex` doubled. Nothing here calls into it.
-oneharness = "0.25.2"
+oneharness = "0.26.1"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
 # a different provider would otherwise still be supervised by this copy.

@@ -1996,10 +1996,14 @@ pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToke
 /// handle the append is made through, and never on the healing path alone.
 ///
 /// The handle is opened for reading too, because the appender has to look at the
-/// file's own tail before it writes, and the caller seeks to the end before it
-/// writes rather than relying on the open mode — the two platforms give a
-/// truncatable handle in different ways, and only one of them can truncate an
+/// file's own tail before it writes, and the caller writes through
+/// [`append_all`] rather than relying on the open mode — the two platforms give
+/// a truncatable handle in different ways, and only one of them can truncate an
 /// append-only one.
+///
+/// The exclusion is between the appenders that take it, and between them only:
+/// on both platforms a reader, or a process appending without this lock, opens
+/// the file while the handle is held.
 pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     platform_open_locked_append(path)
 }
@@ -2008,6 +2012,43 @@ pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::Fi
 /// the file, so a caller can say it is about to wait before it does.
 pub fn try_open_locked_append(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     platform_try_open_locked_append(path)
+}
+
+/// Write all of `bytes` to a handle from [`open_locked_append`] at the end of
+/// the file as it stands at the write, not where the handle last looked.
+///
+/// The lock excludes only the appenders that take it, so a process appending
+/// without it may have grown the file since the caller sought to its end. The
+/// Unix handle is opened to append, so each write lands at the end already; the
+/// Windows one is a plain write handle, and is told the end in the write itself.
+pub fn append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    platform_append_all(file, bytes)
+}
+
+#[cfg(unix)]
+fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    std::io::Write::write_all(file, bytes)
+}
+
+/// `WriteFile` given the offset `0xFFFFFFFF:0xFFFFFFFF` writes at the end of the
+/// file, as a handle opened for `FILE_APPEND_DATA` would; `seek_write` passes the
+/// offset in exactly those two halves. Each write is one such call, and
+/// `write_all` is std's own, short writes and interruptions included.
+#[cfg(windows)]
+fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    struct AtEnd<'a>(&'a std::fs::File);
+
+    impl std::io::Write for AtEnd<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::os::windows::fs::FileExt::seek_write(self.0, buf, u64::MAX)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    std::io::Write::write_all(&mut AtEnd(file), bytes)
 }
 
 // llmlint: ignore-block[changed_behavior_has_e2e] the contended answer of both arms is
@@ -2041,27 +2082,21 @@ fn platform_try_open_locked_append(
     Err(failed)
 }
 
-/// One attempt at the share-mode exclusion the waiting arm below retries: a
-/// sharing violation is another appender holding the file.
+/// One attempt at the exclusion the waiting arm below retries: the appender
+/// lock held, or a sharing violation from a build that still excluded at the
+/// open, is another appender holding the file.
 #[cfg(windows)]
 fn platform_try_open_locked_append(
     path: &std::path::Path,
 ) -> std::io::Result<Option<std::fs::File>> {
-    use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)
-    {
-        Ok(file) => Ok(Some(file)),
-        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(None),
-        Err(e) => Err(e),
-    }
+    let file = match open_shared_for_append(path) {
+        Ok(file) => file,
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(try_lock_appender(&file)?.then_some(file))
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2098,54 +2133,125 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
 /// Windows has no advisory lock a reader can ignore: `LockFileEx` is
 /// *mandatory*, so a range lock over the file's data would fail every view
 /// reading a live run — the one thing this crate's readers must never do. The
-/// exclusion is taken at `CreateFile` instead, by opening with a share mode that
-/// admits readers and no second writer, and waiting for the writer that holds it
-/// to let go.
+/// lock is taken instead on one byte at [`APPENDER_LOCK_BYTE`], far past any end
+/// a file of records reaches, which no reader and no write ever touches: it
+/// excludes the appenders that ask for it and nothing else, as `flock` does.
 ///
-/// A plain write handle rather than an append-only one, which is what that share
-/// mode buys: a handle opened for appending alone cannot be truncated here —
-/// setting the end of a file needs write access — and truncating the fragment is
-/// half of what the caller does. Nothing else may hold this file for writing
-/// while this handle is open, so seeking to the end and writing there *is* an
-/// append.
+/// The open itself excludes nobody. It shares reading and writing, so a reader,
+/// and a process appending to the file without asking this crate — which Unix
+/// has always admitted — open it while this handle is held; a share mode
+/// admitting no second writer would refuse them for as long as the append, its
+/// heal and its receipt take. Deletion is not shared: nothing removes or renames
+/// a ledger file while it is being appended to.
 ///
-/// A sharing violation is the *contended* answer rather than a failure, and the
-/// wait is bounded so an appender can never hang a view or a driver: past the
-/// deadline the error is handed back as what it is.
+/// A plain write handle rather than an append-only one: a handle opened for
+/// appending alone cannot be truncated here — setting the end of a file needs
+/// write access — and truncating the fragment is half of what the caller does.
+/// The record itself goes through [`append_all`], which writes at the end of the
+/// file as it stands at that write, so a foreign append that landed after the
+/// caller looked at the tail is written after rather than over.
+///
+/// The lock held is the *contended* answer rather than a failure, and the wait
+/// is bounded so an appender can never hang a view or a driver: past the
+/// deadline the error is handed back as what it is. So is a sharing violation,
+/// which an appender of a build that still excluded at the open hands back.
 // llmlint: ignore-block[changed_behavior_has_e2e] the *uncontended* half of this arm is
 // driven by every journey that appends, on the Windows leg of CI, which runs the same
-// suite. What has no journey is the contended half, and the reason is that the holder a
-// journey needs is a second writer this suite can only be on the platform it is written
-// on: `tests/e2e/journal.rs` holds the store with `flock` and says so. A Windows journey
-// authored here would be one nobody has ever seen pass or fail — this host cannot link
-// that target, let alone run it — which is a worse thing to ship than a stated gap.
+// suite, and so is the shared open: `tests/e2e/journal.rs` appends from the test process
+// while a held driver has the journal. What has no journey is the contended half, and the
+// reason is that the holder a journey needs is a second writer this suite can only be on
+// the platform it is written on: `tests/e2e/journal.rs` holds the store with `flock` and
+// says so. A Windows journey authored here would be one nobody has ever seen pass or fail
+// — this host cannot link that target, let alone run it — which is a worse thing to ship
+// than a stated gap.
 #[cfg(windows)]
 fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
 
     /// How long an appender waits for the writer ahead of it.
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let waiting_since = std::time::Instant::now();
     loop {
-        let opened = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(path);
-        match opened {
+        let attempt = open_shared_for_append(path).and_then(|file| {
+            if try_lock_appender(&file)? {
+                Ok(file)
+            } else {
+                Err(std::io::Error::from_raw_os_error(
+                    ERROR_LOCK_VIOLATION as i32,
+                ))
+            }
+        });
+        match attempt {
             Err(e)
-                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
-                    && waiting_since.elapsed() < DEADLINE =>
+                if matches!(
+                    e.raw_os_error(),
+                    Some(code) if code == ERROR_SHARING_VIOLATION as i32
+                        || code == ERROR_LOCK_VIOLATION as i32
+                ) && waiting_since.elapsed() < DEADLINE =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             other => return other,
         }
     }
+}
+
+/// The one byte the Windows appender lock covers: the last offset a signed
+/// 64-bit file position can name, which no file of records is ever long enough
+/// to reach, so locking it blocks no read or write of the file's data.
+#[cfg(windows)]
+const APPENDER_LOCK_BYTE: u64 = i64::MAX as u64 - 1;
+
+#[cfg(windows)]
+fn open_shared_for_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+}
+
+/// Take the appender lock on `file` without waiting: `false` while another
+/// handle holds it. Released when the handle closes, including when the process
+/// holding it dies.
+#[cfg(windows)]
+fn try_lock_appender(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut at = OVERLAPPED::default();
+    at.Anonymous.Anonymous.Offset = APPENDER_LOCK_BYTE as u32;
+    at.Anonymous.Anonymous.OffsetHigh = (APPENDER_LOCK_BYTE >> 32) as u32;
+    // SAFETY: the handle is one the caller owns and keeps open across the call,
+    // and `at` is a live OVERLAPPED that names the range; a synchronous handle
+    // asked not to wait completes before the call returns, so nothing keeps it.
+    let locked = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &raw mut at,
+        )
+    };
+    if locked != 0 {
+        return Ok(true);
+    }
+    let failed = std::io::Error::last_os_error();
+    if failed.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        return Ok(false);
+    }
+    Err(failed)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
