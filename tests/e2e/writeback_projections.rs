@@ -2194,6 +2194,13 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+// llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
+// rewrite under an open reader is caught only by holding the document open across it, as
+// `local-md` itself reads; the projection's ordering gate holds that window still.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this uses the same compiled
+// binary and store fixture as its peer write-back journeys. The only separate test edge is for
+// conversational note journeys; moving this filesystem race there loses this module's
+// crateSource coverage when the projection code changes.
 /// A creation carries its task's images by having the store rewrite the task's shadow
 /// document. A reader part of the way through that document when the rewrite runs — held
 /// there by the projection's own ordering gate, between the document being published and its
@@ -2276,3 +2283,5 @@ fn a_reader_part_way_through_a_shadow_document_reads_it_whole_across_its_image_r
         world.run_file(run, "result.json").is_file()
     });
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[tests_mirror_real_usage]
