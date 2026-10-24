@@ -778,12 +778,12 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 #[cfg(all(unix, not(target_os = "macos")))]
 const GIT_STARTS: usize = 14_000;
 
-/// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
-/// before those repeats were taken out runs counted 15,771–16,999 alone and up to 21,874
-/// beside the whole suite. Scaled by what taking them out saved on Linux, about a quarter,
-/// that is near 11,800–16,400, and this figure sits about a fifth above its top. Over a
-/// spread that wide it catches only a gross regression; the bound off macOS is the
-/// discriminating one.
+/// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load.
+/// Derived rather than measured on this tree: main's recorded macOS counts on `onevcs`
+/// 0.56.9, 15,771–16,999 alone and up to 21,874 beside the whole suite, scaled by the
+/// quarter taking out those repeats measurably saved on Linux, are near 11,800–16,400,
+/// and this figure sits about a fifth above their top. Over a spread that wide it
+/// catches only a gross regression; the bound off macOS is the discriminating one.
 #[cfg(target_os = "macos")]
 const GIT_STARTS: usize = 20_000;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
