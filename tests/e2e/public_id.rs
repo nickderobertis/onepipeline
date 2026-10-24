@@ -403,8 +403,8 @@ fn held_and_claimed(world: &World, project: &str, run: &str, node: &str) -> Valu
 }
 
 /// A run named after the private repository claims its project by its public id, and every
-/// read of the claim after that knows the claim as its own: its driver reads it back on each
-/// claim interval and goes on driving, a takeover of it while it drives writes the successor's
+/// read of the claim after that knows the claim as its own: an adoption of it reads it back
+/// and goes on driving, a takeover of it while it drives writes the successor's
 /// own public id, a takeover once its driver is gone finds the run by its public id and waits
 /// on nothing, and its stop and its closeout release it.
 #[test]
@@ -416,12 +416,23 @@ fn a_claim_naming_the_public_id_is_read_back_taken_over_and_released() {
     registered(&world);
     let project = world.plan(A, &plan_of(A, vec![agent("work", &[])]));
 
-    // Driving: three claim intervals pass, and each read finds the run's own claim.
-    held_and_claimed(&world, &project, A, "work");
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    // Adopted: the adoption's first read finds the run's own claim, and it drives on.
+    let claim = held_and_claimed(&world, &project, A, "work");
+    let shutdown = world.run(&["shutdown", A, "--grace", "1"]);
+    assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
+    assert_eq!(
+        stored_claim(&world, &project),
+        claim,
+        "the shutdown took the claim"
+    );
+    let dispatched = world.events_of(A, "node-dispatched").len();
+    world.run(&["adopt", A, "--detach"]).exited(0);
+    world.until("the adoption to dispatch work again", |world| {
+        world.events_of(A, "node-dispatched").len() > dispatched
+    });
     assert!(
         world.events_of(A, "driver-superseded").is_empty(),
-        "the driver read its own claim, naming its public id, as a takeover"
+        "the adoption read its own claim, naming its public id, as a takeover"
     );
 
     // A takeover while it drives claims the project by the successor's own public id first.

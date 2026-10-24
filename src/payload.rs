@@ -620,19 +620,20 @@ pub(crate) struct DriverClaim {
     pub(crate) pid: u32,
     /// When the claim was written, RFC 3339.
     pub(crate) claimed_at: String,
-    /// The terms the claiming driver's lease runs on, which a run taking the project over
-    /// waits out; absent from a claim written by a build that kept no lease.
+    /// The terms the claiming driver's host was given, whose cancel grace a run taking the
+    /// project over waits out; absent from a claim written by a build that kept no lease.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lease: Option<ClaimLease>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// The terms a claiming driver's lease runs on: how often it reads its claim, and how long
-/// a dispatch its lease ends has to stop before it is killed.
+/// The terms a claiming driver's host was given: its claim interval, which paces how often a
+/// takeover reads the claim, and its cancel grace, which a run taking the project over waits
+/// out before it starts without an acknowledgement.
 // llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields; the store boundary checks these in `continuation::claim_of`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ClaimLease {
-    /// The driver's claim interval, in whole seconds.
+    /// The host's claim interval, in whole seconds.
     // llmlint: ignore[invalid_states_unrepresentable] zero is unrepresentable; the day's upper bound is the setting's (`continuation::MAX_CLAIM_INTERVAL`), checked where a claim is read at the store boundary, and a newtype for it would publish a schema of its own in `schemas/events.json` for a bound no reader of a journal record needs.
     pub(crate) interval_seconds: std::num::NonZeroU64,
     /// The driver's cancel grace, in whole seconds.
