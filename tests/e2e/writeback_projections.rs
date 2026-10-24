@@ -709,10 +709,8 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         "the write-back rewrote the project's title or a key it does not own:\n{board}"
     );
 
-    // An `add` is the one copy, and it lands the project item beside the node it creates: the
-    // project is read once for it, so the copy finds the project as the board holds it and
-    // writes nothing to it — title, description, labels, repositories and keys read back byte
-    // for byte.
+    // An `add` copies only the new member, without reading or writing the project:
+    // title, description, labels, repositories and keys read back byte for byte.
     let mark = records(&world, run).len();
     edit(
         &world,
@@ -734,9 +732,13 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         .collect();
     assert_eq!(created.len(), 1, "{created:?}");
     assert_eq!(created[0]["items"], json!(["extra"]), "{}", created[0]);
-    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert!(
+        created[0]["calls"].get("project-show").is_none(),
+        "{}",
+        created[0]
+    );
     assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
-    assert_eq!(created[0]["actions"]["unchanged"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["unchanged"], 0, "{}", created[0]);
     assert_eq!(
         landed(&world, run)["items"]["extra"]["destination"],
         board_task(&world.store_tasks(&project), "extra")["id"],
@@ -2005,7 +2007,19 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         ));
     }
     if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects")) {
-        if body != concurrent_project_body() {
+        // MembersOnly publishes just the project's identity. Accept its empty body
+        // only with that exact front matter; a truncated full project still fails.
+        let origin = parsed["metadata"]["onetaskgraph.origin"].as_str();
+        let identity = origin
+            .and_then(|origin| origin.parse::<onetaskgraph_core::GlobalId>().ok())
+            .is_some_and(|origin| {
+                parsed
+                    == json!({
+                        "title": origin.native,
+                        "metadata": {"onetaskgraph.origin": origin.to_string()}
+                    })
+            });
+        if !(body == concurrent_project_body() || (body.is_empty() && identity)) {
             return Err(format!(
                 "{} has a partial project body of {} bytes",
                 path.display(),
@@ -2073,7 +2087,7 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // conversational note journeys; moving this filesystem race there loses this module's
 // crateSource coverage when the projection code changes.
 /// Two runs each `add` nodes one at a time — every creation rewriting its run's shadow project
-/// document and writing the added node's, and taking the previous one out — while a reader lists
+/// identity document and writing the added node's, and taking the previous one out — while a reader lists
 /// and parses both shadow stores at rate, as the `local-md` source a copy reads them through
 /// does: no document it reads is ever torn.
 #[test]
@@ -2176,6 +2190,98 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         );
         world.release(&format!("{run}-hold.go"));
     }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+// llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
+// rewrite under an open reader is caught only by holding the document open across it, as
+// `local-md` itself reads; the projection's ordering gate holds that window still.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this uses the same compiled
+// binary and store fixture as its peer write-back journeys. The only separate test edge is for
+// conversational note journeys; moving this filesystem race there loses this module's
+// crateSource coverage when the projection code changes.
+/// A creation carries its task's images by having the store rewrite the task's shadow
+/// document. A reader part of the way through that document when the rewrite runs — held
+/// there by the projection's own ordering gate, between the document being published and its
+/// images being carried — still reads the whole document it opened: the store writes the
+/// replacement beside it and renames it into place, so the file the reader holds is never
+/// the one written.
+#[test]
+fn a_reader_part_way_through_a_shadow_document_reads_it_whole_across_its_image_rewrite() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let run = "writeback-shadow-rewrite";
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = World::new(run)
+        .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address());
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the initial projection", |world| {
+        records(world, run)
+            .iter()
+            .any(|record| record["outcome"] == "projected")
+    });
+    let mut reply = world
+        .cmd(&["reply", run])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    reply
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"version": 3, "commands": [{"op": "add", "node": agent("drawn", &[])}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let held = gate.arrived();
+    drop(gate);
+
+    let path = shadow_documents(&world.run_file(run, "writeback"))
+        .into_iter()
+        .find(|path| {
+            shadow_document(path).is_ok_and(|read| read["metadata"]["onepipeline.id"] == "drawn")
+        })
+        .expect("the creation published the added node's shadow document before its images");
+    let whole = std::fs::read_to_string(&path).expect("the published document reads");
+    let mut reader = std::fs::File::open(&path).expect("the reader opens the document");
+    let mut text = vec![0; whole.len() / 2];
+    reader
+        .read_exact(&mut text)
+        .expect("the reader reads the first half");
+
+    held.release();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until("the creation to land", |world| {
+        records(world, run).iter().any(|record| {
+            record["outcome"] == "projected" && record["actions"]["created"].as_u64() >= Some(1)
+        })
+    });
+    reader
+        .read_to_end(&mut text)
+        .expect("the reader reads the rest");
+    assert_eq!(
+        String::from_utf8_lossy(&text),
+        whole,
+        "a reader part way through {} when its images were carried read it torn",
+        path.display()
+    );
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[tests_mirror_real_usage]

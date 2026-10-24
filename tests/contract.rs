@@ -4144,6 +4144,33 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     // meets it in, and nothing compiles that. So the entry is held against it
     // here: every spelling, in the order the entry proposes, and the default.
     let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let passage = readme
+        .split_once("**write-back item budget**")
+        .expect("the README documents the write-back budget")
+        .1
+        .split("\n\n")
+        .next()
+        .expect("the budget passage");
+    let example = passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|code| code.starts_with("adopt RUN "))
+        .expect("the budget passage shows an adoption command");
+    let words =
+        std::iter::once("onepipeline").chain(example.split_whitespace().map(|word| match word {
+            "RUN" => "budgeted-run",
+            "SECONDS" => "30",
+            word => word,
+        }));
+    let parsed = Cli::try_parse_from(words).unwrap_or_else(|error| {
+        panic!("the README's adoption `{example}` does not parse: {error}")
+    });
+    let Command::Adopt(adopted) = parsed.command else {
+        panic!("the README's budget example is not an adoption: {example}")
+    };
+    assert_eq!(adopted.writeback_item_budget, Some(30));
+
     let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut found: Vec<usize> = Vec::new();
     for spelling in &precedence {
@@ -9413,6 +9440,12 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
 
     let in_source = verb_functions_in_source();
     let mut in_contract = verb_functions_in_contract();
+    let adoption_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("71.")["sdk_verbs"].clone())
+            .expect("entry 71 names its SDK verbs");
+    in_contract.extend(adoption_verbs);
+    let _: fn(&RunPaths, Adopt, Option<u64>) -> Result<Adopted> =
+        verbs::adopt_with_writeback_item_budget;
     let review_verbs: Vec<String> =
         serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
             .expect("entry 122 names its SDK verbs");
@@ -11715,5 +11748,102 @@ fn retained_run_views_publish_the_contracts_refresh_outcomes() {
             "`views::RunView::refresh(&mut self) -> crate::Result<views::Refreshed>`",
             "`views::Refreshed { Unchanged, Appended { first: usize }, Reread }`",
         ],
+    );
+}
+
+/// The transcript resolver is the surface the contract states — its signature,
+/// its answers and their spelling, its bound — and the `watch` machine record's
+/// `transcript` object in both its forms is what those types render.
+#[test]
+fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_states() {
+    use onepipeline::views::transcript::{
+        self, Resolved, Text, TranscriptRef, Unresolved, Why, DESCRIPTION_MAX_CHARS,
+    };
+    let _: fn(&TranscriptRef) -> std::result::Result<Resolved, Unresolved> = transcript::resolve;
+    type OfPayload<T> =
+        fn(&str, &serde_json::Map<String, Value>) -> Option<std::result::Result<T, Unresolved>>;
+    let _: OfPayload<TranscriptRef> = TranscriptRef::of;
+    let _: OfPayload<Resolved> = transcript::of_record;
+    assert_eq!(DESCRIPTION_MAX_CHARS, 120);
+    assert_contract_names(
+        "transcript resolver's",
+        &[
+            "`views::transcript::resolve(&TranscriptRef) -> Result<Resolved, Unresolved>`",
+            "`TranscriptRef::of(kind, payload)`",
+            "`views::transcript::of_record(kind, payload)`",
+            "`TranscriptRef::Instruction`",
+            "`TranscriptRef::Message`",
+            "`TranscriptRef::Decision`",
+            "`parse_supervisor`",
+            "`TranscriptRef::Activity`",
+            "`TranscriptRef::Copy { text, cut }`",
+            "`Text::Tool { kind, name, input, output }`",
+            "`DESCRIPTION_MAX_CHARS` (120)",
+            "`io::history::find_session_path`",
+            "`transcript unavailable: <path>: <why>`",
+            "`onepipeline scratch discard`",
+            "`started_at` and `completed_at`",
+        ],
+    );
+    for why in [Why::MissingFile, Why::MissingEntry, Why::Unreadable] {
+        assert_contract_names("transcript resolver's", &[&format!("`{}`", why.as_str())]);
+        assert_eq!(
+            serde_json::to_value(why).expect("a reason serializes"),
+            json!(why.as_str())
+        );
+    }
+    let copy = TranscriptRef::Copy {
+        text: Text::Instruction("## What".into()),
+        cut: true,
+    };
+    assert!(!copy.is_reference());
+
+    let blocks = fenced_blocks("json watch-transcript");
+    let [block] = &blocks[..] else {
+        panic!(
+            "expected exactly one ```json watch-transcript block, found {}",
+            blocks.len()
+        );
+    };
+    let records: Vec<Value> =
+        serde_json::from_str(block).expect("the watch-transcript example parses");
+    let (mut resolved, mut unavailable) = (0, 0);
+    for record in &records {
+        assert_eq!(record["watch"], "event", "{record}");
+        let object = record["transcript"]
+            .as_object()
+            .unwrap_or_else(|| panic!("the example carries no transcript object: {record}"));
+        if let Some(line) = object.get("unavailable") {
+            unavailable += 1;
+            let why: Why = serde_json::from_value(object["why"].clone())
+                .unwrap_or_else(|error| panic!("{error}: {record}"));
+            let rendered = Unresolved {
+                path: object["path"].as_str().expect("a path").into(),
+                why,
+            }
+            .to_string();
+            assert_eq!(line, &json!(rendered), "{record}");
+            assert_eq!(object.len(), 3, "{record}");
+        } else {
+            resolved += 1;
+            let description = object["description"].as_str().expect("a description");
+            assert!(
+                !description.contains('\n') && description.chars().count() <= DESCRIPTION_MAX_CHARS,
+                "{record}"
+            );
+            let texts: Vec<&str> = ["instruction", "message", "reasoning"]
+                .into_iter()
+                .filter(|key| object.contains_key(*key))
+                .collect();
+            let tool = object.contains_key("input") && object.contains_key("output");
+            assert!(
+                texts.len() + usize::from(tool) == 1 && object.len() == 2 + usize::from(tool),
+                "the example's text is not under exactly one field naming what it is: {record}"
+            );
+        }
+    }
+    assert!(
+        resolved >= 1 && unavailable >= 1,
+        "the example shows {resolved} resolved and {unavailable} unavailable forms, not both"
     );
 }

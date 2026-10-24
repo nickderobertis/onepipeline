@@ -287,8 +287,8 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
             && landed_as(world, &[("f", "queued")])
             && landed(world)["items"]["f"]["depends_on"] == json!(["e"])
     });
-    // An `add` is the one copy, naming the node it creates alone, beside the one project read
-    // that lets the copy land the project item unwritten.
+    // An `add` is the one members-only copy, naming the node it creates alone without
+    // reading the destination project.
     let created: Vec<Value> = records(&world)[mark..]
         .iter()
         .filter(|record| record["calls"].get("project-copy").is_some())
@@ -296,7 +296,21 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
         .collect();
     assert_eq!(created.len(), 1, "{created:?}");
     assert_eq!(created[0]["items"], json!(["f"]), "{}", created[0]);
-    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert!(
+        created[0]["calls"].get("project-show").is_none(),
+        "{}",
+        created[0]
+    );
+    assert_eq!(
+        created[0]["spent"],
+        json!({
+            "requests": 4, "budgets": [{
+                "budget": "graphql", "unit": "points", "amount": 4, "lower_bound": false
+            }]
+        }),
+        "{}",
+        created[0]
+    );
     assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
     let edits = world.events_of(RUN, "edit-committed").len();
     let mark = records(&world).len();
@@ -625,7 +639,7 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
             "an attempt read the project's page of tasks: {record}"
         );
         // A copy is made only to create the `add`ed node, and naming only it; the project is
-        // read only by that attempt, for its copy, and by the two that release the run's
+        // read only by the two attempts that release the run's
         // driver claim — the stop's and the closeout's — each reading it once and writing the
         // claim beside it; and every other write is a targeted update whose fields the store
         // says it wrote.
@@ -637,8 +651,8 @@ fn the_comparable_plan_spends_what_the_committed_record_says() {
         let releases = calls.get("project-show") == Some(&json!(1))
             && calls.get("project-metadata-set") == Some(&json!(1));
         assert!(
-            calls.get("project-show").is_none() || calls.get("project-copy").is_some() || releases,
-            "an attempt that created nothing and released no claim read the project: {record}"
+            calls.get("project-show").is_none() || releases,
+            "an attempt that released no claim read the project: {record}"
         );
         assert_eq!(
             calls.get("task-update").is_some(),

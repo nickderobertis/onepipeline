@@ -3412,6 +3412,19 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   either would name a graph run that had ended and stay silent about a run nobody
   will watch again, so the listing asks the launch record, and only for a run its
   driver tier leaves room to say so.
+
+  *Implementation behaviour, not a contract divergence:* that restart is held
+  still by `stop`. A stop of a run launched with an observer graph holds the
+  run's observer restarts — the run directory's `observer-restart.lock`, which
+  the driver makes as it starts watching — for its whole teardown, from before it
+  cancels the recorded observer until it has answered, waiting out a restart
+  already under way so the observer it cancels is the one now watching. While
+  the hold is held the driver restarts nothing and says so on its log, so no
+  observer starts behind the teardown's cancel or its listing. A stop that
+  cannot take the hold signals nothing and refuses, naming the lock, and a
+  driver that cannot take it restarts nothing until it can. A stop that refused
+  lets the hold go, and the run it left running is watched again at the
+  driver's next look.
 - **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
   run roots it could not read with each root's own reason — on the same terms
   `Survey::skipped` already states, because a cheap listing that reported only
@@ -5781,10 +5794,15 @@ failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
-then the shipped default. It is resolved **once**, at the launch, and retained in
-the launch record beside the pacemaker interval — so a driver a fresh `adopt`
-starts bounds its copies as the launch chose, and a record written before the
-field existed reads and resolves to the default. The value is a positive whole
+then the shipped default. It is resolved at launch and retained in the launch
+record beside the pacemaker interval. `adopt --writeback-item-budget SECONDS`
+replaces it under the ownership lock before the new driver projects anything,
+including before a detached driver is spawned. An adoption naming no budget
+keeps the recorded value and ignores the environment. The additive SDK entry point
+`verbs::adopt_with_writeback_item_budget(paths, how, budget)` accepts an optional
+whole-second budget; `verbs::adopt` and `verbs::Adopt` keep their existing shapes.
+A record written before
+the field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
 config key — by the spelling that carried it, because zero is no budget at all:
 multiplied through, it leaves the floor as the whole deadline for every plan
@@ -5818,6 +5836,7 @@ replays.
 
 ```json
 {
+  "sdk_verbs": ["adopt_with_writeback_item_budget"],
   "budget": {
     "flag": "--writeback-item-budget",
     "environment": "ONEPIPELINE_WRITEBACK_ITEM_BUDGET",
@@ -6054,10 +6073,11 @@ engine does not own are never named, so a person's edit to any field stands unti
 changes that same field. The baseline advances per item as each update lands, recording the
 fields the store says it wrote. An item that does not exist — an `add`ed node — is created by
 one member copy naming only the lineages being created, over a shadow store holding only their
-documents and the project's; that copy lands the project item beside them, so the attempt reads
-the project once and the shadow restates it exactly, and the copy writes nothing to it: the one
-project read any attempt makes, ruled by the planner because the store's member copy always
-plans the project item. An engine-owned project key (`onepipeline.goal`, `.concurrency`,
+documents and the project's origin. Since onetaskgraph 0.11.0, `CopyScope::MembersOnly`
+resolves the existing counterpart without reading or writing the project item. A missing
+counterpart is refused before any write. A typed refusal naming a missing routed member
+project triggers a full member copy for that project's initial creation, restating the
+existing home from one read; every other error propagates unchanged. An engine-owned project key (`onepipeline.goal`, `.concurrency`,
 `.name`, `.schema_version`) whose value differs from the baseline is written with
 `set_project_metadata`, one key per call; the project's title, description and labels are never
 written.
@@ -6184,7 +6204,7 @@ it creates an item, which entry 93 states: once per item created, inside that at
                           "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
                                          "outcome": "written", "from": "todo", "to": "queued",
                                          "pruned": ["plans:delivers-plan/gone"]}],
-                          "calls": {"project-copy": 1, "project-show": 1, "task-show": 1}}
+                          "calls": {"project-copy": 1, "task-show": 1}}
   },
   "retired": {
     "record": "<run dir>/writeback-store.json",
@@ -6195,11 +6215,11 @@ it creates an item, which entry 93 states: once per item created, inside that at
   "member_projection": {
     "reads": ["project-show", "task-show"],
     "task_show_per": ["lineage the landed baseline does not hold, by the id the run knows for it"],
-    "project_show_per": "attempt that creates an item, once, so the shadow project restates the destination and the copy writes nothing to it",
+    "project_show_per": "only initial creation of a missing routed member project, after MembersOnly refuses",
     "never_reads": ["task-list"],
     "carries": "the lineages whose projection differs from the landed baseline (entry 93)",
     "existing_item": {"call": "task-update", "names": "only the fields whose projection differs from the baseline", "never_names": ["labels", "repositories", "project membership", "a metadata key the engine does not own"]},
-    "created_item": {"call": "project-copy", "copy_scope": "CopyScope::Members", "names": "only the lineages being created"},
+    "created_item": {"call": "project-copy", "copy_scope": "CopyScope::MembersOnly", "names": "only the lineages being created"},
     "project_keys": {"call": "project-metadata-set", "per": "engine-owned key whose value differs from the baseline"},
     "never_written": ["the project's title", "the project's description", "the project's labels"],
     "carrying_nothing": "no store call at all: items [], calls {}, actions null",
@@ -7898,12 +7918,13 @@ update names its edges, and the store sends only their difference — and its ba
 landed. A stop's
 release reads it in the stopping process and advances it by what the release wrote.
 
-**The project is read once by an attempt that creates an item, and by no other.** The member
-copy that creates it always lands the project item beside it, so the shadow project restates
-the destination's own title, description, labels and metadata, read for that attempt, and the
-copy writes nothing to it; the planner ruled that read in over rewriting the project from a
-shadow built with none. An engine-owned project key whose value moved is written by itself
-(`set_project_metadata`), and `project_metadata` advances as each lands.
+**Member creation does not read or write the project item.** Since onetaskgraph 0.11.0,
+`CopyScope::MembersOnly` resolves the counterpart using the shadow project's origin alone.
+The ordinary shadow carries no destination fields to restate. A typed no-project-counterpart
+refusal naming a routed destination falls back to a full member copy for its initial project
+creation, after one read restates the home. Other errors propagate. Settlement updates keep
+projecting status. An engine-owned project key whose value
+moved is written by itself (`set_project_metadata`), and `project_metadata` advances as each lands.
 
 **One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an
 `add`ed node needs — `onetaskgraph`'s `Engine::copy` first looks for an item already recording
@@ -8863,7 +8884,7 @@ home's `onetaskgraph.members`, under the floor deadline, and only then. A source
 home's source routes to but holds no member in is not one of the run's, and an item
 there is refused. Where the home cannot be read, that is said, and the item is refused.
 A stop reads the baseline only after it has served any wait the store asked for.
-`create` still copies through the store with `CopyScope::Members` and `destination` the
+`create` copies through the store with `CopyScope::MembersOnly` (since 0.11.0) and `destination` the
 home's source; the store's routing places each item, and the engine never chooses a
 source. `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas and
 their versions; each item's qualified destination names its own source. The words, the
@@ -8871,7 +8892,7 @@ their versions; each item's qualified destination names its own source. The word
 of the plan in whichever source it lives.
 
 **A live `add`.** An `add` whose node names a `repo` the home's source routes elsewhere
-lands in that source's member project, through the same routed `Members` copy, created
+lands in that source's member project, through the routed member copy, created
 if the plan had none there. The engine's own compile of the edit is unchanged.
 
 **Where it is held.** `tests/e2e/multi_source.rs` runs each journey over two `local-md`
@@ -11930,7 +11951,7 @@ launch setting.
   "store_review_keys": [],
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
-  "checkpoint_schema_version": 13,
+  "checkpoint_schema_version": 14,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
@@ -11941,6 +11962,10 @@ that number and the events bundles `1.5.0` and `1.6.0` first, moved this record 
 to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
 bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
 first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
+The engine's reading of turn content through transcript references, which keeps a
+node's last activity in the checkpoint as the `transcript` reference it recorded, moved
+the checkpoint to version 14 with its golden; the block pins the version this build
+reads, so it moved from 13 to 14 with it.
 
 **What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
 compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s

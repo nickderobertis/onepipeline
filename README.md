@@ -602,6 +602,9 @@ was allowed, the floor, the item count and the per-item budget. It is named by
 launch config's `writeback_item_budget`, in that order of precedence, as a
 positive whole number of seconds — zero is refused at whichever spelling carried
 it — and naming none takes twelve seconds per item.
+`adopt RUN --writeback-item-budget SECONDS` replaces the recorded budget for
+this driver and every later one. Adoption without the flag keeps the recorded
+value and ignores the environment.
 
 A launch may name **run-end hooks**: `--success-hook COMMAND`, run once when the
 run ends with every node `done`, and `--failure-hook COMMAND`, run once when it

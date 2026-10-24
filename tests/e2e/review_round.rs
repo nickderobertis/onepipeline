@@ -1165,8 +1165,23 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
 /// it starts about 10,000, and more on a slower host, which renders and asks on a timer
 /// more often over a longer run — so the bound sits well above the first and below
 /// anything the round cost before.
-#[cfg(unix)]
-const GIT_STARTS: usize = 15_000;
+///
+/// `onevcs` 0.56.9, whose open session's read is never refused beside a probe, runs its
+/// checkout reads with `--git-dir` and adds about 3,600 starts over 0.56.7: counted on
+/// Linux the round went from 11,400–11,700 to 15,100–15,200, chiefly `rev-parse
+/// --is-inside-work-tree` and `show-ref --verify`, and none of it from the engine. The
+/// bound follows it, still below what the round cost before, and comes back down once
+/// `onevcs` makes those reads cost near what they did.
+#[cfg(all(unix, not(target_os = "macos")))]
+const GIT_STARTS: usize = 17_000;
+
+/// [`GIT_STARTS`] on the macOS runner, where the same reads swing with the host's load:
+/// on `onevcs` 0.56.9 runs counted 15,771–16,999 alone and up to 21,874 beside the whole
+/// suite on a loaded runner. Over a spread that wide this figure catches only a gross
+/// regression; the bound off macOS is the discriminating one. It comes back down with
+/// the other once those `--git-dir` reads do.
+#[cfg(target_os = "macos")]
+const GIT_STARTS: usize = 25_000;
 
 /// Hold the round to [`GIT_STARTS`].
 ///

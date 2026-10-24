@@ -1310,6 +1310,19 @@ fn launched_over(taking: std::process::Child) -> String {
     said
 }
 
+/// `args` run on `host` from `dir`, within `patience`: [`World::run_on_within`], which fails
+/// naming the command and what it had printed if it has not answered by then.
+fn ran_within(
+    host: &World,
+    dir: &std::path::Path,
+    args: &[&str],
+    patience: std::time::Duration,
+) -> crate::harness::Run {
+    let mut command = host.cmd(args);
+    command.current_dir(dir);
+    host.run_on_within(command, &args.join(" "), patience)
+}
+
 /// The record of a takeover, out of both drivers' journals of `run`: [`in_turn`], and no
 /// node dispatched by both.
 fn handed_over(displaced: &World, adopter: &World, run: &str) {
@@ -3379,14 +3392,28 @@ fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
         .with_env(CLAIM_INTERVAL_ENV, "5")
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     world.script("work.wait", "hold");
-    let project = launch_detached(
-        &world,
+    let project = world.plan(
         "adopted",
-        vec![agent("work", &[]), agent("after", &["work"])],
+        &plan_of(
+            "adopted",
+            vec![agent("work", &[]), agent("after", &["work"])],
+        ),
     );
+    ran_within(
+        &world,
+        &world.project,
+        &["start", &project, "--detach"],
+        crate::harness::ONE_STEP,
+    )
+    .exited(0);
     let claim = until_claimed_by(&world, &project, "adopted");
     // Its driver ended and its claim kept, so the run is adoptable.
-    let shutdown = world.run(&["shutdown", "adopted", "--grace", "1"]);
+    let shutdown = ran_within(
+        &world,
+        &world.project,
+        &["shutdown", "adopted", "--grace", "1"],
+        crate::harness::ONE_STEP,
+    );
     assert!([0, 2].contains(&shutdown.code), "{}", shutdown.stderr);
     assert_eq!(stored_claim(&world, &project), claim);
 
@@ -3394,12 +3421,13 @@ fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
         .on_host("host-b")
         .with_env(CLAIM_INTERVAL_ENV, "5")
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
-    successor
-        .run_from(
-            &successor.project,
-            &["start", &project, "--detach", "--take-over"],
-        )
-        .exited(0);
+    ran_within(
+        &successor,
+        &successor.project,
+        &["start", &project, "--detach", "--take-over"],
+        takeover_wait(5) + crate::harness::ONE_STEP,
+    )
+    .exited(0);
     // The successor's driver's own claim, which replaced the one its takeover waited under.
     let driving = successor.run_json("adopted", "launch.json")["pid"].clone();
     world.until(
@@ -3420,7 +3448,13 @@ fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
     let projected = projections();
     let dispatched = world.events_of("adopted", "node-dispatched").len();
     let exited = world.events_of("adopted", "driver-exited").len();
-    world.run(&["adopt", "adopted", "--detach"]).exited(0);
+    ran_within(
+        &world,
+        &world.project,
+        &["adopt", "adopted", "--detach"],
+        crate::harness::ONE_STEP,
+    )
+    .exited(0);
     world.until("the adopting driver to let go", |world| {
         world.events_of("adopted", "driver-exited").len() > exited
     });
@@ -3448,5 +3482,120 @@ fn an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches() {
     successor.until("the successor to settle", |successor| {
         successor.run_file("adopted", "result.json").is_file()
     });
+    drop(successor);
+}
+
+/// A host shutdown that reads its run's dispatches while the driver is admitting one — so it
+/// names none, asks none to stop and waits for none — and ends the driver once that dispatch
+/// has started leaves nothing a takeover waits on past its wait: the takeover starts once the
+/// wait has passed, saying the driver it displaced has nothing under way, and the run it
+/// starts carries the node through.
+///
+/// Held rather than raced: the driver at the moment it would start the node, and the
+/// shutdown once it has listed what it ends, so the shutdown's reading and the dispatch's
+/// start fall on the same sides of each other on any host.
+#[test]
+fn a_takeover_after_a_shutdown_that_missed_a_dispatch_being_admitted_starts_once_its_wait_has_passed(
+) {
+    let world = World::new("shutdown-mid-admission")
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    world.script("work.wait", "hold");
+    let run = "admitting";
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the shutdown's reading the
+    // dispatch starts on is the property, and no user-facing input can place it. The failpoints
+    // only order the real binaries; the launch, the shutdown, the takeover and every outcome
+    // asserted are the binaries' own.
+    let begins = crate::harness::Rendezvous::failpoint();
+    let listed = crate::harness::Rendezvous::failpoint();
+    // The gates go on these two commands alone, so the run that takes over meets neither.
+    let mut start = world.cmd(&["start", &project, "--detach"]);
+    start
+        .current_dir(&world.project)
+        .env(BEGIN_GATE, begins.address())
+        .env(BEGIN_NODE, "work");
+    world
+        .run_on_within(start, "start --detach", crate::harness::ONE_STEP)
+        .exited(0);
+    let admitting = begins.arrived_within("the driver to come to start 'work'", || world.dump());
+    let claim = until_claimed_by(&world, &project, run);
+    let mut shutdown = world.cmd(&["shutdown", run, "--grace", "1"]);
+    shutdown.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let shut = std::thread::scope(|scope| {
+        let shutting =
+            scope.spawn(|| world.run_on_within(shutdown, "shutdown", crate::harness::ONE_STEP));
+        // Its dispatches read — none yet — and its driver listed, before anything is signalled.
+        let at_the_listing = listed.arrived_within("the shutdown to list what it ends", || {
+            format!(
+                "the shutdown had {}returned; the runs root held:\n{}",
+                if shutting.is_finished() { "" } else { "not " },
+                world.dump()
+            )
+        });
+        admitting.release();
+        // Registered as well as journalled, so the shutdown, reading the registry
+        // again once its driver is gone, finds it there on any host.
+        world.until("the dispatch the driver was admitting to start", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+                && !world.dispatch_records(run).is_empty()
+        });
+        // Only the first listing is held: the one the shutdown makes to end that
+        // dispatch once its driver is gone finds nothing listening and goes on.
+        // Closed before the release, so no later listing can reach it first.
+        drop(listed);
+        at_the_listing.release();
+        shutting.join().expect("the shutdown returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    assert!([0, 2].contains(&shut.code), "{}", shut.stderr);
+    let recorded = world.events_of(run, "host-shutdown");
+    assert_eq!(
+        recorded
+            .iter()
+            .map(|shutdown| shutdown["payload"]["dispatches"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(0)],
+        "the shutdown was to have read the run before its dispatch started: {recorded:?}"
+    );
+    assert_eq!(stored_claim(&world, &project), claim, "the shutdown let go");
+
+    let successor = world
+        .on_host("host-b")
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    let since = std::time::Instant::now();
+    let took = ran_within(
+        &successor,
+        &successor.project,
+        &["start", &project, "--detach", "--take-over"],
+        takeover_wait(5) + crate::harness::ONE_STEP,
+    );
+    took.exited(0);
+    let said = &took.stderr;
+    assert!(
+        since.elapsed() >= takeover_wait(5),
+        "the takeover started {:?} after it launched, inside the wait",
+        since.elapsed()
+    );
+    assert!(
+        said.contains(&format!(
+            "run '{run}' on host '{}' has not acknowledged in {}s",
+            claim["host"].as_str().expect("a host"),
+            takeover_wait(5).as_secs()
+        )) && said.contains("none of its publications is under way"),
+        "{said}"
+    );
+
+    world.release("work.go");
+    successor.until("the run that took over to settle", |successor| {
+        successor.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(
+        successor.run_json(run, "result.json")["state"],
+        "complete",
+        "{}",
+        successor.dump()
+    );
     drop(successor);
 }

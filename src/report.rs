@@ -783,6 +783,10 @@ pub(crate) enum ActivityText {
         /// under `output`, and bounds them the same way.
         truncated: Truncation,
     },
+    /// A reference whose content could not be read, as the diagnostic every
+    /// view renders one as — `transcript unavailable: <path>: <why>` — rather
+    /// than as a blank.
+    Unavailable(String),
 }
 
 /// Which of the agent's own items an event is.
@@ -882,6 +886,48 @@ impl ActivityText {
             };
         }
         Self::Acted(compact(field("input").or_else(|| field("detail"))))
+    }
+
+    /// The text a relayed `turn-activity` carries, read through
+    /// [`crate::views::transcript::resolve`]: the whole of it out of the
+    /// history file a reference names, or the bounded copy a record without
+    /// one carries, read exactly as [`of`](Self::of) reads it.
+    pub(crate) fn relayed(payload: &serde_json::Map<String, Value>) -> Self {
+        use crate::views::transcript::{of_record, Text, ToolKind};
+        let kind = payload
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !payload.contains_key("transcript") {
+            return Self::of(kind, |key| payload.get(key));
+        }
+        match of_record("turn-activity", payload) {
+            Some(Ok(resolved)) => match resolved.text {
+                Text::Message(text) => Self::Spoken {
+                    voice: Voice::Message,
+                    text,
+                    truncated: Truncation::Whole,
+                },
+                Text::Reasoning(text) => Self::Spoken {
+                    voice: Voice::Reasoning,
+                    text,
+                    truncated: Truncation::Whole,
+                },
+                Text::Tool {
+                    kind: ToolKind::Result,
+                    ref output,
+                    ..
+                } => Self::Returned {
+                    output: output.clone().unwrap_or_default(),
+                    truncated: Truncation::Whole,
+                },
+                text => Self::Acted(text.input_text().unwrap_or_default()),
+            },
+            Some(Err(unresolved)) => Self::Unavailable(unresolved.to_string()),
+            // Unreachable for this kind, and answered as the copy reading
+            // would answer it rather than as a blank.
+            None => Self::of(kind, |key| payload.get(key)),
+        }
     }
 }
 

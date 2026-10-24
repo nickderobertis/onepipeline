@@ -840,7 +840,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.7.1"
+oneagentgraph = "0.8.0"
 onevcs = "0.56.10"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -971,7 +971,7 @@ onemessagebus = "0.9.3"
 # the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
 # for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
 # requires it, so the lock resolves onejudge once.
-onejudge = "0.20.0"
+onejudge = "0.21.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1086,7 +1086,7 @@ onejudge = "0.20.0"
 # server after its last lease and linger. The retirement journey in
 # `tests/e2e/dispatch.rs` holds this through the public in-process executor.
 # All linked consumers admit this 0.28.x core, so it resolves once.
-oneharness-core = "0.28.8"
+oneharness-core = "0.29.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -1172,11 +1172,21 @@ onevcs-testing = "0.19.19"
 # repository-naming tasks route, refusing a split private home as
 # `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
 # store's own word.
-# **0.10.0 is the floor** for the public held-task-image read that creating write-backs
-# use to carry authoring images through the shadow store.
-onetaskgraph-core = "=0.10.0"
-onetaskgraph-plugin-api = "=0.10.0"
-onetaskgraph-local-md = "=0.10.0"
+# **0.11.0 carries the copy chain** (`otg-member-copy`, `otg-preserve-status`,
+# `otg-target-task`): https://github.com/nickderobertis/onetaskgraph/releases/tag/v0.11.0
+# Created members use MembersOnly; settlement still writes the source status.
+# It also links cheaper approval: GitHub Projects approval lists members and writes
+# document metadata in one request each. The public held-task-image read (0.9.4)
+# carries authoring images through the shadow store. Hosts hold their plan-store CLI
+# to this linked release, adopting both improvements together.
+# **No earlier release than 0.11.1**: local-md writes every entry atomically, beside its file
+# and renamed into place, where 0.11.0 wrote an entry carrying no answers with `fs::write`.
+# The write-back's image step rewrites a created task's shadow document that way, so on
+# 0.11.0 a reader listing the shadow could open it empty or half-written
+# (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
+onetaskgraph-core = "=0.11.1"
+onetaskgraph-plugin-api = "=0.11.1"
+onetaskgraph-local-md = "=0.11.1"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1193,7 +1203,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.85.0"
+version = "0.88.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1365,6 +1375,7 @@ windows-sys = { workspace = true, features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
   "Win32_System_Threading",
 ] }
 
