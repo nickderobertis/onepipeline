@@ -138,61 +138,67 @@ pub(crate) enum Scope<'a> {
     Edit,
 }
 
-/// The phase a line says its operation was asked for in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Phase {
+/// What the operations this thread asks for now are for, each phase carrying exactly the
+/// attribution it has: a re-read its node and the sources it is held on, a projection its
+/// attempt's stamp and — inside it — the item, the others nothing.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "phase", rename_all = "kebab-case")]
+enum Context {
     Launch,
-    ReRead,
-    WriteBack,
-    Release,
+    ReRead {
+        node: String,
+        held_on: Vec<String>,
+    },
+    WriteBack {
+        projection_at: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
+    Release {
+        projection_at: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     Edit,
 }
 
-/// What the operations this thread asks for now are for: each field set by the scope that
-/// names it, an inner scope's over an outer one's.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
-struct Context {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    phase: Option<Phase>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    held_on: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    projection_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    item: Option<String>,
-}
-
 impl Context {
-    fn within(&self, scope: Scope<'_>) -> Self {
-        let mut inner = self.clone();
-        match scope {
-            Scope::Launch => inner.phase = Some(Phase::Launch),
-            Scope::Reread { node, held_on } => {
-                inner.phase = Some(Phase::ReRead);
-                inner.node = Some(node.to_owned());
-                inner.held_on = Some(held_on.iter().cloned().collect());
-            }
-            Scope::WriteBack { projection_at } => {
-                inner.phase = Some(Phase::WriteBack);
-                inner.projection_at = Some(projection_at.to_owned());
-            }
-            Scope::Release { projection_at } => {
-                inner.phase = Some(Phase::Release);
-                inner.projection_at = Some(projection_at.to_owned());
-            }
-            Scope::Item(item) => inner.item = Some(item.to_owned()),
-            Scope::Edit => inner.phase = Some(Phase::Edit),
-        }
-        inner
+    /// The context inside `scope`, entered from `outer`: a phase replaces the outer one, and an
+    /// item narrows the projection it is inside — and names nothing outside one.
+    fn within(outer: Option<&Self>, scope: Scope<'_>) -> Option<Self> {
+        Some(match scope {
+            Scope::Launch => Self::Launch,
+            Scope::Reread { node, held_on } => Self::ReRead {
+                node: node.to_owned(),
+                held_on: held_on.iter().cloned().collect(),
+            },
+            Scope::WriteBack { projection_at } => Self::WriteBack {
+                projection_at: projection_at.to_owned(),
+                item: None,
+            },
+            Scope::Release { projection_at } => Self::Release {
+                projection_at: projection_at.to_owned(),
+                item: None,
+            },
+            Scope::Edit => Self::Edit,
+            Scope::Item(named) => match outer? {
+                Self::WriteBack { projection_at, .. } => Self::WriteBack {
+                    projection_at: projection_at.clone(),
+                    item: Some(named.to_owned()),
+                },
+                Self::Release { projection_at, .. } => Self::Release {
+                    projection_at: projection_at.clone(),
+                    item: Some(named.to_owned()),
+                },
+                other => other.clone(),
+            },
+        })
     }
 }
 
 thread_local! {
     /// What the operations this thread asks for now are for.
-    static ABOUT: RefCell<Context> = RefCell::new(Context::default());
+    static ABOUT: RefCell<Option<Context>> = const { RefCell::new(None) };
 }
 
 /// Send this process's operations to the run whose directory is `dir`, the ones it asked for
@@ -208,7 +214,7 @@ pub(crate) fn attach(dir: &Path) {
 pub(crate) fn about<T>(scope: Scope<'_>, within: impl FnOnce() -> T) -> T {
     let outer = ABOUT.with(|current| {
         let mut current = current.borrow_mut();
-        let inner = current.within(scope);
+        let inner = Context::within(current.as_ref(), scope);
         std::mem::replace(&mut *current, inner)
     });
     let answer = within();
@@ -231,8 +237,8 @@ fn line(operation: Operation) -> Value {
     struct Line<'a> {
         at_ms: u64,
         operation: &'static str,
-        #[serde(flatten)]
-        context: &'a Context,
+        #[serde(flatten, skip_serializing_if = "Option::is_none")]
+        context: &'a Option<Context>,
     }
     ABOUT.with(|about| {
         json!(Line {
@@ -289,6 +295,10 @@ mod tests {
         assert_eq!(reread["phase"], "re-read");
         assert_eq!(reread["node"], "build");
         assert_eq!(reread["held_on"], json!(["vault"]));
+        // An item names nothing outside the projection it narrows.
+        let stray = about(Scope::Item("design"), || line(Operation::Task));
+        assert_eq!(stray.get("item"), None, "{stray}");
+        assert_eq!(stray.get("phase"), None, "{stray}");
         let bare = line(Operation::Task);
         assert_eq!(bare.get("phase"), None, "{bare}");
         assert_eq!(bare.get("node"), None, "{bare}");
