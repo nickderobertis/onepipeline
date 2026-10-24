@@ -3689,6 +3689,15 @@ impl Rendezvous {
         Arrival::of(stream)
     }
 
+    /// Let every later arrival go as it comes, for the rest of the test: a failpoint
+    /// met again past the ordering a journey drives — another identity, another
+    /// sweep, another run — holds nothing.
+    pub fn release_the_rest(self) {
+        std::thread::spawn(move || loop {
+            self.arrived().release();
+        });
+    }
+
     /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
     /// end, a process that never reaches the failpoint, or reaches it and never finishes
     /// announcing itself, fails naming `what` it was waiting for, what it announced, and
@@ -3819,11 +3828,14 @@ impl Arrival {
 
 /// The bounded arrival ends on a peer that announces itself, and fails — naming
 /// the step and the part of the pid line it had — on one that connects and
-/// never finishes announcing, or never connects at all, rather than hanging.
+/// never finishes announcing, closes part-way through it, or never connects at
+/// all, rather than hanging.
 // llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
 // not a journey: no failpoint in the binary can be paused between its connect and its
 // announcement, so the peer here is a socket this test drives byte by byte. The journeys
-// built on it are the `dispatch` and `note` window journeys, and those drive the binary.
+// built on it are the `dispatch` and `note` window journeys, `retirement.rs`'s two
+// late-named-branch journeys and `maintenance.rs`'s closing-driver journey, and those
+// drive the binary.
 #[test]
 fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
     use std::io::{Read, Write};
@@ -3865,6 +3877,21 @@ fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
         "the stalled announcement's failure does not name the step, its part, and the run: {said}"
     );
     drop(half);
+
+    let truncated = Rendezvous::failpoint();
+    let mut cut = std::net::TcpStream::connect(truncated.address()).expect("the peer connects");
+    cut.write_all(b"98")
+        .expect("the peer announces part of itself");
+    drop(cut);
+    let said = failure(Box::new(|| {
+        truncated.arrived_by("the truncated peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the truncated peer to announce itself")
+            && said.contains("announced \"98\" of its pid line, then closed the connection")
+            && said.contains("the runs root held"),
+        "the truncated announcement's failure does not name the step, its part, and the run: {said}"
+    );
 
     let absent = Rendezvous::failpoint();
     let said = failure(Box::new(|| {
