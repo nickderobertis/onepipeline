@@ -634,7 +634,9 @@ impl RunSummary {
     /// opens with.
     fn folded(paths: &RunPaths, stamp: Stamp) -> crate::Result<Self> {
         let launch = ledger::read_json(&paths.launch())?;
-        let maintainer = Maintainer::of(paths);
+        // A reader that folds once, so what it folded is written back: a cold run's
+        // next reader resumes from it rather than folding the same history again.
+        let (maintainer, _) = Maintainer::opened(paths, crate::checkpoint::Persist::Yes);
         Ok(maintainer.derived(&launch, stamp))
     }
 
@@ -868,23 +870,28 @@ impl Maintainer {
     /// Build the state of a run's store as it stands, from its checkpoint and the
     /// records past it.
     pub(crate) fn of(paths: &RunPaths) -> Self {
-        Self::opened(paths).0
+        Self::opened(paths, crate::checkpoint::Persist::No).0
     }
 
     /// [`of`](Self::of), with the greatest `seq` `stream` claims among the records
     /// it read — what a journal writer opening on this run takes its own above.
     pub(crate) fn opened_for(paths: &RunPaths, stream: &str) -> (Self, Option<u64>) {
-        let (maintainer, projected) = Self::opened(paths);
+        let (maintainer, projected) = Self::opened(paths, crate::checkpoint::Persist::No);
         let claimed = projected.seq_claimed(stream);
         (maintainer, claimed)
     }
 
-    fn opened(paths: &RunPaths) -> (Self, crate::checkpoint::Projected) {
-        // Held in memory: a checkpoint is the reconcile loop's to write, once a
-        // pass, and a writer that rewrote it per record would pay the whole fold's
-        // serialization for every line it appends.
-        let projected =
-            crate::checkpoint::Projected::open_with(paths, crate::checkpoint::Persist::No);
+    /// Open on the run's checkpoint and the records past it.
+    ///
+    /// A journal writer opens with [`Persist::No`](crate::checkpoint::Persist::No):
+    /// a checkpoint is the reconcile loop's to write, once a pass, and a writer
+    /// that rewrote it per record would pay the whole fold's serialization for
+    /// every line it appends.
+    fn opened(
+        paths: &RunPaths,
+        persist: crate::checkpoint::Persist,
+    ) -> (Self, crate::checkpoint::Projected) {
+        let projected = crate::checkpoint::Projected::open_with(paths, persist);
         let maintainer = Self {
             paths: paths.clone(),
             name: plan_name(paths),
@@ -1338,6 +1345,33 @@ mod tests {
         assert!(
             cached_cost < fold_cost,
             "the cached read cost {cached_cost} against a fold's {fold_cost}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The fold a reader takes for a missing summary leaves the checkpoint beside
+    /// it as well, so the next reader of the run's state — a `status`, a `watch`, a
+    /// driver adopting it — resumes from what was folded rather than folding the
+    /// same history again.
+    #[test]
+    fn a_reader_folding_a_missing_summary_leaves_the_checkpoint_it_folded() {
+        let root = scratch("fallback-checkpoint");
+        let paths = recorded(&root, "demo", 40);
+        std::fs::remove_file(paths.summary()).expect("the document");
+        std::fs::remove_file(paths.checkpoint()).ok();
+
+        RunSummary::of(&paths).expect("the run reads");
+
+        assert!(
+            paths.checkpoint().is_file(),
+            "the fold left no checkpoint, so every later reader folds the whole journal"
+        );
+        let resumed =
+            crate::checkpoint::Projected::open_with(&paths, crate::checkpoint::Persist::No);
+        assert!(
+            resumed.read_through() > 0 && resumed.took() < 40,
+            "the next reader folded {} records rather than resuming",
+            resumed.took()
         );
         std::fs::remove_dir_all(&root).ok();
     }

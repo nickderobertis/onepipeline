@@ -311,6 +311,46 @@ fn write(path: &Path, value: &Value) {
     std::fs::write(path, serde_json::to_string_pretty(value).expect("JSON")).expect("a write");
 }
 
+/// The seal `src/checkpoint.rs`'s `Coverage::sealed_with` takes over a checkpoint
+/// document: FNV-1a over its counts, its placement and its streams, then over the
+/// state and the tally as they serialize.
+///
+/// A reader that has proved a run ended leaves a checkpoint covering its whole
+/// journal, and a journey that stands in for that reader over a journal grown past
+/// the bound has to seal the coverage it stamps, since the build refuses a
+/// document whose claims do not seal to its digest. Callers check it against a
+/// digest the build wrote first, so a seal that moves fails here by name.
+fn sealed(document: &Value) -> Value {
+    const PRIME: u128 = (1 << 88) | 0x13b;
+    let digested = |from: u128, bytes: &[u8]| {
+        bytes.iter().fold(from, |digest, byte| {
+            (digest ^ u128::from(*byte)).wrapping_mul(PRIME)
+        })
+    };
+    let coverage = &document["coverage"];
+    let count = |field: &str| coverage[field].as_u64().expect("a count").to_le_bytes();
+    let mut seal = digested(0x6c62_272e_07bb_0142_62b8_2175_6295_c58d, &count("bytes"));
+    seal = digested(seal, &count("records"));
+    if let Some(at) = coverage.get("at") {
+        for field in ["ts", "stream"] {
+            seal = digested(seal, at[field].as_str().expect("a placement").as_bytes());
+        }
+    }
+    for (stream, reached) in coverage
+        .get("streams")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        seal = digested(seal, stream.as_bytes());
+        seal = digested(seal, &reached.as_u64().expect("a count").to_le_bytes());
+    }
+    for part in ["state", "tally"] {
+        seal = digested(seal, &serde_json::to_vec(&document[part]).expect("JSON"));
+    }
+    json!(format!("{seal:032x}"))
+}
+
 fn read_json(path: &Path) -> Value {
     serde_json::from_str(
         &std::fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
@@ -1322,7 +1362,13 @@ fn a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_ref
     }
     let checkpoint = world.runs.join("huge-ended-covered/checkpoint.json");
     let mut covering = read_json(&checkpoint);
+    assert_eq!(
+        sealed(&covering),
+        covering["coverage"]["digest"],
+        "this journey's seal no longer matches the one the build wrote"
+    );
     covering["coverage"]["bytes"] = json!(past);
+    covering["coverage"]["digest"] = sealed(&covering);
     write(&checkpoint, &covering);
 
     // llmlint: ignore-end[tests_mirror_real_usage]
