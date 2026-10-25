@@ -152,18 +152,35 @@ fn journal_reads_file() -> Option<&'static Path> {
     .as_deref()
 }
 
+thread_local! {
+    /// The bytes of runs' journals this **thread** has read, every build.
+    ///
+    /// What a fold took from the journal it folds, measured across the fold:
+    /// one that resumes from a checkpoint reads only what was appended past it, so
+    /// the journal's length overstates it. Per thread for the reason the phases it
+    /// sits beside are: a reader folding runs on several threads counts each fold
+    /// on its own.
+    static THREAD_JOURNAL_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many bytes of runs' journals this thread has read so far.
+pub(crate) fn journal_bytes_read() -> u64 {
+    THREAD_JOURNAL_BYTES.with(std::cell::Cell::get)
+}
+
 /// Report one read of a run's journal: `bytes` of it from `offset`.
 ///
 /// A line that cannot be written is said on standard error rather than handed
 /// back: the read it reports has already happened and succeeded, and the journey
 /// that asked counts lines, so a missing one fails it there.
 pub(crate) fn journal_read(path: &Path, offset: u64, bytes: u64) {
-    let Some(report) = journal_reads_file() else {
-        return;
-    };
     if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
         return;
     }
+    THREAD_JOURNAL_BYTES.with(|counted| counted.set(counted.get() + bytes));
+    let Some(report) = journal_reads_file() else {
+        return;
+    };
     let line = json!({
         "pid": std::process::id(),
         "journal": path.to_string_lossy(),

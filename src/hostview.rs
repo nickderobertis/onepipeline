@@ -237,8 +237,10 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
         None => {
             foldable(paths)?;
             let _cold = phase("cold-fold");
-            crate::hostphases::add("cold-journal-bytes", journal_bytes);
-            RunSummary::of(paths).map_err(|error| error.to_string())?
+            let before = crate::loopstats::journal_bytes_read();
+            let summary = RunSummary::of(paths).map_err(|error| error.to_string());
+            crate::hostphases::add("cold-journal-bytes", folded_since(before));
+            summary?
         }
     };
     if !summary
@@ -270,8 +272,10 @@ fn read_run(paths: &RunPaths) -> Result<RunRead, String> {
             foldable(paths)?;
             let state = {
                 let _cold = phase("cold-fold");
-                crate::hostphases::add("cold-journal-bytes", journal_bytes);
-                crate::checkpoint::fold_ended_and_checkpoint(paths)
+                let before = crate::loopstats::journal_bytes_read();
+                let state = crate::checkpoint::fold_ended_and_checkpoint(paths);
+                crate::hostphases::add("cold-journal-bytes", folded_since(before));
+                state
             };
             // The fold read the journal as it stands now, which a driver adopting
             // the run may have grown since the proof above. Asked again after it, so
@@ -341,6 +345,13 @@ fn live(paths: &RunPaths, launch: &LaunchRecord, registry: &Registry) -> Result<
 /// A fold of a journal that cannot be read is a fold of nothing, and a run folded
 /// to nothing records nothing running — its dispatches would be left out rather
 /// than flagged. A run with no journal yet is a real state, and is folded as one.
+/// The journal bytes this thread has read since `before`: what a cold fold took
+/// from the journal it folds. That is the bytes past the checkpoint it resumed
+/// from, not the journal's length.
+fn folded_since(before: u64) -> u64 {
+    crate::loopstats::journal_bytes_read().saturating_sub(before)
+}
+
 fn foldable(paths: &RunPaths) -> Result<(), String> {
     match std::fs::File::open(paths.journal()) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
