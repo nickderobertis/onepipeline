@@ -6468,7 +6468,6 @@ fn an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cann
     let world = World::new("real-monitor-own-config");
     world.write_graphs();
 
-    // The launch directory, holding the incident's config at its root.
     let launch = world.root.join("launch");
     std::fs::create_dir_all(&launch).expect("a launch directory");
     std::fs::write(

@@ -131,11 +131,7 @@ path = "src/bin/fake-codex.rs"
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"
 
-# Not a double: the **released** `oneharness` CLI's own shell — parse, dispatch,
-# exit — over the `oneharness` dependency above, and so over the one
-# `oneharness-core` the engine links. A journey that must meet a refusal the real
-# CLI makes names this at `ONEAGENTGRAPH_ONEHARNESS_BIN` and doubles only the
-# paid harness below it; `fake-oneharness` doubles oneharness itself.
+# Not a double: the released `oneharness` CLI's own shell; see the file's doc.
 # llmlint: ignore[new_command_or_client_gets_its_own_project] a test program of the
 # e2e suite, like the bins beside it; it is not a command this repository publishes.
 [[bin]]

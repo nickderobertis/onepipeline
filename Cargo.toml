@@ -821,18 +821,14 @@ resolver = "2"
 # stops. The attached observer stop journey in
 # `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
 #
-# `oneagentgraph` 0.9.0 is the floor because it runs a two-party member's
-# **worker side under its own config alone**: the config it stamped for that side
-# is onejudge's `worker_config`, so no `oneharness.toml` discovered in the
-# member's worktree is layered beneath it. Below it the observer's monitor works
-# in the launch directory, and a root config there whose variant spells the
-# monitor's identity through an `env_from` the launcher does not set was layered
-# in, so oneharness refused the indirection and the monitor died on its first
-# turn — at launch and after every adoption. `tests/e2e/dispatch.rs`'s
+# `oneagentgraph` 0.9.0 is the floor because it runs a two-party member's worker
+# side under its own stamped config alone, never over an `oneharness.toml`
+# discovered in its worktree — below it the observer's monitor died on its first
+# turn in a launch directory carrying one it could not satisfy. `tests/e2e/
+# dispatch.rs`'s
 # `an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy`
-# drives both through the released oneharness CLI and fails below it naming the
-# refusal. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of, so
-# the two requirements move as one; nothing here changed to compile against it.
+# holds it. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of,
+# so the two requirements move as one.
 #
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
