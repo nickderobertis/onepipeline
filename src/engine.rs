@@ -1733,8 +1733,10 @@ fn converge(
         // consumer recorded is noticed.
         let has_upstreams = !crate::crossdag::edges(&state.graph).is_empty();
         if has_upstreams && due(read_upstreams, UPSTREAM_EVERY) {
-            read_upstreams = Some(Instant::now());
             let resolved = upstreams.resolve(&state.graph, paths, journal)?;
+            // The instant the reads began, so the next one is paced from the same
+            // clock reading that counts it early or not.
+            read_upstreams = upstreams.resolved_at();
             if resolved != state.cross_dag {
                 state.cross_dag = resolved;
                 derived = None;

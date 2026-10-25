@@ -263,6 +263,8 @@ pub struct Observer {
     baselines: BTreeMap<String, u64>,
     /// The `(dependency, consumer)` pairs already reported as moved.
     reported: BTreeSet<(String, String)>,
+    /// When the last [`resolve`](Self::resolve) began reading.
+    resolved_at: Option<Instant>,
 }
 
 impl Observer {
@@ -276,6 +278,7 @@ impl Observer {
             root: root.to_path_buf(),
             baselines,
             reported,
+            resolved_at: None,
         }
     }
 
@@ -331,6 +334,14 @@ impl Observer {
         paths: &RunPaths,
         journal: &mut Journal,
     ) -> Result<BTreeMap<String, NodeStatus>> {
+        // Timed here, where the reads happen, rather than where the loop decides
+        // to make them, so a read made before its interval was due is counted
+        // whatever decided to make it.
+        let now = Instant::now();
+        if begun_early(self.resolved_at, now) {
+            crate::loopstats::early_upstream_read();
+        }
+        self.resolved_at = Some(now);
         let mut resolved = BTreeMap::new();
         for (dependency, consumers) in edges(graph) {
             let Some(reference) = parse(&dependency) else {
@@ -392,6 +403,18 @@ impl Observer {
         }
         Ok(resolved)
     }
+
+    /// When the last [`resolve`](Self::resolve) began reading, which is what the
+    /// loop's next read is paced from.
+    pub(crate) fn resolved_at(&self) -> Option<Instant> {
+        self.resolved_at
+    }
+}
+
+/// Whether a round of reads begun at `now` came less than the loop's upstream
+/// interval after the round begun at `last`.
+fn begun_early(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|last| now.duration_since(last) < crate::engine::UPSTREAM_EVERY)
 }
 
 /// Resolve a graph's edges without recording anything.
@@ -495,6 +518,52 @@ mod tests {
         // Not a reference at all, so not this module's business either way.
         assert_eq!(parse("build"), None);
         assert!(!is_malformed("build"));
+    }
+
+    #[test]
+    fn a_round_is_early_only_inside_the_interval_since_the_last() {
+        let last = Instant::now();
+        let every = crate::engine::UPSTREAM_EVERY;
+        assert!(
+            !begun_early(None, last),
+            "a first round has nothing to be early against"
+        );
+        assert!(begun_early(Some(last), last));
+        assert!(begun_early(
+            Some(last),
+            last + every - std::time::Duration::from_millis(1)
+        ));
+        assert!(!begun_early(Some(last), last + every));
+        assert!(!begun_early(Some(last), last + 2 * every));
+    }
+
+    #[test]
+    fn resolving_twice_inside_the_interval_counts_the_second_round_early() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-crossdag-early-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "consumer");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut observer = Observer::new(&root, BTreeMap::new(), BTreeSet::new());
+        let graph = Graph::default();
+
+        observer
+            .resolve(&graph, &paths, &mut journal)
+            .expect("the first round");
+        let first = observer.resolved_at().expect("the first round is stamped");
+        let before = crate::loopstats::early_upstream_reads();
+        observer
+            .resolve(&graph, &paths, &mut journal)
+            .expect("the second round");
+        // At least one, rather than exactly: the counter is per process, and a
+        // runner that runs tests as threads of one process moves it from others.
+        assert!(
+            crate::loopstats::early_upstream_reads() > before,
+            "a round begun at once after the last was not counted early"
+        );
+        assert!(observer.resolved_at().expect("the second round is stamped") >= first);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
