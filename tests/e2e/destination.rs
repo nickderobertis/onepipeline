@@ -61,6 +61,15 @@ fn consumer(adoption: Option<&str>) -> Value {
     node
 }
 
+/// A node in `service` asking that its change request be left as a draft: the
+/// one rule here that needs the resolved publication policy, so it is what a
+/// journey about a policy this build could not read puts to the loader.
+fn drafting() -> Value {
+    let mut node = lifecycle("held", &[]);
+    node["draft"] = json!(true);
+    node
+}
+
 fn engine() -> Value {
     let mut node = lifecycle("engine", &[]);
     node["repo"] = json!("engine");
@@ -167,104 +176,83 @@ fn a_repository_with_no_commit_msg_hook_refuses_no_title() {
     world.run(&["plan", "check", &project]).exited(0);
 }
 
-/// A non-empty `consumes` on an identity that opens no change request is refused
-/// where the plan is read — naming the node, the identity, the policy and the
-/// targets — and nothing is dispatched.
+/// The release-targets document a `consumes` journey's host carries: the engine
+/// repository declaring the `crate` target its consumer names, and whichever
+/// adoption rungs the case states after it.
+fn engine_releases(rungs: &str) -> String {
+    format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: probe.sh, timeout_seconds: 30}}\n\
+         {rungs}"
+    )
+}
+
+/// A non-empty `consumes` on an identity that opens no change request **loads**,
+/// under either adoption and through every rung that can decide it — at
+/// `plan check` and at `start --detach` alike.
 ///
-/// The structural one: the draft that holds this node to the release it consumes
-/// is a state of a change request, and a `local-direct` publication opens none, so
-/// `onevcs` refuses the publication outright at the last step of the node.
+/// Waiting on a release and publishing without a change request are independent
+/// decisions: a `published` node is not started until its release exists, and a
+/// `fast` one's finished branch is held unlanded on its origin as
+/// `complete-but-held` until it does. So nothing about the pair is the
+/// destination's to refuse, and neither verb reports a `consumes` refusal on any
+/// of these.
 #[test]
-fn a_consumes_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
+fn a_consumes_on_a_repository_that_opens_no_change_request_loads_under_either_adoption() {
     let world = World::new("destination-consumes");
+    world.write_graphs();
     two_repositories(&world, "local-direct");
 
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
+    // (case, the consumer's own adoption field, the rungs the host's document states)
+    let cases: &[(&str, Option<&str>, &str)] = &[
+        ("fast-by-the-floor", None, ""),
+        ("fast-by-its-own-field", Some("fast"), ""),
+        ("published-by-its-own-field", Some("published"), ""),
+        (
+            "published-by-its-repository",
+            None,
+            "\x20 - match: {host: github.com, owner: owner, name: service}\n\
+             \x20   adoption: published\n",
+        ),
+        (
+            "published-by-the-default",
+            None,
+            "default:\n\x20 adoption: published\n",
+        ),
+    ];
+    for (case, adoption, rungs) in cases {
+        world.releases(&engine_releases(rungs));
+        let project = world.plan(case, &plan_of(case, vec![engine(), consumer(*adoption)]));
 
-    let refused = world.run(&["start", &project, "--detach"]);
-    refused
-        .exited(REFUSED)
-        .err_has("node 'consumer'")
-        .err_has("github.com/owner/service")
-        .err_has("local-direct")
-        .err_has("engine=crate");
-    assert!(
-        world.invocations().is_empty(),
-        "a plan refused at load dispatched something anyway: {:?}",
-        world.invocations()
-    );
+        let checked = world.run(&["plan", "check", &project, "--json"]);
+        checked.exited(0).err_lacks("consumes");
+        let answered = answer(&checked);
+        assert!(
+            engine_refusals(&answered).is_empty(),
+            "{case}: `plan check` refused a local-direct consumer: {answered}"
+        );
 
-    let checked = world.run(&["plan", "check", &project, "--json"]);
-    checked.exited(HAS_REFUSALS);
-    let answered = answer(&checked);
-    let refusals = engine_refusals(&answered);
-    assert_eq!(refusals.len(), 1, "{answered}");
-    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
-    assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
-}
-
-/// A **`published`** node is refused on that same repository, in the same words.
-///
-/// The rule turns on the repository and not on the node's adoption. Adoption
-/// decides *when* a node starts; whether its publication opens a change request
-/// for a draft to be a state of is the repository's own answer, and where none is
-/// opened there is nothing to hold this node to the release it consumes. So the
-/// pair is refused however the node adopts — and the refusal names the same
-/// things, because a planner correcting it acts on the same ones.
-#[test]
-fn a_published_node_consuming_on_that_same_repository_is_refused_in_the_same_words() {
-    let world = World::new("destination-consumes-published");
-    two_repositories(&world, "local-direct");
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(Some("published"))]),
-    );
-
-    let refused = world.run(&["start", &project, "--detach"]);
-    refused
-        .exited(REFUSED)
-        .err_has("node 'consumer'")
-        .err_has("github.com/owner/service")
-        .err_has("local-direct")
-        .err_has("engine=crate");
-    assert!(
-        world.invocations().is_empty(),
-        "a plan refused at load dispatched something anyway: {:?}",
-        world.invocations()
-    );
-
-    let checked = world.run(&["plan", "check", &project, "--json"]);
-    checked.exited(HAS_REFUSALS);
-    let answered = answer(&checked);
-    let refusals = engine_refusals(&answered);
-    assert_eq!(refusals.len(), 1, "{answered}");
-    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
-    assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
-}
-
-/// A repository that **does** open a change request has something to draft, so
-/// the same node loads there.
-#[test]
-fn a_consumes_on_a_repository_that_opens_a_change_request_loads() {
-    let world = World::new("destination-consumes-change");
-    two_repositories(&world, "change-auto");
-
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
-    world.run(&["plan", "check", &project]).exited(0);
+        // Each case is its own run over the same two identities, so each states
+        // that the runs before it are deliberately beside it.
+        world
+            .run(&["start", &project, "--detach", "--acknowledge-concurrent"])
+            .exited(0)
+            .err_lacks("consumes")
+            .err_lacks("opens no change request");
+    }
 }
 
 /// A `draft: true` on an identity that opens no change request is refused where
 /// the plan is read, naming the field — and nothing is dispatched.
 ///
-/// The condition `consumes` is refused on, for the same reason: a draft is a
-/// state of a change request, and a `local-direct` publication opens none, so
-/// there is nothing to leave as one. A node that names a change-* policy of its
+/// A draft is a state of a change request, and a `local-direct` publication
+/// opens none, so there is nothing to leave as one. A node that names a change-* policy of its
 /// own opens a change request to draft, and loads on that same repository.
 #[test]
 fn a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch() {
@@ -323,9 +311,8 @@ fn a_node_whose_identity_this_host_cannot_resolve_loads_and_says_it_was_not_chec
 
     let mut node = lifecycle("tidy", &[]);
     node["repo"] = json!("github.com/owner/nobody-registered-this");
-    // A title the hook in the journeys above turns down, and a `consumes` that
-    // would be refused on a `local-direct` identity: neither is reachable without
-    // an identity to ask.
+    // A title the hook in the journeys above turns down: it is not reachable
+    // without an identity to ask.
     node["title"] = json!("refactor(loader): tidy the seam");
     let project = world.plan(
         "unresolvable",
@@ -364,22 +351,19 @@ fn a_node_whose_identity_this_host_cannot_resolve_loads_and_says_it_was_not_chec
 /// The arm that would otherwise be invisible: an absent `onevcs` executable makes
 /// the two refusals unaskable, and "nobody was asked" must never read as "the
 /// repository was satisfied". The refusal that *would* have been made here is the
-/// `consumes` one — this is the very plan the journey above refuses.
+/// `draft` one — this is the very plan the `draft` journey above refuses.
 #[test]
 fn a_host_with_no_resolution_verb_says_the_node_was_not_checked_rather_than_passing_it() {
     let world = World::new("destination-no-verb");
     two_repositories(&world, "local-direct");
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
+    let project = world.plan("drafting", &plan_of("drafting", vec![drafting()]));
 
     let absent = world.root.join("no-onevcs-here");
     let world = world.with_env(ONEVCS_BINARY_ENV, &absent.to_string_lossy());
     world
         .run(&["plan", "check", &project])
         .exited(0)
-        .err_has("node 'consumer'")
+        .err_has("node 'held'")
         .err_has("the plan loaded without that check having run")
         .err_has("could not be run");
 }
@@ -450,17 +434,14 @@ fn script_the_answers(world: &World, resolve: &str, rules_check: &str) {
 /// a resolution printing one more key than this build reads is one it must go
 /// on reading.
 ///
-/// The plan is the one the `consumes` journey above refuses, so what a wrong
-/// answer costs here is exactly a refusal that would otherwise have been made.
+/// The plan is the one the `draft` journey above refuses, so what a wrong answer
+/// costs here is exactly a refusal that would otherwise have been made.
 #[cfg(unix)]
 #[test]
 fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_passed() {
     let world = World::new("destination-unreadable-resolve");
     two_repositories(&world, "local-direct");
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
+    let project = world.plan("drafting", &plan_of("drafting", vec![drafting()]));
     let stand_in = onevcs_answering(&world);
     let world = world.with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy());
 
@@ -501,7 +482,7 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
         let asked = world.run(&["plan", "check", &project]);
         asked
             .exited(0)
-            .err_has("node 'consumer'")
+            .err_has("node 'held'")
             .err_has("the plan loaded without that check having run");
         assert!(
             asked.stderr.contains(said),
@@ -516,7 +497,7 @@ fn a_resolution_this_build_cannot_read_leaves_the_node_unchecked_rather_than_pas
 ///
 /// The split this module is built around, driven through the binary. The
 /// resolution names a real checkout carrying a real `commit-msg` hook, and the
-/// policy comes back on no line this build can read — so the `consumes` rule is
+/// policy comes back on no line this build can read — so the `draft` rule is
 /// reported as unchecked and the title is refused, in one run.
 #[cfg(unix)]
 #[test]
@@ -525,9 +506,9 @@ fn a_policy_this_build_cannot_read_still_lets_the_repositorys_own_hook_answer() 
     let service = two_repositories(&world, "local-direct");
     world.commit_msg_hook(&service);
 
-    let mut node = consumer(None);
+    let mut node = drafting();
     node["title"] = json!("refactor(loader): tidy the seam");
-    let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
+    let project = world.plan("drafting", &plan_of("drafting", vec![node]));
     let stand_in = onevcs_answering(&world);
     script_the_answers(
         &world,
@@ -549,7 +530,7 @@ fn a_policy_this_build_cannot_read_still_lets_the_repositorys_own_hook_answer() 
     let answered = answer(&asked);
     let refusals = engine_refusals(&answered);
     assert_eq!(refusals.len(), 1, "{answered}");
-    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
+    assert_eq!(refusals[0]["node"], json!("held"), "{answered}");
     assert_eq!(refusals[0]["field"], json!("title"), "{answered}");
     assert!(
         refusals[0]["reason"]
@@ -633,41 +614,19 @@ fn a_hook_git_would_skip_and_a_hook_that_cannot_start_are_told_apart() {
         .err_has("could not be run");
 }
 
-/// A node that states its **own** change-request policy consumes without being
-/// refused, whatever its repository's rules resolve to.
-///
-/// `onevcs` lets a node narrow its repository's policy, and narrowing to a
-/// `change-*` one is exactly what gives its draft something to be a state of. The
-/// refusal is about the policy the node actually publishes under rather than the
-/// one its repository would have chosen for it.
-#[test]
-fn a_node_that_names_its_own_change_policy_consumes_without_being_refused() {
-    let world = World::new("destination-narrowed");
-    two_repositories(&world, "local-direct");
-
-    let mut node = consumer(None);
-    node["merge_policy"] = json!("change-open");
-    let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
-    world.run(&["plan", "check", &project]).exited(0);
-}
-
 /// Every **other** way a policy can fail to arrive, driven through the binary.
 ///
 /// A verb that refuses after resolving, one that states a policy the sibling's own
 /// type does not know, one whose stdout is not UTF-8, and one whose line this
 /// build reads no policy off at all: none of them is a repository that opens a
-/// change request, so none may pass the `consumes` rule. The plan is the one the
-/// `consumes` journey refuses, so what each of these costs is exactly that
-/// refusal.
+/// change request, so none may pass the `draft` rule. The plan is the one the
+/// `draft` journey refuses, so what each of these costs is exactly that refusal.
 #[cfg(unix)]
 #[test]
 fn a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked() {
     let world = World::new("destination-policy-arms");
     let service = two_repositories(&world, "local-direct");
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
+    let project = world.plan("drafting", &plan_of("drafting", vec![drafting()]));
     let stand_in = onevcs_answering(&world);
     let resolved = json!({
         "identity": "github.com/owner/service",
@@ -693,7 +652,7 @@ fn a_rules_check_this_build_cannot_read_a_policy_off_leaves_the_node_unchecked()
         let asked = world.run(&["plan", "check", &project]);
         asked
             .exited(0)
-            .err_has("node 'consumer'")
+            .err_has("node 'held'")
             .err_has("the plan loaded without that check having run");
         assert!(
             asked.stderr.contains(said),
@@ -836,10 +795,7 @@ fn a_hook_a_signal_ended_is_reported_as_that_rather_than_as_an_exit_status() {
 fn a_verb_that_answers_bytes_that_are_not_utf8_leaves_the_node_unchecked() {
     let world = World::new("destination-not-utf8");
     two_repositories(&world, "local-direct");
-    let project = world.plan(
-        "consuming",
-        &plan_of("consuming", vec![engine(), consumer(None)]),
-    );
+    let project = world.plan("drafting", &plan_of("drafting", vec![drafting()]));
     let stand_in = onevcs_answering(&world);
     script_the_answers(
         &world,
@@ -850,7 +806,7 @@ fn a_verb_that_answers_bytes_that_are_not_utf8_leaves_the_node_unchecked() {
         .with_env(ONEVCS_BINARY_ENV, &stand_in.to_string_lossy())
         .run(&["plan", "check", &project])
         .exited(0)
-        .err_has("node 'consumer'")
+        .err_has("node 'held'")
         .err_has("the plan loaded without that check having run")
         .err_has("answered bytes that are not UTF-8");
 }
@@ -899,29 +855,29 @@ fn a_git_that_names_no_hooks_path_leaves_the_title_unchecked() {
         .err_has("git named no path at all");
 }
 
-/// A node that names **`local-direct` itself** is refused on a repository that
-/// opens change requests.
+/// A `draft` on a node that names **`local-direct` itself** is refused on a
+/// repository that opens change requests.
 ///
 /// The node's own policy decides whichever way it points. Reading its
 /// repository's answer over its own would let through exactly the node that has
 /// said, in the plan, that it opens no change request — and there would then be
-/// nothing to hold it to the release it consumes.
+/// no change request for its draft to be a state of.
 #[test]
-fn a_node_that_names_local_direct_itself_is_refused_on_a_change_request_repository() {
+fn a_draft_on_a_node_that_names_local_direct_itself_is_refused_on_a_change_request_repository() {
     let world = World::new("destination-node-local-direct");
-    two_repositories(&world, "change-auto");
+    world.repository("change-auto", &[]);
 
-    let mut node = consumer(None);
+    let mut node = drafting();
     node["merge_policy"] = json!("local-direct");
-    let project = world.plan("consuming", &plan_of("consuming", vec![engine(), node]));
+    let project = world.plan("drafting", &plan_of("drafting", vec![node]));
 
     let checked = world.run(&["plan", "check", &project, "--json"]);
     checked.exited(HAS_REFUSALS);
     let answered = answer(&checked);
     let refusals = engine_refusals(&answered);
     assert_eq!(refusals.len(), 1, "{answered}");
-    assert_eq!(refusals[0]["node"], json!("consumer"), "{answered}");
-    assert_eq!(refusals[0]["field"], json!("consumes"), "{answered}");
+    assert_eq!(refusals[0]["node"], json!("held"), "{answered}");
+    assert_eq!(refusals[0]["field"], json!("draft"), "{answered}");
     assert!(
         refusals[0]["reason"]
             .as_str()
