@@ -810,44 +810,48 @@ fn refresh_rereads_after_a_failed_append_rolls_back_and_then_recovers() {
 
 #[test]
 fn refresh_rereads_when_the_upstream_answer_open_reused_expires_or_changes() {
+    let window = 2 * crate::engine::UPSTREAM_EVERY;
     for expire in [true, false] {
-        let mut plan = super::tests::plan();
-        plan.tasks[0].deps = vec!["run:upstream#build".into()];
-        let run = Run::new(
-            if expire {
-                "stale-expired"
-            } else {
-                "stale-refreshed"
-            },
-            plan,
-        );
-        let upstream = RunPaths::under(&run.root, "upstream");
-        upstream.create().expect("upstream directory");
-        ledger::write_json(&upstream.launch(), &super::tests::launch(0)).expect("upstream launch");
-        let mut writer = Journal::open(&upstream);
-        let primed = run.open();
-        assert_eq!(
-            primed.state.cross_dag["run:upstream#build"],
-            NodeStatus::Blocked
-        );
-        writer
-            .emit(
-                PipelineKind::NodeSettled,
-                journal::labels("upstream", Some("build")),
-                journal::payload(&[("status", json!("done"))]),
-            )
-            .expect("upstream settles before retained open");
-        let mut view = run.open();
-        assert_eq!(
-            view.state.cross_dag["run:upstream#build"],
-            NodeStatus::Blocked,
-            "this journey must exercise open reusing an older cached answer"
-        );
+        // The second open reuses the primed answer only inside the cache's real
+        // window. A loaded runner can spend that whole window between the two
+        // opens, which is no evidence about reuse, so only an attempt that
+        // provably outlived it is set up again; one inside it must reuse.
+        let (run, mut view) = (0..5)
+            .find_map(|attempt| {
+                let mut plan = super::tests::plan();
+                plan.tasks[0].deps = vec!["run:upstream#build".into()];
+                let kind = if expire { "expired" } else { "refreshed" };
+                let run = Run::new(&format!("stale-{kind}-{attempt}"), plan);
+                let upstream = RunPaths::under(&run.root, "upstream");
+                upstream.create().expect("upstream directory");
+                ledger::write_json(&upstream.launch(), &super::tests::launch(0))
+                    .expect("upstream launch");
+                let mut writer = Journal::open(&upstream);
+                let started = std::time::Instant::now();
+                let primed = run.open();
+                assert_eq!(
+                    primed.state.cross_dag["run:upstream#build"],
+                    NodeStatus::Blocked
+                );
+                writer
+                    .emit(
+                        PipelineKind::NodeSettled,
+                        journal::labels("upstream", Some("build")),
+                        journal::payload(&[("status", json!("done"))]),
+                    )
+                    .expect("upstream settles before retained open");
+                let view = run.open();
+                let reused = view.state.cross_dag["run:upstream#build"] == NodeStatus::Blocked;
+                assert!(
+                    reused || started.elapsed() >= window,
+                    "this journey must exercise open reusing an older cached answer"
+                );
+                reused.then_some((run, view))
+            })
+            .expect("one attempt opens inside the cache window");
         if expire {
             // Exercise the real cache's lifetime, not a simulated clock or answer.
-            std::thread::sleep(
-                2 * crate::engine::UPSTREAM_EVERY + std::time::Duration::from_millis(20),
-            );
+            std::thread::sleep(window + std::time::Duration::from_millis(20));
         } else {
             crate::crossdag::resolve_for_refresh(&run.root, &view.state.graph);
         }
