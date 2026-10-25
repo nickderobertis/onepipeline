@@ -36,6 +36,10 @@ static PASSES: AtomicU64 = AtomicU64::new(0);
 static STATUSES: AtomicU64 = AtomicU64::new(0);
 static PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
 static UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
+/// Rounds of upstream reads begun less than the loop's upstream interval after the
+/// round before them — timed where the reads are made, so a loop that reads on its
+/// own cadence rather than that interval is counted here at any pass rate.
+static EARLY_UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
 static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
 /// Pool-maintenance sweeps this driver started — counted because a sweep finding
 /// nothing due writes nothing, so no other reading tells "asked" from "never asked".
@@ -71,6 +75,16 @@ pub(crate) fn published() {
 
 pub(crate) fn upstream_read() {
     UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn early_upstream_read() {
+    EARLY_UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the early-read count stands at, for the check that the observer counts one.
+#[cfg(test)]
+pub(crate) fn early_upstream_reads() -> u64 {
+    EARLY_UPSTREAM_READS.load(Ordering::Relaxed)
 }
 
 pub(crate) fn release_asked() {
@@ -150,6 +164,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "statuses": STATUSES.load(Ordering::Relaxed),
         "publications": PUBLICATIONS.load(Ordering::Relaxed),
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
+        "early_upstream_reads": EARLY_UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
         (CLAIM_READS_KEY): CLAIM_READS.load(Ordering::Relaxed),
@@ -222,6 +237,7 @@ mod tests {
         statuses_derived();
         published();
         upstream_read();
+        early_upstream_read();
         release_asked();
         maintenance_sweep_started();
         claim_read();
@@ -239,6 +255,7 @@ mod tests {
             "statuses",
             "publications",
             "upstream_reads",
+            "early_upstream_reads",
             "release_asks",
             "maintenance_sweeps",
             "claim_reads",
