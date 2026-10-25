@@ -6438,6 +6438,12 @@ fn an_adoption_relaunches_the_observer_under_the_launchs_own_filter() {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] measured at about 11
+// seconds on the wall, and what it holds is this crate's lock: the engine's launch and
+// adoption driving the `oneagentgraph` and `onejudge` it links over the `oneharness` CLI that
+// lock builds, so a `Cargo.lock` bump or any change to `driver`, `engine` or `agentgraph`
+// must schedule it. The narrowest edge it can honestly sit behind is the crate itself, which
+// is this target's — the ground the two observer journeys above it run under.
 /// An observer's two-party monitor takes its first turn under **its own** worker
 /// config, in a launch directory whose `oneharness.toml` it could not run under —
 /// at launch, and again when the run is adopted.
@@ -6707,6 +6713,7 @@ fn an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cann
         world.dump()
     );
 }
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
 /// The retained driver reads its own `--event-filter`, and refuses one it could
 /// not honour.
