@@ -39,6 +39,10 @@ pub const PROJECT: &str = "project-1";
 pub enum Operation {
     /// `teams{…states} projectStatuses`: everything a status write resolves, in one request.
     Resolution,
+    /// `issue(id:)` beside `teams{…states} projectStatuses`: the issue an update naming a status
+    /// reads, with everything that status write resolves riding on the same request — what the
+    /// plugin sends while it holds no resolution yet.
+    IssueResolved,
     /// `issue(id:)`: one issue, read whole — the description a settlement's metadata is merged
     /// into.
     Issue,
@@ -78,7 +82,9 @@ pub enum Operation {
 impl Operation {
     fn of(query: &str) -> Self {
         let query = query.trim_start();
-        if query.contains("teams(") && query.contains("projectStatuses(") {
+        if query.contains("issue(id:") && query.contains("teams(") {
+            Self::IssueResolved
+        } else if query.contains("teams(") && query.contains("projectStatuses(") {
             Self::Resolution
         } else if query.starts_with("mutation") && query.contains("issueUpdate(") {
             Self::IssueUpdate
@@ -117,7 +123,7 @@ impl Operation {
 
     /// Whether this is one of the reads a status write resolves its names through.
     pub fn resolves(self) -> bool {
-        self == Self::Resolution
+        matches!(self, Self::Resolution | Self::IssueResolved)
     }
 }
 
@@ -432,6 +438,7 @@ impl Linear {
             if matches!(
                 operation,
                 Operation::Issue
+                    | Operation::IssueResolved
                     | Operation::IssueRelations
                     | Operation::Project
                     | Operation::ProjectRelations
@@ -493,6 +500,7 @@ impl Linear {
         let mut world = self.lock();
         let id = match operation {
             Operation::Issue
+            | Operation::IssueResolved
             | Operation::IssueRelations
             | Operation::Project
             | Operation::ProjectRelations
@@ -503,31 +511,10 @@ impl Linear {
             _ => "",
         };
         let data = match operation {
-            Operation::Resolution => {
-                let mut data = json!({
-                "teams": {"nodes": [{"id": "team-1", "states": {
-                    "nodes": world.states.iter().map(|named| json!({
-                        "id": named.id, "name": named.name, "type": named.kind,
-                    })).collect::<Vec<_>>(),
-                    "pageInfo": {"hasNextPage": false},
-                }}]},
-                "projectStatuses": {
-                    "nodes": world.statuses.iter().enumerate().map(|(at, named)| json!({
-                        "id": named.id, "name": named.name, "type": named.kind,
-                        "position": at,
-                    })).collect::<Vec<_>>(),
-                    "pageInfo": {"hasNextPage": false},
-                },
-                });
-                // A status write's first read of its issue asks for that issue in the same
-                // request as the names it resolves, and Linear answers every root it was asked.
-                if let Some(issue) = query
-                    .contains("issue(id:")
-                    .then(|| variables["id"].as_str())
-                    .flatten()
-                {
-                    data["issue"] = world.issue(issue);
-                }
+            Operation::Resolution => world.resolution(),
+            Operation::IssueResolved => {
+                let mut data = world.resolution();
+                data["issue"] = world.issue(id);
                 data
             }
             Operation::Issue => json!({"issue": world.issue(id)}),
@@ -792,6 +779,26 @@ impl World {
             "priority": issue.priority,
             "labels": {"nodes": []},
             "project": {"id": PROJECT},
+        })
+    }
+
+    /// Everything a status write resolves: the team's workflow states and the workspace's
+    /// project statuses.
+    fn resolution(&self) -> Value {
+        json!({
+            "teams": {"nodes": [{"id": "team-1", "states": {
+                "nodes": self.states.iter().map(|named| json!({
+                    "id": named.id, "name": named.name, "type": named.kind,
+                })).collect::<Vec<_>>(),
+                "pageInfo": {"hasNextPage": false},
+            }}]},
+            "projectStatuses": {
+                "nodes": self.statuses.iter().enumerate().map(|(at, named)| json!({
+                    "id": named.id, "name": named.name, "type": named.kind,
+                    "position": at,
+                })).collect::<Vec<_>>(),
+                "pageInfo": {"hasNextPage": false},
+            },
         })
     }
 

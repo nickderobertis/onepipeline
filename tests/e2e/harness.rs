@@ -2975,7 +2975,7 @@ impl World {
         if let Some(id) = id {
             metadata.insert("onepipeline.id".into(), json!(id));
         }
-        let mut edges: Vec<String> = Vec::new();
+        let mut edges: Vec<Value> = Vec::new();
         let mut crossdag: Vec<String> = Vec::new();
         for dep in node
             .get("deps")
@@ -2994,19 +2994,34 @@ impl World {
                 // project needs, and the one thing a plan document could not
                 // say.
                 Some(elsewhere) => match elsewhere.strip_prefix("store:") {
-                    Some(native) => edges.push(native.to_owned()),
+                    Some(native) => edges.push(json!(native)),
                     // By the far node's own file, which is not its node id: what
                     // an edge names is the store's id, and what the plan reads
                     // back off the far task is `onepipeline.id`. A dependency on
                     // a node this plan does not hold names it directly, which is
                     // what the dangling-reference journey states.
-                    None => edges.push(format!(
+                    None => edges.push(json!(format!(
                         "{project}/{}",
                         named.get(elsewhere).copied().unwrap_or(elsewhere)
-                    )),
+                    ))),
                 },
                 None => panic!("a dependency is a string"),
             }
+        }
+        // An edge into another tracker, named opaquely — `{"designator", "id"}` — as a copy
+        // onto a public destination records one: the store resolves the designator to
+        // whichever configured source that tracker is.
+        for opaque in node
+            .get("opaque_deps")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            edges.push(json!({
+                "designator": opaque["designator"],
+                "id": opaque["id"],
+                "kind": "blocks",
+            }));
         }
         if !crossdag.is_empty() {
             metadata.insert("onepipeline.deps".into(), json!(crossdag));
@@ -3048,7 +3063,13 @@ impl World {
         for (key, value) in node {
             if matches!(
                 key.as_str(),
-                "id" | "title" | "task" | "deps" | "repo" | "delivers" | "classification"
+                "id" | "title"
+                    | "task"
+                    | "deps"
+                    | "opaque_deps"
+                    | "repo"
+                    | "delivers"
+                    | "classification"
             ) {
                 continue;
             }
@@ -3531,6 +3552,11 @@ impl World {
                         .is_some_and(|args| args.iter().any(|arg| arg == part))
                 })
         })
+    }
+
+    /// Every store operation `run` has asked for, as its `store-operations.jsonl` counted them.
+    pub fn store_operations(&self, run: &str) -> Vec<Value> {
+        read_jsonl(&self.runs.join(run).join("store-operations.jsonl"))
     }
 
     /// One run's merged event store.
@@ -5836,7 +5862,9 @@ fn title_of(path: &Path) -> Result<String, String> {
 /// journey about a key the mapping refuses has to be able to say — and one that
 /// names a plain field means that field.
 fn reserved(field: &str) -> String {
-    match field.starts_with("onepipeline.") {
+    // The store's own keys are written as the store spells them: a journey stating that a task
+    // is a copy says so under `onetaskgraph.`.
+    match field.starts_with("onepipeline.") || field.starts_with("onetaskgraph.") {
         true => field.to_owned(),
         false => format!("onepipeline.{field}"),
     }

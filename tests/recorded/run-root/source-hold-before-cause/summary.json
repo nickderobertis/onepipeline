@@ -1,0 +1,77 @@
+{
+  "labels": {},
+  "group": "plans:source-hold-before-cause-board",
+  "schema_version": 11,
+  "run_id": "source-hold-before-cause",
+  "last_write_at": 1792857726857,
+  "last_event_kind": "scratch-retained",
+  "event_count": 8,
+  "node_counts": {
+    "pending": 1,
+    "ready": 1
+  },
+  "stop_recorded": true,
+  "graph_complete": false,
+  "decisions_pending": 0,
+  "surfaces_queued": 1,
+  "surfaces_read": 0,
+  "awaiting_human_action": false,
+  "project": "plans:source-hold-before-cause-board",
+  "name": "source-hold-before-cause",
+  "launcher": "e2e",
+  "session": "session-legacy-source-hold",
+  "started_at": "2026-10-24T16:02:04.601Z",
+  "pid": 3394810,
+  "host": "shulgin",
+  "started": "linux-proc-stat:87791100",
+  "let_go_by": {
+    "host": "shulgin",
+    "pid": 3395221
+  },
+  "owed_until_closed": true,
+  "timing": {
+    "schema_version": 2,
+    "run_id": "source-hold-before-cause",
+    "wall_ms": 2232,
+    "buckets": [
+      {
+        "name": "agent",
+        "ms": 0
+      },
+      {
+        "name": "judge"
+      },
+      {
+        "name": "llmlint"
+      },
+      {
+        "name": "gate"
+      },
+      {
+        "name": "publication_wait",
+        "ms": 0
+      },
+      {
+        "name": "lock_wait",
+        "ms": 0
+      },
+      {
+        "name": "setup",
+        "ms": 0
+      },
+      {
+        "name": "scheduling",
+        "ms": 2232
+      }
+    ],
+    "usage": {},
+    "dispatches": 0,
+    "settled_done": 0,
+    "no_diff": 0,
+    "surfaces_queued": 1,
+    "surfaces_read": 0
+  },
+  "oneharness_sessions": "/tmp/op-3307786-0/runs/source-hold-before-cause/oneharness-sessions.jsonl",
+  "journal_len": 3632,
+  "journal_mtime_ms": 1792857726855
+}

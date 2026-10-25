@@ -740,14 +740,13 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::PrivateReference { .. } | EngineError::PrivateItemReference { .. } => {
             decided("private-reference")
         }
+        EngineError::PrivateReferenceContent { .. } => decided("private-reference-content"),
+        // A dependency read asked for every edge and one is recorded under a designator no
+        // configured source is; a write-back reads no dependencies.
+        EngineError::DesignatorNotConfigured { .. } => decided("designator-not-configured"),
         EngineError::ReferenceUnclassified { .. } => decided("reference-unclassified"),
         EngineError::ProjectUnclassified { .. } => decided("project-unclassified"),
         EngineError::PrivateMemberOfPublicProject { .. } => decided("private-member"),
-        // A dependency named by a form other than its own native id, and an opaque far end
-        // whose tracker no configured source is, are refused for a write that *states* a
-        // reference or a read that asks for every edge; a write-back does neither.
-        EngineError::PrivateReferenceContent { .. } => decided("private-reference-content"),
-        EngineError::DesignatorNotConfigured { .. } => decided("designator-not-configured"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
         // A public projection is the store's own view of a canonical task in a private home.
         // A status write the canonical task took and its view did not, and a created task whose
@@ -1798,6 +1797,8 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     if launch.project.parse::<QualifiedId>().is_err() {
         return;
     }
+    // The stopping process asks the store for the release, so what it asks is the run's.
+    crate::storeops::attach(&paths.dir);
     let store = Store::at(launch_dir(launch));
     let state = crate::checkpoint::Projected::open(paths);
     let statuses = state.statuses();
@@ -1868,13 +1869,18 @@ pub(crate) fn release_stopped(paths: &RunPaths, launch: &LaunchRecord) {
     // and `delivers::a_first_projection_held_past_its_deadline_does_not_hold_back_the_first_dispatch`.
     // A journey holding a `stop` past the sixty-second floor would spend that minute on no line
     // those three do not already reach.
-    let attempted = project(
-        &store,
-        &mut None,
-        per_item_budget(launch),
-        &snapshot,
-        &mut baseline,
-        Scope::Release,
+    let attempted = crate::storeops::about(
+        crate::storeops::Scope::Release { projection_at: &at },
+        || {
+            project(
+                &store,
+                &mut None,
+                per_item_budget(launch),
+                &snapshot,
+                &mut baseline,
+                Scope::Release,
+            )
+        },
     );
     append_record(
         &paths.dir,
@@ -2004,13 +2010,20 @@ fn worker(
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         let at = crate::sys::now_rfc3339();
         let started = Instant::now();
-        let attempted = project(
-            &store,
-            &mut retained,
-            per_item,
-            &snapshot,
-            baseline,
-            Scope::Driven,
+        // Each operation this attempt asks for is counted against it, by the stamp its
+        // projection record carries.
+        let attempted = crate::storeops::about(
+            crate::storeops::Scope::WriteBack { projection_at: &at },
+            || {
+                project(
+                    &store,
+                    &mut retained,
+                    per_item,
+                    &snapshot,
+                    baseline,
+                    Scope::Driven,
+                )
+            },
         );
         append_record(
             &run_dir,
@@ -2669,6 +2682,7 @@ impl Attempt {
         future: impl Future<Output = T>,
     ) -> Result<T, Failed> {
         *self.calls.borrow_mut().entry(call).or_default() += 1;
+        crate::storeops::record(call.operation());
         self.runtime
             .block_on(async { tokio::time::timeout(deadline.within(), future).await })
             .map_err(|_| {
@@ -2867,6 +2881,7 @@ fn project(
             let ended = if attempt.cancelled.get() {
                 Ok(Ok(()))
             } else {
+                crate::storeops::record(crate::storeops::Operation::EndCommand);
                 attempt.runtime.block_on(async {
                     tokio::time::timeout(Deadline::Floor.within(), attempt.engine.end_command())
                         .await
@@ -3430,14 +3445,15 @@ fn update(
         baseline.save();
         return Ok(());
     }
-    let answer = attempt
-        .call(
+    let answer = crate::storeops::about(crate::storeops::Scope::Item(root), || {
+        attempt.call(
             StoreCall::TaskUpdate,
             Deadline::Write { per_item, items: 1 },
             attempt.engine.update_task(&held.id, &update),
         )
-        .map_err(|failed| carrying.failed(failed))?
-        .map_err(|error| carrying.failed(Failed::engine(TASK_UPDATE, &error)))?;
+    })
+    .map_err(|failed| carrying.failed(failed))?
+    .map_err(|error| carrying.failed(Failed::engine(TASK_UPDATE, &error)))?;
     attempt.wrote(&answer.written);
     let counted = carrying.actions();
     if answer.written.is_empty() {
@@ -3732,6 +3748,7 @@ fn member_sources(store: &Store, project: &QualifiedId) -> Vec<SourceName> {
         })?;
         let runtime = crate::taskgraph::runtime()
             .map_err(|error| format!("the store cannot be called: {error}"))?;
+        crate::storeops::record(crate::storeops::Operation::Project);
         let answer = runtime
             .block_on(async {
                 tokio::time::timeout(Deadline::Floor.within(), built.engine.project(&home)).await
@@ -4409,6 +4426,7 @@ fn write_shadow_assets(
             .iter()
             .chain(snapshot.nodes[head].assets_from.iter())
         {
+            crate::storeops::record(crate::storeops::Operation::TaskAssets);
             let held = attempt
                 .runtime
                 .block_on(async {
@@ -5225,6 +5243,19 @@ impl StoreCall {
             Self::ProjectCopy => PROJECT_COPY,
             Self::TaskUpdate => TASK_UPDATE,
             Self::ProjectMetadataSet => PROJECT_METADATA_SET,
+        }
+    }
+
+    /// The store operation this call is, as the run's store-operation telemetry counts it.
+    fn operation(self) -> crate::storeops::Operation {
+        use crate::storeops::Operation;
+        match self {
+            Self::ProjectShow => Operation::Project,
+            Self::TaskList => Operation::Tasks,
+            Self::TaskShow => Operation::Task,
+            Self::ProjectCopy => Operation::Copy,
+            Self::TaskUpdate => Operation::TaskUpdate,
+            Self::ProjectMetadataSet => Operation::ProjectMetadataSet,
         }
     }
 }
@@ -6330,6 +6361,16 @@ mod tests {
                 sent: Some("- a".to_owned()),
                 stored: Some("* a".to_owned()),
             },
+            EngineError::PrivateReferenceContent {
+                item: "plans:a".into(),
+                destination: "plans".into(),
+                form: onetaskgraph_core::boundary::ReferenceForm::Unconfirmed,
+            },
+            EngineError::DesignatorNotConfigured {
+                id: "plans:a".into(),
+                designator: onetaskgraph_plugin_api::Designator::of_alias("a-public-alias-of-16")
+                    .expect("an alias"),
+            },
             EngineError::SplitPrivateHome {
                 project: id(),
                 destinations: vec![(
@@ -6591,16 +6632,6 @@ mod tests {
             EngineError::PrivateMemberOfPublicProject {
                 item: "plans:a".into(),
                 project: "plans:p".into(),
-            },
-            EngineError::PrivateReferenceContent {
-                item: "plans:a".into(),
-                destination: "plans".into(),
-                form: onetaskgraph_core::boundary::ReferenceForm::Slug,
-            },
-            EngineError::DesignatorNotConfigured {
-                id: "plans:a".into(),
-                designator: onetaskgraph_plugin_api::Designator::of_backend("local-md", "board")
-                    .expect("a designator"),
             },
             EngineError::ProjectionReference {
                 task: id(),

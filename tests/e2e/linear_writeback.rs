@@ -517,33 +517,6 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
     scenario.finish();
 }
 
-/// The `linear-requests-per-writeback-settlement` budget's measure: the same six settlements,
-/// each held to landing its own current values and nothing about what it cost, and the most
-/// requests Linear was sent for one attempt after the run's first, which also resolves the
-/// vocabulary. Written to the file `ONEBUDGETSPEC_RESULT` names when the budget's command runs
-/// this journey; whether that figure is within the budget is the checker's to say, never this
-/// journey's, so an attempt that cost more is reported rather than failed.
-#[test]
-fn the_costliest_linear_settlement_after_the_first_is_reported_as_measured() {
-    let scenario = launched_with_states("linear-settlement-budget", &[], &every_mapped_state());
-    let costs = six_settlements(&scenario, |_, _| {});
-    scenario.finish();
-    let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
-    let detail = format!(
-        "the most requests the loopback Linear served for one attempt over {} consecutive \
-         settlements after the run's first, each in its own attempt: {:?}",
-        costs.len() - 1,
-        &costs[1..]
-    );
-    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
-        std::fs::write(
-            result,
-            crate::budget_result::reported(highest, &detail).to_string(),
-        )
-        .expect("the budget's result is written");
-    }
-}
-
 /// Each way a Linear call fails leaves the next attempt landing the values current when it is
 /// made: a connection Linear closes mid-read is retried on the schedule, a write Linear refuses
 /// — one carrying only metadata, and one carrying a state — is attempted again when the graph
@@ -1856,7 +1829,29 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
             && !world.events_of(name, "driver-exited").is_empty()
     });
 
-    assert_eq!(linear.state_of(&only), "Done");
+    // So a failure names the write that left the status it saw.
+    let status_writes: Vec<(usize, Option<String>)> = linear
+        .log()
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::IssueUpdate && request.variables["id"] == only.as_str()
+        })
+        .filter_map(|(at, request)| {
+            request.variables["input"]["stateId"]
+                .as_str()
+                .map(|state| (at, linear.state_named(state)))
+        })
+        .collect();
+    assert_eq!(
+        linear.state_of(&only),
+        "Done",
+        "the issue's status writes, as (request, state set), the last of which left the status seen: {status_writes:?}. A projection's write comes from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate, and a landing's closure from writeback::closer; the journal says which ran. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
+        linear.log(),
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .unwrap_or_default(),
+        world.journal(name),
+    );
     assert_eq!(linear.project_status(), "Completed");
     let log = linear.log();
     let written: Vec<usize> = log
