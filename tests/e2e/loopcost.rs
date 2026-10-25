@@ -537,9 +537,8 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// its own passes are running at.
 ///
 /// Two consumers of the same upstream, one woken five times a second by a
-/// narrating dispatch and one every two seconds. The chatty one runs passes at
-/// more than twice the quiet one's rate, and what they read out of the upstream
-/// is the same.
+/// narrating dispatch and one every two seconds. The chatty one runs more passes
+/// than the quiet one, and what they read out of the upstream is the same.
 ///
 /// Five a second rather than twenty: every beat a dispatch sends is a record the
 /// loop relays, and a host that relays fewer of them a second than it is sent
@@ -597,23 +596,21 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
     // Two reads answer one edge — has the node settled, and how far has that run
     // got — so twice a second is four reads a second and no more.
     let ceiling = 4 * WINDOW.as_secs() + 4;
-    // The chatty loop ran more passes than the ceiling allows reads, which is
-    // what makes the claims below mean anything: a loop that read on every pass
-    // would have read at least that often and broken the ceiling. Stated against
-    // the ceiling rather than against the quiet loop's passes, because the quiet
-    // loop is paced by deadlines and the chatty one by how fast this host runs a
-    // pass — on a loaded Windows runner a third of the idle rate, which put a
-    // ratio between the two below any fixed multiple while every claim here held.
-    assert!(
-        did[0].passes > ceiling,
-        "the chatty loop ran too few passes for its reads to say anything: {did:?}"
-    );
     for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
         assert!(
             did[nth].upstream_reads <= ceiling,
             "{run} read the upstream more often than the interval allows: {did:?}"
         );
     }
+    // A loop that read on every pass would have read the edge's two answers on
+    // each of them. Stated against the passes it actually ran rather than a
+    // number of them, because a host's load decides how many passes fit in the
+    // window; any host relaying five beats a second runs more passes than the
+    // two read rounds a second it is due.
+    assert!(
+        did[0].upstream_reads < 2 * did[0].passes,
+        "the chatty loop read the upstream on every pass it ran: {did:?}"
+    );
     assert!(
         did[0].upstream_reads <= 2 * did[1].upstream_reads + 4,
         "reading the upstream tracked the loop's pass rate: {did:?}"
