@@ -443,8 +443,8 @@ fn shut_down_while_admitting(
     let mut start = world.cmd(&["start", &project, "--detach"]);
     start
         .current_dir(&world.project)
-        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", begins.address())
-        .env("ONEPIPELINE_TEST_CLAIM_BEGIN_NODE", "work");
+        .env("ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE", begins.address())
+        .env("ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE", "work");
     world
         .run_on_within(start, "start --detach", crate::harness::ONE_STEP)
         .exited(0);
@@ -502,8 +502,10 @@ fn shut_down_while_admitting(
 
 /// A dispatch the driver starts while a shutdown is reading its run — after the
 /// registry read named none and after the teardown listed the tree it ends —
-/// does not outlive the shutdown: once the driver is gone it is ended too, the
-/// shutdown says so, and the run is reported cleanly stopped.
+/// does not outlive the shutdown, and the run is reported cleanly stopped. The
+/// teardown ends it as the rest of the tree: it lists the frozen tree again until
+/// a listing finds nothing new, so the dispatch is not left for the shutdown's
+/// later reading of the registry to find.
 ///
 /// Left running, that dispatch is work nobody drives, and on Windows it holds the
 /// handle it inherited to the run's own driver log, so the run's directory can be
@@ -528,9 +530,11 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_does_not_outlive_it() {
         shut.stdout,
         shut.stderr
     );
-    for pid in &pids {
-        shut.err_has(&format!("'work' (pid {pid}) {STARTED_MEANWHILE}"));
-    }
+    assert!(
+        !shut.stderr.contains(STARTED_MEANWHILE),
+        "the teardown missed the late dispatch and left it to the registry:\n{}",
+        shut.stderr
+    );
     shut.exited(0);
     assert_eq!(host_shutdown(&world, run)["teardown"], "signalled");
 }
@@ -574,8 +578,9 @@ fn a_dispatch_started_while_the_shutdown_reads_its_run_that_will_not_go_is_repor
 }
 
 /// A teardown that already left a survivor is not reported whole by ending a
-/// dispatch started while the shutdown read the run: that dispatch is ended, and
-/// the run's teardown is still partly stopped, on the report and on the record.
+/// dispatch started while the shutdown read the run: that dispatch is ended with
+/// the rest of the tree, and the run's teardown is still partly stopped, on the
+/// report and on the record.
 #[cfg(unix)]
 #[test]
 fn a_late_dispatch_ended_does_not_make_a_partial_teardown_whole() {
@@ -599,7 +604,6 @@ fn a_late_dispatch_ended_does_not_make_a_partial_teardown_whole() {
             "the late dispatch (pid {pid}) outlived the shutdown:\n{}",
             shut.stderr
         );
-        shut.err_has(&format!("'work' (pid {pid}) {STARTED_MEANWHILE}"));
     }
     assert!(
         shut.stdout

@@ -379,13 +379,14 @@ pub enum PipelineKind {
     /// Written by `start --take-over` beside its `run-started`, only where the
     /// project's `onepipeline.driver` named a claim; carries that claim whole as
     /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
-    /// names stops at its own next read of the claim. Entries 119 and 128 of
+    /// names stops at its own next read of the claim — before a publication, or as it
+    /// lets go of the project. Entries 119 and 128 of
     /// `docs/contract-divergences.md` record it.
     DriverTakenOver,
     /// A driver found its project claimed by another run, and stopped.
     ///
     /// Written by the driver that read the claim, once, at the read that found
-    /// it — at adoption, or at the read it makes once per claim interval —
+    /// it — at adoption, or at the read it makes immediately before a publication —
     /// carrying the claim it found as `by`. After it the driver dispatches and
     /// publishes nothing, and once its dispatches in flight have settled
     /// unpublished it acknowledges that claim and ends. Entries 119 and 128

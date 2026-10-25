@@ -1171,7 +1171,7 @@ onevcs-testing = "0.19.19"
 # 0.11.0 a reader listing the shadow could open it empty or half-written
 # (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
 # **0.12.1 is the floor: the store owns task visibility** — what that changes here is entry
-# 139 of `docs/contract-divergences.md`. It is breaking: 0.12.0 reads dependencies from a
+# 140 of `docs/contract-divergences.md`. It is breaking: 0.12.0 reads dependencies from a
 # task's own record, so a dependency read names a far end under a tracker the host does not
 # configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
 # words.
@@ -1194,7 +1194,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.89.1"
+version = "0.89.2"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

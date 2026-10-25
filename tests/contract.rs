@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("136.")["bundle_versions"]["events"],
+        divergence_block("139.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -7896,7 +7896,7 @@ const RULINGS: &[(&str, &str)] = &[
     // The store owns task visibility: a node's classification is its task's own, never its
     // project's, and the guidance coordinates one private plan.
     (
-        "139.",
+        "140.",
         "never its project's: a public task of a private coordinating project is public",
     ),
 ];

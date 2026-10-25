@@ -1056,6 +1056,10 @@ fn tear_the_run_down(paths: &RunPaths, view: &RunView) -> StopTeardown {
 /// the teardown has ended it the registry names every dispatch there is; read
 /// again, each live one this shutdown did not already act on is ended as
 /// `stop` ends a tree. A tree that would not go is the run's answer.
+///
+/// On Unix the teardown lists the frozen tree again until nothing new appears,
+/// so it ends such a dispatch itself and what is left here is one that would
+/// not go; on Windows the table is read once, and this is what ends it.
 fn end_what_it_started_meanwhile(
     paths: &RunPaths,
     acted_on: &[(Watched, String, String)],

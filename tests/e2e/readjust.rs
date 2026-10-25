@@ -2210,8 +2210,8 @@ fn an_adoption_readjusts_before_its_first_dispatch() {
 }
 
 /// Nothing polls: a live driver with drafts outstanding and nothing to do, left over more
-/// than one of its claim intervals — shortened through the setting entry 128 names, so it
-/// reads its claim inside the window — asks the host nothing at all; and `start` takes no
+/// than one of its claim intervals — shortened through the setting entry 128 names, which no
+/// running driver reads on — asks the host nothing at all; and `start` takes no
 /// readjustment-interval flag.
 #[test]
 fn an_idle_driver_asks_the_host_nothing() {

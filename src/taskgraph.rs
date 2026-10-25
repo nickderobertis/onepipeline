@@ -370,6 +370,21 @@ impl Store {
         id: &QualifiedId,
         within: std::time::Duration,
     ) -> Result<BTreeMap<String, Value>> {
+        self.project_metadata_asking(id, within)
+            .map_err(|refused| refused.error)
+    }
+
+    /// [`project_metadata_within`](Self::project_metadata_within), answering a read that
+    /// failed with the wait its source asked for before it is asked again, where it named one.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_metadata_within`](Self::project_metadata_within).
+    pub(crate) fn project_metadata_asking(
+        &self,
+        id: &QualifiedId,
+        within: std::time::Duration,
+    ) -> std::result::Result<BTreeMap<String, Value>, ReadRefused> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -391,8 +406,13 @@ impl Store {
                     within.as_secs()
                 ),
             })?
-            .map_err(|error| failed("project show", id.as_str(), &error))?;
-        let found = one(&global, "project show", read)?;
+            .map_err(|error| ReadRefused {
+                error: failed("project show", id.as_str(), &error),
+                wait: crate::writeback::engine_wait(&error),
+            })?;
+        let wait = crate::writeback::failures_wait(&read.errors);
+        let found =
+            one(&global, "project show", read).map_err(|error| ReadRefused { error, wait })?;
         Ok(found.item.metadata.into_iter().collect())
     }
 
@@ -1204,6 +1224,20 @@ impl Reader {
             }
             token = Some(next);
         }
+    }
+}
+
+/// A store read that was not answered, with how long its source asked to be left alone
+/// first: `None` where it named no wait.
+#[derive(Debug)]
+pub(crate) struct ReadRefused {
+    pub(crate) error: Error,
+    pub(crate) wait: Option<std::time::Duration>,
+}
+
+impl From<Error> for ReadRefused {
+    fn from(error: Error) -> Self {
+        Self { error, wait: None }
     }
 }
 
