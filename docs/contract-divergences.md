@@ -12798,9 +12798,10 @@ joined by an `onepipeline.export_edges` entry naming `from`, `to`, `source_direc
 reader of version 1 knows neither field.
 
 **The store's 0.12 release, linked.** Its dependency read names, beside a private source it
-could not ask, a far end recorded under a tracker this host does not configure; such a
-prerequisite can never be named by a re-read here, so the read refuses it rather than holding
-the node. Its five new refusals are named by the write-back in the store's own words.
+could not ask, a far end recorded under a tracker this host does not configure; the read does
+not refuse it but holds the node on that tracker with `cause` `unconfigured`, named by its
+designator, and a later re-read releases it once a configuration layer declares a source as
+that tracker. Its five new refusals are named by the write-back in the store's own words.
 
 **Release.** Breaking, the next minor: the public `Node.classification` and
 `TaskRecord.source` carry the store's `Classification` and `SourceName`, and the store moved a
