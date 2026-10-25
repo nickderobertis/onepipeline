@@ -6663,7 +6663,6 @@ fn an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cann
     );
     watched();
 
-    // Let the first half settle: the driver reaches the gate and exits.
     world.release("turn.go");
     world.release("turn.settle");
     assert!(
