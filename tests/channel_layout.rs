@@ -7,12 +7,16 @@
 //!   local transport, to the waiting, pending and abandoned surfaces and the
 //!   unread count its `queue.json` holds, the reply and command cursors its two
 //!   cursor files hold, and the outcome of every command id its
-//!   `command-outcomes.jsonl` holds — and reading it changes none of its files.
+//!   `command-outcomes.jsonl` holds — and reading it changes none of its files,
+//!   writing nothing but the core's own derived state: the offset beside a
+//!   cursor it claimed through, holding that cursor's position.
 //! - **Re-apply**: the history the directory records, applied through this
 //!   crate's queues into an empty directory — every surface queued, claimed,
 //!   answered, abandoned and attended as its log's transitions say, replies and
 //!   commands appended and claimed up to the recorded cursors, outcomes recorded
-//!   — reproduces every file of the channel layout byte for byte.
+//!   — reproduces every file of the channel layout byte for byte, the core's
+//!   derived counts and offsets (which no earlier build wrote) holding what their
+//!   logs and cursors say.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,6 +84,92 @@ fn copy_of(name: &str, into: &Path) -> PathBuf {
         }
     }
     copy
+}
+
+/// Whether a layout file is the bus core's own derived state: the record count it
+/// keeps beside a numbered queue's log, and the byte offset it keeps beside each
+/// cursor — which a claim through that cursor writes, a read's included, so a
+/// channel an earlier build wrote gains one where this build reads it. Told off the
+/// layout's own list by its suffix rather than restated.
+fn is_core_derived(file: &str) -> bool {
+    file.ends_with(".offset") || file.ends_with(".jsonl.count")
+}
+
+/// The files `dir` holds that the layout does not name — none, for a directory
+/// this layout's queues kept.
+fn undeclared_in(dir: &Path) -> Vec<String> {
+    let mut undeclared: Vec<String> = std::fs::read_dir(dir)
+        .expect("the channel directory")
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|file| !LAYOUT.contains(&file.as_str()))
+        .collect();
+    undeclared.sort();
+    undeclared
+}
+
+/// What the core derived holds of the files beside it: a record count is a count of
+/// the log's first records and the byte they end at, and a cursor's offset holds the position
+/// that cursor names — its count and cursor are the line cursor's, and its offset is
+/// the byte at which that many lines of the queue's log end — so a claim resuming
+/// from it resumes at exactly the envelope the line cursor names.
+fn assert_core_derived_holds(name: &str, dir: &Path, offset_file: &str) {
+    if let Some(log) = offset_file.strip_suffix(".count") {
+        let held: Value = serde_json::from_slice(
+            &std::fs::read(dir.join(offset_file)).expect("the count a write kept"),
+        )
+        .expect("a count is JSON");
+        let bytes = std::fs::read(dir.join(log)).expect("the log beside its count");
+        let whole: Vec<&[u8]> = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| line.ends_with(b"\n"))
+            .collect();
+        let counted = held["count"].as_u64().expect("a count is a number");
+        assert!(
+            counted <= whole.len() as u64,
+            "{name}: {offset_file} counts more records than {log} holds"
+        );
+        assert_eq!(
+            held["offset"],
+            whole
+                .iter()
+                .take(usize::try_from(counted).expect("a count fits"))
+                .map(|line| line.len())
+                .sum::<usize>() as u64,
+            "{name}: {offset_file} is not where {log}'s first {counted} records end"
+        );
+        return;
+    }
+    let cursor_file = offset_file.trim_end_matches(".offset");
+    let log = cursor_file.replace("-cursor.json", ".jsonl");
+    let cursor: u64 = std::fs::read_to_string(dir.join(cursor_file))
+        .expect("the cursor beside its offset")
+        .trim()
+        .parse()
+        .expect("a line cursor is a count");
+    let held: Value = serde_json::from_slice(
+        &std::fs::read(dir.join(offset_file)).expect("the offset the read wrote"),
+    )
+    .expect("an offset is JSON");
+    let ends_at: usize = std::fs::read(dir.join(&log))
+        .unwrap_or_default()
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(usize::try_from(cursor).expect("a cursor fits"))
+        .map(<[u8]>::len)
+        .sum();
+    assert_eq!(
+        held["count"], cursor,
+        "{name}: {offset_file} counts other than {cursor_file}"
+    );
+    assert_eq!(
+        held["cursor"], cursor,
+        "{name}: {offset_file} names another cursor than {cursor_file}"
+    );
+    assert_eq!(
+        held["offset"], ends_at as u64,
+        "{name}: {offset_file} is not where {cursor_file}'s {cursor} lines of {log} end"
+    );
 }
 
 fn lines(path: &Path) -> Vec<Value> {
@@ -225,6 +315,8 @@ fn every_recorded_directory_reads_to_what_its_projection_cursors_and_outcomes_ho
                     std::fs::read(&source).expect("the recording"),
                     "{name}: reading the directory changed {file}"
                 );
+            } else if is_core_derived(file) && dir.join(file).exists() {
+                assert_core_derived_holds(name, &dir, file);
             } else {
                 assert!(
                     !dir.join(file).exists(),
@@ -232,6 +324,11 @@ fn every_recorded_directory_reads_to_what_its_projection_cursors_and_outcomes_ho
                 );
             }
         }
+        assert_eq!(
+            undeclared_in(&dir),
+            Vec::<String>::new(),
+            "{name}: reading the directory wrote a file the layout does not name"
+        );
     }
 }
 
@@ -388,10 +485,18 @@ fn re_applying_each_recorded_history_reproduces_every_file_byte_for_byte() {
                     String::from_utf8_lossy(&std::fs::read(&written).expect("written"))
                 ),
                 (true, false) => panic!("{name}: re-applying the history wrote no {file}"),
+                (false, true) if is_core_derived(file) => {
+                    assert_core_derived_holds(name, &dir, file);
+                }
                 (false, true) => panic!("{name}: re-applying the history wrote a {file} the recording has none of"),
                 (false, false) => {}
             }
         }
+        assert_eq!(
+            undeclared_in(&dir),
+            Vec::<String>::new(),
+            "{name}: re-applying the history wrote a file the layout does not name"
+        );
     }
 }
 

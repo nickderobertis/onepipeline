@@ -25,7 +25,80 @@ pub(crate) const RUN: &str = "onemessagebus-repair-2";
 /// The files of the channel layout, in the order an answer records them: the
 /// layout's own declaration, so the write-side journey fails on a channel file
 /// either binary writes that the layout does not name.
-pub(crate) const LAYOUT: [&str; 7] = onepipeline::channel::layout::FILES;
+pub(crate) const LAYOUT: [&str; onepipeline::channel::layout::FILES.len()] =
+    onepipeline::channel::layout::FILES;
+
+/// Whether a layout file is the bus core's own derived state: the record count it
+/// keeps beside a numbered queue's log, and the byte offset it keeps beside each
+/// cursor — which a claim through that cursor writes, a read's included, so a
+/// channel an earlier build wrote gains one where this build reads it. Told off the
+/// layout's own list by its suffix rather than restated.
+pub(crate) fn is_core_derived(file: &str) -> bool {
+    file.ends_with(".offset") || file.ends_with(".jsonl.count")
+}
+
+/// What the core derived holds of the files beside it: a record count is a count of
+/// the log's first records and the byte they end at, and a cursor's offset holds the position
+/// that cursor names — its count and cursor are the line cursor's, and its offset is
+/// the byte at which that many lines of the queue's log end — so a claim resuming
+/// from it resumes at exactly the envelope the line cursor names.
+pub(crate) fn assert_core_derived_holds(fixture: &str, channel: &Path, offset_file: &str) {
+    if let Some(log) = offset_file.strip_suffix(".count") {
+        let held: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(channel.join(offset_file)).expect("the count a write kept"),
+        )
+        .expect("a count is JSON");
+        let bytes = std::fs::read(channel.join(log)).expect("the log beside its count");
+        let whole: Vec<&[u8]> = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .filter(|line| line.ends_with(b"\n"))
+            .collect();
+        let counted = held["count"].as_u64().expect("a count is a number");
+        assert!(
+            counted <= whole.len() as u64,
+            "{fixture}: {offset_file} counts more records than {log} holds"
+        );
+        assert_eq!(
+            held["offset"],
+            whole
+                .iter()
+                .take(usize::try_from(counted).expect("a count fits"))
+                .map(|line| line.len())
+                .sum::<usize>() as u64,
+            "{fixture}: {offset_file} is not where {log}'s first {counted} records end"
+        );
+        return;
+    }
+    let cursor_file = offset_file.trim_end_matches(".offset");
+    let log = cursor_file.replace("-cursor.json", ".jsonl");
+    let cursor: u64 = std::fs::read_to_string(channel.join(cursor_file))
+        .expect("the cursor beside its offset")
+        .trim()
+        .parse()
+        .expect("a line cursor is a count");
+    let held: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(channel.join(offset_file)).expect("the offset a read wrote"),
+    )
+    .expect("an offset is JSON");
+    let ends_at: usize = std::fs::read(channel.join(&log))
+        .unwrap_or_default()
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(usize::try_from(cursor).expect("a cursor fits"))
+        .map(<[u8]>::len)
+        .sum();
+    assert_eq!(
+        held["count"], cursor,
+        "{fixture}: {offset_file} counts other than {cursor_file}"
+    );
+    assert_eq!(
+        held["cursor"], cursor,
+        "{fixture}: {offset_file} names another cursor than {cursor_file}"
+    );
+    assert_eq!(
+        held["offset"], ends_at as u64,
+        "{fixture}: {offset_file} is not where {cursor_file}'s {cursor} lines of {log} end"
+    );
+}
 
 pub(crate) fn recorded(relative: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

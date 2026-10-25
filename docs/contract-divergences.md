@@ -12875,3 +12875,30 @@ this build writes, so it reads 15 with it. The plan stated this snapshot's move 
 a different document — its seal still over the covered bytes, with no tally — moved this
 one to 15 (ruled by the manager, correlation `c-d02b1d64475c6b7ed6664d80d23372a6`), so a version-14 document is one this build refuses and rebuilds like any
 other it does not write, rather than one number naming two shapes.
+
+## 142. The bus's derived counts and byte-offset cursors added four files to a run's channel directory — RESOLVED
+
+**Ruled by the planner on the plan node `op-journal-scaling`, and `docs/contract.md` edited to
+match.** This build links `onemessagebus` 0.9.4, the newest release `Cargo.toml` permits.
+0.9.4's envelope and filter grammar, its parser included, are 0.9.3's unchanged, so the
+contract's marked copy of them is re-decided against 0.9.4 with its wording kept. What 0.9.4
+changes is how its queues are counted and claimed:
+- It keeps a record count beside each numbered queue's log, once that log is counted with a
+  record already in it: `replies.jsonl.count` and `commands.jsonl.count`.
+- It keeps a byte offset beside each cursor a single reader claims from:
+  `replies-cursor.json.offset` and `commands-cursor.json.offset`.
+
+So the contract's list of the layout's files goes from seven to eleven. **The public
+`onepipeline::channel::layout::FILES` changes type from `[&str; 7]` to `[&str; 11]`**, a
+breaking change to the library's surface. All four files are the core's derived state,
+regenerable from its logs as its cursors are.
+
+**A read over a channel written by an earlier build now leaves the two cursor offsets** beside
+its cursors. The core writes a cursor's offset whenever a reader claims through it, so a
+read-only pass over a channel directory is no longer write-free. Every file the earlier build
+wrote is left byte for byte as it was, and each offset written holds the position its cursor
+names (`tests/channel_layout.rs`, `tests/e2e/recorded_channel.rs`).
+
+**Ruling:** the planner ruled the 0.9.4 link and these contract edits (correlation
+`c-82fe4a181e152433729ebea43a33067d`), and that a read may create the core's derived cursor
+files (correlation `c-ac162df8dd377e864a0238c2006a76ee`).

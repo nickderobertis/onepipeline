@@ -7899,6 +7899,8 @@ const RULINGS: &[(&str, &str)] = &[
         "140.",
         "never its project's: a public task of a private coordinating project is public",
     ),
+    // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
+    ("142.", "`replies-cursor.json.offset`"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
