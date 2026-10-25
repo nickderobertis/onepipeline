@@ -7050,6 +7050,102 @@ fn a_delayed_observer_teardown_still_ends_its_judge_before_the_driver_exits() {
     );
 }
 
+/// A fault in the observer graph's own store, met as a settled run's driver lets
+/// go of that observer.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy)]
+enum ObserverStoreFault {
+    /// The graph's directory is gone, so there is nowhere to signal it.
+    DirectoryGone,
+    /// A file stands where the graph's signal directory belongs, so neither the
+    /// driver nor the graph's own relay can write its stop signal.
+    SignalUnwritable,
+}
+
+/// A settled run whose observer graph's store meets `fault` as the driver lets
+/// go still has no judge of that observer running once its driver exits.
+#[cfg(unix)]
+fn a_store_fault_still_ends_the_observers_judge(fault: ObserverStoreFault) {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) =
+        observed_by_a_command_judge(&format!("settled-observer-store-{fault:?}"));
+    let owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let graph = world.run_json("command-stop", "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    match fault {
+        ObserverStoreFault::DirectoryGone => {
+            std::fs::remove_dir_all(&root).expect("the observer's directory is removed");
+        }
+        ObserverStoreFault::SignalUnwritable => {
+            std::fs::remove_dir_all(&signals).expect("the signal directory is removed");
+            std::fs::write(&signals, "not a directory").expect("the signal cannot be written");
+        }
+    }
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let settled = owner.wait_with_output().expect("the attached engine exits");
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert!(
+        surviving.is_empty(),
+        "{fault:?}: observer command judge(s) {surviving:?} of {started:?} outlived the \
+         driver:\n{said}"
+    );
+    match fault {
+        ObserverStoreFault::DirectoryGone => {}
+        ObserverStoreFault::SignalUnwritable => {
+            assert!(
+                said.contains("cancel observer") && said.contains("ending its processes"),
+                "the driver did not say its cancel failed:\n{said}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&signals).expect("the file is still there"),
+                "not a directory"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_settled_runs_observer_with_its_directory_gone_still_has_its_judge_ended() {
+    a_store_fault_still_ends_the_observers_judge(ObserverStoreFault::DirectoryGone);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_settled_runs_observer_that_cannot_be_signalled_still_has_its_judge_ended() {
+    a_store_fault_still_ends_the_observers_judge(ObserverStoreFault::SignalUnwritable);
+}
+
 /// A missing observer record cannot create a replacement graph directory or
 /// prevent the engine's existing process-tree teardown.
 #[cfg(unix)]

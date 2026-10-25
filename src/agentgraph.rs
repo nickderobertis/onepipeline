@@ -2001,36 +2001,37 @@ impl GraphRun {
     /// What a caller about to exit needs instead of a [cancel](Self::cancel)
     /// alone. The library backend's cancel is handed to a relay thread, so a
     /// process that exits on it can end before the sibling has reaped a thing,
-    /// leaving a command provider running under init. So the sibling's own
-    /// cancel-and-reap runs here, on the caller's thread, against the graph's
-    /// directory; the graph is then given `patience` to record its ending; and
-    /// last, the sibling's reaper is run again until nothing stamped for that
-    /// directory is alive — what a slow graph started in the meantime included.
+    /// leaving a command provider running under init. So the graph's stop signal
+    /// is written here, on the caller's thread; the graph is given `patience` to
+    /// end and record its ending; and then the sibling's reaper is run against
+    /// the graph's directory, whose contract is that nothing stamped for it is
+    /// still running when it returns.
     ///
-    /// Every process ended is one the sibling stamped with this graph's
-    /// directory as it started it, and is signalled only after its pid and
-    /// kernel start token are re-checked: nothing is matched by name, and a run
-    /// beside this one, in a directory of its own, is never in reach.
+    /// Every process that reap ends is one the sibling stamped with this graph's
+    /// directory as it started it, signalled only after its pid and kernel start
+    /// token are re-checked: nothing is matched by name, and a run beside this
+    /// one, in a directory of its own, is never in reach. The stamp is read off
+    /// each process rather than off the directory, so a graph whose directory is
+    /// gone still has its processes ended.
     pub fn stop(&mut self, patience: Duration) -> bool {
         self.cancel();
         let root = self.root();
-        // A directory the sibling never made is not one to make here: the run
-        // either refused before starting or lives on another host.
-        let root = root.filter(|root| root.is_dir());
         if let (Some(root), Some(id)) = (&root, self.run_id()) {
-            let _ = oneagentgraph::run::cancel(
+            if let Err(error) = oneagentgraph::run::cancel(
                 root,
                 id,
                 &oneagentgraph::run::CancelScope::run(),
-                oneagentgraph::run::CancelMode::Kill,
-            );
+                oneagentgraph::run::CancelMode::Stop,
+            ) {
+                eprintln!("onepipeline: cancel observer {id}: {error}; ending its processes");
+            }
         }
         let deadline = Instant::now() + patience;
         while !self.has_exited() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
         if let Some(root) = &root {
-            while oneagentgraph::scratch::reap(root) > 0 {}
+            oneagentgraph::scratch::reap(root);
         }
         self.has_exited()
     }
