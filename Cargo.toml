@@ -836,6 +836,15 @@ resolver = "2"
 # stops. The attached observer stop journey in
 # `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
 #
+# `oneagentgraph` 0.9.0 is the floor because it runs a two-party member's worker
+# side under its own stamped config alone, never over an `oneharness.toml`
+# discovered in its worktree — below it the observer's monitor died on its first
+# turn in a launch directory carrying one it could not satisfy. `tests/e2e/
+# dispatch.rs`'s
+# `an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy`
+# holds it. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of,
+# so the two requirements move as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -856,7 +865,7 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.8.0"
+oneagentgraph = "0.9.0"
 onevcs = "0.57.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
@@ -987,7 +996,15 @@ onemessagebus = "0.9.3"
 # the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
 # for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
 # requires it, so the lock resolves onejudge once.
-onejudge = "0.21.0"
+#
+# **0.22.0 pins the worker side to one config**: the oneharness provider's
+# `worker_config` names the file a worker turn layers under onejudge's history
+# default and nothing else, where 0.21.0 layered the files discovered from the
+# worktree there too. It is what `oneagentgraph` 0.9.0 composes, and that release
+# requires it. A requirement for the same pre-1.0 reason: `^0.21` admits no
+# 0.22.x. `src/note.rs` re-exports its `note` shapes through `oneagentgraph::note`
+# unchanged.
+onejudge = "0.22.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
