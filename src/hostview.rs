@@ -334,14 +334,16 @@ fn live(paths: &RunPaths, launch: &LaunchRecord, registry: &Registry) -> Result<
     foldable(paths)?;
     let state = {
         let _fold = phase("live-fold");
-        crate::hostphases::add("live-journal-bytes", crate::summary::journal_stamp(paths).0);
-        crate::checkpoint::fold_and_checkpoint(paths)
+        let before = crate::loopstats::journal_bytes_read();
+        let state = crate::checkpoint::fold_and_checkpoint(paths);
+        crate::hostphases::add("live-journal-bytes", folded_since(before));
+        state
     };
     Ok(rows_of(paths, launch, registry, &state, Stops::NotEvidence))
 }
 
-/// The journal bytes this thread has read since `before`: what a cold fold took
-/// from the journal it folds. That is the bytes past the checkpoint it resumed
+/// The journal bytes this thread has read since `before`: what a fold took from
+/// the journal it folds. That is the bytes past the checkpoint it resumed
 /// from, not the journal's length.
 fn folded_since(before: u64) -> u64 {
     crate::loopstats::journal_bytes_read().saturating_sub(before)
