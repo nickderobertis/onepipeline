@@ -81,6 +81,12 @@ pub(crate) fn early_upstream_read() {
     EARLY_UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// What the early-read count stands at, for the check that the observer counts one.
+#[cfg(test)]
+pub(crate) fn early_upstream_reads() -> u64 {
+    EARLY_UPSTREAM_READS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }

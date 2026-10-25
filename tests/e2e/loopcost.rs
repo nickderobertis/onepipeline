@@ -544,11 +544,10 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// loop relays, and a host that relays fewer of them a second than it is sent
 /// never finishes a pass — each one drains a backlog that grew while it ran.
 ///
-/// How many passes a host fits in the window is no part of the verdict. A loaded
-/// Windows runner ran 189 where a quiet Linux host runs about 400 (run
-/// 40201000343), and a host whose every pass takes an interval or longer has
-/// every pass due, so a correct loop reads on each of them. What is asserted is
-/// whether any round of reads began before its interval was due.
+/// How many passes a host fits in the window is no part of the verdict: a host
+/// whose every pass takes an interval or longer has every pass due, so a correct
+/// loop reads on each of them. What is asserted is whether any round of reads
+/// began before its interval was due.
 ///
 /// Measured over [`WINDOW`], the same minute every other bound here is stated
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
