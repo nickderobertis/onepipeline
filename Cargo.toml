@@ -1209,9 +1209,12 @@ onevcs-testing = "0.19.22"
 # task's own record, so a dependency read names a far end under a tracker the host does not
 # configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
 # words.
-onetaskgraph-core = "=0.12.1"
-onetaskgraph-plugin-api = "=0.12.1"
-onetaskgraph-local-md = "=0.12.1"
+# **0.12.3 is the floor because the write-back worker writes through it**: every running
+# graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
+# and `justfile`'s CLI is held to it so the host reads the store release its driver links.
+onetaskgraph-core = "=0.12.3"
+onetaskgraph-plugin-api = "=0.12.3"
+onetaskgraph-local-md = "=0.12.3"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
