@@ -2354,14 +2354,15 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     Ok(settled.state.exit_code())
 }
 
-/// End the observer of a run its driver is letting go of, and wait for it to
-/// have ended before the driver exits — said on the driver's own stderr where
-/// it has not within [`TEARDOWN_PATIENCE`].
+/// End the observer of a run its driver is letting go of, and every process it
+/// started, before the driver exits. A graph that has not also recorded its own
+/// ending within [`TEARDOWN_PATIENCE`] is said on the driver's stderr, since a
+/// reader of that record will find it unfinished.
 fn observer_let_go(run: &str, observer: &mut agentgraph::GraphRun) {
     if !observer.stop(TEARDOWN_PATIENCE) {
         eprintln!(
-            "onepipeline: the observer graph for '{run}' had not ended {} seconds after \
-             its run's driver let go of it",
+            "onepipeline: the observer graph for '{run}' had not recorded its ending {} \
+             seconds after its run's driver let go of it; the processes it started are ended",
             TEARDOWN_PATIENCE.as_secs()
         );
     }

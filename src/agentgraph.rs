@@ -108,9 +108,9 @@ pub const DRIVE_VERB: &str = "drive";
 /// process goes.
 pub const AWAIT_ENDING_FLAG: &str = "--await-ending";
 
-/// The test failpoint a cancelled library graph's relay meets before the
-/// sibling's `wait` reaps its members. See [`GraphRun::stop`].
-const CANCELLED_REAP_GATE_ENV: &str = "ONEPIPELINE_TEST_CANCELLED_REAP_GATE";
+/// The test failpoint a library graph's relay meets once it has been asked to
+/// cancel, before it hands the ask to the sibling. See [`GraphRun::stop`].
+const RELAYED_CANCEL_GATE_ENV: &str = "ONEPIPELINE_TEST_RELAYED_CANCEL_GATE";
 
 /// Where `oneagentgraph` keeps its runs.
 ///
@@ -569,6 +569,9 @@ struct LibraryGraphRun {
     cancel: mpsc::Sender<()>,
     /// The graph run's own id, as the sibling minted it.
     run_id: GraphRunId,
+    /// The graph run's directory, which every member process it starts is
+    /// stamped with. See [`GraphRun::stop`].
+    root: PathBuf,
     exited: Arc<AtomicBool>,
 }
 
@@ -1790,6 +1793,7 @@ impl GraphRun {
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
         let run_id = running.started().run_id.clone();
+        let root = request.state_dir.join(&run_id);
         // Where the sibling keeps the record the relay below holds for. See
         // [`hold_until_ending_recorded`].
         let recorded_under = request.state_dir.clone();
@@ -1803,10 +1807,14 @@ impl GraphRun {
             .name("oneagentgraph-relay".into())
             .spawn(move || {
                 let mut graph_settled = None;
-                let mut cancelled = false;
                 loop {
                     if cancel_rx.try_recv().is_ok() {
-                        cancelled = true;
+                        // Test failpoint only, and nothing at all where its
+                        // variable is unset: a journey holds the relay here to
+                        // delay its cancel past a caller's patience.
+                        if let Err(error) = crate::ordering::meet(RELAYED_CANCEL_GATE_ENV) {
+                            eprintln!("onepipeline: {error}");
+                        }
                         let _ = running.cancel();
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
@@ -1849,15 +1857,6 @@ impl GraphRun {
                         announced
                     }
                     (announced, _) => {
-                        // Test failpoint only, and nothing at all where its
-                        // variable is unset: a journey holds a cancelled graph
-                        // here, short of the wait that reaps its members, to
-                        // outlast the patience of a caller waiting for it.
-                        if cancelled {
-                            if let Err(error) = crate::ordering::meet(CANCELLED_REAP_GATE_ENV) {
-                                eprintln!("onepipeline: {error}");
-                            }
-                        }
                         let ended = settled_by(running.wait());
                         announced.unwrap_or(ended)
                     }
@@ -1872,6 +1871,7 @@ impl GraphRun {
                 settled: settled_rx,
                 cancel: cancel_tx,
                 run_id,
+                root,
                 exited,
             }),
         })
@@ -1995,26 +1995,52 @@ impl GraphRun {
         }
     }
 
-    /// [Cancel](Self::cancel) the graph and wait, up to `patience`, for it to
-    /// have ended — answering whether it did.
+    /// Stop the graph and end every process it started before returning —
+    /// answering whether the graph itself also ended within `patience`.
     ///
-    /// What a caller about to exit needs instead of a cancel alone. The library
-    /// backend's graph lives on this process's threads, and its reap of the
-    /// member processes it started — a command provider among them — runs after
-    /// the cancel is delivered, so a process that exits on the cancel ends the
-    /// reaper before it reaps and leaves those members running under init.
-    /// Ended is [`has_exited`](Self::has_exited): for the library backend, the
-    /// sibling's own `wait` has returned, which is after its members are reaped.
+    /// What a caller about to exit needs instead of a [cancel](Self::cancel)
+    /// alone. The library backend's cancel is handed to a relay thread, so a
+    /// process that exits on it can end before the sibling has reaped a thing,
+    /// leaving a command provider running under init. So the sibling's own
+    /// cancel-and-reap runs here, on the caller's thread, against the graph's
+    /// directory; the graph is then given `patience` to record its ending; and
+    /// last, the sibling's reaper is run again until nothing stamped for that
+    /// directory is alive — what a slow graph started in the meantime included.
+    ///
+    /// Every process ended is one the sibling stamped with this graph's
+    /// directory as it started it, and is signalled only after its pid and
+    /// kernel start token are re-checked: nothing is matched by name, and a run
+    /// beside this one, in a directory of its own, is never in reach.
     pub fn stop(&mut self, patience: Duration) -> bool {
         self.cancel();
+        let root = self.root();
+        // A directory the sibling never made is not one to make here: the run
+        // either refused before starting or lives on another host.
+        let root = root.filter(|root| root.is_dir());
+        if let (Some(root), Some(id)) = (&root, self.run_id()) {
+            let _ = oneagentgraph::run::cancel(
+                root,
+                id,
+                &oneagentgraph::run::CancelScope::run(),
+                oneagentgraph::run::CancelMode::Kill,
+            );
+        }
         let deadline = Instant::now() + patience;
-        while !self.has_exited() {
-            if Instant::now() >= deadline {
-                return false;
-            }
+        while !self.has_exited() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        true
+        if let Some(root) = &root {
+            while oneagentgraph::scratch::reap(root) > 0 {}
+        }
+        self.has_exited()
+    }
+
+    /// The directory the sibling keeps this graph run in, where it announced one.
+    fn root(&self) -> Option<PathBuf> {
+        match &self.backend {
+            GraphBackend::Library(run) => Some(run.root.clone()),
+            GraphBackend::Process(run) => run.run_id().map(|id| state_dir(&process_env()).join(id)),
+        }
     }
 }
 

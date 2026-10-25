@@ -6987,18 +6987,20 @@ fn a_detached_run_that_settles_failed_ends_its_observers_command_judge() {
     a_settled_run_ends_its_observers_command_judge(true, true);
 }
 
-/// An attached run whose observer has not ended within the teardown patience
-/// still lets its driver exit once that patience is spent, and the driver says
-/// which observer it left, rather than holding the launch open on it.
+/// An attached run whose observer's own cancel is delayed past the teardown
+/// patience still has no judge of that observer running once its driver exits:
+/// the driver ends what the graph started rather than leaving on the patience.
+///
+/// The delay is the relay's, held at its private ordering gate between being
+/// asked to cancel and passing the ask on — the window a driver that exited on
+/// its cancel alone lost the judge in. It is never released.
 #[cfg(unix)]
 #[test]
-fn an_observer_that_has_not_ended_does_not_hold_its_settled_runs_driver() {
-    let (world, path, judges) = observed_by_a_command_judge("settled-unended-observer");
-    // llmlint: ignore-block[tests_mirror_real_usage] an observer graph whose reap
-    // outlasts the patience is the property, and the sibling's reaper ends every
-    // real member it is given time for. The failpoint only holds the real relay
-    // short of that reap; the launch, the graph and the outcome are the binary's.
-    let reap = crate::harness::Rendezvous::failpoint();
+fn a_delayed_observer_teardown_still_ends_its_judge_before_the_driver_exits() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("settled-delayed-observer");
+    let relay = crate::harness::Rendezvous::failpoint();
     let mut start = world.agentgraph_cmd(&[
         "start",
         &path,
@@ -7007,10 +7009,9 @@ fn an_observer_that_has_not_ended_does_not_hold_its_settled_runs_driver() {
         &world.dag_graph(),
     ]);
     start
-        .env("ONEPIPELINE_TEST_CANCELLED_REAP_GATE", reap.address())
+        .env("ONEPIPELINE_TEST_RELAYED_CANCEL_GATE", relay.address())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    // llmlint: ignore-end[tests_mirror_real_usage]
     let owner = start.spawn().expect("the attached engine starts");
     world.until("the observer command provider to start", |_| {
         !judges_started(&judges).is_empty()
@@ -7018,15 +7019,20 @@ fn an_observer_that_has_not_ended_does_not_hold_its_settled_runs_driver() {
     for gate in ["turn.go", "turn.settle"] {
         world.script(gate, "");
     }
-    let (held, settled) = std::thread::scope(|scope| {
+    let settled = std::thread::scope(|scope| {
         let exited = scope.spawn(|| owner.wait_with_output().expect("the attached engine exits"));
-        // Held, never released: the driver exits with its observer in here.
-        let _reaping = reap.arrived();
-        let at = std::time::Instant::now();
-        let settled = exited.join().expect("the engine's reaper finishes");
-        (at.elapsed(), settled)
+        let _delayed = relay.arrived();
+        exited.join().expect("the engine's reaper finishes")
     });
-    end_judges_surviving_the_stop(&judges);
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
     let said = String::from_utf8_lossy(&settled.stderr);
     assert_eq!(
         world.run_json("command-stop", "result.json")["state"],
@@ -7034,15 +7040,13 @@ fn an_observer_that_has_not_ended_does_not_hold_its_settled_runs_driver() {
         "{said}"
     );
     assert!(
-        said.contains(
-            "the observer graph for 'command-stop' had not ended 5 seconds after its run's \
-             driver let go of it"
-        ),
-        "the driver did not say it left its observer:\n{said}"
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {started:?} outlived a driver whose \
+         observer teardown was delayed:\n{said}"
     );
     assert!(
-        held < std::time::Duration::from_secs(20),
-        "the driver waited past its teardown patience: {held:?}"
+        said.contains("the processes it started are ended"),
+        "the teardown was not delayed past the patience, so nothing here waited it out:\n{said}"
     );
 }
 
