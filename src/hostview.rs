@@ -340,11 +340,6 @@ fn live(paths: &RunPaths, launch: &LaunchRecord, registry: &Registry) -> Result<
     Ok(rows_of(paths, launch, registry, &state, Stops::NotEvidence))
 }
 
-/// Refuse a run whose journal this read has to fold and cannot open.
-///
-/// A fold of a journal that cannot be read is a fold of nothing, and a run folded
-/// to nothing records nothing running — its dispatches would be left out rather
-/// than flagged. A run with no journal yet is a real state, and is folded as one.
 /// The journal bytes this thread has read since `before`: what a cold fold took
 /// from the journal it folds. That is the bytes past the checkpoint it resumed
 /// from, not the journal's length.
@@ -352,6 +347,11 @@ fn folded_since(before: u64) -> u64 {
     crate::loopstats::journal_bytes_read().saturating_sub(before)
 }
 
+/// Refuse a run whose journal this read has to fold and cannot open.
+///
+/// A fold of a journal that cannot be read is a fold of nothing, and a run folded
+/// to nothing records nothing running — its dispatches would be left out rather
+/// than flagged. A run with no journal yet is a real state, and is folded as one.
 fn foldable(paths: &RunPaths) -> Result<(), String> {
     match std::fs::File::open(paths.journal()) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(format!(
