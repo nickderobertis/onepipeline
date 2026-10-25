@@ -4869,7 +4869,9 @@ fn projected(status: NodeStatus, outcome: Option<&str>, claim: Claim) -> Project
         // The one node here projected under a word that is not its own: a draft
         // has not settled, so `done` and `cancelled` would both be false, and
         // the run is still on it.
-        NodeStatus::Running | NodeStatus::CompleteDraft => ProjectedStatus::InProgress,
+        NodeStatus::Running | NodeStatus::CompleteDraft | NodeStatus::CompleteHeld => {
+            ProjectedStatus::InProgress
+        }
         NodeStatus::Done => ProjectedStatus::Done,
         NodeStatus::Failed if outcome == Some(crate::engine::PROVIDER_FAILED) => {
             ProjectedStatus::ProviderFailed
@@ -8366,6 +8368,19 @@ mod tests {
             "https://example.invalid/pull/9"
         );
         assert_eq!(build["metadata"]["onepipeline.landing"], "unlanded");
+
+        // A node held unlanded on its origin — its publication opens no change
+        // request to be a draft — is the same work still in hand, under the same
+        // word, and neither of the two a settlement takes.
+        let held = word(projected(
+            NodeStatus::CompleteHeld,
+            Some(crate::vcs::HELD_FOR_RELEASE),
+            Claim::Held,
+        ));
+        assert_eq!(held, "in progress");
+        for settled in [NodeStatus::Done, NodeStatus::Cancelled] {
+            assert_ne!(held, word(projected(settled, None, Claim::Held)));
+        }
     }
 
     use super::{

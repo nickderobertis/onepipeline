@@ -740,7 +740,9 @@ impl RunSummary {
                             landing: landing.as_str().to_string(),
                             branch: state.branches.get(node).cloned(),
                             repo: state.graph.get(node).and_then(|node| node.repo.clone()),
-                            drafted: statuses.get(node) == Some(&graph::NodeStatus::CompleteDraft),
+                            drafted: statuses
+                                .get(node)
+                                .is_some_and(|status| status.awaits_release()),
                         },
                     )
                 })

@@ -136,7 +136,9 @@ pub fn execute(
         resume,
         &mut placed,
     ) {
-        engine::Ending::Settled(settlement) => engine::Ending::Settled(placed.stamp(settlement)),
+        engine::Ending::Settled(settlement) => {
+            engine::Ending::Settled(Box::new(placed.stamp(*settlement)))
+        }
         ending => ending,
     }
 }
@@ -279,7 +281,7 @@ fn execute_placed(
             executor, paths, launch, &node, references, stack, course, &notes, cancel, tx, ended,
             attempt, placed,
         ) {
-            Attempt::Settled(settlement) => return engine::Ending::Settled(*settlement),
+            Attempt::Settled(settlement) => return engine::Ending::Settled(settlement),
             Attempt::Preserving(mut preserved) => {
                 // An attempt that armed nothing carries the latest one before it
                 // that did, so the settlement a spent budget writes on it still
@@ -344,9 +346,9 @@ fn execute_placed(
         if let Some(same) =
             republished(published.as_deref(), &preserved.tip).filter(|_| !unconcluded)
         {
-            return engine::Ending::Settled(republished_the_same_commit(
+            return engine::Ending::Settled(Box::new(republished_the_same_commit(
                 &node.id, &preserved, &endings, &same, attempt,
-            ));
+            )));
         }
         published = match &preserved.tip {
             crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
@@ -378,7 +380,9 @@ fn execute_placed(
                     let _ = tx.send(Message::SessionConflicted(Box::new(unconverged)));
                 }
             }
-            return engine::Ending::Settled(stopped_retrying(&node.id, &preserved, &endings));
+            return engine::Ending::Settled(Box::new(stopped_retrying(
+                &node.id, &preserved, &endings,
+            )));
         }
         attempt = attempt.saturating_add(1);
         // What the conversation that just ended was shown, and what reached the
@@ -406,11 +410,11 @@ fn execute_placed(
             // record; what this arm adds is the settlement, which is `stopped_retrying`'s
             // shape with the fold's own sentence as its detail.
             Err(why) => {
-                return engine::Ending::Settled(not_dispatched_again(
+                return engine::Ending::Settled(Box::new(not_dispatched_again(
                     &node.id,
                     &preserved,
                     &why.to_string(),
-                ));
+                )));
             } // llmlint: ignore-end[changed_behavior_has_e2e]
         };
         // Another `node-dispatched` rather than a kind of its own, so a reader
@@ -1023,6 +1027,34 @@ fn attempt_once(
             &launch.boundary.term_scope,
         );
     }
+    // A finished, accepted node whose publication opens no change request, still
+    // waiting on a release it adopted early: there is no change request to hold as
+    // a draft, so its branch is held unlanded on the origin instead, and nothing
+    // is drafted or published.
+    if let Some(awaiting) = release_hold(
+        node,
+        references,
+        worktree.as_deref(),
+        base.as_deref(),
+        began,
+    ) {
+        return hold_for_release(
+            node,
+            awaiting,
+            Opened {
+                worktree: worktree.as_deref(),
+                base: base.as_deref(),
+                began,
+                token: &token,
+                branch,
+            },
+            stream,
+            tx,
+            &whose,
+            vcs_filter,
+            &launch.boundary.term_scope,
+        );
+    }
     let mut attempted = publish(
         executor,
         paths,
@@ -1617,6 +1649,166 @@ fn preserve(
     }
 }
 
+/// Whether this node's finished work is **held unlanded** for a release rather than
+/// published: what it still awaits, where it is.
+///
+/// Three conditions, each read at the one moment it decides anything. The branch
+/// is not level with its base — a level one has nothing to hold and settles as a
+/// publication would. Its publication opens no change request: the node's own
+/// `merge_policy` where it states one, else its identity's policy as `onevcs`
+/// resolves it, put to the one predicate the loader uses, so the two cannot read
+/// one policy two ways. And a release it adopted early is still out, asked last
+/// and only of such a node, so a change-request node's publication asks exactly
+/// what it always asked, when it always asked it.
+///
+/// A policy this build cannot read is `None`: the publication goes ahead with its
+/// reason and `onevcs` decides, so a pin that is still temporary is never landed on
+/// this crate's guess.
+fn release_hold(
+    node: &Node,
+    references: &[crate::plan::CrossRepoReference],
+    worktree: Option<&std::path::Path>,
+    base: Option<&str>,
+    began: std::time::SystemTime,
+) -> Option<crate::release::Awaiting> {
+    if references.is_empty() {
+        return None;
+    }
+    if worktree
+        .zip(base)
+        .and_then(|(worktree, base)| crate::vcs::level_with_base(worktree, base, began))
+        .is_some()
+    {
+        return None;
+    }
+    let policy = match node.merge_policy {
+        Some(stated) => stated,
+        None => match onevcs::rules_check(node.repo.as_deref()?) {
+            Ok(checked) => checked.policy.publication,
+            // llmlint: ignore[changed_behavior_has_e2e] a session for this identity was
+            // just opened and its dispatch accepted, both of which read the same registry
+            // and rules file; an identity that resolved then and not now is a host edited
+            // mid-dispatch, and the arm hands the decision to `onevcs`'s own publication
+            // exactly as this closeout did before the hold existed.
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: node '{}': its publication policy could not be read ({error}), \
+                     so it publishes with its release reason and onevcs decides",
+                    node.id
+                );
+                return None;
+            }
+        },
+    };
+    if crate::destination::opens_a_change_request(policy) {
+        return None;
+    }
+    crate::release::awaiting(references)
+}
+
+/// Hold a finished node's branch **unlanded** on its identity's origin until the
+/// release it awaits exists: the closeout of a node [`release_hold`] answered for.
+///
+/// Reached only where a change-request publication would have been — the worker
+/// finished and its judge accepted the work — and through the same close-then-push
+/// [`preserve`] keeps a branch by: nothing lands on the base, no change request
+/// opens, and `onevcs` publish is not called, because it refuses a draft under a
+/// policy that opens no change request. The identity's merge path does not run
+/// here: `onevcs::preserve` pushes the branch ref without it, and it runs once, at
+/// landing, over the re-pinned tree.
+///
+/// The node settles `complete-but-held` under [`crate::vcs::HELD_FOR_RELEASE`],
+/// naming the release, its branch, the commit it stands at and what the push
+/// found to do, with the releases it awaits as data. The release arriving
+/// re-dispatches it on that branch with the arrival note, and that publication
+/// carries no reason and lands. A preservation `onevcs` refuses settles `failed`
+/// under [`engine::INFRASTRUCTURE_FAILURE`], exactly as [`preserve`]'s does.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "`preserve`'s own context, and what the node awaits"
+)]
+fn hold_for_release(
+    node: &Node,
+    awaiting: crate::release::Awaiting,
+    opened: Opened<'_>,
+    stream: Option<crate::vcs::Follower>,
+    tx: &Sender<Message>,
+    whose: &Labels,
+    filter: Option<&EventFilter>,
+    term_scope: &onevcs::TermScope,
+) -> Attempt {
+    let Opened {
+        worktree,
+        token,
+        branch,
+        ..
+    } = opened;
+    check_criteria(node, worktree, tx);
+    let branch = branch.or_else(|| crate::vcs::working_session(token).map(|open| open.branch));
+    let committed = worktree.and_then(crate::vcs::worktree_head);
+    let answered = close_and_keep(
+        node,
+        token,
+        branch.as_deref(),
+        stream,
+        tx,
+        whose,
+        filter,
+        term_scope,
+    );
+    match answered {
+        Ok(preserved) => {
+            let head = preserved
+                .commit
+                .as_deref()
+                .and_then(crate::vcs::usable)
+                .or(committed);
+            Attempt::settled(Settlement {
+                detail: Some(crate::views::one_line(&crate::release::held_detail(
+                    &awaiting.first,
+                    &preserved.branch,
+                    head.as_deref().unwrap_or("its tip"),
+                    preserved.outcome,
+                ))),
+                head,
+                branch: Some(preserved.branch),
+                remote: Some(preserved.outcome),
+                awaiting: awaiting.releases,
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::CompleteHeld,
+                    Some(crate::vcs::HELD_FOR_RELEASE),
+                )
+            })
+        }
+        Err(why) => {
+            let head = match crate::vcs::session_tip(token) {
+                crate::vcs::SessionTip::At(commit) => Some(commit.as_str().to_owned()),
+                crate::vcs::SessionTip::Unmoved | crate::vcs::SessionTip::Unknown => committed,
+            };
+            let name = branch.as_deref().unwrap_or("the session's branch");
+            let at = head
+                .as_deref()
+                .map(|head| format!(" at {head}"))
+                .unwrap_or_default();
+            Attempt::settled(Settlement {
+                detail: Some(crate::views::one_line(&format!(
+                    "onevcs could not preserve {name} to hold it for its release: {why}. The work \
+                     stays on the local branch {name}{at}; `onevcs preserve {name}` puts it on \
+                     the origin once that is fixed"
+                ))),
+                branch,
+                head,
+                ..Settlement::plain(
+                    &node.id,
+                    NodeStatus::Failed,
+                    Some(engine::INFRASTRUCTURE_FAILURE),
+                )
+            })
+        }
+    }
+}
+
 /// Close a lifecycle node's session and put its branch on the identity's origin, then read
 /// the session's stream through: what [`preserve`] keeps a branch by, and what [`withhold`]
 /// leaves one by for the run that took the project over.
@@ -2030,7 +2222,10 @@ fn publish(
     // this crate has always made. The release reason wins over the plan's own
     // `draft`: a draft a release will lift holds the run, and one the plan asked
     // for holds nothing, so where both apply the node settles on the first.
-    let draft = crate::release::draft_reason(references)
+    let awaiting = crate::release::awaiting(references);
+    let draft = awaiting
+        .as_ref()
+        .map(|awaiting| awaiting.reason.clone())
         .or_else(|| node.draft.then(|| crate::release::held_reason(&node.id)));
     // No body where the session already holds the change request: the
     // description was written above, and a publication writes a body only where
@@ -2289,6 +2484,14 @@ fn publish(
                 // cannot land and the run would report finished with the git pin
                 // it launched against sitting in an open change — which is the
                 // one ending fast adoption must not have.
+                // What a draft held for its releases still awaits, as data beside
+                // the detail a person reads — on that settlement and no other.
+                awaiting: match drafted_status(&published.outcome, draft.as_ref()) {
+                    NodeStatus::CompleteDraft => awaiting
+                        .map(|awaiting| awaiting.releases)
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                },
                 ..Settlement::plain(
                     &node.id,
                     drafted_status(&published.outcome, draft.as_ref()),

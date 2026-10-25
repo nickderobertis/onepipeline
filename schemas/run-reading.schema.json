@@ -20,7 +20,7 @@
       "format": "uint32",
       "minimum": 0,
       "description": "The version of this document.",
-      "const": 2
+      "const": 3
     },
     "run_id": {
       "type": "string",
@@ -81,6 +81,13 @@
       ],
       "description": "The decision the run is paused on, or `null` for a run that is not."
     },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ReadingNode"
+      },
+      "description": "Every node of the run's graph, in plan order, with where it has got to."
+    },
     "unanswered": {
       "type": "array",
       "items": {
@@ -106,7 +113,8 @@
     "liveness",
     "driven",
     "ending",
-    "paused"
+    "paused",
+    "nodes"
   ],
   "title": "RunReading",
   "description": "Whether a run is driven or ended, as one document a script reads:\n`onepipeline status <RUN> --json`.\n\n`ending` and `paused` are never both set, and both are `null` while the run is\ndriven. `schemas/run-reading.schema.json` states the document.",
@@ -163,7 +171,7 @@
           "items": {
             "$ref": "#/$defs/EndedNode"
           },
-          "description": "Every node not `done`, in plan order \u2014 the list a failure hook is handed,\nand empty for `complete`."
+          "description": "Every node not `done`, in plan order — the list a failure hook is handed,\nand empty for `complete`."
         }
       },
       "required": [
@@ -216,6 +224,7 @@
             "parked",
             "cancelled",
             "complete-but-draft",
+            "complete-but-held",
             "failed",
             "skipped"
           ]
@@ -233,7 +242,7 @@
         "status",
         "outcome"
       ],
-      "description": "One node that was not `done` when a run ended \u2014 as a failure hook is handed it."
+      "description": "One node that was not `done` when a run ended — as a failure hook is handed it."
     },
     "Paused": {
       "type": "object",
@@ -256,12 +265,88 @@
       ],
       "description": "The decision a run nothing is driving is paused on."
     },
+    "ReadingNode": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The node's id."
+        },
+        "status": {
+          "type": "string",
+          "description": "The node's status word.",
+          "enum": [
+            "pending",
+            "ready",
+            "running",
+            "waiting",
+            "blocked",
+            "parked",
+            "cancelled",
+            "done",
+            "complete-but-draft",
+            "complete-but-held",
+            "failed",
+            "skipped"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The outcome its settlement recorded, or `null` for a node that recorded none."
+        },
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The detail its standing settlement recorded, or `null` for a node with none —\none not yet settled, or settled without one."
+        },
+        "awaiting": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/AwaitedRelease"
+          },
+          "description": "The releases a node held for them still awaits, one per release in the order\nits reference rows list them: present exactly on a `complete-but-held` or\n`complete-but-draft` node whose settlement names them, and omitted otherwise."
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "outcome",
+        "detail"
+      ],
+      "description": "One node of a run, as `status <RUN> --json` reads it."
+    },
+    "AwaitedRelease": {
+      "type": "object",
+      "properties": {
+        "producer": {
+          "type": "string",
+          "description": "The producer's repository identity, its normalized origin."
+        },
+        "target": {
+          "type": "string",
+          "description": "The release target of it awaited."
+        }
+      },
+      "required": [
+        "producer",
+        "target"
+      ],
+      "description": "One release a held node awaits."
+    },
     "UnansweredEnvelope": {
       "type": "object",
       "properties": {
         "envelope": {
           "type": "string",
-          "description": "The channel envelope id \u2014 a decimal string in the document."
+          "description": "The channel envelope id — a decimal string in the document."
         },
         "delivery": {
           "anyOf": [
@@ -272,7 +357,7 @@
               "type": "null"
             }
           ],
-          "description": "Where its live note stands, as the run's live driver last wrote it \u2014\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
+          "description": "Where its live note stands, as the run's live driver last wrote it —\nomitted where no driver is live, which leaves the envelope to be answered\nby the run's next driver, and where the live driver holds no live note of\nit or behind one."
         }
       },
       "required": [
@@ -291,14 +376,14 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was offered, in epoch milliseconds \u2014 RFC 3339 on the wire."
+              "description": "When it was offered, in epoch milliseconds — RFC 3339 on the wire."
             },
             "deadline": {
               "type": [
                 "string",
                 "null"
               ],
-              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds \u2014 RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
+              "description": "When the note being offered stops waiting for a turn to take it, in\nepoch milliseconds — RFC 3339 on the wire. Present exactly where that\nnote carries a `delivery_timeout_seconds`, and omitted otherwise."
             },
             "state": {
               "type": "string",
@@ -351,11 +436,11 @@
             },
             "since": {
               "type": "string",
-              "description": "When it was first held, in epoch milliseconds \u2014 RFC 3339 on the wire."
+              "description": "When it was first held, in epoch milliseconds — RFC 3339 on the wire."
             },
             "behind_envelope": {
               "type": "string",
-              "description": "The channel envelope id of the envelope whose note it waits behind \u2014\na decimal string on the wire."
+              "description": "The channel envelope id of the envelope whose note it waits behind —\na decimal string on the wire."
             },
             "state": {
               "type": "string",

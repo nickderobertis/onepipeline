@@ -2173,8 +2173,24 @@ fn shell_word(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-/// Why one fast-adoption node's change request is opened as a **draft**, asked of
-/// `onevcs` at the moment the publication is composed.
+/// What one fast-adoption node is still waiting on at its publication: the reason
+/// its publication is held, and every release it awaits.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Awaiting {
+    /// The reason handed to `onevcs` for a draft: always
+    /// [`onevcs::DraftReason::AwaitingRelease`], naming [`first`](Self::first).
+    pub(crate) reason: onevcs::DraftReason,
+    /// The first release still awaited — the one the reason names, and the one a
+    /// held node's detail names.
+    pub(crate) first: crate::payload::Awaited,
+    /// One entry per release still awaited, in the order the node's reference rows
+    /// list them — what `node-settled`'s `awaiting` carries for a view to read.
+    pub(crate) releases: Vec<crate::payload::Awaited>,
+}
+
+/// Why one fast-adoption node's change request is opened as a **draft** — or,
+/// where its publication opens none, its branch held unlanded — asked of `onevcs`
+/// at the moment the publication is composed.
 ///
 /// The rows are the node's own reference block, so what is asked about is exactly
 /// what the worker was told to pin against. `None` is a node with nothing to wait
@@ -2187,7 +2203,7 @@ fn shell_word(word: &str) -> String {
 /// A row this run cannot put a question about is **not** drafted against — the
 /// judgement [`Dependency::askable`] already makes for the hold — because a draft
 /// nothing can ever lift is a change request nobody can finish.
-pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
+pub(crate) fn awaiting(references: &[CrossRepoReference]) -> Option<Awaiting> {
     // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
     // half of `askable`: a row is only composed for a dependency that settled `done`
     // in a repository declaring release targets, so it has the branch or the landing
@@ -2213,8 +2229,8 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
     let (row, reference, target) = unreleased.first()?;
     // One reason names one dependency, because [`onevcs::DraftReason`] carries one
     // target — so how many are being waited on is said in the sentence a person
-    // reads rather than left for them to count.
-    Some(onevcs::DraftReason::AwaitingRelease {
+    // reads rather than left for them to count, and listed whole beside it.
+    let reason = onevcs::DraftReason::AwaitingRelease {
         because: format!(
             "this node adopted {identity} early and is pinned to {reference} rather than to a \
              released version; it is one of {count} release(s) this node adopted early, and \
@@ -2225,6 +2241,20 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
         awaiting: row.repository.clone(),
         target: target.clone(),
         reference: (*reference).to_owned(),
+    };
+    Some(Awaiting {
+        reason,
+        first: crate::payload::Awaited {
+            producer: row.repository.clone(),
+            target: target.to_string(),
+        },
+        releases: unreleased
+            .iter()
+            .map(|(row, _, target)| crate::payload::Awaited {
+                producer: row.repository.clone(),
+                target: target.to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -2252,6 +2282,35 @@ pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
         ),
         onevcs::DraftReason::Held { .. } => HELD_DETAIL.to_owned(),
     }
+}
+
+/// The one line a node held **unlanded** settles with: its work finished and
+/// accepted, its publication opening no change request, and a release it adopted
+/// early not out yet.
+///
+/// Composed beside [`drafted_detail`] so the two holds are spelled in one module,
+/// and from the first release [`awaiting`] found still out — the one its reason
+/// names — so the settlement cannot name a different release from the one the node
+/// waits for. `kept` is what putting the branch on the origin answered, said in
+/// words — `pushed`, `already on origin`, or `no origin` — on a line written for a
+/// person rather than as [`crate::vcs::preservation_word`]'s journal word.
+pub(crate) fn held_detail(
+    awaited: &crate::payload::Awaited,
+    branch: &str,
+    commit: &str,
+    kept: onevcs::Preservation,
+) -> String {
+    let kept = match kept {
+        onevcs::Preservation::Pushed => "pushed",
+        onevcs::Preservation::AlreadyOnOrigin => "already on origin",
+        onevcs::Preservation::NoRemote => "no origin",
+    };
+    format!(
+        "complete, and held unlanded: awaiting the {target} release of {producer}, kept on \
+         {branch} at {commit} ({kept}); it lands when that release arrives",
+        target = awaited.target,
+        producer = awaited.producer,
+    )
 }
 
 /// The one line a node that was asked to leave its change request as a draft
@@ -2400,10 +2459,10 @@ pub(crate) fn watching(
         .graph
         .iter()
         .filter(|node| {
-            matches!(
-                statuses.get(&node.id),
-                Some(&NodeStatus::Ready | &NodeStatus::CompleteDraft)
-            ) || running.contains(&node.id)
+            statuses
+                .get(&node.id)
+                .is_some_and(|status| *status == NodeStatus::Ready || status.awaits_release())
+                || running.contains(&node.id)
         })
         .cloned()
         .collect()
