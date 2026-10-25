@@ -6968,7 +6968,6 @@ fn an_attached_run_that_settles_done_ends_its_observers_command_judge() {
     a_settled_run_ends_its_observers_command_judge(false, false);
 }
 
-/// The same for a run whose node fails: a failed settlement is still an end.
 #[cfg(unix)]
 #[test]
 fn an_attached_run_that_settles_failed_ends_its_observers_command_judge() {
@@ -6982,11 +6981,69 @@ fn a_detached_run_that_settles_done_ends_its_observers_command_judge() {
     a_settled_run_ends_its_observers_command_judge(false, true);
 }
 
-/// The same for a detached run whose node fails.
 #[cfg(unix)]
 #[test]
 fn a_detached_run_that_settles_failed_ends_its_observers_command_judge() {
     a_settled_run_ends_its_observers_command_judge(true, true);
+}
+
+/// An attached run whose observer has not ended within the teardown patience
+/// still lets its driver exit once that patience is spent, and the driver says
+/// which observer it left, rather than holding the launch open on it.
+#[cfg(unix)]
+#[test]
+fn an_observer_that_has_not_ended_does_not_hold_its_settled_runs_driver() {
+    let (world, path, judges) = observed_by_a_command_judge("settled-unended-observer");
+    // llmlint: ignore-block[tests_mirror_real_usage] an observer graph whose reap
+    // outlasts the patience is the property, and the sibling's reaper ends every
+    // real member it is given time for. The failpoint only holds the real relay
+    // short of that reap; the launch, the graph and the outcome are the binary's.
+    let reap = crate::harness::Rendezvous::failpoint();
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    start
+        .env("ONEPIPELINE_TEST_CANCELLED_REAP_GATE", reap.address())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let owner = start.spawn().expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let (held, settled) = std::thread::scope(|scope| {
+        let exited = scope.spawn(|| owner.wait_with_output().expect("the attached engine exits"));
+        // Held, never released: the driver exits with its observer in here.
+        let _reaping = reap.arrived();
+        let at = std::time::Instant::now();
+        let settled = exited.join().expect("the engine's reaper finishes");
+        (at.elapsed(), settled)
+    });
+    end_judges_surviving_the_stop(&judges);
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert_eq!(
+        world.run_json("command-stop", "result.json")["state"],
+        "complete",
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "the observer graph for 'command-stop' had not ended 5 seconds after its run's \
+             driver let go of it"
+        ),
+        "the driver did not say it left its observer:\n{said}"
+    );
+    assert!(
+        held < std::time::Duration::from_secs(20),
+        "the driver waited past its teardown patience: {held:?}"
+    );
 }
 
 /// A missing observer record cannot create a replacement graph directory or

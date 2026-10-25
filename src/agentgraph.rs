@@ -108,6 +108,10 @@ pub const DRIVE_VERB: &str = "drive";
 /// process goes.
 pub const AWAIT_ENDING_FLAG: &str = "--await-ending";
 
+/// The test failpoint a cancelled library graph's relay meets before the
+/// sibling's `wait` reaps its members. See [`GraphRun::stop`].
+const CANCELLED_REAP_GATE_ENV: &str = "ONEPIPELINE_TEST_CANCELLED_REAP_GATE";
+
 /// Where `oneagentgraph` keeps its runs.
 ///
 /// Restated rather than imported, and that is a duplicated configuration
@@ -1799,8 +1803,10 @@ impl GraphRun {
             .name("oneagentgraph-relay".into())
             .spawn(move || {
                 let mut graph_settled = None;
+                let mut cancelled = false;
                 loop {
                     if cancel_rx.try_recv().is_ok() {
+                        cancelled = true;
                         let _ = running.cancel();
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
@@ -1843,6 +1849,15 @@ impl GraphRun {
                         announced
                     }
                     (announced, _) => {
+                        // Test failpoint only, and nothing at all where its
+                        // variable is unset: a journey holds a cancelled graph
+                        // here, short of the wait that reaps its members, to
+                        // outlast the patience of a caller waiting for it.
+                        if cancelled {
+                            if let Err(error) = crate::ordering::meet(CANCELLED_REAP_GATE_ENV) {
+                                eprintln!("onepipeline: {error}");
+                            }
+                        }
                         let ended = settled_by(running.wait());
                         announced.unwrap_or(ended)
                     }
