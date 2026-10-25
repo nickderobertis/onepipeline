@@ -54,7 +54,13 @@ oneharness-core = { workspace = true }
 # turn, and `tests/e2e/dispatch.rs`'s
 # `a_judged_codex_turn_starts_with_plugins_off_unless_its_config_opts_in` drives
 # that real process — over the one `oneharness-core` above, since 0.25.2 requires
-# `^0.28.2` — with only `codex` doubled. Nothing here calls into it.
+# `^0.28.2` — with only `codex` doubled. The `oneharness-cli` bin below is that
+# same CLI's shell over this one dependency, so a journey can name the released
+# CLI from this package's own build.
+#
+# A normal dependency rather than a dev-dependency, because a `[[bin]]` cannot link
+# a dev-dependency; this package is test-support and publishes nothing, so the
+# dependency reaches no artifact either way.
 oneharness = "0.26.1"
 # The graph document's own reader, so the observer double runs the judge-side
 # provider the graph *declares* rather than one it remembered: a graph that named
@@ -77,12 +83,6 @@ tokio = { workspace = true, features = ["rt"] }
 # worker that keeps working through the polite ask to stop. The crate under test
 # names the same dependency for the same platform, and for the same reason —
 # what a process does with a signal is not a `std` question on this MSRV floor.
-# `oneharness` is named for the binary `tests/e2e/harness.rs`'s
-# `oneharness_binary` builds from it, not for any item this crate imports, so no
-# `use` of it exists for cargo-machete to find.
-[package.metadata.cargo-machete]
-ignored = ["oneharness"]
-
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -130,6 +130,17 @@ path = "src/bin/fake-codex.rs"
 [[bin]]
 name = "fake-oneharness"
 path = "src/bin/fake-oneharness.rs"
+
+# Not a double: the **released** `oneharness` CLI's own shell — parse, dispatch,
+# exit — over the `oneharness` dependency above, and so over the one
+# `oneharness-core` the engine links. A journey that must meet a refusal the real
+# CLI makes names this at `ONEAGENTGRAPH_ONEHARNESS_BIN` and doubles only the
+# paid harness below it; `fake-oneharness` doubles oneharness itself.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a test program of the
+# e2e suite, like the bins beside it; it is not a command this repository publishes.
+[[bin]]
+name = "oneharness-cli"
+path = "src/bin/oneharness-cli.rs"
 
 # Not a double either: a **real** `onetaskgraph` source that can be told to fail the
 # way a hosted one does. It serves every read and write out of the real `local-md`
