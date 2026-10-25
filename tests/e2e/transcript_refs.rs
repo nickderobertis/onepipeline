@@ -172,18 +172,8 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         monitor.stdout
     );
 
-    // From the run's first byte: a watch given no cursor starts where the run's
-    // checkpoint stops, and what this holds is how each record of the run is shown.
-    let from_the_start = format!("1:{run}:0");
-    let watched = world.run(&[
-        "watch",
-        run,
-        "--cursor",
-        &from_the_start,
-        "--all",
-        "--timeout",
-        "0",
-    ]);
+    // Every event in the store (`--all`), from the run's first byte.
+    let watched = world.run(&["watch", run, "--all", "--timeout", "0"]);
     assert!(
         watched
             .stderr
@@ -232,6 +222,9 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     assert_eq!(returned["input"], Value::Null, "{returned}");
     // Through the `planner` profile a bare `watch` reads with, no relayed turn
     // is shown, reference or not: that profile is what a supervisor wakes on.
+    // From the run's first byte, since a watch through a profile given no cursor
+    // starts where the run's checkpoint stops.
+    let from_the_start = format!("1:{run}:0");
     let planner = world.run(&["watch", run, "--cursor", &from_the_start, "--timeout", "0"]);
     assert!(
         machine(&planner.stdout)
@@ -370,18 +363,8 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
 
     // What the agent said once released, both as its own activity and as the
     // turn's closing words, served whole on the machine record.
-    // From the run's first byte: a watch given no cursor starts where the run's
-    // checkpoint stops, and what this holds is how each record of the run is shown.
-    let from_the_start = format!("1:{run}:0");
-    let settled = world.run(&[
-        "watch",
-        run,
-        "--cursor",
-        &from_the_start,
-        "--all",
-        "--timeout",
-        "0",
-    ]);
+    // Every event in the store (`--all`), from the run's first byte.
+    let settled = world.run(&["watch", run, "--all", "--timeout", "0"]);
     let records = machine(&settled.stdout);
     let said: Vec<&Value> = records
         .iter()
@@ -503,18 +486,8 @@ fn assert_unavailable_everywhere(
         "`monitor` does not say the call's transcript is unavailable:\n{}",
         monitor.stdout
     );
-    // From the run's first byte: a watch given no cursor starts where the run's
-    // checkpoint stops, and what this holds is how each record of the run is shown.
-    let from_the_start = format!("1:{run}:0");
-    let watched = world.run(&[
-        "watch",
-        run,
-        "--cursor",
-        &from_the_start,
-        "--all",
-        "--timeout",
-        "0",
-    ]);
+    // Every event in the store (`--all`), from the run's first byte.
+    let watched = world.run(&["watch", run, "--all", "--timeout", "0"]);
     assert!(
         watched.stderr.contains(diagnostic),
         "`watch` does not say the call's transcript is unavailable:\n{}",
