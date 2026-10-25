@@ -1011,6 +1011,7 @@ pub fn metadata_of(description: &str) -> Map<String, Value> {
 /// How long a journey waits for this endpoint before it calls a wait lost.
 pub const PATIENCE: Duration = Duration::from_secs(120);
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this models a remote service's behaviour, not a contract with a source to reconcile against: hosted Linear publishes no statement of what it stores, the spike's measured stored forms exist only in its report, and the one declaration a gate once compared this with — the Linear plugin's `stored_form` — is what onetaskgraph 0.12.4 retires, because a table of Linear's rewrites never converges. Nothing in the engine or the store reads this model: the launch journey needs only rewrites the store does not predict, stable on their own output, which `the_loopback_stores_every_rewrite_the_spike_measured` holds; drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
 /// What Linear stores when it is written Markdown, as this endpoint models it: every write of an
 /// issue's `description`, a project's `content` and a document's `content` is stored as this
 /// answers, a read hands back what was stored, and a write's own answer selects it too.
@@ -1243,6 +1244,7 @@ pub const MEASURED: &[(&str, &str, &str)] = &[
         "| a |\n| -- |\n\n<!-- onetaskgraph.metadata `{\"k\":\"**\"}` -->",
     ),
 ];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// The content a description holding a metadata slot reports, as a read of it does: the text
 /// above the slot less the one blank line that sets it off — of which only a line break is left
