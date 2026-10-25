@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.91.0](https://github.com/nickderobertis/onepipeline/compare/v0.90.0...v0.91.0) - 2026-10-25
+
+### Added
+
+- [**breaking**] execute private coordination plans with task-owned visibility ([#1152](https://github.com/nickderobertis/onepipeline/pull/1152))
+
+### Fixed
+
+- free the run's event store before the Windows stop-guard journey replaces it ([#1160](https://github.com/nickderobertis/onepipeline/pull/1160))
+
 ## [0.90.0](https://github.com/nickderobertis/onepipeline/compare/v0.89.3...v0.90.0) - 2026-10-25
 
 ### Added
