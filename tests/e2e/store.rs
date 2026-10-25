@@ -839,10 +839,7 @@ fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
     let name = "slow";
     let project = world.plan(
         name,
-        &plan_of(
-            name,
-            vec![agent("design", &[]), agent("spare", &[])],
-        ),
+        &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
     );
     landed_by_an_earlier_copy(&world, &project);
     world.run(&["start", &project, "--detach"]).exited(0);
