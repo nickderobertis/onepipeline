@@ -47,11 +47,10 @@ static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
 static CLAIM_READS: AtomicU64 = AtomicU64::new(0);
 /// Claims of a run's command queue this process made.
 ///
-/// Counted because a claim costs the whole queue's length — the bus reads its log
-/// through to the cursor each time — and a queue holds every envelope its run was
-/// ever sent, so a pass that claims whatever the queue holds pays the run's history
-/// where one that finds the queue unmoved pays nothing. No other reading tells the
-/// two apart: neither writes anything.
+/// Counted because a claim takes the queue's lock and reads its log from the
+/// cursor's offset, so a pass that claims whatever the queue holds pays a locked
+/// read where one that finds the queue unmoved pays nothing. No other reading tells
+/// the two apart: neither writes anything.
 static QUEUE_CLAIMS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.

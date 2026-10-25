@@ -2304,9 +2304,10 @@ impl ChannelState {
     /// command queue has not moved since `seen`: the queue's change token taken
     /// before the caller's last claim, which this keeps current.
     ///
-    /// A claim costs the whole queue's length — the bus reads its log through to
-    /// the cursor on every claim — and a queue holds every envelope the run was
-    /// ever sent, so a claim per pass would cost each pass the run's history.
+    /// A claim takes the queue's lock and reads its log from the cursor's offset,
+    /// so a claim per pass would cost each pass a locked read that finds nothing
+    /// new. That is the whole queue's history on a bus without cursor offsets,
+    /// as before 0.9.4.
     /// The token is taken before the claim it stands for: an envelope appended
     /// after it moves the next token, and so does the cursor that claim
     /// committed, so the claim after a non-empty one runs once and finds the

@@ -224,8 +224,8 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
 }
 
 /// A pass claims the run's command queue only once the queue has moved: a claim
-/// costs the queue's whole length, and a queue holds every envelope its run was ever
-/// sent, so a pass claiming an unmoved queue would pay the run's history. Twenty
+/// takes the queue's lock and reads its log from the cursor's offset, so a pass
+/// claiming an unmoved queue would pay a locked read that finds nothing. Twenty
 /// passes with nothing queued claim nothing; a reply is claimed and answered; and
 /// twenty passes after it claim nothing again.
 #[test]

@@ -7655,8 +7655,8 @@ pub struct Counts {
     pub records_folded: u64,
     /// Reads of the project's driver claim the driver asked its plan store for.
     pub claim_reads: u64,
-    /// Claims of the run's command queue the driver made, each of which costs
-    /// the queue's whole length.
+    /// Claims of the run's command queue the driver made, each of which takes the
+    /// queue's lock and reads its log from the cursor's offset.
     pub queue_claims: u64,
 }
 
