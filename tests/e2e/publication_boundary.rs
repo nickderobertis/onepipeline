@@ -1780,8 +1780,6 @@ fn declare_package(world: &World, repository: &Repository, package: &str) {
     crate::harness::git(world, &repository.checkout, &["push", "origin", "main"]);
 }
 
-/// Write this host's public phrase file, `public-phrases.yml` under the sandboxed onevcs
-/// home, as `document`.
 fn declare_phrases(world: &World, document: &str) {
     std::fs::write(world.onevcs_home().join("public-phrases.yml"), document)
         .expect("the public phrase file is written");
@@ -1790,7 +1788,6 @@ fn declare_phrases(world: &World, document: &str) {
 /// A synthetic host public phrase: the private package name `qorv` after a hyphen.
 const PHRASES: &str = "version: 1\nphrases:\n  - relay-qorv\n";
 
-/// Whether a direct `reply` of `envelope` to `run` was taken.
 fn replied(world: &World, run: &str, envelope: &Value) {
     let replied = world.run_with_stdin(&["reply", run], &envelope.to_string());
     assert!(
