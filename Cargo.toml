@@ -1212,9 +1212,15 @@ onevcs-testing = "0.19.22"
 # **0.12.3 is the floor because the write-back worker writes through it**: every running
 # graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
 # and `justfile`'s CLI is held to it so the host reads the store release its driver links.
-onetaskgraph-core = "=0.12.3"
-onetaskgraph-plugin-api = "=0.12.3"
-onetaskgraph-local-md = "=0.12.3"
+# **0.12.4 is the floor: what Linear stores is read off each write's own answer**
+# (`otg-linear-stored-content`). The store predicts no rewrite — `TaskSource::stored_form`
+# and the stdio `stored_form` method are retired — so a plan copied into Linear verifies
+# whatever Linear's serializer made of it, and no read of an item follows a metadata write.
+# It is breaking; `tests/e2e/linear_launch.rs` drives it against a loopback that stores what
+# spike `spike-linear-stored-content` measured.
+onetaskgraph-core = "=0.12.4"
+onetaskgraph-plugin-api = "=0.12.4"
+onetaskgraph-local-md = "=0.12.4"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
