@@ -680,6 +680,19 @@ fn a_run_whose_event_store_cannot_be_read_is_still_decided_from_its_watch_state(
     let session = owner.session.clone();
     let paths = onepipeline::views::RunPaths::under(&world.runs, &run);
 
+    // The run's driver ended first. It is the store's one appender, and the
+    // `node-dispatched` the wait above saw is readable before that append's
+    // handle closes: the receipt beside the store is published under it. Windows
+    // shares no deletion with an appender, so a store removed under a live
+    // driver is refused there; and a driver left running meets a directory at
+    // its next append and ends on its own anyway. Ended here, nothing the held
+    // run started holds the store when it goes, on any platform.
+    let driver = crate::harness::end_driver(&owner, &run);
+    assert!(
+        crate::harness::process_ended(driver),
+        "the driver {driver} of {run} is still running, so it can still hold the store"
+    );
+
     // The store is unreadable and the document beside it is current about what
     // is there — the state `tests/e2e/unwatched.rs` decides the verb over.
     //
