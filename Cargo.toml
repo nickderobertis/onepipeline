@@ -1194,8 +1194,9 @@ onevcs-testing = "0.19.21"
 # task's own record, so a dependency read names a far end under a tracker the host does not
 # configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
 # words.
-# **0.12.3 links the faster protected writes** (`otg-cut-store-startup`, 0.12.2, and
-# `otg-close-copy-gaps`, 0.12.3): both are `perf`, so no public type here moves.
+# **0.12.3 is the floor because the write-back worker writes through it**: every running
+# graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
+# and `justfile`'s CLI is held to it so the host reads the store release its driver links.
 onetaskgraph-core = "=0.12.3"
 onetaskgraph-plugin-api = "=0.12.3"
 onetaskgraph-local-md = "=0.12.3"
