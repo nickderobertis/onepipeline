@@ -53,9 +53,10 @@ pub const DETAILED_PROFILE: &str = "detailed";
 /// and **6** the commands a run fires when it ends — `success_hook`,
 /// `failure_hook` and `hook_timeout`. **10** adds the ordered node and dag
 /// graph override lists, **11** the template a lifecycle node's branch is
-/// named from, `branch_template`, and **12** the host's template root and the
-/// rendered-only check, `template_root` and `require_rendered`.
-pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 12;
+/// named from, `branch_template`, **12** the host's template root and the
+/// rendered-only check, `template_root` and `require_rendered`, and **13** the
+/// graph a review comment's reply is drafted by, `review_reply_graph`.
+pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 13;
 
 /// Every launch-config version this build **reads**, newest first.
 ///
@@ -69,13 +70,14 @@ pub const LAUNCH_CONFIG_SCHEMA_VERSION: u32 = 12;
 /// says nothing about the bus or a reviewer's bar, a version-7 one says nothing
 /// about a dispatch-env hook, a version-8 one says nothing about a maintenance
 /// schedule, a version-9 one says nothing about graph overrides, and a
-/// version-10 one says nothing about a branch-name template, and a version-11
-/// one says nothing about templates, which is what a launch naming none of them
-/// means — and
+/// version-10 one says nothing about a branch-name template, a version-11
+/// one says nothing about templates, and a version-12 one says nothing about a
+/// reply drafter, which is what a launch naming none of them means — and
 /// naming a later key there is refused by that field's name**, exactly as a key
 /// no version ever had is.
-pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 12] = [
+pub const LAUNCH_CONFIG_SCHEMA_VERSIONS_READ: [u32; 13] = [
     LAUNCH_CONFIG_SCHEMA_VERSION,
+    12,
     11,
     10,
     9,
@@ -148,7 +150,12 @@ const KEYS_BY_VERSION: &[(&str, u32, BlankValue)] = &[
         crate::templates::CONFIG_SCHEMA_VERSION,
         BlankValue::Refused,
     ),
+    (REVIEW_REPLY_GRAPH_KEY, 13, BlankValue::Kept),
 ];
+
+/// The launch-config key naming the reply drafter's graph, spelled once for the
+/// readers that refuse and resolve by it.
+pub(crate) const REVIEW_REPLY_GRAPH_KEY: &str = "review_reply_graph";
 
 /// The launch-config key naming the write-back's per-item budget, spelled once
 /// for the two readers that refuse by it.
@@ -658,6 +665,21 @@ pub struct LaunchConfig {
         deserialize_with = "require_rendered"
     )]
     pub require_rendered: Option<bool>,
+    /// The agent graph a review comment's reply is drafted by, if any.
+    ///
+    /// The launch-level decision `--review-reply-graph` spells inline and
+    /// overrides, written down beside a plan for the reason the drafting graph
+    /// is: who answers a reviewer is a property of how a team works rather than
+    /// of one launch. Named, `onepipeline review` drafts and posts every reply a
+    /// rework owes and a `decline` posts its own; named nowhere, every rework's
+    /// reply stays owed and surfaced, and a `decline` is refused.
+    ///
+    /// A key [`LAUNCH_CONFIG_SCHEMA_VERSION`] added, so a document below it may
+    /// not carry one. Blank is kept as written and read at the launch as naming
+    /// none, as the drafting graph is. Omitted when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] a path spelled as the launch config document wrote it, exactly as `pr_author_graph` beside it is: resolved against the launch directory at the launch and read there by `oneagentgraph`, whose own boundary refuses a graph it cannot run. It is a public field of the type `docs/contract.md`'s launch config names, and a path newtype would be a public item that contract never promised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_reply_graph: Option<String>,
 }
 
 impl Default for LaunchConfig {
@@ -682,6 +704,7 @@ impl Default for LaunchConfig {
             branch_template: None,
             template_root: None,
             require_rendered: None,
+            review_reply_graph: None,
         }
     }
 }
@@ -706,11 +729,9 @@ impl LaunchConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{}: {why}", path.display()));
-        let config: Self =
-            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         if config.schema_version < OVERRIDE_LIST_SCHEMA_VERSION {
-            let written: serde_json::Value =
-                serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+            let written: serde_json::Value = crate::yaml::from_str(&text).map_err(named)?;
             for (key, _, _) in KEYS_BY_VERSION
                 .iter()
                 .filter(|(_, version, _)| *version == OVERRIDE_LIST_SCHEMA_VERSION)
@@ -740,7 +761,7 @@ impl LaunchConfig {
         // request nobody drafted a body for, one who wrote a validator would
         // find it out from a node nothing checked, and one who wrote a budget
         // would find it out from a settlement that never reached the board.
-        let carried: [(&str, Carried); 15] = [
+        let carried: [(&str, Carried); 16] = [
             (
                 "pr_author_graph",
                 Carried::text(config.pr_author_graph.as_deref()),
@@ -812,6 +833,10 @@ impl LaunchConfig {
                 config
                     .require_rendered
                     .map_or(Carried::Absent, |_| Carried::Named),
+            ),
+            (
+                REVIEW_REPLY_GRAPH_KEY,
+                Carried::text(config.review_reply_graph.as_deref()),
             ),
         ];
         for (key, value) in carried {
@@ -961,19 +986,39 @@ impl Filters {
 
 /// The shipped profile of that name, before any launch override.
 ///
-/// `planner` is every pipeline-level event and nothing else — node dispatch,
-/// settlement and failure, decisions, surfaces, edits, attestations, stop and
-/// adopt — with the detailed `agentgraph` and `vcs` activity behind them left
-/// out, because planner attention is the scarce resource. `detailed` is
-/// unfiltered: an observer's whole job is to read the detail.
+/// `planner` is every pipeline-level event — node dispatch, settlement and
+/// failure, decisions, surfaces, edits, attestations, stop and adopt — except
+/// one stamped `significance: progress`, beside every `vcs` event its producer
+/// stamped a `milestone` or a `blocker`; the detailed `agentgraph` activity, and
+/// `vcs` progress, are left out, because planner attention is the scarce
+/// resource. An unstamped pipeline event — every kind this crate wrote before
+/// the stamp — is still in, and an unstamped `vcs` event is still out, because
+/// what each producer's stamp means is that producer's table and an absent one
+/// says nothing new. `detailed` is unfiltered: an observer's whole job is to
+/// read the detail.
 fn shipped_profile(name: &str) -> Option<EventFilter> {
+    let stamped = |source: Source, significance: crate::vocabulary::Significance| Matcher {
+        source: Some(source),
+        fields: crate::vocabulary::MatchFields {
+            significance: Some(significance),
+            ..crate::vocabulary::MatchFields::default()
+        },
+        ..Matcher::default()
+    };
     match name {
         DEFAULT_PROFILE => Some(EventFilter {
-            include: vec![Matcher {
-                source: Some(Source::Pipeline),
-                ..Matcher::default()
-            }],
-            exclude: Vec::new(),
+            include: vec![
+                Matcher {
+                    source: Some(Source::Pipeline),
+                    ..Matcher::default()
+                },
+                stamped(Source::Vcs, crate::vocabulary::Significance::Milestone),
+                stamped(Source::Vcs, crate::vocabulary::Significance::Blocker),
+            ],
+            exclude: vec![stamped(
+                Source::Pipeline,
+                crate::vocabulary::Significance::Progress,
+            )],
         }),
         DETAILED_PROFILE => Some(EventFilter::default()),
         _ => None,
@@ -994,11 +1039,12 @@ mod tests {
     /// without anyone deciding to move it. The earlier ones stay checked in for
     /// the half a single golden cannot pin — that a config written before the
     /// current version is still a document this build reads.
-    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v12.json");
+    const GOLDEN: &str = include_str!("../tests/golden/launch-config-v13.json");
 
     /// The same document as each earlier version wrote it: the block it had, and
     /// no key that version never had, newest first.
-    const GOLDEN_EARLIER: [(u32, &str); 11] = [
+    const GOLDEN_EARLIER: [(u32, &str); 12] = [
+        (12, include_str!("../tests/golden/launch-config-v12.json")),
         (11, include_str!("../tests/golden/launch-config-v11.json")),
         (10, include_str!("../tests/golden/launch-config-v10.json")),
         (9, include_str!("../tests/golden/launch-config-v9.json")),
@@ -1062,10 +1108,20 @@ mod tests {
                 include: vec![kind("gate-*"), kind("session-closed")],
                 exclude: Vec::new(),
             }),
+            // The `planner` override as these configs declare it — the profile
+            // that shipped when they were recorded — rather than the one that
+            // ships now: a declared override is the operator's document, and
+            // what the shipped default became since does not move it.
             profiles: [
                 (
                     DEFAULT_PROFILE.to_string(),
-                    shipped_profile(DEFAULT_PROFILE).expect("planner ships"),
+                    EventFilter {
+                        include: vec![Matcher {
+                            source: Some(Source::Pipeline),
+                            ..Matcher::default()
+                        }],
+                        exclude: Vec::new(),
+                    },
                 ),
                 (
                     recorded_override(),
@@ -1100,6 +1156,7 @@ mod tests {
             branch_template: Some("{{ task.key }}/{{ node.id }}".to_string()),
             template_root: Some("./templates".to_string()),
             require_rendered: Some(true),
+            review_reply_graph: Some("./graphs/review-reply.yaml".to_string()),
         }
     }
 
@@ -1173,12 +1230,14 @@ mod tests {
                         .then(|| "./scripts/dispatch-env.sh".to_string()),
                     dispatch_env_hook_timeout: NonZeroU64::new(60).filter(|_| version >= 8),
                     maintenance_config: (version >= 9).then(|| "./maintenance.yml".to_string()),
-                    // Version 11 declared the branch-name template, and none of them
-                    // the template root or the rendered-only check.
+                    // Version 11 declared the branch-name template, version 12 the
+                    // template root and the rendered-only check, and none of them the
+                    // reply drafter.
                     branch_template: (version >= 11)
                         .then(|| "{{ task.key }}/{{ node.id }}".to_string()),
-                    template_root: None,
-                    require_rendered: None,
+                    template_root: (version >= 12).then(|| "./templates".to_string()),
+                    require_rendered: (version >= 12).then_some(true),
+                    review_reply_graph: None,
                 }
             );
             assert!(
@@ -1274,7 +1333,7 @@ mod tests {
         // filters already means.
         for version in LAUNCH_CONFIG_SCHEMA_VERSIONS_READ {
             let minimal: LaunchConfig =
-                serde_norway::from_str(&format!("schema_version: {version}\n"))
+                crate::yaml::from_str(&format!("schema_version: {version}\n"))
                     .expect("a bare config parses");
             assert_eq!(minimal.schema_version, version);
             assert!(minimal.filters.is_empty());
@@ -1294,9 +1353,9 @@ mod tests {
     #[test]
     fn a_launch_config_round_trips_without_losing_or_inventing_a_field() {
         let full = golden();
-        let text = serde_norway::to_string(&full).expect("it serialises as YAML too");
+        let text = crate::yaml::to_string(&full).expect("it serialises as YAML too");
         assert_eq!(
-            serde_norway::from_str::<LaunchConfig>(&text).expect("it re-parses"),
+            crate::yaml::from_str::<LaunchConfig>(&text).expect("it re-parses"),
             full
         );
 

@@ -1400,6 +1400,7 @@ fn unpublished_host(root: &Path) -> Vec<(&'static str, String)> {
                 .into_iter()
                 .collect(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         })
         .expect("a session opens");
     std::fs::write(session.worktree.join("work.txt"), "work\n").expect("the work");

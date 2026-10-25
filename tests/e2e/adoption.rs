@@ -6453,6 +6453,21 @@ fn consumer_waits(world: &World, run: &str) -> Option<Vec<(u64, String)>> {
     )
 }
 
+/// The consumer's release waits, read once the queue's projection has caught up
+/// with its log.
+///
+/// [`consumer_waits`] answers `None` in the moment between the driver appending
+/// to the log and accounting for it, so a read taken after a wait that saw the
+/// queue readable can still land in that moment; this one waits it out.
+fn settled_consumer_waits(world: &World, run: &str) -> Vec<(u64, String)> {
+    let mut waits = None;
+    world.until("the queue to be read back", |world| {
+        waits = consumer_waits(world, run);
+        waits.is_some()
+    });
+    waits.unwrap_or_default()
+}
+
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and real probe subprocesses — so a narrower project would declare the same dependency and skip nothing.
 /// An unchanged release wait is queued again only once the one before it has
 /// been read, at an interval that doubles from the configured base and stops
@@ -6496,25 +6511,23 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
 
     // Unread, an unchanged wait is not queued again, however long it waits.
     std::thread::sleep(std::time::Duration::from_secs(4));
-    world.until("the queue to be read back", |world| {
-        consumer_waits(world, &run).is_some()
-    });
     assert_eq!(
-        consumer_waits(&world, &run).expect("read").len(),
+        settled_consumer_waits(&world, &run).len(),
         1,
         "an unchanged wait was queued again while the one before it was unread"
     );
 
     // Read, it is queued again: at once, since four seconds is past the base,
     // then after two, and after four.
+    let mut waits = Vec::new();
     world.until(
         "three unchanged waits queued again as each is read",
         |world| {
             read_waits(world, &run);
-            consumer_waits(world, &run).is_some_and(|waits| waits.len() >= 4)
+            waits = consumer_waits(world, &run).unwrap_or_default();
+            waits.len() >= 4
         },
     );
-    let waits = consumer_waits(&world, &run).expect("read");
     let gap = |at: usize| waits[at].0.saturating_sub(waits[at - 1].0);
     assert!(gap(1) >= 4_000, "{waits:?}");
     assert!(
@@ -6587,7 +6600,7 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
                 .any(|surface| surface["kind"] == "release-wait")
         })
     });
-    let unchanged = consumer_waits(&world, &run).expect("read").len();
+    let unchanged = settled_consumer_waits(&world, &run).len();
     let queued = |world: &World, said: &str| {
         consumer_waits(world, &run).is_some_and(|waits| {
             waits

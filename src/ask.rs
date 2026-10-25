@@ -491,7 +491,7 @@ mod tests {
     #[test]
     fn the_reply_window_is_the_longest_a_surfaces_codec_names() {
         let config = |codecs: &str| -> onemessagebus::Config {
-            serde_norway::from_str(&format!(
+            crate::yaml::from_str(&format!(
                 "version: 1\ntransport: {{kind: local}}\nprofile: planner-channel\ncodecs:\n{codecs}"
             ))
             .expect("a configuration")

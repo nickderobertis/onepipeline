@@ -96,6 +96,81 @@ fn is_ancestor(world: &World, ancestor: &str, of: &str) -> bool {
         .success()
 }
 
+/// Make the host refuse every standings read of the service repository.
+fn cold_reads_fail(world: &World) {
+    world.script("gh.standings-outage.owner.service", "");
+}
+
+#[test]
+fn a_cold_republication_without_a_head_record_watches_the_same_draft() {
+    let world = team_world("rework-cold-watch");
+    world.script("a.work", "first draft\n");
+    let project = launched(&world, "coldwatch", vec![lifecycle("a", &[])], 1, &[]);
+    let original = settled(&world, "coldwatch", "a");
+    let branch = text(&original["branch"], "original branch");
+    // Every standings read the cold host's triggers make fails, so nothing on it
+    // records which branch the draft carries.
+    cold_reads_fail(&world);
+    let cold = world.on_host("without-change-heads");
+    cold.run_from(&cold.project, &["start", &project, "--attach"])
+        .exited(0);
+    assert!(!cold.onevcs_home().join("change-heads").exists());
+    cold.script("a-rework-1.work", "changed on the cold host\n");
+    cold.script("a-rework-1.work-file", "a");
+    reply(
+        &cold,
+        "coldwatch",
+        json!([rework("a", "address the review on this host")]),
+    )
+    .exited(0);
+    let before = cold.invocations().len();
+    let output = adopt(&cold, "coldwatch");
+    output
+        .exited(0)
+        .err_has("no local head-branch record; watching its existing draft instead");
+    let replacement = settled(&cold, "coldwatch", "a-rework-1");
+    assert_eq!(replacement["outcome"], "change-review-draft");
+    assert_eq!(replacement["change_url"], original["change_url"]);
+    assert_eq!(replacement["branch"], original["branch"]);
+    assert_eq!(opened_from(&cold, branch), 1);
+    assert!(held_as_draft(&cold, &change_from(&cold, branch)["number"]));
+    assert!(cold
+        .invocations()
+        .iter()
+        .skip(before)
+        .any(|call| call["tool"] == "gh"
+            && call["args"][0] == "pr"
+            && call["args"][1] == "checks"));
+    assert!(is_ancestor(
+        &cold,
+        text(&original["head"], "original head"),
+        text(&replacement["head"], "replacement head")
+    ));
+}
+
+/// A republication of a review draft settles `change-review-draft-unchecked` at its push,
+/// watching no checks; the next trigger reads its verdict, and a green one reads as the
+/// review draft it is from then on.
+fn read_green(world: &World, run: &str, nodes: &[&str]) {
+    for node in nodes {
+        let settlement = settled(world, run, node);
+        assert_eq!(
+            settlement["outcome"], "change-review-draft-unchecked",
+            "{node}: {settlement}"
+        );
+    }
+    world.run(&["readjust", run]).exited(0);
+    for node in nodes {
+        let read = world
+            .events_of(run, "node-checks-read")
+            .into_iter()
+            .rev()
+            .find(|event| event["labels"]["node"] == *node)
+            .unwrap_or_else(|| panic!("no trigger read {node}'s verdict"));
+        assert_eq!(read["payload"]["verdict"], "passed", "{node}: {read}");
+    }
+}
+
 /// The committed operations of every `edit-committed` the run journalled.
 fn committed(world: &World, run: &str) -> Vec<Value> {
     world
@@ -138,6 +213,14 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     let a_branch = text(&a["branch"], "a's branch").to_owned();
     let a_head = text(&a["head"], "a's head").to_owned();
     let a_number = change_from(&world, &a_branch)["number"].clone();
+    let publication_calls = world.invocations();
+    assert!(
+        publication_calls.iter().any(|call| call["tool"] == "gh"
+            && call["args"][0] == "pr"
+            && call["args"][1] == "checks"),
+        "first publications must watch their checks"
+    );
+    let before_rework = publication_calls.len();
 
     reply(
         &world,
@@ -146,6 +229,13 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     )
     .exited(0);
     adopt(&world, run).exited(0);
+    let republication_calls = world.invocations();
+    assert!(
+        republication_calls.iter().skip(before_rework).all(|call| {
+            call["tool"] != "gh" || !(call["args"][0] == "pr" && call["args"][1] == "checks")
+        }),
+        "a rework and its clean restack must defer their check watches"
+    );
 
     // On the record: the rework, with what it asked.
     let reworked = committed(&world, run)
@@ -167,7 +257,7 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
     let replacement = settled(&world, run, "a-rework-1");
     assert_eq!(replacement["status"], "done", "{replacement}");
     assert_eq!(
-        replacement["outcome"], "change-review-draft",
+        replacement["outcome"], "change-review-draft-unchecked",
         "{replacement}"
     );
     assert_eq!(replacement["branch"], a_branch.as_str(), "{replacement}");
@@ -234,6 +324,9 @@ fn a_draft_in_review_is_reworked_on_its_own_branch_and_change_request() {
             "reason": "a reviewer asked for it on the draft",
             "instruction": "say what the review asked in a.md",
             "comments": [{"id": "101", "url": COMMENT_URL}],
+            // Where the rework's own commits begin, so a host continuing the lineage can
+            // tell them from the original worker's (entry 130).
+            "replaces_head": a_head,
         }),
         "{projected}"
     );
@@ -454,7 +547,10 @@ fn a_rework_restacks_every_draft_stacked_on_it_by_merges_alone() {
         .collect();
     for (id, record) in &restacked {
         assert_eq!(record["agent_dispatched"], false, "{id}: {record}");
-        assert_eq!(record["outcome"], "change-review-draft", "{id}: {record}");
+        assert_eq!(
+            record["outcome"], "change-review-draft-unchecked",
+            "{id}: {record}"
+        );
         // No worker and no drafter was dispatched for it again.
         assert_eq!(
             world
@@ -628,7 +724,7 @@ fn a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker
     );
     let b = settled(&world, run, "b");
     assert_eq!(b["status"], "done", "{b}");
-    assert_eq!(b["outcome"], "change-review-draft", "{b}");
+    read_green(&world, run, &["b"]);
     let b_restacked = world
         .events_of(run, "node-restacked")
         .into_iter()
@@ -681,9 +777,31 @@ fn a_rework_conflicting_with_the_draft_above_is_concluded_by_that_draft_s_worker
 /// A draft is restacked once its reworked parent has pushed, and not once its
 /// parent's checks have settled: the rework's checks are held pending until the
 /// draft above it has started its restack.
+///
+/// What settles the rework's checks is the trigger that reads their verdict — its
+/// `node-checks-read` — and not its node's settlement: a rework republished as a
+/// review draft settles `change-review-draft-unchecked` at its push, on its
+/// dispatch's thread, while the restack starts on the driver's next pass, and
+/// nothing orders those two. So the order held here is the restack's start against
+/// the verdict, which only the trigger this journey runs once the checks have
+/// passed can read.
+///
+/// And `status` is read while the restack is still running because its push is
+/// held: unchecked, the restack settles at that push too, a moment after it
+/// starts, which no poll of `status` is guaranteed to land inside. The rework's
+/// push and the restack's go through one hook, so the hook is switched to the
+/// restack's hold while the rework's push is the one it is holding.
 #[test]
 fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
-    let world = team_world("rework-early").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let world = World::new("rework-early")
+        .with_env("ONEVCS_BRANCH_PREFIX", crate::stacked_drafts::PREFIX)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let rework_push = crate::harness::held_publication(&world, &world.fakes.join("rework.go"));
+    // The first settlement's pushes go straight through.
+    rework_push.release();
+    world.repository("change-open", &rework_push.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
     world.script("a.work", "a's change\n");
     world.script("b.work", "b's change\n");
     world.script("a-rework-1.work", "a's change, as the review asked\n");
@@ -714,6 +832,7 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         );
     }
 
+    rework_push.rearm();
     reply(
         &world,
         run,
@@ -725,23 +844,40 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let driver = driving.spawn().expect("the adopting driver starts");
+    world.until("the rework's push to be held", |_| rework_push.holding());
+    let restack_push = crate::harness::held_publication(&world, &world.fakes.join("restack.go"));
+    crate::harness::hold_later_pushes_at(&world, &restack_push);
+    rework_push.release();
     world.until("b's restack to start", |world| {
         !world.events_of(run, "node-restack-started").is_empty()
     });
-    // The rework had pushed and has not settled: its checks are still running.
+    // The rework had pushed and its checks have not settled: they are still
+    // running, no verdict on them has been read, and if the rework's node has
+    // settled already it settled without one.
     assert!(
         !world
-            .events_of(run, "node-settled")
+            .events_of(run, "node-checks-read")
             .iter()
             .any(|event| event["labels"]["node"] == "a-rework-1"),
-        "the rework settled before the restack started"
+        "the rework's checks settled before the restack started"
     );
+    for settled in world
+        .events_of(run, "node-settled")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "a-rework-1")
+    {
+        assert_eq!(
+            settled["payload"]["outcome"], "change-review-draft-unchecked",
+            "the rework settled on its checks before the restack started: {settled}"
+        );
+    }
     assert!(world
         .events_of(run, "push")
         .iter()
         .any(|event| event["labels"]["node"] == "a-rework-1"));
     // `status` reads the draft as restacking onto the rework's pushed head while
-    // its own publication waits on its checks.
+    // its own publication is still under way.
+    world.until("b's restack to reach its push", |_| restack_push.holding());
     let a_pushed = world
         .events_of(run, "node-restack-started")
         .first()
@@ -753,6 +889,7 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
             text(&a_pushed, "the head")
         ))
     });
+    restack_push.release();
     for number in [&a_number, &b_number] {
         world.script(
             &format!("gh.checks.{number}"),
@@ -761,24 +898,35 @@ fn a_restack_starts_before_its_reworked_parent_s_checks_have_settled() {
     }
     let ended = driver.wait_with_output().expect("the driver ends");
     assert!(ended.status.success(), "{ended:?}");
+    read_green(&world, run, &["a-rework-1", "b"]);
     let journal = world.journal(run);
     assert!(
         position(&journal, "node-restack-started", "b")
-            < position(&journal, "node-settled", "a-rework-1")
+            < position(&journal, "node-checks-read", "a-rework-1")
     );
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
-    assert_eq!(settled(&world, run, "b")["outcome"], "change-review-draft");
 }
 
 /// A `retitle` reaching a run while its driver is live is staged by that driver
 /// and applied through the host as it is to a run nothing is driving: `c` is
-/// retitled while `a`'s rework waits on its checks.
+/// retitled while `a`'s rework is still publishing, and the rework's checks are
+/// read only once they pass.
+///
+/// The driver is held live by the rework's push rather than by its checks: a
+/// rework republished as a review draft settles `change-review-draft-unchecked`
+/// at its push, on its dispatch's thread, and the driver exits once nothing is
+/// left running. So nothing but a held push keeps the rework unsettled, and the
+/// driver live, for as long as the retitle takes to reach it.
 #[test]
 fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
-    let world = team_world("retitle-driven").with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let world = World::new("retitle-driven")
+        .with_env("ONEVCS_BRANCH_PREFIX", crate::stacked_drafts::PREFIX)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "120");
+    let rework_push = crate::harness::held_publication(&world, &world.fakes.join("rework.go"));
+    // The first settlement's pushes go straight through.
+    rework_push.release();
+    world.repository("change-open", &rework_push.argv());
+    crate::draft_lifecycle::rules(&world, "change-open", "required", None);
+    world.script("gh.checks", crate::draft_lifecycle::GREEN);
     world.script("a.work", "a's change\n");
     world.script("c.work", "c's change\n");
     world.script("a-rework-1.work", "a's change, as the review asked\n");
@@ -801,6 +949,7 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
         "lint in_progress - required",
     );
 
+    rework_push.rearm();
     reply(
         &world,
         run,
@@ -811,14 +960,9 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     driving
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let driver = driving.spawn().expect("the adopting driver starts");
-    world.until("the rework to push", |world| {
-        world
-            .events_of(run, "push")
-            .iter()
-            .any(|event| event["labels"]["node"] == "a-rework-1")
-    });
-    // The driver is live: the rework is waiting on its checks, and has not settled.
+    let mut driver = driving.spawn().expect("the adopting driver starts");
+    world.until("the rework's push to be held", |_| rework_push.holding());
+    // The driver is live: the rework is publishing, and has not settled.
     assert!(!world
         .events_of(run, "node-settled")
         .iter()
@@ -834,6 +978,13 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
     world.until("the driver to retitle c", |world| {
         !retitled(world, run, "c").is_empty()
     });
+    assert!(
+        driver
+            .try_wait()
+            .expect("the driver can be asked about")
+            .is_none(),
+        "the driver had exited before c was retitled, so it was not the one that did"
+    );
     assert_eq!(
         retitled(&world, run, "c"),
         [
@@ -845,16 +996,38 @@ fn a_retitle_reaching_a_driven_run_is_applied_by_its_driver() {
         "fix(c): say what c does"
     );
 
+    // Let the rework push. It settles on that push while its checks are still
+    // running, and not on them: no verdict on them is read until they pass.
+    rework_push.release();
+    world.until("the rework to settle at its push", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1")
+    });
+    assert!(world
+        .events_of(run, "push")
+        .iter()
+        .any(|event| event["labels"]["node"] == "a-rework-1"));
+    assert_eq!(
+        settled(&world, run, "a-rework-1")["outcome"],
+        "change-review-draft-unchecked"
+    );
+    assert!(
+        !world
+            .events_of(run, "node-checks-read")
+            .iter()
+            .any(|event| event["labels"]["node"] == "a-rework-1"),
+        "the rework's checks were read while they were still running"
+    );
+
     world.script(
         &format!("gh.checks.{a_number}"),
         crate::draft_lifecycle::GREEN,
     );
     let ended = driver.wait_with_output().expect("the driver ends");
     assert!(ended.status.success(), "{ended:?}");
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-1"]);
     assert_eq!(
         change_from(&world, &c_branch)["title"],
         "fix(c): say what c does"
@@ -1060,7 +1233,7 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     reply(&world, run, json!([stated])).exited(0);
     adopt(&world, run).exited(0);
     let again = settled(&world, run, "x-again");
-    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["outcome"], "change-review-draft-unchecked", "{again}");
     assert_eq!(again["branch"], branch("x").as_str(), "{again}");
     assert_eq!(
         change_from(&world, &branch("x"))["title"],
@@ -1078,7 +1251,7 @@ fn the_op_s_title_outranks_the_drafter_s_and_a_keeps_leaves_the_title_alone() {
     adopt(&world, run).exited(0);
     assert_eq!(
         settled(&world, run, "y-rework-1")["outcome"],
-        "change-review-draft"
+        "change-review-draft-unchecked"
     );
     assert_eq!(change_from(&world, &branch("y"))["title"], "feat: ship y");
     assert!(retitled(&world, run, "y-rework-1").is_empty());
@@ -1142,7 +1315,10 @@ fn held_unverified(world: &World, run: &str, shown: &Shown, id: &str, title: &st
     let replacement = format!("{id}-rework-1");
     let settlement = settled(world, run, &replacement);
     assert_eq!(settlement["status"], "done", "{settlement}");
-    assert_eq!(settlement["outcome"], "change-review-draft", "{settlement}");
+    assert_eq!(
+        settlement["outcome"], "change-review-draft-unchecked",
+        "{settlement}"
+    );
     let branch = text(&settlement["branch"], "a branch");
     assert_eq!(change_from(world, branch)["title"], title);
     let records = unverified(world, run, &replacement);
@@ -1417,8 +1593,7 @@ fn a_drafter_that_reuses_its_workers_pid_is_read_as_itself() {
 
     reply(&world, run, json!([rework("a", "rework it")])).exited(0);
     adopt(&world, run).exited(0);
-    let settlement = settled(&world, run, "a-rework-1");
-    assert_eq!(settlement["outcome"], "change-review-draft", "{settlement}");
+    read_green(&world, run, &["a-rework-1"]);
     let change = change_from(&world, &branch);
     assert_eq!(change["body"], crate::stacked_drafts::DRAFTED, "{change}");
     assert_eq!(change["title"], "fix(a): say what a does now", "{change}");
@@ -1633,6 +1808,7 @@ fn only_the_planner_may_rework_or_retitle() {
                 op,
                 onepipeline::channel::layout::Op::Rework
                     | onepipeline::channel::layout::Op::Retitle
+                    | onepipeline::channel::layout::Op::Decline
             )
         })
         .map(onepipeline::channel::layout::Op::word)
@@ -1674,6 +1850,11 @@ fn only_the_planner_may_rework_or_retitle() {
             json!({"op": "retitle", "id": "a", "title": "fix: the sentinel's", "reason": "why"}),
             "retitle",
         ),
+        (
+            json!({"op": "decline", "id": "a", "reason": "why",
+                   "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/1#issuecomment-501"}]}),
+            "decline",
+        ),
     ] {
         as_sentinel(command)
             .exited(crate::harness::REFUSED)
@@ -1691,10 +1872,7 @@ fn only_the_planner_may_rework_or_retitle() {
     )
     .exited(0);
     adopt(&world, run).exited(0);
-    assert_eq!(
-        settled(&world, run, "a-rework-1")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-1"]);
     reply(
         &world,
         run,
@@ -1809,7 +1987,7 @@ fn a_rework_the_run_cannot_take_is_refused_naming_why() {
     reply(&world, run, json!([uncommented])).exited(0);
     adopt(&world, run);
     let again = settled(&world, run, "a-rework-2");
-    assert_eq!(again["outcome"], "change-review-draft", "{again}");
+    assert_eq!(again["outcome"], "change-review-draft-unchecked", "{again}");
     assert_eq!(again["branch"], settled(&world, run, "a")["branch"]);
     let said = "reworked — as a-rework-2: a reviewer asked for it on the draft; naming no \
                 review comment";
@@ -1895,10 +2073,11 @@ fn a_restack_whose_worker_fails_its_merge_settles_the_draft_failed() {
     assert_eq!(settled(&world, run, "c")["status"], "done");
 }
 
-/// A restack whose publication the host's checks refuse goes back to the draft's
-/// own worker on the same branch, as any publication refusal does — drafted again,
-/// since that worker may change the content — and settles as a review draft once
-/// a later publication of it is green.
+/// A restack whose republication the host's checks refuse goes back to the draft's
+/// own worker on the same branch once a trigger reads that verdict red, as a
+/// `checks-failed` publication's re-dispatch does — drafted again, since that worker may
+/// change the content — and reads as a review draft once a later trigger reads its
+/// repair green.
 #[test]
 fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     let world = team_world("rework-restack-retry");
@@ -1918,11 +2097,6 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     );
     let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
     let b_number = change_from(&world, &b_branch)["number"].clone();
-    // `b`'s checks fail from here, until its worker has been asked again.
-    world.script(
-        &format!("gh.checks.{b_number}"),
-        "lint completed failure required",
-    );
 
     reply(
         &world,
@@ -1930,35 +2104,31 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
         json!([rework("a", "say what the review asked in a.md")]),
     )
     .exited(0);
-    let mut driving = world.cmd(&["adopt", run]);
-    driving
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let driver = driving.spawn().expect("the adopting driver starts");
-    world.until("b's worker to be asked again", |world| {
-        world
-            .events_of(run, "node-dispatched")
-            .iter()
-            .filter(|event| event["labels"]["node"] == "b")
-            .count()
-            == 2
-    });
-    world.script(
-        &format!("gh.checks.{b_number}"),
-        crate::draft_lifecycle::GREEN,
+    adopt(&world, run).exited(0);
+    let restacked = settled(&world, run, "b");
+    assert_eq!(
+        restacked["outcome"], "change-review-draft-unchecked",
+        "{restacked}"
     );
-    let ended = driver.wait_with_output().expect("the driver ends");
-    assert!(ended.status.success(), "{ended:?}");
+    // `b`'s restacked head is red on the host, and the next trigger reads it so.
+    let red = text(&restacked["head"], "b's head").to_owned();
+    std::fs::create_dir_all(world.fakes.join("gh-head-verdict")).expect("a verdict directory");
+    std::fs::write(
+        world.fakes.join("gh-head-verdict").join(&red),
+        "failed:lint",
+    )
+    .expect("the verdict is written");
+    world.run(&["readjust", run]).exited(0);
 
     let b = settled(&world, run, "b");
     assert_eq!(b["status"], "done", "{b}");
-    assert_eq!(b["outcome"], "change-review-draft", "{b}");
-    let restacked = world
+    assert_ne!(b["head"], red.as_str(), "{b}");
+    let restack = world
         .events_of(run, "node-restacked")
         .into_iter()
         .find(|event| event["labels"]["node"] == "b")
         .expect("b's restack is on the record");
-    assert_eq!(restacked["payload"]["agent_dispatched"], true);
+    assert_eq!(restack["payload"]["agent_dispatched"], false);
     let redispatched = world
         .events_of(run, "node-dispatched")
         .into_iter()
@@ -1973,13 +2143,20 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
     assert_eq!(tasks_of(&world, run, "b", "pr-author").len(), 2);
     assert_eq!(opened_from(&world, &b_branch), 1);
     assert!(held_as_draft(&world, &b_number));
+    read_green(&world, run, &["b"]);
 }
 
-/// A rework cleared for publication before a takeover may finish its push, but
-/// the superseded driver must not begin the descendant restack that push owes.
+/// A rework cleared for publication before a takeover finishes its push. The descendant
+/// restack that push owes may still start — a dispatch reads no claim — but it publishes
+/// nothing: its publication's read finds the takeover, which supersedes the driver, and the
+/// restack settles unpublished with its work kept on b's branch, as every withheld dispatch
+/// keeps its own; no second change request is opened from it.
 #[test]
-fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack() {
-    let world = World::new("rework-takeover").with_env("ONEVCS_BRANCH_PREFIX", "me/");
+fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
+    let world = World::new("rework-takeover")
+        .with_env("ONEVCS_BRANCH_PREFIX", "me/")
+        .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "10")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let go = world.fakes.join("push.go");
     let held = crate::harness::held_publication(&world, &go);
     world.repository("change-open", &held.argv());
@@ -1999,6 +2176,7 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
         &[],
     );
     let a_branch = text(&settled(&world, run, "a")["branch"], "a's branch").to_owned();
+    let b_branch = text(&settled(&world, run, "b")["branch"], "b's branch").to_owned();
     let old_head = head_of(&world, &a_branch);
     for marker in [go.clone(), go.with_extension("go.holding")] {
         std::fs::remove_file(marker).expect("the initial publication released its gate");
@@ -2008,35 +2186,61 @@ fn a_takeover_before_a_reworks_push_prevents_its_driver_from_starting_a_restack(
     world.until("the rework's cleared publication to be held", |_| {
         held.holding()
     });
-    // The successor owns the project before the first driver's accepted push
-    // makes b's restack due. Hold its worker so it cannot push a competing head.
+    // The successor claims the project before the first driver's accepted push makes b's
+    // restack due, and starts nothing until that driver has let go.
     let successor = world.on_host("takeover-host");
-    let worker = successor.rendezvous("a");
-    successor
-        .run_from(
-            &successor.project,
-            &["start", &project, "--detach", "--take-over"],
-        )
-        .exited(0);
-    let theirs = worker.arrived();
-    held.release();
-    world.until("the superseded driver to end", |world| {
-        !world.events_of(run, "driver-superseded").is_empty()
-            && world.run_file(run, "result.json").is_file()
+    let mut taking = successor.cmd(&["start", &project, "--detach", "--take-over"]);
+    let taking = taking
+        .current_dir(&successor.project)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the takeover starts");
+    world.until("the successor's claim to reach the store", |world| {
+        world.store_project(&project)["items"][0]["item"]["metadata"]["onepipeline.driver"]["host"]
+            == "takeover-host"
     });
+    held.release();
+    world.until("the first driver to read the takeover", |world| {
+        !world.events_of(run, "driver-superseded").is_empty()
+    });
+    world.until("the superseded driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let taken = taking.wait_with_output().expect("the takeover answers");
+    assert_eq!(
+        taken.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&taken.stderr)
+    );
     assert_ne!(
         head_of(&world, &a_branch),
         old_head,
         "the already cleared push did not finish"
     );
-    assert!(
-        world.events_of(run, "node-restack-started").is_empty(),
-        "a superseded driver began a restack: {:#?}",
-        world.journal(run)
-    );
+    let read = world.events_of(run, "driver-superseded")[0]["ts"]
+        .as_str()
+        .expect("a record's time")
+        .to_owned();
+    for started in world.events_of(run, "node-restack-started") {
+        assert!(
+            started["ts"].as_str().expect("a record's time") <= read.as_str(),
+            "a superseded driver began a restack after it read the takeover: {:#?}",
+            world.journal(run)
+        );
+    }
+    if !world.events_of(run, "node-restack-started").is_empty() {
+        let restacked = settled(&world, run, "b");
+        assert_eq!(restacked["status"], "cancelled", "{restacked}");
+        assert!(
+            text(&restacked["detail"], "b's detail").starts_with("not published"),
+            "a superseded driver published b's restack: {restacked}"
+        );
+    }
+    assert_eq!(opened_from(&world, &b_branch), 1);
     successor.run(&["stop", run]).exited(0);
     assert_eq!(successor.events_of(run, "run-stopped").len(), 1);
-    drop(theirs);
     assert_eq!(opened_from(&world, &a_branch), 1);
 }
 
@@ -2097,10 +2301,7 @@ fn a_rework_title_check_is_validated_by_the_real_producer() {
     )
     .exited(0);
     world.run_on_agentgraph(&["adopt", run]).exited(0);
-    assert_eq!(
-        settled(&world, run, "a-rework-2")["outcome"],
-        "change-review-draft"
-    );
+    read_green(&world, run, &["a-rework-2"]);
     assert_eq!(
         change_from(&world, &branch)["title"],
         "fix(a): answer the review"

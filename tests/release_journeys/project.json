@@ -1,0 +1,56 @@
+{
+  "name": "onepipeline-release-journeys",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/release_journeys",
+  "tags": ["scope:tests", "lang:js", "tier:live"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "bash -c 'for file in tests/release_journeys/*.mjs; do node --check \"$file\" || exit; done'"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/release_journeys"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/release_journeys"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/release_journeys"
+    },
+    "release-journeys": {
+      "command": "node --test tests/release_journeys/*.journey.mjs",
+      "cache": false,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/.github/workflows/release.yml",
+        "{workspaceRoot}/.github/workflows/release-plz.yml",
+        "{workspaceRoot}/.github/workflow-graph.mjs",
+        "{workspaceRoot}/.github/tests/support/**/*",
+        "{workspaceRoot}/.github/fixtures/release-v0.74.1-published.json",
+        "{workspaceRoot}/npm/test/registry-support.mjs",
+        "{workspaceRoot}/npm/onepipeline-cli/**/*",
+        "{workspaceRoot}/release/release.py",
+        "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/scripts/build-linux-wheel.sh",
+        "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/scripts/publish-npm.sh",
+        "{workspaceRoot}/scripts/smoke-published.sh",
+        "{workspaceRoot}/scripts/retry-install.sh",
+        "{workspaceRoot}/scripts/linked-engines.sh",
+        "{workspaceRoot}/scripts/release-outcome.mjs",
+        "{workspaceRoot}/release/release-pr-auto-merge.sh",
+        "{workspaceRoot}/release-plz.toml",
+        "{workspaceRoot}/justfile",
+        "rustBuild",
+        "sharedGlobals"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint"]
+    }
+  }
+}

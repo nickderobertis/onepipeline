@@ -11,10 +11,17 @@
 //! cleanly, so only the structured error can classify the attempt as failed.
 //!
 //! It speaks the `codex exec` line oneharness builds — `codex exec [resume ID]
-//! [--dangerously-bypass-approvals-and-sandbox | --sandbox read-only|
-//! workspace-write] [--model M] [--json] (PROMPT | -)` — and refuses any other,
-//! so a line oneharness starts sending that this double does not speak is a
-//! refusal a journey reads rather than an argument it silently swallows.
+//! [-c features.plugins=false|true] [-c features.apps=false|true]
+//! [-c analytics.enabled=false|true] [-c model_catalog_json=PATH] [--dangerously-bypass-approvals-and-sandbox |
+//! --sandbox read-only|workspace-write] [--model M] [--json] (PROMPT | -)` — and
+//! refuses any other, so a line oneharness starts sending that this double does
+//! not speak is a refusal a journey reads rather than an argument it silently
+//! swallows.
+//!
+//! It also speaks the shared server a controlled turn runs on — `codex
+//! app-server [-c SETTING]... --listen unix://PATH`, which oneharness-core 0.28
+//! starts once per pool key — and serves it with
+//! [`onepipeline_testfakes::codex_app_server`] (unix only, as that address is).
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -30,15 +37,43 @@ fn main() -> ExitCode {
         println!("codex-cli 1.0.0 (fake-codex)");
         return ExitCode::SUCCESS;
     }
-    let dir = fake::script_dir();
+    let dir = script_dir();
     // Recorded first, so an argv this double refuses is still readable by the
     // journey that has to explain why the candidate was stepped past.
     fake::record(&dir, "codex", &args);
+    if args.first().map(String::as_str) == Some("app-server") {
+        return app_server(&args[1..], dir);
+    }
     if let Err(refusal) = declared(&args) {
         return fake::refuse(&refusal);
     }
     println!("{}", fake::CODEX_SERVER_OVERLOADED);
     ExitCode::SUCCESS
+}
+
+/// The file beside this executable that names the script directory, for a
+/// copy oneharness starts with an environment that does not carry
+/// [`fake::SCRIPT_DIR_ENV`].
+///
+/// oneharness from 0.28 starts `codex app-server` as a **shared server**, with
+/// the environment cleared down to its base variables and Codex's own, so the
+/// variable every other double reads is not there. A journey that puts this
+/// binary on `PATH` as `codex` writes the directory here instead.
+const SCRIPT_DIR_BESIDE: &str = "onepipeline-fake-dir";
+
+/// Where this double reads its script from and records into: the variable,
+/// else the file a journey wrote beside this copy, else refused as unset.
+fn script_dir() -> std::path::PathBuf {
+    if std::env::var_os(fake::SCRIPT_DIR_ENV).is_none() {
+        let beside = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join(SCRIPT_DIR_BESIDE)))
+            .and_then(|file| std::fs::read_to_string(file).ok());
+        if let Some(dir) = beside.filter(|dir| !dir.trim().is_empty()) {
+            return std::path::PathBuf::from(dir.trim());
+        }
+    }
+    fake::script_dir()
 }
 
 /// The sandboxes `codex exec --sandbox` takes, as oneharness maps its modes
@@ -50,6 +85,46 @@ fn main() -> ExitCode {
 // `oneharness_core` against this binary, so a sandbox oneharness starts sending
 // that is not below is a refusal there rather than a double that reads differently.
 const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
+
+/// The `-c` settings oneharness starts every Codex launch with, in either state.
+const SETTINGS: [&str; 6] = [
+    "features.plugins=false",
+    "features.plugins=true",
+    "features.apps=false",
+    "features.apps=true",
+    "analytics.enabled=false",
+    "analytics.enabled=true",
+];
+
+/// Serve the shared app-server `args` (what follows `app-server`) asks for, or
+/// refuse a line oneharness does not build: its `-c` settings, then exactly one
+/// `--listen unix://PATH`, and nothing else.
+fn app_server(args: &[String], dir: std::path::PathBuf) -> ExitCode {
+    let mut listen = None;
+    let mut rest = args.iter().map(String::as_str);
+    while let Some(arg) = rest.next() {
+        match (arg, rest.next()) {
+            ("-c", Some(setting))
+                if SETTINGS.contains(&setting) || setting.starts_with("model_catalog_json=") => {}
+            ("--listen", Some(address)) if listen.is_none() => listen = Some(address),
+            (arg, value) => {
+                return fake::refuse(&format!(
+                    "codex app-server takes no argument {arg:?} {value:?} here"
+                ))
+            }
+        }
+    }
+    let Some(listen) = listen else {
+        return fake::refuse("codex app-server was given no --listen address");
+    };
+    #[cfg(unix)]
+    fake::codex_app_server::run(listen, dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (listen, dir);
+        fake::refuse("this double serves the app-server's unix:// address on unix only")
+    }
+}
 
 /// Whether `args` is a `codex exec` line oneharness builds, or why it is not.
 ///
@@ -64,7 +139,7 @@ const SANDBOXES: [&str; 2] = ["read-only", "workspace-write"];
 fn declared(args: &[String]) -> Result<(), String> {
     let mut rest = args.iter().map(String::as_str).peekable();
     if rest.next() != Some("exec") {
-        return Err("codex is only driven as `codex exec` here".to_owned());
+        return Err("codex is only driven as `codex exec` or `codex app-server` here".to_owned());
     }
     if rest.peek() == Some(&"resume") {
         rest.next();
@@ -82,6 +157,16 @@ fn declared(args: &[String]) -> Result<(), String> {
                     .ok_or("codex's --sandbox takes a value, and nothing followed it")?;
                 if !SANDBOXES.contains(&sandbox) {
                     return Err(format!("codex takes no sandbox {sandbox:?}"));
+                }
+            }
+            // The config overrides oneharness sends: Codex's plugins, apps and
+            // analytics, each off unless the run opted in, and the shared model catalog.
+            "-c" => {
+                let setting = rest
+                    .next()
+                    .ok_or("codex's -c takes a setting, and nothing followed it")?;
+                if !SETTINGS.contains(&setting) && !setting.starts_with("model_catalog_json=") {
+                    return Err(format!("codex takes no setting {setting:?} here"));
                 }
             }
             "--model" => {

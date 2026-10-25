@@ -118,7 +118,8 @@ const UNIFORM_EXEMPT = ["onepipeline-visual-docs"];
 const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.name));
 
 // The live and network tiers (`tier:live`: `onepipeline-real-smoke` reaches GitHub,
-// `onepipeline-release-compat` PyPI) declare every uniform target but `test`.
+// `onepipeline-release-compat` PyPI, `onepipeline-release-journeys` Docker and the
+// toolchains the release builds with) declare every uniform target but `test`.
 // Their journey is a target of its own, uncached and reached by no `check`, so
 // `just test` and `just check` stay offline and credential-free; a `test` that
 // ran it would put the network into both, and one that ran nothing would look
@@ -127,9 +128,19 @@ const LIVE = projects.filter((declared) => declared.tags?.includes("tier:live"))
 const LIVE_TARGETS = {
   "onepipeline-real-smoke": "smoke",
   "onepipeline-release-compat": "release-compat",
+  "onepipeline-release-journeys": "release-journeys",
 };
 const declaresUniform = (declared, target) =>
-  target !== "test" || !declared.tags?.includes("tier:live");
+  target !== "test" ||
+  (!declared.tags?.includes("tier:live") && !declared.tags?.includes("tier:workload"));
+
+// The workload tiers (`tier:workload`: `onepipeline-pool-workload`,
+// `onepipeline-scratch-workload`) measure a whole host-shaped workload against
+// their own budgets file. Like the live tiers they declare no `test`: their journey
+// and its budget check are one uncached `workload` target, fanned out by `just
+// workload` and reached by no `check`, `test`, coverage or `budgets` target, so no
+// per-change selection pays for one.
+const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
 // The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
 // `onepipeline:budgets` reads. They time an uninstrumented release binary over full
@@ -145,7 +156,8 @@ const OFFLINE_RUST = projects.filter(
   (declared) =>
     declared.tags?.includes("lang:rust") &&
     !declared.tags?.includes("tier:live") &&
-    !declared.tags?.includes("tier:budget"),
+    !declared.tags?.includes("tier:budget") &&
+    !declared.tags?.includes("tier:workload"),
 );
 
 describe("the uniform target set", () => {
@@ -199,7 +211,7 @@ describe("the uniform target set", () => {
 });
 
 describe("the live and network tiers", () => {
-  it("are the two projects that run outside the offline tier", () => {
+  it("are the projects that run outside the offline tier", () => {
     assert.deepEqual(
       LIVE.map((declared) => declared.name).sort(),
       Object.keys(LIVE_TARGETS).sort(),
@@ -236,6 +248,42 @@ describe("the live and network tiers", () => {
       const body = justfile.split(`\n${recipe}:\n`)[1]?.split("\n\n")[0] ?? "";
       assert.match(body, new RegExp(`scripts/nx\\.sh run ${name}:${target}(\\s|$)`), body);
       assert.doesNotMatch(body, /cargo /, `\`${recipe}\` reaches cargo outside the graph`);
+    });
+  }
+});
+
+describe("the workload tiers", () => {
+  it("are the projects whose journey only `just workload` runs", () => {
+    assert.deepEqual(WORKLOAD.map((declared) => declared.name).sort(), [
+      "onepipeline-pool-workload",
+      "onepipeline-scratch-workload",
+    ]);
+    const body = justfile.split("\nworkload:\n")[1]?.split("\n\n")[0] ?? "";
+    assert.match(body, /scripts\/nx\.sh run-many -t workload(\s|$)/, body);
+    assert.equal(nxJson.targetDefaults.workload?.cache, false, "nx.json caches `workload`");
+  });
+
+  for (const declared of WORKLOAD) {
+    it(`keeps \`${declared.name}\`'s journey out of every per-change target`, () => {
+      const workload = declared.targets.workload;
+      assert.ok(workload, `${declared.name} declares no \`workload\` target`);
+      assert.equal(workload.cache, false, `${declared.name}:workload could replay a measure`);
+      assert.equal(workload.parallelism, false, `${declared.name}:workload runs beside others`);
+      assert.equal(declared.targets.test, undefined, `${declared.name} declares a \`test\``);
+      assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+      for (const owner of projects) {
+        for (const target of ["check", "test", "test-rest", "test-quick", "budgets"]) {
+          assert.doesNotMatch(
+            JSON.stringify(owner.targets?.[target]?.dependsOn ?? []),
+            /workload/,
+            `${owner.name}:${target} reaches a workload`,
+          );
+        }
+        assert.ok(
+          !(owner.implicitDependencies ?? []).includes(declared.name),
+          `${owner.name} depends on ${declared.name}, so a change to it selects them`,
+        );
+      }
     });
   }
 });
@@ -314,7 +362,16 @@ describe("the offline tier split", () => {
       execFileSync("just", ["--evaluate", name], { cwd: root, encoding: "utf8" });
     assert.match(project("onepipeline").targets["test-rest"].command, /just _crate-test-rest/);
     const rest = evaluate("rest-tier");
-    for (const binary of ["e2e", "contract", "note", "smoke", "release_channel", "stop_verdict"]) {
+    for (const binary of [
+      "e2e",
+      "contract",
+      "note",
+      "smoke",
+      "release_channel",
+      "stop_verdict",
+      "pool_workload",
+      "scratch_workload",
+    ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),
         `rest-tier runs the ${binary} binary: ${rest}`,
@@ -745,7 +802,7 @@ echo "$1" >> "$JUST_CALLS"
 tree=target/llvm-cov-target
 case "$1" in
   _crate-coverage-clean) rm -rf "$tree" ;;
-  _crate-test-archive) ;;
+  _crate-test-archive | _crate-lint) ;;
   _crate-coverage) ls "$tree" > "$JUST_SAW" ;;
   *)
     tier="$(sed -n "s/^$1:.*(_tier-test \\"\\([a-z0-9_]*\\)\\".*/\\1/p" justfile)"
@@ -759,7 +816,13 @@ case "$1" in
     ;;
 esac
 `;
-  const TIER_RECIPES = ["_crate-test-rest", "_e2e-test", "_contract-test", "_note-test"];
+  const TIER_RECIPES = [
+    "_crate-test-rest",
+    "_e2e-test",
+    "_contract-test",
+    "_note-test",
+    "_codex-server-test",
+  ];
 
   it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
     const repo = scratchRepository(t);
@@ -789,7 +852,7 @@ esac
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
-    assert.deepEqual(tiersIn(cold.merged), ["contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(cold.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
 
     // Only the note tier's inputs change; the budget record the e2e tier
     // writes is gone, as it is on a fresh runner.
@@ -802,11 +865,46 @@ esac
       `only the changed tier runs: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
-    assert.deepEqual(tiersIn(warm.merged), ["contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(warm.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
       "the replayed e2e tier did not restore the budget record `budgets` reads",
     );
+  });
+
+  it("reruns Codex checks for their own inputs while lint still covers other modules", (t) => {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    const calls = join(repo.path, "just.calls");
+    const ranRecipe = (target, recipe) => {
+      writeFileSync(calls, "");
+      const result = run(
+        ["scripts/nx.sh", "run", target],
+        { PATH: `${join(repo.path, "bin")}:${process.env.PATH}`, JUST_CALLS: calls },
+        repo.path,
+      );
+      assert.equal(result.status, 0, result.stderr);
+      return readFileSync(calls, "utf8").split("\n").includes(recipe);
+    };
+    const tierRan = () => ranRecipe("onepipeline-codex-server:test", "_codex-server-test");
+    const lintRan = () => ranRecipe("onepipeline:lint", "_crate-lint");
+    assert.equal(tierRan(), true);
+    assert.equal(lintRan(), true);
+    for (const [path, expected] of [
+      ["src/driver.rs", false],
+      ["crates/testfakes/src/bin/fake-gh.rs", false],
+      ["crates/testfakes/src/hosted.rs", false],
+      ["crates/testfakes/src/containment.rs", false],
+      ["crates/testfakes/src/yaml.rs", false],
+      ["crates/testfakes/src/lib.rs", true],
+      ["crates/testfakes/src/bin/fake-codex.rs", true],
+      ["crates/testfakes/src/codex_app_server.rs", true],
+    ]) {
+      repo.change(path);
+      assert.equal(tierRan(), expected, path);
+      assert.equal(lintRan(), true, `onepipeline:lint must still cover ${path}`);
+    }
   });
 
   it("runs again after a change to the doubles or either configuration file", (t) => {
@@ -951,5 +1049,53 @@ describe("the locked install", () => {
       result.stderr,
       /npm not found;.*the pinned onebudgetspec SDK the stage budget reports through/,
     );
+  });
+});
+
+describe("release-only workload selection", () => {
+  it("keeps the large journey out of check graphs for all projects and each relevant edit", (t) => {
+    const repo = scratchRepository(t);
+    const graphPath = join(repo.path, "task-graph.json");
+    const graph = (args) => {
+      const run = spawnSync(
+        join(repo.path, "node_modules", ".bin", "nx"),
+        [...args, `--graph=${graphPath}`],
+        {
+          cwd: repo.path,
+          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          encoding: "utf8",
+        },
+      );
+      assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+      const tasks = JSON.parse(readFileSync(graphPath, "utf8")).tasks.tasks;
+      return Object.keys(tasks);
+    };
+    const noWorkload = (tasks) =>
+      assert.ok(
+        tasks.every((task) => !task.endsWith(":workload")),
+        tasks.join("\n"),
+      );
+    noWorkload(graph(["run-many", "-t", "check"]));
+    for (const file of [
+      "src/plan.rs",
+      "src/executor.rs",
+      "src/maintenance.rs",
+      "tests/scratch_workload/main.rs",
+      "tests/pool_workload/main.rs",
+    ]) {
+      const base = repo.head();
+      repo.change(file);
+      noWorkload(graph(["affected", "-t", "check", `--base=${base}`]));
+    }
+    const tasks = graph(["run-many", "-t", "workload"]);
+    assert.ok(tasks.includes("onepipeline-scratch-workload:workload"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-scratch-workload:build"), tasks.join("\n"));
+    assert.ok(tasks.includes("onepipeline-pool-workload:workload"), tasks.join("\n"));
+    const declared = project("onepipeline-scratch-workload");
+    assert.equal(declared.targets.workload.parallelism, false);
+    assert.deepEqual(declared.targets.check.dependsOn, ["format-check", "lint"]);
+    assert.equal(declared.targets.test, undefined);
+    assert.equal(declared.targets.budgets, undefined);
+    assert.ok(!project("onepipeline").implicitDependencies.includes(declared.name));
   });
 });

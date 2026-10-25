@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.10.1",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -460,6 +460,17 @@
                 ],
                 "description": "A glob over the kind's kebab-case wire string, where `*` stands for any\nrun of characters including none and every other character is itself."
               },
+              "significance": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Significance"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The producer's `significance` stamp, carried among the labels' extras as\n`onevcs` carries it. An envelope with no stamp matches no value here."
+              },
               "phase": {
                 "anyOf": [
                   {
@@ -528,6 +539,26 @@
               }
             ],
             "description": "The library that produced an event."
+          },
+          "Significance": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "milestone",
+                "description": "A change opened, its checks passed, or its landing reached its base."
+              },
+              {
+                "type": "string",
+                "const": "blocker",
+                "description": "An attempted action failed, was refused, or needs a person."
+              },
+              {
+                "type": "string",
+                "const": "progress",
+                "description": "Ordinary running or successful detail."
+              }
+            ],
+            "description": "How much attention an event asks of its consumer, stamped by its producer."
           },
           "Phase": {
             "oneOf": [
@@ -968,7 +999,7 @@
               "string",
               "null"
             ],
-            "description": "The word its settlement was reached under."
+            "description": "The word its settlement was reached under. A review draft republished\nwithout a check watch settles change-review-draft-unchecked at its push."
           },
           "detail": {
             "type": [
@@ -1232,6 +1263,20 @@
                 "items": {
                   "$ref": "#/$defs/ReworkComment"
                 }
+              },
+              "reason": {
+                "type": "string",
+                "description": "The rework's reason and instruction, byte-for-byte as the store holds them:\nwhat a reply drafting on this host is handed as `## Reason`. Empty in a\nrecord written before they were carried."
+              },
+              "instruction": {
+                "type": "string"
+              },
+              "replaces_head": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The superseded node's settled head, where the store's provenance carries\nit: where the commits the rework added begin."
               }
             },
             "required": [
@@ -1258,7 +1303,7 @@
               "id",
               "url"
             ],
-            "description": "One review comment a [`Command::Rework`] answers: its id on the host, and\nwhere a person reads it."
+            "description": "One review comment a [`Command::Rework`] or a [`Command::Decline`] answers: its id on the host, and\nwhere a person reads it."
           },
           "ContinuedSource": {
             "oneOf": [
@@ -1269,6 +1314,257 @@
               }
             ],
             "description": "Where a continued settlement was read."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-closures@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node whose landing it is, or `null` for a `publish-branch`, `repo-recover` or\n`integrate` landing outside a run."
+          },
+          "commit": {
+            "type": "string",
+            "description": "The commit the landing reached its base at."
+          },
+          "closes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The issues the landing reported closing, as `owner/name#N`, as it reported them."
+          },
+          "outcome": {
+            "$ref": "#/$defs/ClosureOutcome",
+            "description": "Whether the store's call finished with every item written, or failed for good."
+          },
+          "items": {
+            "type": "array",
+            "items": true,
+            "description": "The store's `items`, verbatim: one per issue and source asked."
+          },
+          "unsupported": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The store's `unsupported` sources, verbatim: each was sent no request."
+          },
+          "class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The failure's class, as the store decided it — `null` unless `outcome` is `failed`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, in the store's words — `null` unless `outcome` is `failed`."
+          }
+        },
+        "required": [
+          "commit",
+          "closes",
+          "outcome",
+          "items",
+          "unsupported"
+        ],
+        "description": "`landing-closures`: what the store did with the GitHub issues one landing closed —\nentry 132 of `docs/contract-divergences.md`, whose fenced example `tests/contract.rs`\nholds to this type.\n\nEvery member is always written, `node`, `class` and `reason` as `null` when they have\nnothing to say, so a reader reads one fixed shape.",
+        "title": "LandingClosures",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ClosureOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "projected",
+                "description": "The call finished and no item it reports failed."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The call, or an item it reports, failed, and is not asked again."
+              }
+            ],
+            "description": "What one landing's closure call came to."
+          },
+          "FailureClass": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "refused",
+                "description": "A failure no retry can change."
+              },
+              {
+                "type": "string",
+                "const": "transient",
+                "description": "A failure a wait can change."
+              }
+            ],
+            "description": "Whether asking the store again, unchanged, could change its answer — the store's own\nword, and the one thing this worker branches on.\n\n`refused` is a failure no retry can change: a projection the store refused never reaches\nthe board however often it is asked, and each attempt against a hosted destination spends\nits allowance for nothing. `transient` is everything a wait can change, a rate limit\nincluded. The mapping from a failure to its class is the store's —\n[`onetaskgraph_core::classify`] — and is never restated here, and no message is ever read\nto decide. This is the record's own vocabulary, which [`ProjectionRecord`] writes and a\nreader of it names, so it is converted from the store's by an exhaustive match: a class\nthe store adds is a compile error here rather than a line this build writes and cannot\nread back."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.home-status@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project": {
+            "type": "string",
+            "description": "The run's home, by the qualified id its launch recorded."
+          },
+          "outcome": {
+            "$ref": "#/$defs/HomeOutcome",
+            "description": "Whether the store wrote the home `done`, or failed to for good."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Status"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The home's status as the store read it back — `null` unless `outcome` is `written`."
+          },
+          "class": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/FailureClass"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The failure's class, as the store decided it — `null` unless `outcome` is `failed`."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it failed, in the store's words — `null` unless `outcome` is `failed`."
+          }
+        },
+        "required": [
+          "project",
+          "outcome"
+        ],
+        "description": "`home-status`: what the store answered when the run's home was marked `done` — entry 134\nof `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this\ntype.\n\nOne per run, written once the call has finished. Every member is always written, `status`,\n`class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed\nshape.",
+        "title": "HomeStatus",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "HomeOutcome": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "written",
+                "description": "The store wrote the home `done`."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The store refused the write, and it is not asked again."
+              }
+            ],
+            "description": "What the call marking a run's home `done` came to."
+          },
+          "Status": {
+            "type": "object",
+            "properties": {
+              "category": {
+                "$ref": "#/$defs/StatusCategory",
+                "description": "The normalised value filters compare against."
+              },
+              "name": {
+                "type": "string",
+                "description": "The source's own label for this status."
+              }
+            },
+            "required": [
+              "category",
+              "name"
+            ],
+            "description": "A source's status, kept in both normalised and original form.\n\n`category` is what every filter compares against; `name` is the source's own\nwording, preserved so display never flattens \"In Review\" into \"In Progress\"."
+          },
+          "StatusCategory": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "draft",
+                "description": "Written down but not yet committed to as work."
+              },
+              {
+                "type": "string",
+                "const": "backlog",
+                "description": "Known about, not yet accepted as ready to work."
+              },
+              {
+                "type": "string",
+                "const": "todo",
+                "description": "Accepted and ready to be picked up, and nothing has claimed it."
+              },
+              {
+                "type": "string",
+                "const": "queued",
+                "description": "Claimed by work that will do it, and not yet started."
+              },
+              {
+                "type": "string",
+                "const": "in-progress",
+                "description": "Being worked on."
+              },
+              {
+                "type": "string",
+                "const": "done",
+                "description": "Finished."
+              },
+              {
+                "type": "string",
+                "const": "cancelled",
+                "description": "Abandoned."
+              },
+              {
+                "type": "string",
+                "const": "unknown",
+                "description": "The source reported a status this vocabulary cannot place."
+              }
+            ],
+            "description": "The normalised status vocabulary shared across every source."
+          },
+          "FailureClass": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "refused",
+                "description": "A failure no retry can change."
+              },
+              {
+                "type": "string",
+                "const": "transient",
+                "description": "A failure a wait can change."
+              }
+            ],
+            "description": "Whether asking the store again, unchanged, could change its answer — the store's own\nword, and the one thing this worker branches on.\n\n`refused` is a failure no retry can change: a projection the store refused never reaches\nthe board however often it is asked, and each attempt against a hosted destination spends\nits allowance for nothing. `transient` is everything a wait can change, a rate limit\nincluded. The mapping from a failure to its class is the store's —\n[`onetaskgraph_core::classify`] — and is never restated here, and no message is ever read\nto decide. This is the record's own vocabulary, which [`ProjectionRecord`] writes and a\nreader of it names, so it is converted from the store's by an exhaustive match: a class\nthe store adds is a compile error here rather than a line this build writes and cannot\nread back."
           }
         }
       }
@@ -1462,6 +1758,26 @@
             "format": "uint64",
             "minimum": 0,
             "description": "The command envelope it came in. Absent from a record written before the\nfield existed, and from one no queued envelope produced."
+          },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Where in that envelope's `commands` the refused command sat, from zero:\nwhat names a refused note among several alike in one envelope. Present\nbeside `envelope`, and absent from a record written before the field\nexisted."
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Refusal"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The refusal by kind, where it was one the reconciler names as one; `reason`\nis then its text. Absent otherwise."
           }
         },
         "required": [
@@ -1476,6 +1792,115 @@
           "AuthorWord": {
             "type": "string",
             "description": "Who submitted a command or a reply."
+          },
+          "Refusal": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment no read found there."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "comment-not-read"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment"
+                ],
+                "description": "The comment was never read for the node: no `onepipeline review` of this\nrun found it on the node's draft."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "blank-reason"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node"
+                ],
+                "description": "The decline's reason was blank."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comment": {
+                    "type": "string",
+                    "description": "The comment already answered."
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "Where that reply is read."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "already-answered"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comment",
+                  "url"
+                ],
+                "description": "A marked reply already answers the comment's current revision, so there is\nnothing to post."
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "node": {
+                    "type": "string",
+                    "description": "The node the decline named."
+                  },
+                  "comments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "The comments it named."
+                  },
+                  "detail": {
+                    "type": "string",
+                    "description": "What failed."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "const": "decline-not-posted"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "node",
+                  "comments",
+                  "detail"
+                ],
+                "description": "The decline's replies could not all be drafted or posted. Any posted before\nthe failure stay on the host, and sending the decline again posts only the\nrest."
+              }
+            ],
+            "description": "Why the reconciler refused a [`Command::Decline`], by kind.\n\nIts [`Display`](std::fmt::Display) is the refusal's `reason` on the command's\noutcome. The kinds are the ones a planner acts on differently: a comment no\nread of the node found is named again once `onepipeline review` has read it, a\nblank reason is restated, a comment a reply already answers needs nothing, and\na decline whose replies did not all reach the host is sent again, posting only\nthe ones still missing. See `docs/contract-divergences.md` entry 130."
           }
         }
       }
@@ -3622,6 +4047,11 @@
                 "type": "string",
                 "const": "restack",
                 "description": "A stack parent's own restack republished with new commits."
+              },
+              {
+                "type": "string",
+                "const": "readjust",
+                "description": "A node it is connected to landed or was absorbed, so the draft is brought onto\nits placement: its nearest unlanded parents, or the root."
               }
             ],
             "description": "Why a draft is restacked."
@@ -3660,6 +4090,521 @@
         "description": "`node-restacked`: a restack published.",
         "title": "NodeRestacked",
         "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-landed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "change_url": {
+            "type": "string",
+            "description": "Its change request."
+          },
+          "commit": {
+            "type": "string",
+            "description": "The commit its work reached the root as."
+          },
+          "detected_by": {
+            "$ref": "#/$defs/LandingDetection",
+            "description": "How the landing was found."
+          },
+          "trigger": {
+            "$ref": "#/$defs/ReadjustTrigger",
+            "description": "The action whose readjustment found it."
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node whose landing carried it, for an absorbed node."
+          }
+        },
+        "required": [
+          "node",
+          "change_url",
+          "commit",
+          "detected_by",
+          "trigger"
+        ],
+        "description": "`node-landed`: a draft's change request was found merged into its root.",
+        "title": "NodeLanded",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingDetection": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "readjust",
+                "description": "A readjustment's standings read reported its change request merged into its root."
+              },
+              {
+                "type": "string",
+                "const": "absorber-landed",
+                "description": "The node it was absorbed into landed, carrying its work."
+              }
+            ],
+            "description": "How a node's landing was found."
+          },
+          "ReadjustTrigger": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "review",
+                "description": "The pass `onepipeline review`."
+              },
+              {
+                "type": "string",
+                "const": "readjust",
+                "description": "The verb `onepipeline readjust`."
+              },
+              {
+                "type": "string",
+                "const": "rework",
+                "description": "Applying a `rework`, or the republication that continues one."
+              },
+              {
+                "type": "string",
+                "const": "placement",
+                "description": "A restack, or a placement of a lifecycle node at dispatch."
+              },
+              {
+                "type": "string",
+                "const": "continuation",
+                "description": "A continuing launch or an adoption, before its first dispatch."
+              }
+            ],
+            "description": "The action a readjustment ran first in."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.node-absorbed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "into": {
+            "type": "string",
+            "description": "The node whose branch it merged into."
+          },
+          "change_url": {
+            "type": "string",
+            "description": "Its change request."
+          },
+          "commit": {
+            "type": "string",
+            "description": "The commit the merge made on that branch."
+          }
+        },
+        "required": [
+          "node",
+          "into",
+          "change_url",
+          "commit"
+        ],
+        "description": "`node-absorbed`: a draft's change request was merged into another node's branch, so\nits work reaches the root only with that node's.",
+        "title": "NodeAbsorbed",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.change-reopened@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "change_url": {
+            "type": "string",
+            "description": "Its change request."
+          },
+          "restored_base": {
+            "type": "string",
+            "description": "The branch restored on the origin, which its retarget then deletes again."
+          }
+        },
+        "required": [
+          "node",
+          "change_url",
+          "restored_base"
+        ],
+        "description": "`change-reopened`: a draft the host closed when its landed parent's branch was\ndeleted had that branch restored and was reopened.",
+        "title": "ChangeReopened",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-readjusted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "from": {
+            "$ref": "#/$defs/Placement",
+            "description": "Where it was placed before."
+          },
+          "to": {
+            "$ref": "#/$defs/Placement",
+            "description": "Where it is placed now."
+          },
+          "cause": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The nodes whose landing or absorption moved it."
+          },
+          "head": {
+            "type": "string",
+            "description": "The commit its branch stands at afterwards."
+          },
+          "agent_dispatched": {
+            "type": "boolean",
+            "description": "Whether an agent was dispatched to conclude a conflict."
+          },
+          "retarget": {
+            "$ref": "#/$defs/RetargetWord",
+            "description": "What became of its change request's base."
+          },
+          "content": {
+            "$ref": "#/$defs/ReadjustContent",
+            "description": "Whether its branch carries its new base."
+          }
+        },
+        "required": [
+          "node",
+          "from",
+          "to",
+          "cause",
+          "head",
+          "agent_dispatched",
+          "retarget",
+          "content"
+        ],
+        "description": "`node-readjusted`: a draft was brought onto its placement after a node it is\nconnected to landed or was absorbed. The node's ordinary `node-settled` follows.",
+        "title": "NodeReadjusted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "Placement": {
+            "type": "object",
+            "properties": {
+              "base": {
+                "type": "string",
+                "description": "The branch its change request is based on."
+              },
+              "stack_parents": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Its stack parents, in declared order; empty on the root."
+              }
+            },
+            "required": [
+              "base",
+              "stack_parents"
+            ],
+            "description": "Where a draft is placed: its base and the stack parents whose branches it stands on."
+          },
+          "RetargetWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "retargeted",
+                "description": "Its base moved on the host."
+              },
+              {
+                "type": "string",
+                "const": "unchanged",
+                "description": "The host already targeted the computed base."
+              },
+              {
+                "type": "string",
+                "const": "none",
+                "description": "No retarget was asked: its placement did not move."
+              }
+            ],
+            "description": "Whether a readjustment moved a draft's change request."
+          },
+          "ReadjustContent": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "merged",
+                "description": "Its base's head was merged into its branch and pushed."
+              },
+              {
+                "type": "string",
+                "const": "pending",
+                "description": "Its change request was moved with no merge: a `retry` merges the base."
+              }
+            ],
+            "description": "Whether a readjusted draft's branch now carries its new base."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.stack-landed-out-of-order@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node that landed."
+          },
+          "carried": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each unlanded ancestor whose work reached the root through it."
+          }
+        },
+        "required": [
+          "node",
+          "carried"
+        ],
+        "description": "`stack-landed-out-of-order`: a draft merged into the root while unlanded ancestors'\nwork rode along with it.",
+        "title": "StackLandedOutOfOrder",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.change-closed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "change_url": {
+            "type": "string",
+            "description": "Its change request."
+          }
+        },
+        "required": [
+          "node",
+          "change_url"
+        ],
+        "description": "`change-closed`: a draft's change request was closed without being merged.",
+        "title": "ChangeClosed",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.node-checks-read@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node."
+          },
+          "head": {
+            "type": "string",
+            "description": "The head the verdict is about."
+          },
+          "verdict": {
+            "$ref": "#/$defs/ChecksVerdictWord",
+            "description": "The verdict."
+          }
+        },
+        "required": [
+          "node",
+          "head",
+          "verdict"
+        ],
+        "description": "`node-checks-read`: a later trigger's read of a draft republished without a check\nwatch.",
+        "title": "NodeChecksRead",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ChecksVerdictWord": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "pending",
+                "description": "Something required has not settled."
+              },
+              {
+                "type": "string",
+                "const": "passed",
+                "description": "Every required check passed."
+              },
+              {
+                "type": "string",
+                "const": "passed-with-skipped",
+                "description": "Every required check passed or was skipped."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "A required check failed."
+              },
+              {
+                "type": "string",
+                "const": "none-required",
+                "description": "The base requires nothing."
+              }
+            ],
+            "description": "A deferred republication's required-checks verdict, as a later read found it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.readjust-read-failed@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "The repository, as its drafts name it."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What the host or the sibling said."
+          }
+        },
+        "required": [
+          "repo",
+          "detail"
+        ],
+        "description": "`readjust-read-failed`: one repository's standings read failed, and its drafts were\nleft as they were.",
+        "title": "ReadjustReadFailed",
+        "$schema": "https://json-schema.org/draft/2020-12/schema"
+      }
+    },
+    {
+      "id": "agent.pipeline.review-reply-posted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose draft carries the comment."
+          },
+          "comment": {
+            "type": "string",
+            "description": "The comment answered."
+          },
+          "disposition": {
+            "$ref": "#/$defs/ReplyDisposition",
+            "description": "Whether it was answered or declined."
+          },
+          "url": {
+            "type": "string",
+            "description": "Where the reply is read."
+          },
+          "commits": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The commits its body links, by full sha; empty for a decline."
+          }
+        },
+        "required": [
+          "node",
+          "comment",
+          "disposition",
+          "url",
+          "commits"
+        ],
+        "description": "`review-reply-posted`: one reply the host accepted, in its comment's thread or as a\nconversation comment linking it.",
+        "title": "ReviewReplyPosted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReplyDisposition": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "answered",
+                "description": "Answered by commits a rework added."
+              },
+              {
+                "type": "string",
+                "const": "declined",
+                "description": "Left, saying why."
+              }
+            ],
+            "description": "How a posted reply answers its comment: with the rework's commits, or declining it."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.review-reply-not-drafted@2",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The node whose draft carries the comments."
+          },
+          "comments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The comments the drafting named."
+          },
+          "ending": {
+            "$ref": "#/$defs/ReplyNotDraftedEnding",
+            "description": "Why nothing was posted."
+          },
+          "detail": {
+            "type": "string",
+            "description": "What failed, in the drafter's or the engine's words."
+          }
+        },
+        "required": [
+          "node",
+          "comments",
+          "ending",
+          "detail"
+        ],
+        "description": "`review-reply-not-drafted`: a drafting of a rework's replies posted nothing; the\nreplies stay owed and are drafted again on the next pass.",
+        "title": "ReviewReplyNotDrafted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ReplyNotDraftedEnding": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "unconfigured",
+                "description": "No reply drafter is configured for the run."
+              },
+              {
+                "type": "string",
+                "const": "failed",
+                "description": "The drafting dispatch failed, or answered nothing the schema accepted."
+              },
+              {
+                "type": "string",
+                "const": "invalid",
+                "description": "The drafter answered a result the engine refused."
+              }
+            ],
+            "description": "Why a reply drafting posted nothing."
+          }
+        }
       }
     },
     {
@@ -3706,6 +4651,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's host was given, whose cancel grace a run taking the\nproject over waits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -3715,6 +4671,28 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The host's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's host was given: its claim interval, which paces how often a\ntakeover reads the claim, and its cancel grace, which a run taking the project over waits\nout before it starts without an acknowledgement."
           }
         }
       }
@@ -3763,6 +4741,17 @@
               "claimed_at": {
                 "type": "string",
                 "description": "When the claim was written, RFC 3339."
+              },
+              "lease": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ClaimLease"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "The terms the claiming driver's host was given, whose cancel grace a run taking the\nproject over waits out; absent from a claim written by a build that kept no lease."
               }
             },
             "required": [
@@ -3772,6 +4761,694 @@
               "claimed_at"
             ],
             "description": "A project's `onepipeline.driver` claim: the run driving it, the host and launching\nsession that run is driven from, its driver's pid, and when it claimed.\n\nThe document a journal record carries, and so no stricter than any other payload here;\nthe store's copy is external input, and `continuation::claim_of` refuses one carrying a\nkey this shape does not name before it is read as one."
+          },
+          "ClaimLease": {
+            "type": "object",
+            "properties": {
+              "interval_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The host's claim interval, in whole seconds."
+              },
+              "cancel_grace_seconds": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 1,
+                "description": "The driver's cancel grace, in whole seconds."
+              }
+            },
+            "required": [
+              "interval_seconds",
+              "cancel_grace_seconds"
+            ],
+            "description": "The terms a claiming driver's host was given: its claim interval, which paces how often a\ntakeover reads the claim, and its cancel grace, which a run taking the project over waits\nout before it starts without an acknowledgement."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-registered@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-registered`: a manager landing's ownership, recorded before any\nside effect.",
+        "title": "LandingRegistered",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-drafting@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-drafting`: a manager landing started drafting its body.",
+        "title": "LandingDrafting",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-started@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-started`: a manager landing started its forwarded verb.",
+        "title": "LandingStarted",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-finished@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTerminal",
+        "description": "`landing-finished`: a manager landing's verb ended `0`.",
+        "title": "LandingFinished",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTerminal": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              },
+              "status": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The forwarded command's exit status."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message",
+              "status"
+            ],
+            "description": "A terminal transition's payload: the transition, and the forwarded\ncommand's exit status."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-refused@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTerminal",
+        "description": "`landing-refused`: a manager landing's verb ended non-zero, or its progress\ncould not be relayed.",
+        "title": "LandingRefused",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTerminal": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              },
+              "status": {
+                "type": "integer",
+                "format": "int32",
+                "description": "The forwarded command's exit status."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message",
+              "status"
+            ],
+            "description": "A terminal transition's payload: the transition, and the forwarded\ncommand's exit status."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.landing-died@2",
+      "schema": {
+        "$ref": "#/$defs/LandingTransition",
+        "description": "`landing-died`: a manager landing's process proved gone with no ending.",
+        "title": "LandingDied",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "LandingTransition": {
+            "type": "object",
+            "properties": {
+              "landing_id": {
+                "type": "string",
+                "description": "The landing."
+              },
+              "flow_id": {
+                "type": "string",
+                "description": "The flow that holds it."
+              },
+              "operation": {
+                "$ref": "#/$defs/LandingOperation",
+                "description": "The verb it forwards."
+              },
+              "subjects": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/LandingSubject"
+                },
+                "description": "Every branch it can advance."
+              },
+              "message": {
+                "type": "string",
+                "description": "What happened, for a person."
+              }
+            },
+            "required": [
+              "landing_id",
+              "flow_id",
+              "operation",
+              "subjects",
+              "message"
+            ],
+            "description": "What every landing transition's payload carries."
+          },
+          "LandingOperation": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "publish-branch",
+                "description": "`onepipeline publish-branch`, over `onevcs publish-branch`."
+              },
+              {
+                "type": "string",
+                "const": "repo-recover",
+                "description": "`onepipeline repo-recover`, over `onevcs recover`."
+              },
+              {
+                "type": "string",
+                "const": "integrate",
+                "description": "`onepipeline integrate`, over `onevcs integrate`."
+              }
+            ],
+            "description": "The engine verb a manager landing forwards to the linked `onevcs`."
+          },
+          "LandingSubject": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "identity": {
+                "type": "string",
+                "description": "The `onevcs` identity key the branch belongs to."
+              },
+              "branch": {
+                "type": "string",
+                "description": "The branch."
+              }
+            },
+            "required": [
+              "identity",
+              "branch"
+            ],
+            "description": "One branch a landing advances, in the identity it belongs to."
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-removed@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "$ref": "#/$defs/ScratchTrigger"
+          },
+          "dirs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchFailure"
+            }
+          }
+        },
+        "required": [
+          "trigger",
+          "dirs",
+          "bytes",
+          "failed"
+        ],
+        "description": "The scratch removed at one ending or manager request.",
+        "title": "ScratchRemoved",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchTrigger": {
+            "type": "string",
+            "enum": [
+              "success",
+              "discard"
+            ],
+            "description": "Why scratch is removed."
+          },
+          "ScratchFailure": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "error": {
+                "$ref": "#/$defs/ScratchError"
+              }
+            },
+            "required": [
+              "path",
+              "error"
+            ],
+            "description": "A directory removal that the filesystem refused."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
+          },
+          "ScratchError": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "id": "agent.pipeline.scratch-retained@2",
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "ending": {
+            "$ref": "#/$defs/ScratchEnding"
+          },
+          "dirs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ScratchDir"
+            }
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "ending",
+          "dirs",
+          "total_bytes"
+        ],
+        "description": "Scratch kept for inspection or retry.",
+        "title": "ScratchRetained",
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "ScratchEnding": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "unfinished",
+              "stopped",
+              "paused"
+            ],
+            "description": "A non-success ending or pause."
+          },
+          "ScratchDir": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "$ref": "#/$defs/AbsolutePath"
+              },
+              "bytes": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "bytes"
+            ],
+            "description": "A directory's allocated disk usage at an ending."
+          },
+          "AbsolutePath": {
+            "type": "string",
+            "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\[^\\\\]+\\\\[^\\\\]+)"
           }
         }
       }

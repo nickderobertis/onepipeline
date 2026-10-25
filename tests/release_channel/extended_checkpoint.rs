@@ -2,9 +2,10 @@
 //! read by the last release before this build began extending it.
 //!
 //! A reader that has proved a run ended covers its trailing records in
-//! `checkpoint.json`. Review intake advances the fold schema to 12, so the
-//! preceding release must discard that checkpoint and recover the same answers
-//! from the journal, writing its own schema-11 checkpoint. This drives that
+//! `checkpoint.json`. Review intake advanced the fold schema to 12, review replies
+//! to 13, and transcript references to 14, so the preceding release must discard
+//! that checkpoint and recover the same answers from the journal, writing its own
+//! schema-11 checkpoint. This drives that
 //! release's `status`, `host` and `results` over the extended checkpoint.
 
 use std::path::{Path, PathBuf};
@@ -67,12 +68,19 @@ fn document(path: &Path) -> Value {
     serde_json::from_slice(&std::fs::read(path).expect("the document")).expect("JSON")
 }
 
-/// Compare the recorded run's answers without live filesystem measurements or
-/// the elapsed duration the two releases compute at different instants.
+/// Compare the recorded run's answers without live filesystem measurements,
+/// the elapsed duration the two releases compute at different instants, or the
+/// scratch notice (a header and its indented directory lines) that only a
+/// release journalling scratch records can print.
 fn stable_answer(answer: &str) -> String {
+    let mut in_scratch_notice = false;
     answer
         .lines()
-        .filter(|line| !line.starts_with("  free space: "))
+        .filter(|line| {
+            in_scratch_notice = line.starts_with("  scratch kept: ")
+                || (in_scratch_notice && line.starts_with("    "));
+            !in_scratch_notice && !line.starts_with("  free space: ")
+        })
         .map(|line| {
             if line.contains(": worker ended when the run was stopped, ") {
                 line.rsplit_once(", ").expect("the stop's duration").0
@@ -122,7 +130,7 @@ fn a_checkpoint_the_host_view_extended_is_refolded_by_the_preceding_release() {
         Some(journal_len()),
         "this build's view did not extend the ended run's checkpoint"
     );
-    assert_eq!(extended["schema_version"], 12);
+    assert_eq!(extended["schema_version"], 14);
 
     let status = world.run(&["status", run]).exited(0).stdout.clone();
     let results = world.run(&["results", run]).exited(0).stdout.clone();

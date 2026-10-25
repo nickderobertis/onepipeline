@@ -1,0 +1,52 @@
+{
+  "name": "onepipeline-release",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "release",
+  "tags": ["scope:tooling", "lang:python"],
+  "implicitDependencies": ["github-workflows"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "bash -c 'python3 -m py_compile release/release.py && bash -n release/release-pr-auto-merge.sh'"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write release"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format release"
+    },
+    "lint": {
+      "command": "bash -c 'node node_modules/@biomejs/biome/bin/biome lint release && python3 -m py_compile release/release.py && bash -n release/release-pr-auto-merge.sh'"
+    },
+    "test": {
+      "command": "node --test release/tests/*.test.mjs",
+      "cache": false,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/.github/workflows/release.yml",
+        "{workspaceRoot}/.github/workflows/release-plz.yml",
+        "{workspaceRoot}/.github/workflow-graph.mjs",
+        "{workspaceRoot}/npm/test/registry-support.mjs",
+        "{workspaceRoot}/npm/onepipeline-cli/**/*",
+        "{workspaceRoot}/scripts/build-staged-release.py",
+        "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/scripts/publish-npm.sh",
+        "{workspaceRoot}/scripts/smoke-published.sh",
+        "{workspaceRoot}/scripts/retry-install.sh",
+        "{workspaceRoot}/scripts/linked-engines.sh",
+        "{workspaceRoot}/scripts/release-outcome.mjs",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/Cargo.lock",
+        "sharedGlobals"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

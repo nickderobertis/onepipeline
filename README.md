@@ -53,8 +53,11 @@ The package name is not optional: `cargo install --git` searches the whole
 repository, and this one also carries the `onepipeline-testfakes` test harness,
 so an unqualified command fails with `multiple packages with binaries found`.
 
-Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
-Windows (x86-64) are attached to every release, with `sha256` checksums.
+Prebuilt archives for Linux (x86-64, arm64), macOS (Apple silicon), and Windows
+(x86-64) are attached to every release, with `sha256` checksums; PyPI and npm
+carry the same platforms. arm64 Linux builds are supported again, built natively
+on an arm64 runner. Intel macOS builds are discontinued: on an Intel Mac, build
+from source with the command above.
 
 ## How the npm launcher is published
 
@@ -65,18 +68,21 @@ optional dependency it cannot resolve**, leaving an `onepipeline` on `PATH` with
 nothing to exec.
 
 **`npm publish` exiting 0 means the registry accepted the upload, not that it
-serves the version.** The gap was measured at 75 seconds on one release and
-around eight minutes on another. So the order a release publishes in is not the
-order the registry becomes able to answer in, and offering the launcher on the
-strength of five exit codes is what put a broken install in front of users for a
-window after each release.
+serves the version.** The gap was measured at 75 seconds on one release, around
+eight minutes on another, and past ten minutes on two of v0.80.0's packages. So
+the order a release publishes in is not the order the registry becomes able to
+answer in, and offering the launcher on the strength of five exit codes is what
+put a broken install in front of users for a window after each release.
 
 `scripts/publish-npm.sh` therefore asks the registry rather than the exit code:
 it does not return until the version it just published is served, and it refuses
 to publish any package before the exact versions that package's own manifest
-pins are served. `verify-npm` then installs and starts the launcher on every
-platform the manifest declares a package for, so a release that would ship that
-window is red rather than green.
+pins are served, waiting at most `PUBLISH_NPM_AWAIT_BUDGET` seconds (fifteen
+minutes by default) in all. A job that gives up has still published, and its
+re-run keeps what npm took rather than publishing it again. Each platform's
+build job then installs its own platform package from npm and starts it on that
+OS, and `publish` installs and starts the launcher, so a release that would ship
+that window is red rather than green.
 
 ## Release outcome
 
@@ -84,7 +90,7 @@ Every release attaches **`release-outcome.json`** to its GitHub Release. It
 answers one question in three states, so a consumer can tell a publication that
 was verified from one that was not without opening a job log:
 
-- `nothing-shipped` — no publish job ran, so no artifact can have reached a
+- `nothing-shipped` — no publish step ran, so no artifact can have reached a
   registry. A publish that *failed* does not say this: it may have published
   part of what it was given, so it reads as `shipped-unverified`.
 - `shipped-unverified` — artifacts are public, and installing one of them was
@@ -221,6 +227,31 @@ are projected back onto the onetaskgraph project in the background. A failed
 write is reported and retried — unless the store refused it, which is reported
 once and attempted again when the run's graph next changes; it never changes
 execution or an edit ruling.
+
+A run claims its project on the store (`onepipeline.driver`), and a launch finding
+another run's claim is refused unless told `--take-over`. A project changes driver only
+when somebody says so, so a running driver reads that claim only where it must: on an
+adoption's first pass, and once immediately before each publication it starts. It never
+reads it on a timer or before a dispatch, and a read that fails, times out, is rate
+limited or finds no claim ends nothing. Before a publication starts, the driver names it
+on the project (`onepipeline.publishing`), and only then reads the claim. A read naming
+another run withholds the publication and stops the driver. A read that was not answered
+holds that one publication until a later read is — never sooner than a rate-limited read's
+own wait allows — while dispatches go on starting. Once the publication has finished, the
+name is cleared — ten seconds later where it was the last, so the next draft of a restack
+replaces it in one write. So a takeover waits rather than every driver: `start --take-over` writes
+its claim, and starts nothing until the driver it displaced has stopped and acknowledged
+that on the claim, which that driver does once it has read the takeover at a publication,
+its closeout or its stop. Where it does not, the takeover starts once *that driver's*
+cancel grace (`ONEPIPELINE_CANCEL_GRACE_SECONDS`, which its claim states) and ten seconds
+have passed and the project names none of its publications under way. A publication held
+for any length of time holds the takeover with it. A driver that has not read the takeover
+yet may still start a dispatch, which then publishes nothing. While it waits, the takeover
+reads the claim every tenth of its **claim interval** —
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`, 300 by default — at least one and at most thirty
+seconds apart; that is all the setting governs. A claim stating no lease — one an older
+build wrote — is taken over only on an acknowledgement. A run of this host that nothing
+drives is taken over at once.
 
 A task's shape is a template its host owns. A host registers names in
 `<root>/templates.yaml` under `--template-root DIR`; `plan-task` is always
@@ -424,13 +455,18 @@ run's observer graph alike, whether the run was launched attached or detached.
 It fails nothing: a node settles on the death exactly as above, and the observer
 is restarted as it always is.
 
+Scratch is removed when every node is done (`SETTLED`). Other endings and pauses
+keep it for inspection or retry; `status` and `results` list its recorded disk
+usage. Remove an ended run’s scratch with `onepipeline scratch discard <run-id>`.
+The journal, reports and launch record stay.
+
 Every node dispatch carries `ONEPIPELINE_NODE_SCRATCH_DIR` in its own
 environment: an absolute path to a directory that exists and is writable before
 the dispatch's first turn, unique to that dispatch — a retry, a requeue and a
 resumed pin of the same node each get their own — and never removed while that
 dispatch runs. Nothing beyond that is promised, and the spelling of the path least
 of all: no consumer may derive one path from another. Not in the approved contract
-yet either: open divergence 48.
+yet either: open divergence 48, whose scratch lifetime divergence 127 revises.
 
 The planner supervises over the channel:
 
@@ -449,6 +485,19 @@ reconciler applied it, `0` when it is accepted and still queued — durable,
 waiting for something to drive the run, and never an instruction to send again,
 which the reply says in words on stderr — and `2` when it was refused. A
 non-zero status from this verb is a rejection to correct.
+
+An `add` node or a `retry` replacement may state `"assets_from":
+"plans:authoring-board/task"`, a qualified onetaskgraph task id. Before accepting
+that edit, the compiler asks the store to read the task's held images; an unreadable
+task refuses the edit with its id and the store's reason, before anything is journalled.
+When the write-back creates the lineage, it reads those images through the store's
+public API and writes them alongside the shadow task through local-md's write API,
+so the creating copy carries each image under its reference name. A stored root
+supplies its own held images through its task record without a field. A reference
+neither source holds still refuses `asset-not-held`. Omit `assets_from` for the
+existing behavior; it is absent by default. It is an edit-only field:
+`onepipeline.assets_from` on a task loaded from a plan is refused as not a node
+field, and `requeue` cannot amend it.
 
 A verdict answers one question: `reply --correlation C` names it, and one naming
 none binds first to the question whose `ask-manager-token:` its `message` echoes.
@@ -561,6 +610,9 @@ was allowed, the floor, the item count and the per-item budget. It is named by
 launch config's `writeback_item_budget`, in that order of precedence, as a
 positive whole number of seconds — zero is refused at whichever spelling carried
 it — and naming none takes twelve seconds per item.
+`adopt RUN --writeback-item-budget SECONDS` replaces the recorded budget for
+this driver and every later one. Adoption without the flag keeps the recorded
+value and ignores the environment.
 
 A launch may name **run-end hooks**: `--success-hook COMMAND`, run once when the
 run ends with every node `done`, and `--failure-hook COMMAND`, run once when it
@@ -619,10 +671,13 @@ nothing and has capacity to spare, the driver runs `onevcs pool maintain` over e
 registered identity with that identity's `every`, paced in memory by
 `ONEPIPELINE_MAINTENANCE_PACE_SECONDS` (ten minutes by default). The sibling's
 recorded stamp decides what is due, so nothing is kept here, nothing runs twice, two
-drivers on one host are safe, and between runs nothing runs. A sweep that ran a
-slot's command — or met another run inside an identity, or failed — journals one
-`pool-maintenance` record; `status` names a sweep in progress and `results` the last
-record. A driver closing out mid-sweep finishes the identity in progress and begins
+drivers on one host are safe, and between runs nothing runs. The command a slot
+runs is the one its repository declares in its own `onevcs.toml`, else the host's
+`maintain`. A sweep that ran a slot's command — or met another run inside an
+identity, found a repository's `onevcs.toml` unreadable, or failed — journals one
+`pool-maintenance` record carrying `onevcs`'s report, each slot's `disk` before and
+after its command among it; `status` names a sweep in progress and `results` the last
+record, with how much it freed and any declaration it could not read. A driver closing out mid-sweep finishes the identity in progress and begins
 no other, so a settled run is not held behind the rest; its records carry
 `cut_short` naming the identities it did not reach, which another driver's idle pass
 or the host's own sweep picks up. Naming no schedule runs no maintenance at all.
@@ -722,10 +777,12 @@ and cannot drift from it: `tests/parity.rs` holds the two to one another over a
 recorded run, and a behaviour the binary has that the library lacks is a defect.
 Exit codes do not move; each result answers the code the binary exits with.
 
-`onepipeline monitor RUN [--filter NAME|SPEC | --all] [--cursor CURSOR]` makes one
+`onepipeline monitor RUN | --flow ID [--filter NAME|SPEC | --all] [--cursor CURSOR]` —
+`--flow` in the place of `RUN` reads a flow's manager landings — makes one
 pass over the merged stream and returns. Every pass — including one that renders
 no event — ends its stdout with exactly one resume line after the trailer,
-`-- cursor 1:<run>:<byte>`, whose byte is the end of the last finished record in
+`-- cursor 1:<run>:<byte>` — for `--flow`, the flow watch's own
+`-- cursor flow:2:<flow>:<landing>@<byte>/...:<run>@<byte>/...` — whose byte is the end of the last finished record in
 the journal at the moment of the read: past records the profile hid, and short of
 a record whose writer has not finished it. `--cursor` renders only the events
 recorded after that place, so a caller that keeps the last line and hands it back
@@ -834,12 +891,19 @@ started, and every run it launched — and returns `4` on a surface on the flow'
 own channel or a member run's, `6` on a member run's node settling, `8`
 (`run-joined`, a word a run's watch refuses) on a run joining the flow,
 `0` when the flow ends cleanly and `9` when it fails or dies; `--until run-joined`
-alone returns on a run joining and nothing else of the three. `--filter` and
-`--all` are a run's alone. [`docs/stop-guard.md`](docs/stop-guard.md#flows)
-states it, with the flow's own channel and what `unwatched` owes a flow. Under a
+alone returns on a run joining and nothing else of the four. A flow also holds
+the **manager landings** `publish-branch`, `repo-recover` and `integrate` register
+under `ONEPIPELINE_LAUNCHER_SESSION`, and `--until landing-progress` — in the
+default set — returns `0` on a landing event its `--filter` profile admits: under
+the shipped `planner` profile a milestone or a blocker, never progress, with
+`--filter detailed` waking on every event. `--all` is a run's alone.
+<!-- llmlint: ignore-block[no_redundant_instruction_pointers] this README is the page crates.io, PyPI and npm publish, read by a user with none of this repository's agent instructions in hand, so its links to the document that states the surface are the only route such a reader has to it. -->
+[`docs/stop-guard.md`](docs/stop-guard.md#flows) states it, with the flow's own
+channel and what `unwatched` owes a flow. Under a
 wake budget a watch given no `--timeout` gives up the wake reserve
 [`docs/stop-guard.md`](docs/stop-guard.md#the-wake-reserve) names before the budget, so it
 has returned by the time the budget is spent.
+<!-- llmlint: ignore-end[no_redundant_instruction_pointers] -->
 
 ## Where a dispatch runs
 
@@ -868,6 +932,11 @@ just bootstrap   # from a clean clone
 just check       # the deterministic gate
 just gate        # check + the diff-scoped llmlint tier
 ```
+
+The llmlint tier, `just lint-llm-diff <base>`, runs the llmlint CLI as a cached Nx
+target keyed on the tracked tree, the resolved base commit and `llmlint
+fingerprint`: an unchanged pass is replayed, a failure is judged again, and
+`--skip-nx-cache` forces a fresh judgement.
 
 `just --list` is the full command surface.
 [`docs/contract-divergences.md`](docs/contract-divergences.md) records every place

@@ -20,7 +20,7 @@ use onevcs::releases::TargetName;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::channel::{Author, Command, Deliver, Dependents, SettleOutcome};
+use crate::channel::{Author, Command, Dependents, SettleOutcome};
 use crate::error::{Error, Result};
 use crate::graph::{self, Graph, NodeStatus};
 use crate::plan::Node;
@@ -260,7 +260,7 @@ pub enum Operation {
     /// reader of the run has no second source for. Four of the five dispositions
     /// mutate nothing, because the note went into a conversation rather than onto
     /// the graph, so replay reconstructs them by changing nothing exactly as the
-    /// reconciler did. [`Reached::Carried`](crate::note::Reached::Carried) is the
+    /// reconciler did. [`Reached::Carried { reason: None }`](crate::note::Reached::Carried { reason: None }) is the
     /// one that does: it is the note still owed to the node's next dispatch, and
     /// folding it is what makes replay of the edit alone reconstruct that.
     NoteDelivered {
@@ -302,8 +302,36 @@ pub enum Operation {
         /// record written before the field existed, which reads back the same way.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         envelope: Option<u64>,
+        /// The note's 0-based position among that envelope's commands, which is
+        /// how a `withdraw-note` names it. Present exactly where `envelope` is,
+        /// and absent from a record written before the field existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        index: Option<u32>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// A note no turn had read, taken back by a `withdraw-note`: it is composed
+    /// into no dispatch, and its own command is answered refused.
+    NoteWithdrawn {
+        /// The node the note was for.
+        // llmlint: ignore[invalid_states_unrepresentable] the `String` every neighbouring variant spells a node id with; a withdrawal's node is never typed in — `withdrawal::validate` reads it off the envelope's own `note` command, whose node `compile_note` already judged against the graph — so there is no unjudged node id here to narrow.
+        node: String,
+        /// The envelope the note was sent in.
+        envelope: u64,
+        /// The note's 0-based position among that envelope's commands.
+        index: u32,
+        /// Why it was withdrawn, as the `withdraw-note` said.
+        reason: crate::note::WithdrawalReason,
+        /// Where the note was when it was withdrawn.
+        from: crate::note::WithdrawnFrom,
+        /// What the withdrawn note said: what replay takes back off the node a
+        /// carried note was folded onto.
+        text: crate::note::NoteText,
+        /// How many notes still owed to the node, carried after this one, read
+        /// the same: which of several identical carried entries replay takes
+        /// out, counted back from the latest. Omitted where none does.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        alike_after: u32,
+    },
     // llmlint: ignore-block[invalid_states_unrepresentable] a durable record field, as
     // `NodeParked`'s `reason` is: the reason, the instruction and the title are the prose
     // the `rework` op carried, each refused blank or invalid where `compile_rework` judged
@@ -341,6 +369,21 @@ pub enum Operation {
         to: String,
         /// Why.
         reason: String,
+    },
+    /// Review comments on a node's draft were declined: a reply saying why was
+    /// posted in each one's thread, labelled `declined` in its marker, before this
+    /// was committed. The replies are the decline's whole record.
+    DeclineApplied {
+        /// The node whose draft carries the comments.
+        node: String,
+        /// The comments declined.
+        comments: Vec<crate::channel::ReworkComment>,
+        /// Why they were left.
+        reason: String,
+        /// Where each comment's reply is read, in the order `comments` names them —
+        /// empty in the compile that judged the op, and filled in by the posting.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        replies: Vec<String>,
     },
     // llmlint: ignore-end[invalid_states_unrepresentable]
 }
@@ -400,6 +443,7 @@ impl Operation {
             | Self::TaskAmended { .. }
             | Self::ReworkRequested { .. }
             | Self::Retitled { .. }
+            | Self::DeclineApplied { .. }
             // llmlint: ignore-block[names_match_behavior] both are `true` for
             // every disposition on purpose, though only `ContextAdded`'s
             // `Deferred` and `NoteDelivered`'s `Carried` move anything a fold
@@ -415,6 +459,9 @@ impl Operation {
             | Self::ContextAdded { .. }
             | Self::NoteDelivered { .. } => true,
             // llmlint: ignore-end[names_match_behavior]
+            // It takes a carried note out of what the node's next dispatch is
+            // composed with, which the notes fold reads off this record.
+            Self::NoteWithdrawn { .. } => true,
         }
     }
 }
@@ -450,8 +497,10 @@ pub(crate) fn every_operation_kind() -> Vec<String> {
         "task-amended",
         "context-added",
         "note-delivered",
+        "note-withdrawn",
         "rework-requested",
         "retitled",
+        "decline-applied",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -558,6 +607,10 @@ pub struct Frontier {
     /// the run's record says: what a `rework` is refused over beside
     /// [`in_flight`](Self::in_flight), which only the loop knows.
     pub restacking: BTreeSet<String>,
+    /// Each node whose change request was merged into another node's branch, and that
+    /// node: a `rework` of one is refused naming it.
+    // llmlint: ignore[invalid_states_unrepresentable] both are node ids, the plain `String` every neighbouring map of this struct keys by — `landings`, `branches`, `superseded` — validated where the graph took the node and copied from `RunState::absorbed`, which folds them off `node-absorbed`; a node-id newtype on this one field would disagree with each of them.
+    pub absorbed: BTreeMap<String, String>,
 }
 
 /// What an edit's overrides are checked against, read off the launch record
@@ -727,6 +780,21 @@ pub fn compile(
                 resolve_amended_graphs(id, amend, base)?;
             }
             _ => {}
+        }
+    }
+    if let Command::Add { node } | Command::Retry { node, .. } = &resolved {
+        if let Some(id) = &node.assets_from {
+            let base = frontier
+                .graph_validation
+                .as_ref()
+                .ok_or_else(|| refuse("assets_from requires the run's launch directory"))?;
+            let built = crate::taskgraph::Store::at(&base.launch_dir)
+                .engine(&onetaskgraph_core::config::Layer::default())
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
+            crate::taskgraph::runtime()
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?
+                .block_on(built.engine.task_assets(id))
+                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
         }
     }
     let operations = compile_into(&mut candidate, frontier, author, &resolved)?;
@@ -1471,6 +1539,9 @@ fn compile_into(
         Command::Review { .. } => Err(refuse(
             "review discovery must be requested alone".to_owned(),
         )),
+        Command::Readjust { .. } => {
+            Err(refuse("a readjustment must be requested alone".to_owned()))
+        }
         Command::Add { node } => compile_add(graph, node),
         Command::Drop {
             id,
@@ -1526,8 +1597,18 @@ fn compile_into(
             id,
             deliver,
             persist,
+            delivery_timeout_seconds,
             ..
-        } => compile_note(graph, frontier, id, *deliver, *persist),
+        } => compile_note(
+            graph,
+            frontier,
+            id,
+            crate::note::Reach::of(id, *deliver, *persist, *delivery_timeout_seconds),
+        ),
+        // What it takes back is a record of the run's, which a graph cannot
+        // judge, so every refusal it earns is the reconciler's to journal:
+        // `withdrawal::validate` decides it against that record.
+        Command::WithdrawNote { .. } => Ok(Vec::new()),
         Command::Finding {
             message,
             blocking,
@@ -1555,6 +1636,11 @@ fn compile_into(
         Command::Retitle { id, title, reason } => {
             compile_retitle(graph, frontier, id, title, reason)
         }
+        Command::Decline {
+            id,
+            comments,
+            reason,
+        } => compile_decline(graph, frontier, id, comments, reason),
     }
 }
 
@@ -2073,6 +2159,12 @@ fn compile_requeue(
         }
     }
 
+    if amend.is_some_and(|amend| amend.contains_key("assets_from")) {
+        return Err(refuse(format!(
+            "requeue: node '{id}' cannot amend `assets_from`, which only add and retry may state"
+        )));
+    }
+
     if amend.is_some_and(|amend| amend.contains_key("task_record")) {
         return Err(refuse(format!(
             "requeue: node '{id}' cannot amend `task_record`, which is read from the task a \
@@ -2496,13 +2588,12 @@ fn compile_note(
     graph: &mut Graph,
     frontier: &Frontier,
     id: &str,
-    deliver: Deliver,
-    persist: bool,
+    reach: Result<crate::note::Reach>,
 ) -> Result<Vec<Operation>> {
     if !graph.contains(id) {
         return Err(refuse(format!("note: no node '{id}'")));
     }
-    let reach = crate::note::Reach::of(id, deliver, persist)?;
+    let reach = reach?;
     // A note that can only be carried has to have somewhere to be carried to. A
     // node that settled `done` will never be dispatched again, so `deliver: next`
     // to one is the same reach-nobody rule with the run's own record deciding it
@@ -2622,6 +2713,12 @@ fn compile_rework(
         return Err(refuse(format!(
             "rework: node '{id}''s change landed, so there is no open change request to rework; \
              build on the landed work with `add`"
+        )));
+    }
+    if let Some(into) = frontier.absorbed.get(id) {
+        return Err(refuse(format!(
+            "rework: node '{id}''s change request was merged into the branch of '{into}', so its \
+             work is in '{into}''s draft now; rework '{into}' instead"
         )));
     }
     let Some(branch) = frontier.branches.get(id).cloned() else {
@@ -2882,6 +2979,77 @@ fn compile_retitle(
     }])
 }
 
+/// Validate one `decline`: a lifecycle node whose draft is open on the run's
+/// record, and at least one comment, each named once by a usable id and URL.
+/// Whether its reason is blank and each comment was read for the node are judged by
+/// the reconciler against the run's record (`reply::staged_decline`), so each
+/// refusal reaches the command's outcome by kind; whether a reply already answers
+/// a comment is the delivery's, against the host.
+fn compile_decline(
+    graph: &mut Graph,
+    frontier: &Frontier,
+    id: &str,
+    comments: &[crate::channel::ReworkComment],
+    reason: &str,
+) -> Result<Vec<Operation>> {
+    let Some(node) = graph.get(id) else {
+        return Err(refuse(format!("decline: no node '{id}'")));
+    };
+    if node.repo.is_none() {
+        return Err(refuse(format!(
+            "decline: node '{id}' is not a lifecycle node: it names no repo, so it has no \
+             draft to carry review comments"
+        )));
+    }
+    if !frontier.change_urls.contains_key(id)
+        || frontier.landings.get(id) == Some(&crate::graph::Landing::Landed)
+    {
+        return Err(refuse(format!(
+            "decline: node '{id}' has no open change request on the run's record"
+        )));
+    }
+    if comments.is_empty() {
+        return Err(refuse(format!(
+            "decline: node '{id}': name at least one comment to decline"
+        )));
+    }
+    let mut named = BTreeSet::new();
+    for comment in comments {
+        if comment.id.trim().is_empty()
+            || comment.id.chars().any(char::is_control)
+            || !onevcs::Url::parse(&comment.url)
+                .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        {
+            return Err(refuse(format!(
+                "decline: node '{id}': {:?} at {:?} is not a comment's id and URL",
+                comment.id, comment.url
+            )));
+        }
+        if !named.insert(comment.id.as_str()) {
+            return Err(refuse(format!(
+                "decline: node '{id}' names comment {} twice",
+                comment.id
+            )));
+        }
+    }
+    Ok(vec![Operation::DeclineApplied {
+        node: id.to_owned(),
+        comments: comments.to_vec(),
+        // Byte-for-byte: it is what the reply drafter is handed as the decline's reason.
+        reason: reason.to_owned(),
+        replies: Vec::new(),
+    }])
+}
+
+/// Whether a count is zero, so a record omits it.
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the signature serde's `skip_serializing_if` requires"
+)]
+fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
 /// Fold one recorded operation back onto a graph.
 ///
 /// This is replay's half of [`compile`]: the reconciler validated and mutated,
@@ -3005,17 +3173,37 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
             }
         }
         Operation::ContextAdded { .. } => {}
+        // A carried note taken back is owed to no dispatch, so the context it
+        // was folded onto the node as comes off again — and only that note's.
+        // A live note was folded onto nothing, so nothing comes off for it.
+        Operation::NoteWithdrawn {
+            node,
+            text,
+            alike_after,
+            from: crate::note::WithdrawnFrom::Carried,
+            ..
+        } => {
+            if let Some(node) = graph.get_mut(node) {
+                node.context = node.context.as_deref().and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
+            }
+        }
+        Operation::NoteWithdrawn { .. } => {}
         // The one disposition that moved the graph: no turn took the note, so it
         // is owed to the node's next dispatch and replay has to put it back
         // where the reconciler did.
         Operation::NoteDelivered {
             node,
             text,
-            reached: crate::note::Reached::Carried,
+            reached: crate::note::Reached::Carried { .. },
             ..
         } => {
             if let Some(node) = graph.get_mut(node) {
-                node.context = Some(text.as_str().to_string());
+                node.context = Some(crate::note::with_carried(
+                    node.context.as_deref(),
+                    text.as_str(),
+                ));
             }
         }
         // None mutates the graph: an attestation settles a node, a completion
@@ -3034,7 +3222,8 @@ pub fn apply(graph: &mut Graph, operation: &Operation) {
         | Operation::CompletionRequested { .. }
         | Operation::FindingRaised { .. }
         | Operation::RetryRequested { .. }
-        | Operation::ReworkRequested { .. } => {}
+        | Operation::ReworkRequested { .. }
+        | Operation::DeclineApplied { .. } => {}
     }
 }
 
@@ -3043,6 +3232,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::channel::Deliver;
     use crate::plan::{NodeKind, Plan, Resume, PLAN_SCHEMA_VERSION};
 
     /// [`every_operation_kind`] is every kind the enum carries, and no others.
@@ -3182,6 +3372,7 @@ mod tests {
             criterion: None,
             deliver,
             persist,
+            delivery_timeout_seconds: None,
         }
     }
 
@@ -4742,10 +4933,11 @@ mod tests {
             addressee: crate::note::Addressee::Worker,
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
-            reached: crate::note::Reached::Carried,
+            reached: crate::note::Reached::Carried { reason: None },
             shown_to: Vec::new(),
             routed_to: Vec::new(),
             envelope: None,
+            index: None,
         };
         let mut graph = graph_of(vec![agent("build", &[])]);
         apply(&mut graph, &carried);
@@ -4761,10 +4953,13 @@ mod tests {
             addressee: crate::note::Addressee::Worker,
             text: "the fixture moved".parse().expect("a usable note"),
             criterion: None,
-            reached: crate::note::Reached::Worker,
+            reached: crate::note::Reached::Worker { turn: None },
             shown_to: Vec::new(),
-            routed_to: crate::note::Reached::Worker.routed_to().to_vec(),
+            routed_to: crate::note::Reached::Worker { turn: None }
+                .routed_to()
+                .to_vec(),
             envelope: None,
+            index: None,
         };
         let mut untouched = graph_of(vec![agent("build", &[])]);
         apply(&mut untouched, &taken);

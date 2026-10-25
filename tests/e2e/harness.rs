@@ -186,6 +186,78 @@ fn the_harness_double_draws_its_stream_as_the_released_cli_does() {
     let _ = std::fs::remove_dir_all(&fakes);
 }
 
+/// The harness double refuses a held turn whose `turn.gates` script holds a line
+/// that is not `<marker> <name>` with a name of letters, digits, `-` and `_`,
+/// naming the line, rather than skipping it and running the turn unheld — which
+/// would let a journey that meant to hold a turn race it instead — and does so
+/// wherever the line stands, after a line the prompt matches too. A well-formed
+/// script naming no marker the prompt carries runs the turn unheld, so the
+/// refusal is the malformed line's and not the script's. Driven as the process
+/// onejudge spawns, against the compiled double.
+#[test]
+fn the_harness_double_refuses_a_malformed_turn_gates_line() {
+    let fakes = std::env::temp_dir().join(format!("onepipeline-gates-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&fakes);
+    let worktree = fakes.join("worktree");
+    std::fs::create_dir_all(&worktree).expect("a scratch directory for the double");
+    let config = fakes.join("role.toml");
+    std::fs::write(&config, "harnesses = [\"claude-code\"]\n").expect("the config is written");
+    std::fs::write(fakes.join("turn.hold"), "hold").expect("the hold is written");
+    let run = |gates: &str| -> Output {
+        std::fs::write(fakes.join("turn.gates"), gates).expect("the gates are written");
+        Command::new(double("fake-oneharness"))
+            .args(["run", "--events", "--stream", "--format", "json"])
+            .args(["--cwd", worktree.to_str().expect("a UTF-8 scratch path")])
+            .args(["--prompt", "do the work"])
+            .args([
+                "--config",
+                config.to_string_lossy().as_ref(),
+                "--no-history",
+            ])
+            .env(SCRIPT_DIR_ENV, &fakes)
+            .stdin(Stdio::null())
+            .output()
+            .expect("the compiled double runs")
+    };
+
+    // The gates a matching line names are already open, so a double that took
+    // the match and never read on would run the turn through them and exit
+    // cleanly rather than wait.
+    for gate in ["work.go", "work.settle"] {
+        std::fs::write(fakes.join(gate), "").expect("the gate is open");
+    }
+    // A line with no marker, one whose name is not one file name, and a
+    // malformed line after one this prompt matches.
+    for (script, line) in [
+        ("lonely", "lonely"),
+        ("do the work held/apart", "do the work held/apart"),
+        ("do the work work\nlonely", "lonely"),
+    ] {
+        let refused = run(script);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert_eq!(
+            refused.status.code(),
+            Some(i32::from(onepipeline_testfakes::USAGE)),
+            "turn.gates holding {script:?} was not refused:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("turn.gates holds {line:?}"))
+                && stderr.contains("which is not `<marker> <name>`"),
+            "the refusal of {line:?} does not name it:\n{stderr}"
+        );
+    }
+
+    // Well formed, naming a marker this prompt does not carry: not held.
+    let unheld = run("another prompt gate");
+    assert_eq!(
+        unheld.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&unheld.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&fakes);
+}
+
 /// The harness double takes `--config` **repeated**, and layers the files in the
 /// order given — each later one over the ones before it — as the released CLI's
 /// loader does.
@@ -678,6 +750,26 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// Where every world's scratch root is made: the temporary directory, except on
+/// macOS, where it is `/tmp`.
+///
+/// A held turn's control socket is bound at
+/// `<state home>/oneharness/sessions/control/<session>.sock`, and a unix socket
+/// address is at most 104 bytes on macOS. The runner's temporary directory,
+/// resolved, is `/private/var/folders/<2>/<28>/T/`, and under it the control
+/// directory alone took 108: no session name fit, so no turn there could be
+/// interrupted, and the interrupt journeys in `tests/note` waited for an answer
+/// that never came. `/tmp` resolves to `/private/tmp`, which leaves the session
+/// name about 40 bytes. `a_worlds_control_socket_fits_this_platforms_address_limit`
+/// holds it.
+fn scratch_base() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// The environment variable the linked `oneharness-core` reads its per-user
 /// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
 /// `$XDG_STATE_HOME` everywhere else — the library's own
@@ -743,8 +835,11 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        // Before anything is started, so that everything this test starts is
+        // something its teardown can reach. See [`Drop for World`](World).
+        onepipeline_testfakes::containment::enrol();
         LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
+        let root = scratch_base().join(format!(
             "op-{}-{}",
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -860,6 +955,55 @@ impl World {
     pub fn through_scripted_source(mut self) -> Self {
         self.scripted = true;
         self
+    }
+
+    /// The same world, with every `git` its commands start counted first and then run as
+    /// the real one: see [`World::git_starts`].
+    ///
+    /// The count is a two-line shell program placed ahead of everything on the world's
+    /// `PATH`: it appends one line to the world's count, and then `exec`s the real `git`
+    /// with its argv, environment and directory untouched — so a start counted is still
+    /// one process, and one it could not count is one it does not run. Unix alone, where
+    /// that `exec` is a replacement rather than a second process, and where `/bin/sh`
+    /// runs it.
+    #[cfg(unix)]
+    pub fn counting_git(self) -> Self {
+        let real = Self::resolved_on(&Command::new("git"), "git").expect("the host has a git");
+        let counted = self.root.join("counted-git");
+        std::fs::create_dir_all(&counted).expect("a directory for the counted git");
+        let quoted = |path: &Path| format!("'{}'", path_text(path).replace('\'', "'\\''"));
+        onepipeline_testfakes::executable(
+            &counted.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'start\\n' >> {} || exit 70\nexec {} \"$@\"\n",
+                quoted(&self.git_starts_log()),
+                quoted(&real),
+            ),
+        );
+        let path = path_leading_with(&[
+            counted,
+            onevcs_binary()
+                .parent()
+                .expect("onevcs has a directory")
+                .to_path_buf(),
+        ]);
+        self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
+    }
+
+    /// The file [`counting_git`](World::counting_git) counts each start into.
+    #[cfg(unix)]
+    pub fn git_starts_log(&self) -> PathBuf {
+        self.root.join("git-starts.log")
+    }
+
+    /// How many `git` processes this world's commands have started so far, where it
+    /// was made with [`counting_git`](World::counting_git).
+    #[cfg(unix)]
+    pub fn git_starts(&self) -> usize {
+        std::fs::read_to_string(self.git_starts_log())
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     /// The settings that declare this world's plans source to the binary under test.
@@ -1217,6 +1361,39 @@ impl World {
             .block_on(call(engine))
     }
 
+    /// Copy a project's metadata onto its same-titled local counterpart through the store.
+    pub fn copy_project_metadata(&self, project: &str, destination: &str) {
+        let project = global(project);
+        let destination = onetaskgraph_plugin_api::SourceName::new(destination).unwrap();
+        let report = self.store_call(|engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    destination,
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: Some(onetaskgraph_core::MatchBy::Title),
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .expect("the real store copies the project")
+        });
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.action.destination().is_some()),
+            "{report:?}"
+        );
+    }
+
     /// Read this world's project back through the store the engine links, as the page a
     /// `show` of it answers.
     pub fn store_project(&self, project: &str) -> Value {
@@ -1283,6 +1460,7 @@ impl World {
                 let request = onetaskgraph_core::DependencyRequest {
                     id: id.clone(),
                     direction: onetaskgraph_plugin_api::Direction::DependsOn,
+                    completeness: onetaskgraph_core::Completeness::Required,
                     paging: onetaskgraph_core::Paging {
                         limit: std::num::NonZeroU32::new(500).expect("not zero"),
                         token,
@@ -2049,6 +2227,45 @@ impl World {
         self.path_with_ps("failing-ps", "echo '1 0'\nexit 1")
     }
 
+    /// A `PATH` whose `ps` answers the **first** listing with the real one and
+    /// fails every listing after it.
+    ///
+    /// The fault a teardown meets once it has read its tree and frozen it, when
+    /// the host stops answering the listings it reads again: it has a tree to
+    /// end and processes it froze, and neither may be left as they are. Every
+    /// other question `ps` is asked is answered for real, as [`listing_plus`]
+    /// says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_fails_after_its_first_listing(&self) -> PathBuf {
+        let listed = self.root.join("once-listing-ps.listed");
+        self.path_with_ps(
+            "once-listing-ps",
+            &format!(
+                "case \" $* \" in\n  *\" -A \"*) [ -e '{}' ] && exit 1; : >'{}' ;;\nesac\nexec {} \"$@\"",
+                listed.display(),
+                listed.display(),
+                real_ps().display()
+            ),
+        )
+    }
+
+    /// A `PATH` whose `ps` runs `answer` in place of saying whether processes are
+    /// stopped, and answers every other question for real.
+    ///
+    /// The fault a teardown meets once it has frozen its tree and asks the host
+    /// whether it took: an answer it cannot trust is not a tree shown stopped.
+    /// Scoped to that one question, as [`listing_plus`] says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_answers_whether_stopped_with(&self, name: &str, answer: &str) -> PathBuf {
+        self.path_with_ps(
+            name,
+            &format!(
+                "case \" $* \" in\n  *stat=*) {answer} ;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
+    }
+
     /// A `PATH` whose `ps` answers with the **real** listing and one row nobody
     /// can read.
     ///
@@ -2146,7 +2363,7 @@ impl World {
         use oneagentgraph::config::Member;
 
         let shipped = repo_file("graphs/dag-scope.yaml");
-        let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(
+        let config: oneagentgraph::config::GraphConfig = onepipeline_testfakes::yaml::from_str(
             &std::fs::read_to_string(&shipped).expect("the shipped dag-scope graph"),
         )
         .expect("the shipped dag-scope graph is a valid oneagentgraph config");
@@ -2251,6 +2468,43 @@ impl World {
             ),
         )
         .expect("the pr-author graph is written");
+        graph.display().to_string()
+    }
+
+    /// A reply-drafter graph, `--review-reply-graph`'s document: one single-sided
+    /// member asked for the reply result's shape, which the double answers.
+    ///
+    /// The schema holds the shape and nothing the engine's own rules decide — no
+    /// length, no link — so a result breaking one of those rules reaches the engine.
+    pub fn review_reply_graph(&self) -> String {
+        let dir = self.graphs();
+        std::fs::create_dir_all(&dir).expect("a directory for the graph configs");
+        std::fs::write(
+            dir.join("review-reply.schema.json"),
+            r#"{"type":"object","properties":{
+                 "replies":{"type":"array","items":{"type":"object","properties":{
+                   "comment":{"type":"string"},
+                   "disposition":{"type":"string","enum":["answered","declined"]},
+                   "body":{"type":"string"}},
+                   "required":["comment","disposition","body"],"additionalProperties":false}}},
+               "required":["replies"],"additionalProperties":false}"#,
+        )
+        .expect("the reply result's schema is written");
+        std::fs::write(
+            dir.join("oneharness.review-reply.toml"),
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
+             schema_file = \"./review-reply.schema.json\"\n",
+        )
+        .expect("the reply drafter's harness config is written");
+        let graph = dir.join("review-reply.yaml");
+        std::fs::write(
+            &graph,
+            format!(
+                "version: {CONSUMER_GRAPH_SCHEMA}\nname: review-reply\nmembers:\n  replier:\n    \
+                 kind: oneharness\n    oneharness_config: ./oneharness.review-reply.toml\n"
+            ),
+        )
+        .expect("the review-reply graph is written");
         graph.display().to_string()
     }
 
@@ -2361,6 +2615,82 @@ impl World {
     pub fn run_on(&self, command: Command, args: &str) -> Run {
         let mut command = command;
         Run::of(command.output().expect("the binary runs"), &[args], self)
+    }
+
+    /// [`run_on`](World::run_on), within `patience`: a command that has not answered by
+    /// then — or that exited while something it started still holds its output open — is
+    /// ended, and fails naming `args` and what it had printed, rather than leaving the
+    /// journey blocked until the runner's timeout names only the test.
+    pub fn run_on_within(
+        &self,
+        command: Command,
+        args: &str,
+        patience: std::time::Duration,
+    ) -> Run {
+        use std::io::Read;
+        let mut command = command;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary runs");
+        let collect = |mut stream: Box<dyn Read + Send>| {
+            let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let into = std::sync::Arc::clone(&read);
+            let reading = std::thread::spawn(move || {
+                let mut chunk = [0_u8; 4096];
+                while let Ok(got @ 1..) = stream.read(&mut chunk) {
+                    into.lock()
+                        .expect("one reader")
+                        .extend_from_slice(&chunk[..got]);
+                }
+            });
+            (read, reading)
+        };
+        let (stdout, out_reading) =
+            collect(Box::new(child.stdout.take().expect("stdout is piped")));
+        let (stderr, err_reading) =
+            collect(Box::new(child.stderr.take().expect("stderr is piped")));
+        let deadline = std::time::Instant::now() + patience;
+        let mut status = None;
+        while std::time::Instant::now() < deadline {
+            status = child.try_wait().expect("the command can be waited on");
+            if status.is_some() && out_reading.is_finished() && err_reading.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let text = |held: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+            held.lock().expect("one reader").clone()
+        };
+        let finished = out_reading.is_finished() && err_reading.is_finished();
+        let Some(status) = status.filter(|_| finished) else {
+            // Ours, started above: ended so the journey's teardown has nothing of it to wait on.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`onepipeline {args}` had not answered {patience:?} after it started{}\n\
+                 stdout: {}\nstderr: {}\nthe runs root held:\n{}",
+                if status.is_some() {
+                    " (it exited, and something it started still held its output open)"
+                } else {
+                    ""
+                },
+                String::from_utf8_lossy(&text(&stdout)),
+                String::from_utf8_lossy(&text(&stderr)),
+                self.dump()
+            );
+        };
+        Run::of(
+            Output {
+                status,
+                stdout: text(&stdout),
+                stderr: text(&stderr),
+            },
+            &[args],
+            self,
+        )
     }
 
     /// The host's own channel server over one run's channel: the generic
@@ -2778,7 +3108,7 @@ impl World {
         let mut document = String::from("---\n");
         for (key, value) in front {
             document.push_str(
-                &serde_norway::to_string(&json!({ *key: value }))
+                &onepipeline_testfakes::yaml::to_string(&json!({ *key: value }))
                     .expect("a front-matter field serialises"),
             );
         }
@@ -2813,6 +3143,32 @@ impl World {
     /// [`through_scripted_source`](World::through_scripted_source) reaches it.
     pub fn store_keys_tasks(&self, key: &str) {
         self.script(&format!("{SCRIPTED_KEY}.task.key"), key);
+    }
+
+    /// The same, for every write of the project metadata `key` alone: writes of any other key
+    /// still reach the real store.
+    pub fn store_refuses_key(&self, key: &str, error: &Value) {
+        self.script(
+            &format!(
+                "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+                onepipeline_testfakes::segment(key)
+            ),
+            &error.to_string(),
+        );
+    }
+
+    /// The scripted store writes the project metadata `key` to the real store again.
+    pub fn store_stops_refusing_key(&self, key: &str) {
+        self.unscript(&format!(
+            "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+            onepipeline_testfakes::segment(key)
+        ));
+    }
+
+    /// Have the scripted store answer every project read without the project metadata `key`,
+    /// which it still holds: a board that reads back without what was written to it.
+    pub fn store_reads_without_key(&self, key: &str) {
+        self.script(&format!("{SCRIPTED_KEY}.get_project.without"), key);
     }
 
     /// The same, for the next call of `method` alone.
@@ -2917,11 +3273,26 @@ impl World {
         &self,
         patience: std::time::Duration,
         what: &str,
+        ready: impl FnMut(&Self) -> bool,
+    ) {
+        self.until_within_on(&RealClock::started(), patience, what, ready);
+    }
+
+    /// [`until_within`](Self::until_within), with its deadline read from `clock`: a
+    /// journey proving a wait's budget passes a [`ManualClock`] and moves its time itself.
+    pub fn until_within_on(
+        &self,
+        clock: &dyn Clock,
+        patience: std::time::Duration,
+        what: &str,
         mut ready: impl FnMut(&Self) -> bool,
     ) {
-        if waited_for(patience, std::time::Duration::from_millis(250), || {
-            ready(self)
-        }) {
+        if waited_on(
+            clock,
+            patience,
+            std::time::Duration::from_millis(250),
+            || ready(self),
+        ) {
             return;
         }
         panic!(
@@ -2936,7 +3307,7 @@ impl World {
     /// reads for the reason `tests/AGENTS.md` gives; the deadline and assertion
     /// are [`until`](Self::until)'s.
     pub fn until_store(&self, what: &str, mut ready: impl FnMut(&Self) -> bool) {
-        self.until_store_for(std::time::Duration::from_secs(120), what, &mut ready);
+        self.until_store_for(ONE_STEP, what, &mut ready);
     }
 
     fn until_store_for(
@@ -3315,6 +3686,23 @@ pub struct Arrival {
 }
 
 impl Rendezvous {
+    /// A rendezvous the binary under test meets itself rather than a double: one of its
+    /// private ordering failpoints, which a journey points at [`Rendezvous::address`]
+    /// through that failpoint's variable.
+    pub fn failpoint() -> Self {
+        Self {
+            listener: std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback listener"),
+        }
+    }
+
+    /// Where the failpoint meets this test.
+    pub fn address(&self) -> String {
+        self.listener
+            .local_addr()
+            .expect("the listener has an address")
+            .to_string()
+    }
+
     /// Block until the next dispatch arrives, and say which one.
     ///
     /// Once this returns, what the caller does next lands on a worker that is
@@ -3323,17 +3711,132 @@ impl Rendezvous {
     /// promise. Called again after a takeover, it answers with the fresh
     /// driver's dispatch, since the stopped one is already held.
     pub fn arrived(&self) -> Arrival {
-        use std::io::BufRead;
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
+        Arrival::of(stream)
+    }
+
+    /// Let every later arrival go as it comes, for the rest of the test: a failpoint
+    /// met again past the ordering a journey drives — another identity, another
+    /// sweep, another run — holds nothing.
+    pub fn release_the_rest(self) {
+        std::thread::spawn(move || loop {
+            self.arrived().release();
+        });
+    }
+
+    /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
+    /// end, a process that never reaches the failpoint, or reaches it and never finishes
+    /// announcing itself, fails naming `what` it was waiting for, what it announced, and
+    /// `seen` — what the journey can say of where things stood — rather than blocking
+    /// until the runner's timeout names only the test.
+    pub fn arrived_within(&self, what: &str, seen: impl Fn() -> String) -> Arrival {
+        self.arrived_by(what, ONE_STEP, seen)
+    }
+
+    /// [`arrived_within`](Self::arrived_within), saying where things stood as
+    /// [`World::until`] does: by what the runs root held.
+    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
+        self.arrived_within(what, || format!("the runs root held:\n{}", world.dump()))
+    }
+
+    /// [`arrived_within`](Self::arrived_within) with the step's deadline given: the
+    /// connection and the announcement after it share one.
+    fn arrived_by(
+        &self,
+        what: &str,
+        patience: std::time::Duration,
+        seen: impl Fn() -> String,
+    ) -> Arrival {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + patience;
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let mut met = None;
+        let arrived = waited_for(
+            patience,
+            std::time::Duration::from_millis(20),
+            || match self.listener.accept() {
+                Ok((stream, _)) => {
+                    met = Some(stream);
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
+            },
+        );
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener blocks again");
+        let Some(mut stream) = met.filter(|_| arrived) else {
+            panic!(
+                "timed out after {patience:?} waiting for {what}; {}",
+                seen()
+            );
+        };
+        // Windows hands an accepted socket the listener's mode.
+        stream
+            .set_nonblocking(false)
+            .expect("the arrival's connection blocks");
+        // The pid line, a byte at a time so what came of it is kept to report.
+        let mut announced = Vec::new();
+        let stalled = |announced: &[u8], why: &str| -> ! {
+            panic!(
+                "timed out after {patience:?} waiting for {what}: the process connected and \
+                 announced {:?} of its pid line, then {why}; {}",
+                String::from_utf8_lossy(announced),
+                seen()
+            )
+        };
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                stalled(&announced, "sent nothing more");
+            }
+            stream
+                .set_read_timeout(Some(left))
+                .expect("the connection takes a read timeout");
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => stalled(&announced, "closed the connection"),
+                Ok(_) if byte[0] == b'\n' => break,
+                Ok(_) => announced.push(byte[0]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => stalled(&announced, &format!("failed: {error}")),
+            }
+        }
+        stream
+            .set_read_timeout(None)
+            .expect("the connection blocks again");
+        let announced = String::from_utf8_lossy(&announced).into_owned();
+        let pid = announced.trim().parse::<u32>().unwrap_or_else(|_| {
+            panic!("waiting for {what}, a process announced {announced:?} where a pid was due")
+        });
+        Arrival { pid, stream }
+    }
+}
+
+impl Arrival {
+    fn of(stream: std::net::TcpStream) -> Self {
+        Self::announced(stream).expect("the dispatch announces itself")
+    }
+
+    /// The arrival on `stream` once it has announced its pid, or the read that failed.
+    fn announced(stream: std::net::TcpStream) -> std::io::Result<Self> {
+        use std::io::BufRead;
         let mut announced = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
-            .read_line(&mut announced)
-            .expect("the dispatch announces itself");
+        std::io::BufReader::new(stream.try_clone()?).read_line(&mut announced)?;
         let pid = announced
             .trim()
             .parse::<u32>()
             .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
-        Arrival { pid, stream }
+        Ok(Arrival { pid, stream })
     }
 }
 
@@ -3348,6 +3851,85 @@ impl Arrival {
         let _ = self.stream.write_all(b"go");
     }
 }
+
+/// The bounded arrival ends on a peer that announces itself, and fails — naming
+/// the step and the part of the pid line it had — on one that connects and
+/// never finishes announcing, closes part-way through it, or never connects at
+/// all, rather than hanging.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: no failpoint in the binary can be paused between its connect and its
+// announcement, so the peer here is a socket this test drives byte by byte. The journeys
+// built on it are the `dispatch` and `note` window journeys, `retirement.rs`'s two
+// late-named-branch journeys and `maintenance.rs`'s closing-driver journey, and those
+// drive the binary.
+#[test]
+fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
+    use std::io::{Read, Write};
+    let world = World::new("rendezvous-bounded");
+    let patience = std::time::Duration::from_secs(1);
+    let held = || format!("the runs root held:\n{}", world.dump());
+    let failure = |waited: Box<dyn FnOnce() + '_>| -> String {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(waited))
+            .expect_err("the wait returned where it was due to fail");
+        panicked
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| panic!("the wait failed with no message"))
+    };
+
+    let meeting = Rendezvous::failpoint();
+    let mut peer = std::net::TcpStream::connect(meeting.address()).expect("the peer connects");
+    peer.write_all(b"4242\n")
+        .expect("the peer announces itself");
+    let arrival = meeting.arrived_by("the peer to announce itself", patience, held);
+    assert_eq!(arrival.pid, 4242);
+    arrival.release();
+    let mut released = [0; 2];
+    peer.read_exact(&mut released)
+        .expect("the peer is released");
+    assert_eq!(&released, b"go");
+
+    let stalled = Rendezvous::failpoint();
+    let mut half = std::net::TcpStream::connect(stalled.address()).expect("the peer connects");
+    half.write_all(b"42")
+        .expect("the peer announces part of itself");
+    let said = failure(Box::new(|| {
+        stalled.arrived_by("the stalled peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the stalled peer to announce itself")
+            && said.contains("announced \"42\" of its pid line, then sent nothing more")
+            && said.contains("the runs root held"),
+        "the stalled announcement's failure does not name the step, its part, and the run: {said}"
+    );
+    drop(half);
+
+    let truncated = Rendezvous::failpoint();
+    let mut cut = std::net::TcpStream::connect(truncated.address()).expect("the peer connects");
+    cut.write_all(b"98")
+        .expect("the peer announces part of itself");
+    drop(cut);
+    let said = failure(Box::new(|| {
+        truncated.arrived_by("the truncated peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the truncated peer to announce itself")
+            && said.contains("announced \"98\" of its pid line, then closed the connection")
+            && said.contains("the runs root held"),
+        "the truncated announcement's failure does not name the step, its part, and the run: {said}"
+    );
+
+    let absent = Rendezvous::failpoint();
+    let said = failure(Box::new(|| {
+        absent.arrived_by("a peer that never connects", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for a peer that never connects")
+            && said.contains("the runs root held"),
+        "the missing arrival's failure does not name the step and the run: {said}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A dispatch that met the test is inside its hold until the test lets it go,
 /// and the letting-go is what settles the run.
@@ -3385,6 +3967,18 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
         world.run_file("met", "result.json").is_file()
     });
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Whether a node's projected planner context carries `text` as its **latest**
+/// carried note.
+///
+/// Notes carried to one node accumulate in carry order, one paragraph each, so
+/// the next dispatch is composed with every one of them; the latest is the
+/// context's last entry, and a context holding only one note is exactly it.
+pub fn carries_latest(context: &Value, text: &str) -> bool {
+    context
+        .as_str()
+        .is_some_and(|context| context == text || context.ends_with(&format!("\n\n{text}")))
+}
 
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
@@ -3503,22 +4097,167 @@ pub fn waited(ready: impl FnMut() -> bool) -> bool {
 }
 
 fn waited_every(interval: std::time::Duration, ready: impl FnMut() -> bool) -> bool {
-    waited_for(std::time::Duration::from_secs(120), interval, ready)
+    waited_for(ONE_STEP, interval, ready)
+}
+
+/// The deadline [`waited`] — and so [`World::until`] — gives one step of the product's
+/// asynchrony: a dispatch carried from its start through its publication to its
+/// settlement, on the slowest hosted leg with the suite running beside it.
+pub const ONE_STEP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long a run of `plan` may take to settle: one [`ONE_STEP`] for each node on its
+/// longest chain of dependencies.
+///
+/// The contract's execution model fixes that count: "a node — and each step within a
+/// lifecycle node — dispatches the moment its dependencies settle `done`", so the nodes
+/// of one chain run one after another, and a run settles no sooner than its longest
+/// chain has, each link a whole dispatch. Nodes off that chain run beside it.
+pub fn settling_patience(plan: &Value) -> std::time::Duration {
+    let tasks: BTreeMap<&str, Vec<&str>> = plan["tasks"]
+        .as_array()
+        .expect("a plan carries its tasks")
+        .iter()
+        .map(|task| {
+            let id = task["id"].as_str().expect("a task carries its id");
+            let deps = task["deps"]
+                .as_array()
+                .map(|deps| deps.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            (id, deps)
+        })
+        .collect();
+    fn depth<'a>(
+        node: &'a str,
+        tasks: &BTreeMap<&'a str, Vec<&'a str>>,
+        known: &mut BTreeMap<&'a str, u32>,
+    ) -> u32 {
+        if let Some(depth) = known.get(node) {
+            return *depth;
+        }
+        // A dependency outside the plan — a cross-DAG edge — is another run's to settle.
+        let below = tasks.get(node).map_or(0, |deps| {
+            deps.iter()
+                .filter(|dep| tasks.contains_key(*dep))
+                .map(|dep| depth(dep, tasks, known))
+                .max()
+                .unwrap_or(0)
+        });
+        known.insert(node, below + 1);
+        below + 1
+    }
+    let mut known = BTreeMap::new();
+    let longest = tasks
+        .keys()
+        .map(|node| depth(node, &tasks, &mut known))
+        .max()
+        .unwrap_or(1);
+    ONE_STEP * longest
 }
 
 fn waited_for(
     duration: std::time::Duration,
     interval: std::time::Duration,
+    ready: impl FnMut() -> bool,
+) -> bool {
+    waited_on(&RealClock::started(), duration, interval, ready)
+}
+
+fn waited_on(
+    clock: &dyn Clock,
+    duration: std::time::Duration,
+    interval: std::time::Duration,
     mut ready: impl FnMut() -> bool,
 ) -> bool {
-    let deadline = std::time::Instant::now() + duration;
-    while std::time::Instant::now() < deadline {
+    let deadline = clock.elapsed().saturating_add(duration);
+    while clock.elapsed() < deadline {
         if ready() {
             return true;
         }
-        std::thread::sleep(interval);
+        clock.pause(interval);
     }
     false
+}
+
+/// The time a wait reads its deadline against.
+pub trait Clock: Sync {
+    /// How long the wait has been running, by this clock.
+    fn elapsed(&self) -> std::time::Duration;
+    /// Let `interval` go by between looks.
+    fn pause(&self, interval: std::time::Duration);
+}
+
+/// The wall clock every wait in the suite runs on.
+pub struct RealClock(std::time::Instant);
+
+impl RealClock {
+    pub fn started() -> Self {
+        Self(std::time::Instant::now())
+    }
+}
+
+impl Clock for RealClock {
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        std::thread::sleep(interval);
+    }
+}
+
+/// A clock whose time moves only when the journey moves it.
+///
+/// A wait on it still looks at its predicate every real interval, so the work it waits on
+/// is observed as it happens; only its deadline is the journey's to spend. Each move opens
+/// a new reading, and [`read_again`](Self::read_again) says whether the wait has read the
+/// moved time and then looked once more — that is, read it and not given up.
+#[derive(Default)]
+pub struct ManualClock {
+    time: std::sync::Mutex<(std::time::Duration, u32)>,
+}
+
+impl ManualClock {
+    /// Move the clock on by `by`.
+    pub fn advance(&self, by: std::time::Duration) {
+        let mut time = self.time.lock().expect("the clock is readable");
+        *time = (time.0.saturating_add(by), 0);
+    }
+
+    /// Whether the wait has read the time since the last move at least twice.
+    pub fn read_again(&self) -> bool {
+        self.time.lock().expect("the clock is readable").1 >= 2
+    }
+
+    /// A guard that, once dropped, moves the clock past any deadline — so a wait on it
+    /// ends, rather than holding the scope its journey runs it in when that journey
+    /// fails with the clock still.
+    pub fn expiring(&self) -> Expiry<'_> {
+        Expiry(self)
+    }
+}
+
+/// [`ManualClock::expiring`]'s guard.
+pub struct Expiry<'a>(&'a ManualClock);
+
+impl Drop for Expiry<'_> {
+    fn drop(&mut self) {
+        // Poisoned only by a panic while the lock was held, which nothing here makes.
+        if let Ok(mut time) = self.0.time.lock() {
+            *time = (std::time::Duration::MAX, 0);
+        }
+    }
+}
+
+impl Clock for ManualClock {
+    fn elapsed(&self) -> std::time::Duration {
+        let mut time = self.time.lock().expect("the clock is readable");
+        time.1 = time.1.saturating_add(1);
+        time.0
+    }
+
+    fn pause(&self, interval: std::time::Duration) {
+        std::thread::sleep(interval);
+    }
 }
 
 /// Move `from` onto `to`, waiting out a holder that has not let go of it yet.
@@ -3841,6 +4580,17 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
+        let last = LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
+        // Then whatever that left — what `stop` had no run to reach it through, or
+        // no longer found under the run's driver — once no world is left that
+        // could still want it. `containment` says why and what each platform
+        // reaches. Before the directories go, because Windows will not remove a
+        // directory a running process is in.
+        let left = if last {
+            onepipeline_testfakes::containment::end_descendants().err()
+        } else {
+            None
+        };
         // A host [`on_host`](World::on_host) made removes only what is its own: the world it
         // was made from still has runs to stop and a root to remove.
         let removed = match &self.home {
@@ -3853,8 +4603,17 @@ impl Drop for World {
         // target directory. Best-effort: Windows refuses to unlink a running
         // image, and a directory left behind there costs a directory entry
         // rather than a binary, because these are links and not copies.
-        if LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+        if last {
             let _ = std::fs::remove_dir_all(held_dir());
+        }
+        // Said last, so a teardown that fails still removes what it made; and not
+        // while the test is already failing: a second panic during the first
+        // aborts, and loses the message that says why.
+        if let Some(left) = left {
+            assert!(
+                std::thread::panicking(),
+                "this test's teardown left processes running: {left}"
+            );
         }
     }
 }
@@ -3996,6 +4755,542 @@ fn still_running(pid: u64) -> bool {
         .success()
 } // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A double this test started through a world's own spawning path, and the
+/// long-lived process that double started in turn, are both gone once the world
+/// is.
+///
+/// No run is involved, so the binary's own `stop` has nothing to walk: what ends
+/// them is the teardown every world runs last. The descendant takes a process
+/// group of its own on Unix, and both inherit this test's standard streams,
+/// which is how a process left running makes nextest report a test `LEAK` and
+/// keeps a CI step that tees the run waiting after its last test.
+///
+/// The double is still running at teardown here, which is the case every
+/// platform reaches; the journey below is the one where it is not.
+// llmlint: ignore-block[tests_mirror_real_usage] as above: a journey cannot assert what
+// is true after itself, and being dropped is the only way this property is ever reached.
+#[test]
+fn a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started() {
+    let (pids, mut double) = {
+        let world = World::new("teardown-descendant");
+        let record = world.root.join("descendant.pids");
+        let double = world
+            .cmd_on(
+                &self::double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "hold"],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        (pids, double)
+    };
+
+    let (double_pid, descendant) = pids;
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started, outlived the world \
+         that started the double"
+    );
+    // Collected, so the ended double leaves no entry behind in this process.
+    double.wait().expect("the ended double is collected");
+}
+
+/// The same, where what the double started is still on its way out when the
+/// double is gone: killed beside the double, it is held at its exit by a tracer
+/// outside the test's tree, so the double's death hands it to `init` before it
+/// has finished. No walk from the test reaches it then, and it was a descendant
+/// when the teardown found it; the teardown is not over until it has gone.
+///
+/// Linux only, because the exit stop is `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the three-second hold is the
+// property under test — a killed descendant still exiting after the walk has stopped finding
+// it — and what it proves is `World`'s own teardown, which every e2e and note journey runs, so
+// this edge is the harness's; one bounded hold does not warrant a project of its own.
+fn a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone() {
+    let (double_pid, descendant) = {
+        let world = World::new("teardown-exiting");
+        let record = world.root.join("descendant.pids");
+        // Collected by nothing here: the teardown kills it, and its zombie is
+        // this process's until it ends, which the assertions below allow for.
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the teardown under test is what ends it; see the comment above"
+        )]
+        let _double = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &[
+                    "leave-a-descendant",
+                    &record.to_string_lossy(),
+                    "hold-at-exit",
+                ],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = left_descendant(&record);
+        for pid in [pids.0, pids.1] {
+            assert!(
+                !process_ended(pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        pids
+    };
+
+    assert!(
+        process_ended(double_pid),
+        "the double at pid {double_pid} outlived the world whose spawning path started it"
+    );
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, which the double at pid {double_pid} started and the teardown \
+         killed, was still exiting when the world was gone"
+    );
+}
+
+use onepipeline_testfakes::containment::PATIENCE_VARIABLE;
+
+/// A teardown that has killed a descendant and still finds it running when its
+/// patience runs out fails its test and names it, rather than waiting on it
+/// for good or letting the test pass while it holds the test's output.
+///
+/// Held at its exit for longer than the teardown is let wait, so the teardown
+/// has already signalled what it names. Linux only, because the exit stop is
+/// `ptrace`'s.
+#[cfg(target_os = "linux")]
+#[test]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] as for the journey above: the
+// hold is the property under test, and what it proves is `World`'s own teardown.
+fn a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out() {
+    let world = World::new("teardown-outwaited");
+    let record = world.root.join("descendant.pids");
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the teardown under test is what ends it"
+    )]
+    let _double = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &[
+                "leave-a-descendant",
+                &record.to_string_lossy(),
+                "hold-at-exit",
+            ],
+        )
+        .spawn()
+        .expect("the double starts");
+    let (_, descendant) = left_descendant(&record);
+
+    let refused = with_variable(PATIENCE_VARIABLE, "1000", move || drop(world))
+        .expect_err("a teardown that could not wait out what it killed let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running")
+            && said.contains(&descendant.to_string()),
+        "the teardown's failure does not name pid {descendant}, which it killed and could not \
+         wait out: {said}"
+    );
+    // Its exit finishes once the hold does; waited for here so this test does
+    // not return while it still holds the test's output.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !process_ended(descendant) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pid {descendant} never finished its exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// A teardown that runs out of patience fails its test and names what it left
+/// running, rather than letting the test pass with them still there — and
+/// what it left, it ends once it is given the time.
+///
+/// Out of patience at once, through the variable that says how long it waits,
+/// so it gives up at its first look and before it has ended anything.
+#[test]
+fn a_worlds_teardown_that_runs_out_of_patience_names_what_it_left_running() {
+    let world = World::new("teardown-impatient");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    let refused = with_variable(PATIENCE_VARIABLE, "0", move || drop(world))
+        .expect_err("a teardown that left processes running let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running"),
+        "the teardown's failure does not say what it is: {said}"
+    );
+    for pid in [double_pid, descendant] {
+        assert!(
+            said.contains(&pid.to_string()),
+            "the teardown's failure does not name pid {pid}, which it left running: {said}"
+        );
+    }
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// When the test is already failing, a teardown that also fails leaves the
+/// test's own failure as the reason, rather than aborting the process over a
+/// second panic and losing it.
+#[test]
+fn a_failing_tests_own_failure_survives_a_teardown_that_also_fails() {
+    let world = World::new("teardown-impatient-failing");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    let failed = with_variable(PATIENCE_VARIABLE, "0", move || {
+        let _world = world;
+        panic!("the test's own failure");
+    })
+    .expect_err("the test's own failure was swallowed");
+    assert_eq!(
+        panic_text(failed.as_ref()),
+        "the test's own failure",
+        "the test's own failure is not what it failed with"
+    );
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// A teardown told to wait for something that is no length of time, or for
+/// longer than it may, says so rather than guessing one — and with its own
+/// patience back, ends what it found.
+#[test]
+fn a_worlds_teardown_given_a_patience_it_cannot_keep_fails_saying_so() {
+    let world = World::new("teardown-unkeepable-patience");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+
+    for (patience, refusal) in [
+        ("soon", "is not a number of milliseconds"),
+        ("600001", "is longer than the 600s a teardown may wait"),
+    ] {
+        let answered = with_variable(
+            PATIENCE_VARIABLE,
+            patience,
+            onepipeline_testfakes::containment::end_descendants,
+        )
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a patience the teardown cannot keep was kept");
+        assert!(
+            said.contains(PATIENCE_VARIABLE) && said.contains(refusal),
+            "a patience of {patience:?} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its patience was its own"
+        );
+    }
+}
+
+/// A teardown that cannot list this host's processes says so by name, rather
+/// than passing with nothing ended.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_that_cannot_list_processes_fails_saying_why() {
+    let world = World::new("teardown-unlisted");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    let empty = world.root.join("no-programs");
+    std::fs::create_dir_all(&empty).expect("an empty directory to search");
+
+    let refused = with_variable("PATH", &empty, move || drop(world))
+        .expect_err("a teardown that could not look let its test pass");
+    let said = panic_text(refused.as_ref());
+    assert!(
+        said.contains("this test's teardown left processes running")
+            && said.contains("ps did not run"),
+        "the teardown's failure does not say it could not list processes: {said}"
+    );
+    ends_what_it_left(&[double_pid, descendant]);
+}
+
+/// A teardown handed a process list it cannot read refuses it by name, rather
+/// than reading it as a host with nothing left to end: a `ps` that fails, one
+/// that writes something other than text, and one that writes a row that is no
+/// process are each its own refusal — and with the host's own `ps` back, the
+/// teardown ends what it found.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_refuses_a_process_list_it_cannot_read() {
+    let world = World::new("teardown-unreadable-list");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    for (case, script, refusal) in [
+        ("fails", "exit 3", "ps exited"),
+        (
+            "not-text",
+            "printf '\\377\\n'",
+            "ps wrote something other than text",
+        ),
+        (
+            "not-a-row",
+            "printf 'not a process\\n'",
+            "ps wrote a row that is not a process",
+        ),
+    ] {
+        let bin = world.root.join(format!("ps-that-{case}"));
+        std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+        let ps = bin.join("ps");
+        std::fs::write(&ps, format!("#!/bin/sh\n{script}\n")).expect("the stand-in ps");
+        std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("the stand-in ps is runnable");
+
+        let answered = with_variable("PATH", &bin, || {
+            onepipeline_testfakes::containment::end_descendants()
+        })
+        .expect("the teardown answers rather than panicking");
+        let said = answered.expect_err("a process list nobody could read was read as empty");
+        assert!(
+            said.contains(refusal),
+            "a ps that {case} is not refused as one: {said}"
+        );
+    }
+    drop(world);
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid} outlived the world once its process list could be read"
+        );
+    }
+}
+
+/// A row whose state `ps` could not classify — the `?` macOS writes for a
+/// process mid-exit, as `?<` — is a process the teardown ends, rather than a
+/// row it refuses: the host's own `ps`, with the double's and its
+/// descendant's states rewritten that way until each has ended, leaves the
+/// teardown answering and neither still running.
+#[cfg(unix)]
+#[test]
+fn a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify() {
+    let world = World::new("teardown-unclassified-state");
+    let (double_pid, descendant) = holding_a_descendant(&world);
+    let host_path = std::env::var_os("PATH").expect("the host has a PATH");
+    let bin = world.root.join("ps-unclassified");
+    std::fs::create_dir_all(&bin).expect("a directory for the stand-in ps");
+    let ps = bin.join("ps");
+    // The host's own `ps`, found on the host's own PATH. Only a row not yet a
+    // zombie is rewritten: a zombie written `?` would be a process that never
+    // ends, which is not what macOS reports.
+    std::fs::write(
+        &ps,
+        format!(
+            "#!/bin/sh\nPATH='{}'\nexport PATH\n\
+             ps \"$@\" | awk -v pids=' {double_pid} {descendant} ' \
+             '{{ if (index(pids, \" \" $1 \" \") && $3 !~ /^Z/) $3 = \"?\" substr($3, 2); print }}'\n",
+            host_path.to_string_lossy().replace('\'', "'\\''")
+        ),
+    )
+    .expect("the stand-in ps");
+    std::fs::set_permissions(&ps, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .expect("the stand-in ps is runnable");
+
+    let answered = with_variable("PATH", &bin, || {
+        onepipeline_testfakes::containment::end_descendants()
+    })
+    .expect("the teardown answers rather than panicking");
+    answered.expect("a row in a state ps could not classify was refused as no process");
+    for pid in [double_pid, descendant] {
+        assert!(
+            process_ended(pid),
+            "pid {pid}, listed in a state ps could not classify, outlived the teardown"
+        );
+    }
+    drop(world);
+}
+
+/// More descendants than the teardown's first look has room for are all gone
+/// once the world is: on Windows the job is asked again, with room for all of
+/// them, rather than ended as far as the first answer went.
+#[test]
+fn a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for() {
+    let pids = {
+        let world = World::new("teardown-many");
+        let record = world.root.join("descendants.pids");
+        #[expect(
+            clippy::zombie_processes,
+            reason = "the teardown under test is what ends it"
+        )]
+        let _double = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-descendants", &record.to_string_lossy(), "80"],
+            )
+            .spawn()
+            .expect("the double starts");
+        let pids = recorded_pids(&record);
+        assert_eq!(pids.len(), 81, "the record is not the double and 80 others");
+        for pid in &pids {
+            assert!(
+                !process_ended(*pid),
+                "pid {pid} had ended before the teardown, so this proves nothing about it"
+            );
+        }
+        pids
+    };
+
+    let left: Vec<u32> = pids
+        .into_iter()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "pids {left:?} outlived the world whose spawning path started them"
+    );
+}
+
+/// The same, where the double has already exited by the teardown and what it
+/// started is an orphan: the process the Windows leg was left holding.
+///
+/// Windows only, because only there does the teardown reach it. A Unix process
+/// whose parent has exited belongs to `init`, and nothing descends from this
+/// test to it any more — `containment` says why that is not closed there.
+#[cfg(windows)]
+#[test]
+fn a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited() {
+    let descendant = {
+        let world = World::new("teardown-orphan");
+        let record = world.root.join("descendant.pids");
+        let exited = world
+            .cmd_on(
+                &double("fake-oneharness"),
+                &["leave-a-descendant", &record.to_string_lossy(), "exit"],
+            )
+            .status()
+            .expect("the double runs");
+        assert!(exited.success(), "the double refused: {exited}");
+        let (double_pid, descendant) = left_descendant(&record);
+        assert!(
+            process_ended(double_pid),
+            "the double at pid {double_pid} is still running, so its descendant is no orphan"
+        );
+        assert!(
+            !process_ended(descendant),
+            "pid {descendant} had ended before the teardown, so this proves nothing about it"
+        );
+        descendant
+    };
+
+    assert!(
+        process_ended(descendant),
+        "pid {descendant}, orphaned by a double this test started, outlived the world that \
+         started it"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// The pids `fake-oneharness leave-a-descendant` records, once it has: the
+/// double's own, then its descendant's.
+fn left_descendant(record: &Path) -> (u32, u32) {
+    let pids = recorded_pids(record);
+    let [double, descendant] = pids[..] else {
+        panic!("the record is not two pids: {pids:?}")
+    };
+    (double, descendant)
+}
+
+/// The pids a double records at `record`, once it has: its own first.
+fn recorded_pids(record: &Path) -> Vec<u32> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let text = loop {
+        if let Ok(text) = std::fs::read_to_string(record) {
+            break text;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the double never recorded what it started at {}",
+            record.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    text.split_whitespace()
+        .map(|pid| {
+            pid.parse()
+                .ok()
+                .filter(|pid| *pid != 0)
+                .unwrap_or_else(|| panic!("the record is not pids: {text:?}"))
+        })
+        .collect()
+}
+
+/// Start a double from `world` that keeps running beside a descendant of its
+/// own, and return both pids once both are.
+fn holding_a_descendant(world: &World) -> (u32, u32) {
+    let record = world.root.join("descendant.pids");
+    #[expect(
+        clippy::zombie_processes,
+        reason = "the teardown under test is what ends it"
+    )]
+    let _double = world
+        .cmd_on(
+            &double("fake-oneharness"),
+            &["leave-a-descendant", &record.to_string_lossy(), "hold"],
+        )
+        .spawn()
+        .expect("the double starts");
+    left_descendant(&record)
+}
+
+/// Run `run` with the environment variable `name` set to `value`, and put it
+/// back as it was however `run` ends.
+///
+/// This process's own environment, which no other test shares: nextest runs
+/// each in a process of its own.
+fn with_variable<T>(
+    name: &str,
+    value: impl AsRef<std::ffi::OsStr>,
+    run: impl FnOnce() -> T,
+) -> std::thread::Result<T> {
+    let was = std::env::var_os(name);
+    std::env::set_var(name, value);
+    // Unwind-safe in fact: nothing `run` could leave half-changed is read after
+    // a panic except the variable, which is put back below either way, and the
+    // panic itself, which is handed to the caller rather than resumed past.
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    match was {
+        Some(was) => std::env::set_var(name, was),
+        None => std::env::remove_var(name),
+    }
+    ran
+}
+
+/// End what a failed teardown left, as a teardown with its patience back does,
+/// and hold it to having ended every one of `pids`.
+fn ends_what_it_left(pids: &[u32]) {
+    onepipeline_testfakes::containment::end_descendants()
+        .expect("the teardown ends what it left once it is let");
+    for pid in pids {
+        assert!(
+            process_ended(*pid),
+            "pid {pid} is still running after the teardown that was let finish"
+        );
+    }
+}
+
+/// What a caught panic said: a `String` when `panic!` formatted its message, a
+/// `&str` when it was a literal.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            payload
+                .downcast_ref::<&str>()
+                .map(|said| (*said).to_owned())
+        })
+        .unwrap_or_else(|| "a panic that said nothing".to_owned())
+}
+
 /// A repository `onevcs` knows about, and what its base branch carries.
 pub struct Repository {
     /// The bare repository that stands in for the remote.
@@ -4018,10 +5313,11 @@ impl World {
 }
 
 /// Whether one recorded `gh` invocation is `onevcs`'s probe of a repository's
-/// visibility — `gh api repos/<owner>/<name>` and nothing more.
+/// visibility — `gh api repos/<owner>/<name> --include` and nothing more.
 ///
 /// `onevcs` 0.44.0 on asks it before every write that could reach a public
-/// destination, to decide what the public boundary screens. It reads the
+/// destination, to decide what the public boundary screens, and 0.56.0 on asks it
+/// with `--include`, so a host that did not answer is told from one that refused. It reads the
 /// repository's metadata and nothing of a change request, a merge path or a ref,
 /// so a journey counting what a run asked the host about its *work* leaves it out.
 pub fn is_visibility_probe(call: &Value) -> bool {
@@ -4029,7 +5325,7 @@ pub fn is_visibility_probe(call: &Value) -> bool {
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    matches!(args.as_slice(), ["api", path]
+    matches!(args.as_slice(), ["api", path, "--include"]
         if path.split('/').count() == 3 && path.starts_with("repos/"))
 }
 
@@ -4338,6 +5634,19 @@ pub fn oneagentgraph_binary() -> PathBuf {
     held_alias(held, "oneagentgraph")
 }
 
+/// The **real** `oneharness` binary, built from the release `crates/testfakes`
+/// names as a normal dependency, over the one `oneharness-core` this lock resolves.
+///
+/// For the journeys whose claim is about the process a two-party member's
+/// onejudge spawns for each turn rather than about what this suite's double
+/// answers, the way [`oneagentgraph_binary`] is for the graph.
+pub fn oneharness_binary() -> PathBuf {
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let held = BUILT
+        .get_or_init(|| build(&["--package", "oneharness", "--bin", "oneharness", "--locked"]));
+    held_alias(held, "oneharness")
+}
+
 /// The project every store fixture here holds beside the plan under test.
 pub const DECOY_PROJECT: &str = "not-this-runs-board";
 
@@ -4509,7 +5818,7 @@ fn title_of(path: &Path) -> Result<String, String> {
         .and_then(|rest| rest.split_once("---\n"))
         .map(|(front, _)| front)
         .ok_or_else(|| "its project document has no front matter".to_owned())?;
-    let front = serde_norway::from_str::<serde_json::Map<String, Value>>(front)
+    let front = onepipeline_testfakes::yaml::from_str::<serde_json::Map<String, Value>>(front)
         .map_err(|error| format!("its front matter is not a mapping ({error})"))?;
     front
         .get("title")
@@ -4646,47 +5955,10 @@ pub fn reaped_pid() -> u32 {
 /// and then still has its closeout to write, so the last file it touches is not a
 /// signal that it has finished touching them.
 ///
-/// A process that has ended but not yet been reaped counts as ended, because the
-/// question is whether it can still write, and a zombie cannot. Every other answer
-/// this host cannot give reads as still running, so a wait on this outlives the
-/// process rather than stopping short of it.
-#[cfg(unix)]
+/// [`onepipeline_testfakes::containment::process_ended`] says what counts as
+/// ended, and why it asks `ps` rather than `/proc`.
 pub fn process_ended(pid: u32) -> bool {
-    let Ok(raw) = i32::try_from(pid) else {
-        return false;
-    };
-    // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
-    if unsafe { libc::kill(raw, 0) } != 0 {
-        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-    }
-    // The state field follows the command name's closing parenthesis.
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-        stat.rsplit_once(')')
-            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-    })
-}
-
-/// The same question on Windows, where a process handle is signalled once — and
-/// only once — the process has terminated.
-#[cfg(windows)]
-pub fn process_ended(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
-    // SAFETY: `OpenProcess` returns null on failure and otherwise a handle closed
-    // below; no borrowed memory crosses the boundary.
-    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if handle.is_null() {
-        // No such process any more: its pid names nothing this host can open.
-        return std::io::Error::last_os_error().raw_os_error()
-            == Some(ERROR_INVALID_PARAMETER as i32);
-    }
-    // SAFETY: `handle` is live, and a zero timeout returns at once.
-    let waited = unsafe { WaitForSingleObject(handle, 0) };
-    // SAFETY: the handle came from `OpenProcess` above and is closed once.
-    unsafe { CloseHandle(handle) };
-    waited == WAIT_OBJECT_0
+    onepipeline_testfakes::containment::process_ended(pid)
 }
 
 /// End one process this suite is entitled to end, and wait until it is gone.
@@ -4699,7 +5971,7 @@ pub fn process_ended(pid: u32) -> bool {
 /// The wait is what makes this usable as a precondition. `kill` returns when the
 /// signal is queued, not when the process has exited, so a journey that went
 /// straight on from here would be asserting against a host that had not caught
-/// up with it yet.
+/// up with it yet. Gone means ended, not reaped — see [`process_ended`].
 #[cfg(unix)]
 pub fn end_process(pid: u32) {
     std::process::Command::new("kill")
@@ -4708,15 +5980,10 @@ pub fn end_process(pid: u32) {
         .expect("this host ends a process it owns");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
-        // `kill -0` is the existence check: it delivers nothing and fails once
-        // there is no such process.
-        let still_there = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .expect("this host answers about a process it owns")
-            .success();
-        if !still_there {
+        // Ended rather than reaped: a process this suite did not start is reaped
+        // by its own parent, which a journey may be holding at a failpoint, and
+        // a zombie writes and holds nothing.
+        if process_ended(pid) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -4768,6 +6035,33 @@ pub fn end_driver(world: &World, run: &str) -> u32 {
     pid
 }
 
+/// End the process holding a run's ownership lock, and wait until it is gone.
+///
+/// For the driver a detached adoption retained, between its taking the lock and
+/// its claiming the run in the launch record: the one moment the lock names a
+/// driver the record does not yet. The same proof [`end_driver`] asks of its
+/// target, read off the lock — the pid it names, started at the very moment
+/// the lock was stamped with — so a pid the host has handed on is refused rather
+/// than signalled.
+pub fn end_lock_holder(world: &World, run: &str) -> u32 {
+    let lock = world.run_json(run, "owner.lock");
+    let pid = lock["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} names no holder"));
+    let started = lock["started"]
+        .as_str()
+        .filter(|started| !started.is_empty())
+        .unwrap_or_else(|| panic!("the ownership lock of {run} stamps no start for pid {pid}"));
+    assert_eq!(
+        start_stamp(pid).as_deref(),
+        Some(started),
+        "pid {pid} is not the process holding {run}'s lock; refusing to end it"
+    );
+    end_driver_process(pid);
+    pid
+}
+
 /// When the process at `pid` started, spelled the way the engine stamps a launch
 /// record, or nothing for no such process.
 ///
@@ -4782,9 +6076,10 @@ fn start_stamp(pid: u32) -> Option<String> {
 }
 
 /// The other Unix hosts have no procfs, and the engine stamps `ps`'s `lstart`,
-/// read in UTC under the C locale so the spelling does not follow the reader's.
+/// read in UTC under the C locale so the spelling does not follow the reader's —
+/// on macOS followed by ` +0.` and the kernel's microseconds of that start.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn start_stamp(pid: u32) -> Option<String> {
+pub(crate) fn start_stamp(pid: u32) -> Option<String> {
     let listed = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", "UTC")
@@ -4793,7 +6088,29 @@ fn start_stamp(pid: u32) -> Option<String> {
         .output()
         .expect("this host answers about its processes");
     let answer = String::from_utf8_lossy(&listed.stdout).trim().to_string();
-    (listed.status.success() && !answer.is_empty()).then_some(answer)
+    let second = (listed.status.success() && !answer.is_empty()).then_some(answer)?;
+    #[cfg(target_os = "macos")]
+    let second = format!("{second} +0.{:06}", start_micros(pid)?);
+    Some(second)
+}
+
+/// The microseconds of `pid`'s start, as macOS's `proc_pidinfo` gives them.
+#[cfg(target_os = "macos")]
+fn start_micros(pid: u32) -> Option<u64> {
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is writable storage of the flavor's struct, `size` its size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: a whole answer sets every field.
+    (written == size).then(|| unsafe { info.assume_init() }.pbi_start_tvusec)
 }
 
 /// Windows stamps the process's creation `FILETIME` as `high:low`.
@@ -5303,7 +6620,8 @@ impl HeldPublication {
     }
 
     /// Whether the merge path has started holding the push — git is running the
-    /// hook, so the push is under way and nothing interrupts it from here.
+    /// hook, so the push is under way. Held at the repository's `pre-push`, a
+    /// caller's cancellation still stops it (`onevcs` 0.56 on).
     ///
     /// Not the same moment as the publication's last record before the push:
     /// `onevcs` asks its caller's cancellation between the two, so a journey
@@ -5319,6 +6637,38 @@ impl HeldPublication {
     pub fn release(&self) {
         std::fs::write(&self.rendezvous, "go").expect("the held publication is released");
     }
+
+    /// Hold the next push again, once every push this hold let through is over:
+    /// the rendezvous and the marker the last push left are both taken away, so
+    /// [`holding`](Self::holding) answers for the next one alone.
+    pub fn rearm(&self) {
+        let mut marker = self.rendezvous.clone().into_os_string();
+        marker.push(".holding");
+        for path in [PathBuf::from(marker), self.rendezvous.clone()] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("{} could not be taken away: {error}", path.display()),
+            }
+        }
+    }
+}
+
+/// Hold every push from here on at `held`'s rendezvous rather than at the one the
+/// repository's hook was installed with.
+///
+/// git reads the hook again at every push, so a push already inside the old hook
+/// waits on the old rendezvous and every later push on `held`'s — which is how a
+/// journey holds the second of two pushes it cannot tell apart by anything else,
+/// switching once it has seen the first held. Only for a world whose
+/// [`World::repository`] installed a hook, since that is what points git here.
+pub fn hold_later_pushes_at(world: &World, held: &HeldPublication) {
+    let hook = hooks_dir(world).join("pre-push");
+    assert!(
+        hook.is_file(),
+        "this world's repository has no hook of its own to hold a push with"
+    );
+    install_hook(&hook, &held.argv());
 }
 
 impl Drop for HeldPublication {
@@ -6195,7 +7545,7 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
 /// may be an append still in flight and is skipped; a torn line with another
 /// line after it cannot be, so it is a record the writer lost, and reading past
 /// it would let a test assert against a gap and call it a pass.
-fn read_jsonl(path: &Path) -> Vec<Value> {
+pub(crate) fn read_jsonl(path: &Path) -> Vec<Value> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text
         .lines()
@@ -6275,6 +7625,8 @@ pub struct Counts {
     /// written, and one resuming from a checkpoint counts what the store has
     /// grown by since.
     pub records_folded: u64,
+    /// Reads of the project's driver claim the driver asked its plan store for.
+    pub claim_reads: u64,
 }
 
 impl Counts {
@@ -6289,6 +7641,7 @@ impl Counts {
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
+            claim_reads: self.claim_reads - before.claim_reads,
         }
     }
 }
@@ -6320,6 +7673,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
+        claim_reads: count("claim_reads"),
         records_folded: count("records_folded"),
     }
 }
@@ -6382,6 +7736,41 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
     })
 }
 
+/// A run's patience counts the dispatches on its longest dependency chain, one step
+/// each, and nothing for nodes running beside that chain or edges to another run.
+#[test]
+fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
+    let chained = |id: &str, deps: &[&str]| json!({"id": id, "deps": deps});
+    let patience = |nodes: Vec<Value>| settling_patience(&plan_of("patience", nodes));
+    assert_eq!(patience(vec![json!({"id": "only"})]), ONE_STEP);
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &[]),
+            chained("c", &[])
+        ]),
+        ONE_STEP
+    );
+    assert_eq!(
+        patience(vec![
+            chained("ship", &["adopt"]),
+            chained("core", &[]),
+            chained("adopt", &["core"]),
+        ]),
+        ONE_STEP * 3
+    );
+    assert_eq!(
+        patience(vec![
+            chained("a", &[]),
+            chained("b", &["a"]),
+            chained("c", &["a"]),
+            chained("d", &["b", "c", "run:other#x"]),
+            chained("e", &[]),
+        ]),
+        ONE_STEP * 3
+    );
+}
+
 /// A directory reached through a symlink resolves to the directory itself.
 ///
 /// The rule [`resolved`] exists for, held where the symlink can be built. macOS
@@ -6395,6 +7784,28 @@ pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
 /// privilege no CI account is guaranteed to hold. What `resolved` has to get
 /// right on Windows is [`plain`]'s rule, and the test below holds that one on
 /// every platform.
+/// A world's state home leaves a held turn room to bind its control socket on
+/// this platform, at the address onejudge dials for a session name of the length
+/// a graph mints. See [`scratch_base`]: on macOS the temporary directory left
+/// none.
+#[cfg(unix)]
+#[test]
+fn a_worlds_control_socket_fits_this_platforms_address_limit() {
+    use oneharness_core::domain::control::{socket_address_within_limit, socket_path};
+    let world = World::new("control-socket");
+    let store = world.state_home().join("oneharness").join("sessions");
+    let socket = socket_path(&store, "node-scope-1760000000000-123456-worker-skill")
+        .unwrap_or_else(|too_long| {
+            panic!(
+                "no control socket fits under a world's state home: {} is past the limit",
+                too_long.path().display()
+            )
+        });
+    if let Err(too_long) = socket_address_within_limit(&socket) {
+        panic!("{} is past the limit", too_long.path().display());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {

@@ -693,18 +693,18 @@ const RECOVERED_RULING: &str = "build only what fixtures/v2 needs";
 const LATER_RULING: &str = "build only what fixtures/v3 needs";
 
 /// **The envelopes a dead driver claimed are its adopter's first work.** A
-/// driver claims a live note into a node whose worker turn is held — handed to
-/// a delivery thread, waiting on that turn — and an `amend` of the same node,
-/// held behind the note; then it is killed before it answers either. Both
-/// submitters are still waiting, and `status` names both as claimed with no
-/// outcome. A later `amend` of the node reaches the queue behind them. The
-/// driver that adopts the run takes the two back ahead of it: the claimed amend
-/// is applied — journalled under its envelope id — before the later one, whose
-/// text is the one that stands, and each waiting `reply` is told so, with no
-/// envelope left unanswered. The conversation the note was first offered to
-/// died with the driver, so the adopter's own dispatch of the node waits for the
-/// note's answer and is composed with it: the worker's opening turn carries the
-/// note, and no other turn of the run does.
+/// driver hands a live note to a node whose worker turn is held and answers its
+/// envelope at once, with the note `queued`; then it claims an `amend` of the
+/// same node and is killed while its validator is still judging it. The amend's
+/// submitter is still waiting, and `status` names it as claimed with no outcome.
+/// A later `amend` of the node reaches the queue behind it. The driver that
+/// adopts the run takes the claimed one back ahead of it: the claimed amend is
+/// applied — journalled under its envelope id — before the later one, whose text
+/// is the one that stands, and its waiting `reply` is told so, with no envelope
+/// left unanswered. The note's envelope keeps the one answer it was given: the
+/// conversation its note was handed to died with the driver, so the adopter
+/// records the note refused rather than offering it again, and no turn of the
+/// run carries it.
 #[cfg(unix)]
 #[test]
 fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered() {
@@ -713,37 +713,45 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
     world.script("turn.hold", "hold");
     world.write_graphs();
     world.write_supervised_node_graph();
+    let (validator, holding, go) = validator_holding_its_second_offer(&world);
     let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
     world
-        .run_on_agentgraph(&["start", &path, "--detach"])
+        .run_on_agentgraph(&["start", &path, "--detach", "--node-validator", &validator])
         .exited(0);
     world.until("the worker's turn to open", |world| {
         !world.events_of(run, "turn-started").is_empty()
     });
 
-    // Envelope 0: a live note, waiting on the held turn to take it.
-    let note = waiting_reply_on_agentgraph(
+    // Envelope 0: a live note, answered as it is handed to the held turn's inbox.
+    let (code, said) = receipt(waiting_reply_on_agentgraph(
         &world,
         run,
         json!([{"op": "note", "id": "build", "addressee": "worker",
                 "text": RECOVERED_NOTE, "deliver": "live"}]),
-    );
-    world.until("the driver to claim the note", |world| {
-        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0 "))
-    });
-    // Envelope 1: an amend of the same node, held behind the note.
+    ));
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+    assert!(said.contains("\"notes\":{\"build\":\"queued\"}"), "{said}");
+    // Envelope 1: an amend of the same node, claimed and held inside the
+    // driver's own validation of it.
     let amend = waiting_reply_on_agentgraph(
         &world,
         run,
         json!([{"op": "amend", "id": "build", "text": RECOVERED_RULING}]),
     );
-    world.until("the driver to claim the amend behind it", |world| {
-        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 "))
+    world.until("the driver to be judging the claimed amend", |_| {
+        holding.is_file()
     });
     crate::harness::end_driver(&world, run);
-    assert!(world.command_outcomes(run).is_empty());
+    std::fs::write(&go, "go").expect("the validator is released");
+    let answered: Vec<u64> = world
+        .command_outcomes(run)
+        .iter()
+        .filter_map(|outcome| outcome["id"].as_u64())
+        .collect();
+    assert_eq!(answered, [0]);
     assert!(
-        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 ")),
+        unanswered_line(&world, run).is_some_and(|line| line.contains("envelope(s) 1 ")),
         "{:?}",
         unanswered_line(&world, run)
     );
@@ -774,18 +782,11 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
     let (code, said) = receipt(amend);
     assert_eq!(code, Some(0), "{said}");
     assert!(said.contains("\"state\":\"applied\""), "{said}");
-    let (code, said) = receipt(note);
-    assert_eq!(code, Some(0), "{said}");
-    assert!(said.contains("\"state\":\"applied\""), "{said}");
 
     let amended = committed_from(&world, run, 1);
     assert_eq!(amended.len(), 1, "{amended:?}");
     assert_eq!(amended[0]["payload"]["command"]["op"], "amend");
     assert_eq!(amended[0]["payload"]["command"]["text"], RECOVERED_RULING);
-    let noted = committed_from(&world, run, 0);
-    assert_eq!(noted.len(), 1, "{noted:?}");
-    assert_eq!(noted[0]["payload"]["operations"][0]["envelope"], json!(0));
-    assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 1);
     let answered: Vec<u64> = world
         .command_outcomes(run)
         .iter()
@@ -801,54 +802,32 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
         .collect();
     assert_eq!(amended, [json!(RECOVERED_RULING), json!(LATER_RULING)]);
 
-    // And the note reached the adopter's own dispatch: that dispatch was composed
-    // once the note's answer was on the record, so the worker's opening turn
-    // carries it — the one turn of the run that does. The answers above can land
-    // before that turn opens: the adopter's member starts it on its own after the
-    // dispatch, so the journal is read once it has.
-    world.until("the adopter's dispatch to open its turn", |world| {
-        world.events_of(run, "turn-started").iter().any(|event| {
-            event["payload"]["instruction"]
-                .as_str()
-                .is_some_and(|said| said.contains(RECOVERED_NOTE))
-        })
-    });
-    let journal = world.journal(run);
-    let adopted_at = journal
-        .iter()
-        .position(|event| event["kind"] == "driver-adopted")
-        .expect("the adoption is journalled");
-    let carrying: Vec<(usize, &Value)> = journal
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| {
-            event["kind"] == "turn-started"
-                && event["payload"]["role"] == "assistant"
-                && event["payload"]["instruction"]
-                    .as_str()
-                    .is_some_and(|said| said.contains(RECOVERED_NOTE))
-        })
+    // The note's one record is the adopter's refusal of it, and its envelope's
+    // answer is the one written as it was handed.
+    let refused: Vec<Value> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["text"] == RECOVERED_NOTE)
         .collect();
-    assert_eq!(carrying.len(), 1, "{carrying:?}");
-    let instruction = carrying[0].1["payload"]["instruction"]
-        .as_str()
-        .expect("an instruction");
-    assert_eq!(
-        instruction.matches(RECOVERED_NOTE).count(),
-        1,
-        "{instruction}"
-    );
-    let dispatched = journal
-        .iter()
-        .enumerate()
-        .filter(|(_, event)| event["kind"] == "node-dispatched")
-        .map(|(at, _)| at)
-        .next_back()
-        .expect("the adopter dispatched the node");
-    assert!(
-        adopted_at < dispatched && dispatched < carrying[0].0,
-        "the note reached a turn other than the adopter's dispatch's opening one"
-    );
+    assert_eq!(refused.len(), 1, "{refused:?}");
+    assert_eq!(refused[0]["payload"]["envelope"], json!(0));
+    let first = &world.command_outcomes(run)[0];
+    assert_eq!(first["applied"], json!(true), "{first}");
+    assert_eq!(first["results"][0]["outcome"], json!("queued"), "{first}");
+
+    // And the adopter's own dispatch is not composed with it: the turn that
+    // dispatch opens carries no note.
+    world.until("the adopter's dispatch to open its turn", |world| {
+        let journal = world.journal(run);
+        journal
+            .iter()
+            .position(|event| event["kind"] == "driver-adopted")
+            .is_some_and(|adopted| {
+                journal[adopted..]
+                    .iter()
+                    .any(|event| event["kind"] == "turn-started")
+            })
+    });
 
     world.release("turn.go");
     world.release("turn.settle");
@@ -864,7 +843,18 @@ fn an_adopter_answers_the_envelopes_its_dead_driver_claimed_and_never_answered()
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 1);
+    let carrying: Vec<Value> = world
+        .events_of(run, "turn-started")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["instruction"]
+                .as_str()
+                .is_some_and(|said| said.contains(RECOVERED_NOTE))
+        })
+        .collect();
+    assert!(carrying.is_empty(), "{carrying:?}");
+    assert_eq!(deliveries_of(&world, run, RECOVERED_NOTE), 0);
+    assert_eq!(world.command_outcomes(run).len(), 3);
 }
 
 /// A node validator that passes the edit it is offered at submission and
@@ -1318,15 +1308,17 @@ fn an_envelope_whose_write_ahead_cannot_be_read_is_left_unanswered_and_surfaced(
 const HELD_NOTE: &str = "the fixture moved to fixtures/v4; start from there";
 
 /// **What one recovered envelope writes down never costs another its own.** A
-/// driver holds a live note to a node whose turn is held, a two-command `amend`
-/// of that node behind it, and commits a later two-command envelope naming no
-/// node — and dies between that envelope's two records. A `reply` then finds
-/// nothing driving and becomes the writer, reconciling in claim order with no
-/// delivery thread: the note, then the held amend — committing an envelope of
-/// two commands of its own — then the half-journalled one, finished from what
-/// its driver wrote down, and then its own. Every envelope is answered
-/// `applied`, each command recorded exactly once, the finished envelope's second
-/// command after the amend.
+/// driver hands a live note to a node whose turn is held, answering it `queued`;
+/// commits a two-command `amend` of that node at once, the note's turn
+/// notwithstanding; commits a later two-command envelope naming no node — and
+/// dies between the two records of each of those two envelopes. A `reply` then
+/// finds nothing driving and becomes the writer, reconciling in claim order with
+/// no delivery thread: the queued note is recorded refused under the answer it
+/// already has, then the amend is finished from what its driver wrote down —
+/// committing its second command ahead — then the later envelope from what its
+/// driver wrote down too, and then its own. Every envelope is answered once, each
+/// command recorded exactly once, the amend's second command before the later
+/// envelope's.
 #[cfg(unix)]
 #[test]
 fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_needs() {
@@ -1342,26 +1334,24 @@ fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_n
     world.until("the worker's turn to open", |world| {
         !world.events_of(run, "turn-started").is_empty()
     });
-    // Envelope 0: a live note, waiting on the held turn.
-    let note = waiting_reply_on_agentgraph(
+    // Envelope 0: a live note, answered as it is handed to the held turn's inbox.
+    let (code, said) = receipt(waiting_reply_on_agentgraph(
         &world,
         run,
         json!([{"op": "note", "id": "build", "addressee": "worker",
                 "text": HELD_NOTE, "deliver": "live"}]),
-    );
-    world.until("the driver to claim the note", |world| {
-        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0 "))
-    });
-    // Envelope 1: two amends of the same node, held behind the note.
+    ));
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"notes\":{\"build\":\"queued\"}"), "{said}");
+    // Envelope 1: two amends of the same node, committed while the note waits.
     let amends = json!([
         {"op": "amend", "id": "build", "text": "the first amendment"},
         {"op": "amend", "id": "build", "text": "the second amendment"},
     ]);
-    let held = waiting_reply_on_agentgraph(&world, run, amends.clone());
-    world.until("the driver to hold the amends", |world| {
-        unanswered_line(world, run).is_some_and(|line| line.contains("envelope(s) 0, 1 "))
-    });
-    // Envelope 2: two commands naming no node, committed while the others wait.
+    let (code, said) = receipt(waiting_reply_on_agentgraph(&world, run, amends.clone()));
+    assert_eq!(code, Some(0), "{said}");
+    assert!(said.contains("\"state\":\"applied\""), "{said}");
+    // Envelope 2: two commands naming no node.
     let (code, said) = receipt(waiting_reply_on_agentgraph(
         &world,
         run,
@@ -1369,7 +1359,8 @@ fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_n
     ));
     assert_eq!(code, Some(0), "{said}");
     crate::harness::end_driver(&world, run);
-    died_between_records(&world, run, &[2]);
+    died_between_records(&world, run, &[1, 2]);
+    assert_eq!(committed_commands(&world, run, 1), [amends[0].clone()]);
     assert_eq!(committed_commands(&world, run, 2), [model("first-half")]);
 
     // Envelope 3: a reply that finds nothing driving.
@@ -1381,11 +1372,6 @@ fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_n
     assert_eq!(code, Some(0), "{said}");
     assert!(said.contains("\"state\":\"applied\""), "{said}");
 
-    for (reply, what) in [(note, "the note"), (held, "the held amends")] {
-        let (code, said) = receipt(reply);
-        assert_eq!(code, Some(0), "{what}: {said}");
-        assert!(said.contains("\"state\":\"applied\""), "{what}: {said}");
-    }
     let outcomes = world.command_outcomes(run);
     let applied: Vec<(u64, bool)> = outcomes
         .iter()
@@ -1401,6 +1387,7 @@ fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_n
         [(0, true), (1, true), (2, true), (3, true)],
         "{outcomes:?}"
     );
+    assert_eq!(outcomes[0]["results"][0]["outcome"], json!("queued"));
     assert_eq!(
         committed_commands(&world, run, 1),
         amends.as_array().expect("a list").clone()
@@ -1410,6 +1397,12 @@ fn a_recovered_envelope_committed_ahead_keeps_what_a_later_half_journalled_one_n
         [model("first-half"), model("second-half")]
     );
     assert_eq!(committed_commands(&world, run, 3), [model("after")]);
+    let refused: Vec<Value> = world
+        .events_of(run, "edit-rejected")
+        .into_iter()
+        .filter(|event| event["payload"]["command"]["text"] == HELD_NOTE)
+        .collect();
+    assert_eq!(refused.len(), 1, "{refused:?}");
     let journal = world.journal(run);
     let at = |id: u64, command: &Value| {
         journal

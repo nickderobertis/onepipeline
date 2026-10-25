@@ -57,7 +57,7 @@ budgets:
       20-core dispatch host at load1 46: 321.8 ms, the owed scenario's maximum (median
       129.4 ms), over this threshold on that host. On onevcs 0.47.0 the same journey
       recorded 169.7 ms and on 0.46.0 110.5 ms. Each carries the scoped launcher-filtered
-      decision read (onevcs #356, first released in 0.45.0). This branch links onevcs 0.48.1;
+      decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.2;
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-latency-cold
     measure: reported
@@ -73,7 +73,7 @@ budgets:
       20-core dispatch host at load1 46: 647.5 ms, the none scenario's maximum (median
       361.8 ms), over this threshold on that host. On onevcs 0.47.0 the same journey
       recorded 555.3 ms and on 0.46.0 299.1 ms. Each carries the scoped launcher-filtered
-      decision read (onevcs #356, first released in 0.45.0). This branch links onevcs 0.48.1;
+      decision read (onevcs #356, first released in 0.45.0). This build links onevcs 0.56.2;
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-latency-10x
     measure: reported
@@ -90,7 +90,7 @@ budgets:
       on a shared 20-core dispatch host at load1 50: 707.1 ms, the none scenario's maximum. On
       onevcs 0.47.0 the same journey recorded 724.2 ms (load1 66) and on 0.46.0 1,209.2 ms
       (owed, load1 31). Each carries the scoped launcher-filtered decision read (onevcs #356,
-      first released in 0.45.0). This branch links onevcs 0.48.1;
+      first released in 0.45.0). This build links onevcs 0.56.2;
       the threshold was not re-measured on it.
   - id: stop-guard-unpublished-journey-time
     measure: reported
@@ -116,3 +116,30 @@ budgets:
       the slowest; the median, the phase breakdown, the cold read and the 100/400/800-root
       scaling reads are its detail. Measured by `just host-view-budget` there, read from the
       record it leaves; `just budgets` leaves it out, as the gate builds no release binary.
+  - id: review-round-github-quota
+    measure: reported
+    command: [bash, scripts/review-round-quota-budget.sh]
+    unit: quota-units
+    direction: max
+    threshold: 175
+    description: >-
+      GraphQL points plus REST requests one busy review round spends across the two tokens it
+      touches: the host's `gh` token and the plan store's board token. The round is ten stacked
+      drafts, six new comments, two passes, two reworks, one decline, a person's merge and a
+      readjustment, and six replies. Read from the telemetry the e2e tier's busy-round journey
+      records over onevcs-testing's remote double, fake agents and a local Markdown store,
+      because no check may spend the shared account's quota. Each ledger call is charged what
+      the spikes measured on GitHub, each store task written 2 points, and each store read 1.
+      The threshold is this journey's measured round, 152 to 162 over eight runs on 2026-10-18
+      and 2026-10-19 (CI 156 at #935's head, 160 on main at 645ca97f and 162 at #1015; locally
+      152, 152, 154, 158, 162), plus a margin: 175 is the measured upper bound 162 plus 13 units,
+      about 8% of it. The gh token is 54 in every run: 30 GraphQL
+      points (both passes' review reads 11, the decline's comment read 1, sixteen standings
+      reads — the reworks' and the readjustment's placement reads and one per retarget — 16, two
+      open-change lookups 2) and 24
+      REST requests (six reply posts, two retargets, sixteen visibility probes). The board token
+      is 98 to 108, as concurrency groups the publications: each publication's fence written
+      and cleared on the project, each command's claim written and released, about eleven task
+      writes and six claim reads. The 45 it replaces was arithmetic of 2026-10-10 over a design
+      without the boundary's visibility probes (#852), the driver's claim (#862), the placement
+      read (#916) or the publication fence (#965); the fence's writes alone are over 45.

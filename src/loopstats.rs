@@ -40,6 +40,9 @@ static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
 /// Pool-maintenance sweeps this driver started — counted because a sweep finding
 /// nothing due writes nothing, so no other reading tells "asked" from "never asked".
 static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
+/// Reads of the project's driver claim this driver asked its plan store for — each one a
+/// board call, so the count a quota is spent by.
+static CLAIM_READS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -76,6 +79,14 @@ pub(crate) fn release_asked() {
 
 pub(crate) fn maintenance_sweep_started() {
     MAINTENANCE_SWEEPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The name the claim reads are reported under, which entry 128 of
+/// `docs/contract-divergences.md` names.
+pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
+
+pub(crate) fn claim_read() {
+    CLAIM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -141,6 +152,7 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
+        (CLAIM_READS_KEY): CLAIM_READS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
         "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });
@@ -212,6 +224,7 @@ mod tests {
         upstream_read();
         release_asked();
         maintenance_sweep_started();
+        claim_read();
         store_read(7);
         records_folded(3);
         flush(&paths).expect("the counts are written");
@@ -228,6 +241,7 @@ mod tests {
             "upstream_reads",
             "release_asks",
             "maintenance_sweeps",
+            "claim_reads",
             "store_bytes",
             "records_folded",
         ] {

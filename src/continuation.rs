@@ -16,8 +16,17 @@
 //! The claim is **not atomic**: the store offers no conditional write, so it is a record
 //! two launches can both read empty. What it holds is narrower — a launch that finds
 //! another run's claim is refused unless told `--take-over`, and a driver that finds its
-//! claim replaced stops at its next check — and `docs/contract-divergences.md` entry 119
-//! says exactly what it does not.
+//! claim replaced stops — and `docs/contract-divergences.md` entry 119 says exactly what it
+//! does not.
+//!
+//! A running driver reads the claim only where it must: on an adoption's first pass, and
+//! once immediately before each publication it starts, after the fence naming that
+//! publication has landed. Nothing reads it on a timer, nothing reads it before a dispatch,
+//! and a read that is not answered ends nothing. So the waiting is the adopter's: a
+//! `--take-over` writes its claim, and starts nothing until the driver it displaced has
+//! acknowledged it — on the claim, once it has read the takeover at a publication, its
+//! closeout or its stop — or until [`takeover_wait`] has passed with no publication of that
+//! driver's under way. Entry 128 states the contract.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -25,17 +34,24 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
+use crate::payload::ClaimLease;
 use crate::payload::DriverClaim;
-use crate::taskgraph::{QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, SETTLEMENT_KEY};
+use crate::taskgraph::{
+    QualifiedId, Read, Store, DISPATCH_KEY, DRIVER_KEY, PUBLISHING_KEY, SETTLEMENT_KEY,
+};
 
 // llmlint: ignore-block[invalid_states_unrepresentable] The store’s existing onepipeline.rework contract uses string identities. This boundary DTO rejects unknown fields; rework_provenance validates its values before continuation or baseline preservation uses them. Changing the serialized fields belongs to the shared contract’s owner.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StoredRework {
     pub(crate) replaces: String,
-    reason: String,
-    instruction: String,
+    pub(crate) reason: String,
+    pub(crate) instruction: String,
     pub(crate) comments: Vec<crate::channel::ReworkComment>,
+    /// The superseded node's settled head, absent from a record written before it
+    /// was carried (entry 130).
+    #[serde(default)]
+    pub(crate) replaces_head: Option<String>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -59,29 +75,183 @@ pub(crate) fn rework_provenance(value: &Value) -> Result<StoredRework> {
             "invalid comment in rework provenance".to_owned(),
         ));
     }
+    // A commit id git names in full — SHA-1's 40 hex digits or SHA-256's 64 — and nothing
+    // else, because the drafting asks git for the commits after it.
+    if stored.replaces_head.as_deref().is_some_and(|head| {
+        !matches!(head.len(), 40 | 64) || !head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(Error::Invalid(
+            "rework provenance names a superseded head that is no full commit id".to_owned(),
+        ));
+    }
     Ok(stored)
 }
 
-/// The longest an idle driver goes between two reads of its project's claim.
-///
-/// A driver that dispatches or publishes reads the claim at the start of each pass that
-/// does, so this bounds only the driver with nothing to do: how long after a takeover it
-/// can go on holding dispatches it will not publish.
-pub(crate) const IDLE_CLAIM_CHECK: Duration = Duration::from_secs(600);
+/// The claim interval's default. It paces the one read of the claim still made on a timer —
+/// a takeover's, while it waits — and is stated in each claim's `lease` for a build that
+/// still sizes a takeover's wait by it.
+pub(crate) const CLAIM_INTERVAL: Duration = Duration::from_secs(300);
 
-/// The **test seam** shortening [`IDLE_CLAIM_CHECK`], in whole seconds.
-///
-/// Read only so a journey can show an idle driver noticing a takeover without waiting
-/// ten minutes; entry 119 names it as a seam, and nothing an operator configures sets it.
-pub(crate) const IDLE_CLAIM_CHECK_ENV: &str = "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS";
+/// The longest claim interval the setting may name, and a claim's `lease` may state: a day.
+/// A build that still sizes a takeover's wait by a claim's interval would wait days on a
+/// longer one, and arithmetic on the instants it is added to has to stay representable.
+pub(crate) const MAX_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
 
-/// The longest one read of the claim may take before the driver goes on without its answer:
-/// a store that does not answer has not said anybody else drives, and a reconcile pass that
-/// waited on it for longer would hold every dispatch behind a board.
+/// The setting naming the claim interval, in whole seconds.
+///
+/// Each host is given its own, and its claim states it. It governs only how often a
+/// takeover reads the claim while it waits; no running driver reads its claim on a timer.
+pub(crate) const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+
+/// The longest one read of the claim may take before the driver goes on without its answer
+/// — a publication waiting on it waits for the next: a reconcile pass that waited on a store
+/// for longer would hold every settlement behind a board.
 pub(crate) const CLAIM_READ_DEADLINE: Duration = Duration::from_secs(20);
 
-/// The keys a claim carries, and the only ones: the store's copy is external input.
-const CLAIM_KEYS: [&str; 5] = ["run", "host", "session", "pid", "claimed_at"];
+/// What [`takeover_wait`] adds to the displaced host's cancel grace.
+const TAKEOVER_SLACK: Duration = Duration::from_secs(10);
+
+/// How long a superseded driver waits, once, for what it settled to land on the store
+/// before it goes on passing and says the settlement has not reached it.
+pub(crate) const SETTLEMENT_LANDING_WAIT: Duration = Duration::from_secs(20);
+
+/// A takeover reads the claim every this-many-th of an interval while it waits, bounded by
+/// [`TAKEOVER_POLL_MIN`] and [`TAKEOVER_POLL_MAX`].
+const TAKEOVER_POLLS_PER_INTERVAL: u32 = 10;
+const TAKEOVER_POLL_MIN: Duration = Duration::from_secs(1);
+const TAKEOVER_POLL_MAX: Duration = Duration::from_secs(30);
+
+/// How soon a driver writes its publications under way again after the store refused it,
+/// and reads the claim again before a publication after a read that was not answered.
+const FENCE_RETRY: Duration = Duration::from_secs(5);
+
+/// How long a driver whose last publication has settled leaves its fence naming it before it
+/// clears it: a publication starting inside that time replaces the fence in one write, rather
+/// than one clearing it and one naming the next — as each draft of a restack does, one after
+/// the other.
+const FENCE_LINGER: Duration = Duration::from_secs(10);
+
+/// The test failpoint met before each read a takeover makes once its wait has passed, so a
+/// journey can hold that read until the displaced driver has got where it needs it.
+const TAKEOVER_PAST_WAIT_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_PAST_WAIT_GATE";
+
+/// The test failpoint met before every read a takeover makes while it waits, so a journey can
+/// read the store as the displaced driver left it before the takeover has seen it.
+const TAKEOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_TAKEOVER_READ_GATE";
+
+/// The test failpoint met before the first read a driver makes ahead of a publication, so a
+/// journey can record a takeover between the fence naming that publication landing and the
+/// read that clears it.
+const BEFORE_PUBLICATION_GATE_ENV: &str = "ONEPIPELINE_TEST_BEFORE_PUBLICATION_CLAIM_GATE";
+
+/// The test failpoint met at the moment a driver would start a dispatch of the node
+/// [`BEGIN_GATE_NODE_ENV`] names, so a journey can hold a dispatch being admitted.
+const BEGIN_GATE_ENV: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_GATE";
+const BEGIN_GATE_NODE_ENV: &str = "ONEPIPELINE_TEST_DISPATCH_BEGIN_NODE";
+
+/// Met at the moment a dispatch of `node` would start: [`BEGIN_GATE_ENV`]'s failpoint, where
+/// [`BEGIN_GATE_NODE_ENV`] names `node`, and nothing otherwise.
+pub(crate) fn before_dispatch(node: &str) {
+    if std::env::var(BEGIN_GATE_NODE_ENV).is_ok_and(|named| named == node) {
+        let _ = crate::ordering::meet(BEGIN_GATE_ENV);
+    }
+}
+
+/// The key a displaced driver's acknowledgement is written under, inside the claim it
+/// acknowledges.
+pub(crate) const ACKNOWLEDGED_KEY: &str = "acknowledged";
+
+/// The keys a claim carries, and the only ones: the store's copy is external input. A
+/// claim a displaced driver acknowledged carries [`ACKNOWLEDGED_KEY`] beside them.
+const CLAIM_KEYS: [&str; 6] = ["run", "host", "session", "pid", "claimed_at", "lease"];
+
+/// The keys a claim's `lease` carries, and the only ones.
+const LEASE_KEYS: [&str; 2] = ["interval_seconds", "cancel_grace_seconds"];
+
+/// The terms this host's claim states: the claim interval and the cancel grace it was given,
+/// both at least a second, as [`claim_interval`] and the grace's own setting read them. A run
+/// taking the project over waits out the grace these state rather than its own.
+pub(crate) fn lease_terms() -> ClaimLease {
+    let positive =
+        |seconds: u64| std::num::NonZeroU64::new(seconds).unwrap_or(std::num::NonZeroU64::MIN);
+    ClaimLease {
+        interval_seconds: positive(claim_interval().as_secs()),
+        cancel_grace_seconds: positive(crate::engine::cancel_grace().as_secs()),
+    }
+}
+
+/// A driver's publications under way, as the project's [`PUBLISHING_KEY`] holds them.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Publishing {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as the
+    // claim beside them spells them: a run, a host, node ids and an RFC 3339 instant are
+    // strings on the store, and `publishing_of` refuses one that is not each.
+    /// The run publishing.
+    pub(crate) run: String,
+    /// The host it is driven on.
+    pub(crate) host: String,
+    /// The nodes whose publications are under way.
+    pub(crate) nodes: Vec<String>,
+    /// When this was written, RFC 3339.
+    pub(crate) at: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+/// The project's publications under way, out of its metadata: `None` where the key is
+/// absent or `null`, and a refusal where it holds anything that is not a driver's
+/// publications.
+pub(crate) fn publishing_of(
+    project: &str,
+    metadata: &BTreeMap<String, Value>,
+) -> Result<Option<Publishing>> {
+    let refused = |why: String| {
+        Error::Invalid(format!(
+            "{project}: `{PUBLISHING_KEY}` is not a driver's publications: {why}"
+        ))
+    };
+    let Some(stored) = metadata
+        .get(PUBLISHING_KEY)
+        .filter(|stored| !stored.is_null())
+    else {
+        return Ok(None);
+    };
+    let read: Publishing =
+        serde_json::from_value(stored.clone()).map_err(|why| refused(why.to_string()))?;
+    if crate::vcs::usable(&read.run).is_none()
+        || crate::vcs::usable(&read.host).is_none()
+        || read.nodes.is_empty()
+        || read
+            .nodes
+            .iter()
+            .any(|node| crate::vcs::usable(node).is_none())
+        || crate::projection::millis_of(&read.at).is_none()
+    {
+        return Err(refused(format!(
+            "it names {:?} on {:?} publishing {:?} at {:?}, not a run, a host, the nodes \
+             publishing and an instant",
+            read.run, read.host, read.nodes, read.at
+        )));
+    }
+    Ok(Some(read))
+}
+
+/// A displaced driver's acknowledgement of the claim that displaced it: it has stopped
+/// starting dispatches and publications, and none of its own is in progress.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Acknowledgement {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a store document's fields, as the
+    // claim beside them spells them: a run, a host and an RFC 3339 instant are strings on the
+    // store, and `stored_claim_of` refuses one that is not each.
+    /// The run that was displaced.
+    pub(crate) run: String,
+    /// The host it was driven on.
+    pub(crate) host: String,
+    /// When it acknowledged, RFC 3339.
+    pub(crate) at: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
 
 /// The project's claim, out of its metadata: `None` where the key is absent or `null` —
 /// the two read the same, because a release writes `null` — and a refusal naming the key
@@ -90,15 +260,77 @@ pub(crate) fn claim_of(
     project: &str,
     metadata: &BTreeMap<String, Value>,
 ) -> Result<Option<DriverClaim>> {
+    Ok(stored_claim_of(project, metadata)?.map(|(claim, _)| claim))
+}
+
+/// The claim to write where the run `run` on `host`, letting go of its project with nothing
+/// of its own in progress, finds another run's claim on it that nothing has acknowledged:
+/// that claim, acknowledged by this run. `None` where the claim is this run's, already
+/// acknowledged, absent or not a claim.
+pub(crate) fn acknowledgement_over(
+    project: &str,
+    metadata: &BTreeMap<String, Value>,
+    run: &str,
+    host: &str,
+) -> Option<Value> {
+    let Ok(Some((claim, None))) = stored_claim_of(project, metadata) else {
+        return None;
+    };
+    if claim.names(run, host) {
+        return None;
+    }
+    let mut written = serde_json::to_value(&claim).ok()?;
+    written[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
+        run: run.to_owned(),
+        host: host.to_owned(),
+        at: crate::sys::now_rfc3339(),
+    });
+    Some(written)
+}
+
+/// The project's claim and the acknowledgement it carries, if a displaced driver wrote one.
+fn stored_claim_of(
+    project: &str,
+    metadata: &BTreeMap<String, Value>,
+) -> Result<Option<(DriverClaim, Option<Acknowledgement>)>> {
     let refused =
         |why: String| Error::Invalid(format!("{project}: `{DRIVER_KEY}` is not a claim: {why}"));
     match metadata.get(DRIVER_KEY) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Object(claim)) => {
+            let mut claim = claim.clone();
+            let acknowledged = match claim.remove(ACKNOWLEDGED_KEY) {
+                None => None,
+                Some(written) => {
+                    let read: Acknowledgement = serde_json::from_value(written)
+                        .map_err(|why| refused(format!("its `{ACKNOWLEDGED_KEY}`: {why}")))?;
+                    if crate::vcs::usable(&read.run).is_none()
+                        || crate::vcs::usable(&read.host).is_none()
+                        || crate::projection::millis_of(&read.at).is_none()
+                    {
+                        return Err(refused(format!(
+                            "its `{ACKNOWLEDGED_KEY}` names {:?} on {:?} at {:?}, not a run, a \
+                             host and an instant",
+                            read.run, read.host, read.at
+                        )));
+                    }
+                    Some(read)
+                }
+            };
             if let Some(key) = claim.keys().find(|key| !CLAIM_KEYS.contains(&key.as_str())) {
                 return Err(refused(format!("it carries `{key}`, which no claim does")));
             }
-            let claim: DriverClaim = serde_json::from_value(Value::Object(claim.clone()))
+            if let Some(lease) = claim.get("lease") {
+                let Some(lease) = lease.as_object() else {
+                    return Err(refused(format!("its `lease` is {lease}, not a mapping")));
+                };
+                if let Some(key) = lease.keys().find(|key| !LEASE_KEYS.contains(&key.as_str())) {
+                    return Err(refused(format!(
+                        "its `lease` carries `{key}`, which no lease does"
+                    )));
+                }
+            }
+            let claim: DriverClaim = serde_json::from_value(Value::Object(claim))
                 .map_err(|why| refused(why.to_string()))?;
             // Each name is printed on a refusal's line and compared as an identity, so it has
             // to be one a line can carry: not empty, nothing but what prints.
@@ -118,7 +350,18 @@ pub(crate) fn claim_of(
                     claim.claimed_at
                 )));
             }
-            Ok(Some(claim))
+            // A lease no driver of this build runs on would size a takeover's wait wrong.
+            if let Some(lease) = claim
+                .lease
+                .filter(|lease| lease.interval_seconds.get() > MAX_CLAIM_INTERVAL.as_secs())
+            {
+                return Err(refused(format!(
+                    "its `lease` names a {}s interval, not one of 1 to {} seconds",
+                    lease.interval_seconds,
+                    MAX_CLAIM_INTERVAL.as_secs()
+                )));
+            }
+            Ok(Some((claim, acknowledged)))
         }
         Some(other) => Err(refused(format!("it holds {other}, not a mapping"))),
     }
@@ -284,6 +527,15 @@ fn settlement_of(node: &str, metadata: Option<&Map<String, Value>>) -> Result<Op
     }))
 }
 
+/// Whether the stored settlement on a task says the engine itself settled it `cancelled`:
+/// a park, a stopped dispatch or a superseded attempt, each of which a continuing launch
+/// resumes. `false` where the task carries none, and a refusal where it carries anything that
+/// is not a settlement.
+pub(crate) fn cancelled_by_the_engine(task: &str, metadata: &Map<String, Value>) -> Result<bool> {
+    Ok(settlement_of(task, Some(metadata))?
+        .is_some_and(|settlement| settlement.status == crate::payload::Status::Cancelled))
+}
+
 /// A stored settlement as the boundary read it: its status, typed, and every field it
 /// carries, verbatim, for a continuation to journal whole.
 #[derive(Debug)]
@@ -426,7 +678,10 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
                     from["rework"] = json!(crate::payload::ContinuedRework {
                         replacement: replacement.to_owned(),
                         replaces: stored.replaces,
-                        comments: stored.comments
+                        comments: stored.comments,
+                        reason: stored.reason,
+                        instruction: stored.instruction,
+                        replaces_head: stored.replaces_head,
                     });
                 }
             }
@@ -453,11 +708,13 @@ pub(crate) fn continuation_of(read: &Read, claim: Option<&DriverClaim>) -> Resul
     Ok(continued)
 }
 
-/// What a driver knows about its project's claim, and when it last asked.
+/// What a driver knows about its project's claim.
 ///
-/// One store read per check, and a check only where the engine is about to do something a
-/// takeover should stop — at launch and adoption, at the start of a pass that would dispatch
-/// or publish, and on its idle interval — never before each dispatch or publication.
+/// Read only where a driver must know: an adoption's first pass, and once immediately before
+/// each publication starts, after the fence naming it has landed — never on a timer, and
+/// never before a dispatch. A project changes driver only where somebody says so with
+/// `--take-over`, so a driver reading its claim on a clock would spend the board's quota
+/// confirming that nothing changed; and a read that cannot be answered ends nothing.
 pub(crate) struct ClaimWatch {
     store: Store,
     project: QualifiedId,
@@ -470,42 +727,93 @@ pub(crate) struct ClaimWatch {
     // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The run's own directory, where the store's request to be left alone is kept.
     run_dir: std::path::PathBuf,
-    /// Which kind of driver this is, which decides whether its first pass reads the claim.
-    driving: Driving,
     /// The claim this run's launch knowingly took over: still on the store until this
     /// driver's first projection replaces it, and no sign that anybody else drives.
     displaced: Option<DriverClaim>,
-    last: Option<Instant>,
-    every: Duration,
+    /// Where this driver stands with its claim.
+    standing: Standing,
+    /// The nodes the project's [`PUBLISHING_KEY`] names as this driver's publications under
+    /// way, as far as this driver knows: `None` where it cannot say — an adoption before its
+    /// first read, or after a write the store refused.
+    fenced: Option<std::collections::BTreeSet<String>>,
+    /// When the store last refused that write, so the loop wakes to write it again.
+    fence_refused: Option<Instant>,
+    /// When this driver's last publication under way settled, while the fence still names
+    /// it: cleared once [`FENCE_LINGER`] has passed, unless a publication replaces it first.
+    lingering: Option<Instant>,
+    /// When the read before a publication last went unanswered, so the loop wakes to read
+    /// again.
+    read_unanswered: Option<Instant>,
+    /// The run's term scope, which a public boundary checks this driver's writes over.
+    // llmlint: ignore[invalid_states_unrepresentable] the shape the store takes a scope in, as `writeback::Snapshot::term_scope` says.
+    term_scope: Vec<String>,
+}
+
+/// Where a driver stands with its project's claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// An adoption whose first read is still to be made: made on its first pass the store
+    /// has not asked to be left alone over.
+    AdoptionReadDue,
+    /// Driving, on the read its launch made or on its adoption's.
+    Driving,
+    /// A read found another run's claim: the fence this driver clears may since be that
+    /// run's, so it reads before it clears.
+    Superseded,
+}
+
+/// What the read immediately before a publication lets the driver do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BeforePublishing {
+    /// The read found the project this driver's — its own claim, the one it took over, or
+    /// none: the publications go ahead.
+    Publish,
+    /// The read failed, outlasted its deadline, or was not made inside a wait the store asked
+    /// for: the publications wait, and the read is made again once [`FENCE_RETRY`] has passed.
+    Wait,
+    /// The read found another run's claim, which supersedes this driver.
+    Superseded(DriverClaim),
 }
 
 impl ClaimWatch {
     /// The watch over the project `launch` names, or `None` for a run naming none.
+    ///
+    /// A launch's driver starts on the read that let it launch — its own, or the one its
+    /// takeover made once the driver it displaced had let go — and reads nothing more until
+    /// a publication. An adoption's first pass reads.
     pub(crate) fn of_run(
         paths: &crate::ledger::RunPaths,
         launch: &crate::ledger::LaunchRecord,
+        term_scope: Vec<String>,
     ) -> Option<Self> {
         let project = launch.project.parse().ok()?;
+        let launched = launch.adoptions == 0;
         Some(Self {
             store: Store::at(&launch.dir),
             project,
-            run: paths.run.clone(),
+            // As the store names this run: its public id, where the store does not declare
+            // the project's source private.
+            run: crate::publicid::on_store(launch),
             host: crate::sys::hostname(),
             run_dir: paths.dir.clone(),
-            driving: if launch.adoptions == 0 {
-                Driving::Launched
-            } else {
-                Driving::Adopted
-            },
             displaced: taken_over(paths),
-            last: None,
-            every: idle_claim_check(),
+            standing: if launched {
+                Standing::Driving
+            } else {
+                Standing::AdoptionReadDue
+            },
+            // A launch minted its run, so nothing on the store names its publications yet.
+            fenced: launched.then(std::collections::BTreeSet::new),
+            fence_refused: None,
+            lingering: None,
+            read_unanswered: None,
+            term_scope,
         })
     }
 
     /// The claim this driver writes: this run, this host, the session that launched it,
     /// this process, from `claimed_at`.
-    pub(crate) fn mine(&self, session: &str, claimed_at: &str) -> DriverClaim {
+    pub(crate) fn claim(&self, session: &str, claimed_at: &str) -> DriverClaim {
         DriverClaim {
             run: self.run.clone(),
             host: self.host.clone(),
@@ -513,38 +821,52 @@ impl ClaimWatch {
             session: crate::vcs::usable(session),
             pid: crate::sys::pid(),
             claimed_at: claimed_at.to_owned(),
+            lease: Some(lease_terms()),
         }
     }
 
-    /// Read the claim, and answer the claim that supersedes this driver, if one does.
+    /// How long until the adoption's first read is due: now, where it is still to be made
+    /// and the store has asked for no wait, and `Duration::MAX` once it has been made.
+    pub(crate) fn until_adoption_read(&self) -> Duration {
+        if self.standing != Standing::AdoptionReadDue {
+            return Duration::MAX;
+        }
+        crate::writeback::store_wait_left(&self.run_dir).unwrap_or(Duration::ZERO)
+    }
+
+    /// Make an adoption's first read, once: the claim that supersedes this driver, if one
+    /// does. `None` where this driver is no adoption or has read already, and — the read
+    /// still due — inside a wait the store asked for.
     ///
-    /// A read the store fails is said on standard error and answers nothing: a claim is
-    /// best effort, and a store that cannot be read has not said anybody else drives.
-    pub(crate) fn check(&mut self) -> Option<DriverClaim> {
-        self.last = Some(Instant::now());
+    /// A read the store fails is said on standard error and answers nothing: a claim is best
+    /// effort, and a store that cannot be read has not said anybody else drives.
+    pub(crate) fn adoption_read(&mut self) -> Option<DriverClaim> {
+        if self.standing != Standing::AdoptionReadDue {
+            return None;
+        }
         // A store that asked to be left alone is asked nothing inside the wait: every further
         // call extends a limiter nothing reports. The write-back is waiting it out too, and
-        // the next check after it has passed reads the claim.
+        // the first pass after it has passed reads the claim.
         // llmlint: ignore-block[changed_behavior_has_e2e] driven end to end by `tests/e2e/store.rs`'s
         // `a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed` and
         // `a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing`, which hold that an adopted
-        // driver inside a wait the store asked for makes no store call at all — the adoption's own
-        // claim read was the one call each caught before this skip existed — and that the driver
+        // driver inside a wait the store asked for makes no store call at all, and that the driver
         // reaches the store again once the wait has passed.
-        if crate::writeback::store_asked_to_wait(&self.run_dir) {
+        if crate::writeback::store_wait_left(&self.run_dir).is_some() {
             return None;
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        let read = self
-            .store
-            .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
-            .and_then(|metadata| claim_of(self.project.as_str(), &metadata));
-        match read {
-            Ok(claim) => claim.filter(|claim| self.supersedes(claim)),
+        self.standing = Standing::Driving;
+        match self.read() {
+            Ok(Some(claim)) if self.supersedes(&claim) => {
+                self.standing = Standing::Superseded;
+                Some(claim)
+            }
+            Ok(_) => None,
             Err(why) => {
                 eprintln!(
                     "onepipeline: run '{}' could not read the claim on {}: {why}; it goes on \
-                     driving and reads it again at its next check",
+                     driving, and reads it again before its next publication",
                     self.run,
                     self.project.as_str()
                 );
@@ -553,41 +875,476 @@ impl ClaimWatch {
         }
     }
 
+    /// Read the claim immediately before a publication starts, once the fence naming it has
+    /// landed: only a claim naming another run holds it back, for good, and a read that was
+    /// not answered holds it until a later read is.
+    ///
+    /// A read finding no claim publishes: the claim may never have reached the board, and a
+    /// run that took the project over and finished it has nothing left this driver could
+    /// publish beside.
+    pub(crate) fn before_publishing(&mut self) -> BeforePublishing {
+        if self.read_unanswered.is_none() {
+            let _ = crate::ordering::meet(BEFORE_PUBLICATION_GATE_ENV);
+        }
+        if self
+            .read_unanswered
+            .is_some_and(|at| at.elapsed() < FENCE_RETRY)
+        {
+            return BeforePublishing::Wait;
+        }
+        // Inside a wait the store asked for, as the fence's own write is not made in one.
+        if let Some(left) = crate::writeback::store_wait_left(&self.run_dir) {
+            eprintln!(
+                "onepipeline: run '{}' waits {}s, as the store asked, to read the claim on {} \
+                 before it publishes",
+                self.run,
+                left.as_secs(),
+                self.project.as_str()
+            );
+            self.read_unanswered = Some(Instant::now());
+            return BeforePublishing::Wait;
+        }
+        match self.read() {
+            Ok(Some(claim)) if self.supersedes(&claim) => {
+                self.read_unanswered = None;
+                self.standing = Standing::Superseded;
+                BeforePublishing::Superseded(claim)
+            }
+            Ok(_) => {
+                self.read_unanswered = None;
+                BeforePublishing::Publish
+            }
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' could not read the claim on {} before it publishes: \
+                     {why}; the publication waits, and it reads again in {}s",
+                    self.run,
+                    self.project.as_str(),
+                    FENCE_RETRY.as_secs()
+                );
+                self.read_unanswered = Some(Instant::now());
+                BeforePublishing::Wait
+            }
+        }
+    }
+
+    /// One read of the project's claim, bounded by [`CLAIM_READ_DEADLINE`], which also
+    /// refreshes what this driver knows of its fence.
+    ///
+    /// A read the store refused naming a wait keeps that wait in the run's directory, so no
+    /// read of this driver's, and nothing its write-back sends, asks the store again before it
+    /// has passed.
+    fn read(&mut self) -> Result<Option<DriverClaim>> {
+        crate::loopstats::claim_read();
+        let metadata = self
+            .store
+            .project_metadata_asking(&self.project, CLAIM_READ_DEADLINE)
+            .map_err(|refused| {
+                if let Some(wait) = refused.wait {
+                    crate::writeback::record_store_wait(&self.run_dir, wait);
+                }
+                refused.error
+            })?;
+        self.fenced = self.fence_on(&metadata);
+        claim_of(self.project.as_str(), &metadata)
+    }
+
     /// Whether `claim` names a run other than this one and other than the one this launch
     /// took the project over from.
     fn supersedes(&self, claim: &DriverClaim) -> bool {
         !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
     }
 
-    /// How long until the idle check is due: now where this driver has never checked.
-    pub(crate) fn until_idle_check(&self) -> Duration {
-        self.last.map_or(Duration::ZERO, |last| {
-            self.every.saturating_sub(last.elapsed())
-        })
+    /// How long until a write of this driver's publications the store refused, a read
+    /// before a publication it did not answer, or the clearing of a fence left naming a
+    /// settled publication, is due again.
+    pub(crate) fn until_fence_retry(&self) -> Duration {
+        [
+            self.fence_refused.map(|at| at + FENCE_RETRY),
+            self.read_unanswered.map(|at| at + FENCE_RETRY),
+            self.lingering.map(|at| at + FENCE_LINGER),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|due| due.saturating_duration_since(Instant::now()))
+        .min()
+        .unwrap_or(Duration::MAX)
     }
 
-    pub(crate) fn idle_check_due(&self) -> bool {
-        self.until_idle_check() == Duration::ZERO
-    }
-
-    /// Whether the first pass is covered by the read that let this run launch: a launch's
-    /// driver is, an adoption's is not. Marks the idle clock from now, so a covered first pass
-    /// is not read again as an idle one.
-    pub(crate) fn covered_by_the_launch(&mut self) -> bool {
-        let covered = self.driving == Driving::Launched;
-        if covered {
-            self.last = Some(Instant::now());
+    /// [`ClaimWatch::fence`], except that a driver still driving whose fence would go from
+    /// naming publications to naming none leaves it standing for [`FENCE_LINGER`] first: a
+    /// fence naming a publication that has settled only holds a takeover a little longer.
+    pub(crate) fn fence_lingering(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+        let standing = self
+            .fenced
+            .as_ref()
+            .is_some_and(|fenced| !fenced.is_empty());
+        if nodes.is_empty() && standing && self.standing == Standing::Driving {
+            let since = *self.lingering.get_or_insert_with(Instant::now);
+            if since.elapsed() < FENCE_LINGER {
+                return true;
+            }
         }
-        covered
+        let landed = self.fence(nodes);
+        if !landed && self.lingering.is_some() {
+            // Not written inside a wait the store asked for: tried again a linger later.
+            self.lingering = Some(Instant::now());
+        }
+        landed
+    }
+
+    /// Clear a fence left naming a settled publication now, where one is: no pass follows.
+    pub(crate) fn clear_lingering(&mut self) {
+        if self.lingering.is_some() {
+            self.fence(&std::collections::BTreeSet::new());
+        }
+    }
+
+    /// The nodes `metadata`'s [`PUBLISHING_KEY`] names as this driver's: none where it is
+    /// absent or another run's, and `None` where it is not a driver's publications at all.
+    fn fence_on(
+        &self,
+        metadata: &BTreeMap<String, Value>,
+    ) -> Option<std::collections::BTreeSet<String>> {
+        match publishing_of(self.project.as_str(), metadata) {
+            Ok(Some(publishing)) if publishing.run == self.run && publishing.host == self.host => {
+                Some(publishing.nodes.into_iter().collect())
+            }
+            Ok(_) => Some(std::collections::BTreeSet::new()),
+            Err(_) => None,
+        }
+    }
+
+    /// Make the project's [`PUBLISHING_KEY`] name `nodes` as this driver's publications under
+    /// way — `null` for none — and answer whether it does: a publication starts only once the
+    /// fence naming it has landed, so a run taking the project over that finds no fence of
+    /// this driver's knows none is under way.
+    ///
+    /// Written only where it differs from what the store is known to hold, bounded by
+    /// [`CLAIM_READ_DEADLINE`], and not inside a wait the store asked for. A superseded
+    /// driver reads before it clears, and clears only a fence of its own.
+    pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
+        if self.fenced.as_ref() == Some(nodes) {
+            self.lingering = None;
+            return true;
+        }
+        if crate::writeback::store_asked_to_wait(&self.run_dir) {
+            return false;
+        }
+        // A write the store refused is made again when its retry is due, and not on whatever
+        // pass something else woke first.
+        if self.fence_refused.is_some() && !self.until_fence_retry().is_zero() {
+            return false;
+        }
+        if nodes.is_empty() && self.standing == Standing::Superseded {
+            match self
+                .store
+                .project_metadata_within(&self.project, CLAIM_READ_DEADLINE)
+            {
+                Ok(metadata) => {
+                    self.fenced = self.fence_on(&metadata);
+                    if self.fenced.as_ref() == Some(nodes) {
+                        return true;
+                    }
+                }
+                Err(why) => {
+                    eprintln!(
+                        "onepipeline: run '{}' could not read its publications on {}: {why}; it \
+                         clears them at its next pass",
+                        self.run,
+                        self.project.as_str()
+                    );
+                    return false;
+                }
+            }
+        }
+        let written = if nodes.is_empty() {
+            Ok(Value::Null)
+        } else {
+            serde_json::to_value(Publishing {
+                run: self.run.clone(),
+                host: self.host.clone(),
+                nodes: nodes.iter().cloned().collect(),
+                at: crate::sys::now_rfc3339(),
+            })
+        };
+        let landed = written.map_err(|why| why.to_string()).and_then(|value| {
+            self.store
+                .set_project_metadata_within(
+                    &self.project,
+                    PUBLISHING_KEY,
+                    &value,
+                    CLAIM_READ_DEADLINE,
+                    &self.term_scope,
+                )
+                .map_err(|why| why.to_string())
+        });
+        match landed {
+            Ok(()) => {
+                self.fenced = Some(nodes.clone());
+                self.fence_refused = None;
+                self.lingering = None;
+                true
+            }
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' could not write its publications under way on {}: \
+                     {why}; it starts no publication until a write lands",
+                    self.run,
+                    self.project.as_str()
+                );
+                // What the store holds now is not known: the write may yet land.
+                self.fenced = None;
+                self.fence_refused = Some(Instant::now());
+                self.lingering = None;
+                false
+            }
+        }
+    }
+
+    /// Record on the claim that superseded this driver that it has stopped: written once,
+    /// best effort, over the claim exactly as it was read, with the acknowledgement beside
+    /// it. What could not be written is said on standard error, and the adopter then waits
+    /// out [`takeover_wait`] instead.
+    pub(crate) fn acknowledge(&self, by: &DriverClaim) {
+        let written = serde_json::to_value(by).map(|mut claim| {
+            claim[ACKNOWLEDGED_KEY] = json!(Acknowledgement {
+                run: self.run.clone(),
+                host: self.host.clone(),
+                at: crate::sys::now_rfc3339(),
+            });
+            claim
+        });
+        let outcome = match written {
+            // llmlint: ignore-block[changed_behavior_has_e2e] the store's own wait is the
+            // write-back's to keep, as every read of the claim keeps it; the adopter's journeys
+            // drive the wait it falls back to (`a_takeover_whose_displaced_driver_died_proceeds_once_its_wait_has_passed`).
+            _ if crate::writeback::store_asked_to_wait(&self.run_dir) => {
+                Err("the store asked to be left alone".to_owned())
+            }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            Ok(claim) => self
+                .store
+                .set_project_metadata_within(
+                    &self.project,
+                    DRIVER_KEY,
+                    &claim,
+                    CLAIM_READ_DEADLINE,
+                    &self.term_scope,
+                )
+                .map_err(|why| why.to_string()),
+            Err(why) => Err(why.to_string()),
+        };
+        match outcome {
+            Ok(()) => eprintln!(
+                "onepipeline: run '{}' acknowledged run '{}' on host '{}' as the driver of {}",
+                self.run,
+                by.run,
+                by.host,
+                self.project.as_str()
+            ),
+            Err(why) => eprintln!(
+                "onepipeline: run '{}' could not acknowledge run '{}' on host '{}': {why}; that \
+                 run starts once its wait has passed with no publication of this one's under way",
+                self.run, by.run, by.host
+            ),
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Driving {
-    /// A launch's: the read of the claim that let it launch covers its first pass.
-    Launched,
-    /// An adoption's: nothing read the claim for it, so its first pass does.
-    Adopted,
+/// How a `--take-over` came to start: on the displaced driver's acknowledgement, or once
+/// the wait for one had passed with none of its publications under way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandedOver {
+    /// The displaced driver wrote that it had stopped.
+    Acknowledged(Acknowledgement),
+    /// Nothing answered within [`takeover_wait`], and the project named none of the
+    /// displaced driver's publications under way.
+    WaitedOut,
+}
+
+/// Take the project over from the driver its claim named: write `mine`, then start nothing
+/// until that driver has acknowledged it on the claim — which it does once it has read `mine`
+/// before a publication, at its closeout or at its stop, with nothing of its own in progress —
+/// or until [`takeover_wait`], sized by the cancel grace **its own claim** states, has passed
+/// since the write landed and a read after that finds no publication of its under way on the
+/// project's [`PUBLISHING_KEY`].
+///
+/// No publication of the displaced driver runs beside this run's: that driver writes the
+/// fence naming a publication, and only once it has landed reads the claim, publishing only
+/// on a read that answered and did not find `mine`; this run writes `mine`, and only once it
+/// has landed reads the fence. So one of the two reads finds the other's write. A dispatch is
+/// not fenced: a displaced driver that has not read `mine` yet may still start one, which
+/// publishes nothing once it does.
+///
+/// A claim stating no lease terms — one an older build wrote, or a value that is not a
+/// claim — names a driver whose fence this build cannot vouch for: the takeover then starts
+/// only on an acknowledgement, which a driver of this build writes once it reads `mine`.
+///
+/// The store is read every tenth of an interval while it waits, at least a second and at
+/// most thirty apart: the adopter carries the cost of a takeover, not every running driver.
+///
+/// # Errors
+///
+/// [`Error::Refused`] where the claim cannot be written, and [`Error::ProjectDriven`] where
+/// another launch's claim replaces this one while it waits.
+pub(crate) fn hand_over(
+    store: &Store,
+    project: &QualifiedId,
+    mine: &DriverClaim,
+    displaced: Option<&DriverClaim>,
+    term_scope: &[String],
+) -> Result<HandedOver> {
+    store
+        .set_project_metadata_within(
+            project,
+            DRIVER_KEY,
+            &serde_json::to_value(mine).map_err(|why| Error::Invalid(why.to_string()))?,
+            CLAIM_READ_DEADLINE,
+            term_scope,
+        )
+        .map_err(|why| {
+            Error::Refused(format!(
+                "--take-over could not write its claim on {}: {why}",
+                project.as_str()
+            ))
+        })?;
+    let written = Instant::now();
+    let wait = displaced.and_then(|claim| claim.lease).map(takeover_wait);
+    let every = takeover_poll(claim_interval());
+    let whom = displaced.map_or_else(
+        || "the driver its claim named".to_owned(),
+        |claim| format!("run '{}' on host '{}'", claim.run, claim.host),
+    );
+    match (wait, displaced) {
+        (Some(wait), _) => eprintln!(
+            "onepipeline: --take-over claimed {} for run '{}'; it starts once {whom} has \
+             acknowledged, or in {}s once none of its publications is under way",
+            project.as_str(),
+            mine.run,
+            wait.as_secs()
+        ),
+        (None, displaced) => eprintln!(
+            "onepipeline: --take-over claimed {} for run '{}'; {whom} states no lease, so no \
+             wait outlasts it: it starts once that driver has acknowledged{}",
+            project.as_str(),
+            mine.run,
+            displaced.map_or_else(String::new, |claim| format!(
+                ", or — taken over on host '{}' — once that host's records prove its run gone",
+                claim.host
+            ))
+        ),
+    }
+    // What has been said of the displaced driver's publications, so each is said once.
+    let mut said: Option<std::result::Result<Publishing, String>> = None;
+    loop {
+        let left = wait.map_or(every, |wait| wait.saturating_sub(written.elapsed()));
+        std::thread::sleep(if left.is_zero() {
+            every
+        } else {
+            every.min(left)
+        });
+        if wait.is_some_and(|wait| written.elapsed() >= wait) {
+            let _ = crate::ordering::meet(TAKEOVER_PAST_WAIT_GATE_ENV);
+        }
+        let _ = crate::ordering::meet(TAKEOVER_READ_GATE_ENV);
+        let read = store
+            .project_metadata_within(project, CLAIM_READ_DEADLINE)
+            .and_then(|metadata| {
+                stored_claim_of(project.as_str(), &metadata)
+                    .map(|claim| (claim, publishing_of(project.as_str(), &metadata)))
+            });
+        let publishing = match read {
+            Ok((Some((claim, acknowledged)), publishing))
+                if claim.names(&mine.run, &mine.host) && claim.claimed_at == mine.claimed_at =>
+            {
+                if let Some(acknowledged) = acknowledged {
+                    eprintln!(
+                        "onepipeline: run '{}' on host '{}' acknowledged the takeover of {}: run \
+                         '{}' starts",
+                        acknowledged.run,
+                        acknowledged.host,
+                        project.as_str(),
+                        mine.run
+                    );
+                    return Ok(HandedOver::Acknowledged(acknowledged));
+                }
+                publishing
+            }
+            Ok((Some((other, _)), _)) => {
+                return Err(Error::ProjectDriven {
+                    run: other.run,
+                    host: other.host,
+                    claimed_at: other.claimed_at,
+                })
+            }
+            // Cleared by somebody else: no answer, and the wait goes on to its end.
+            Ok((None, publishing)) => publishing,
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: --take-over could not read the claim on {}: {why}; it goes on \
+                     waiting",
+                    project.as_str()
+                );
+                continue;
+            }
+        };
+        let Some(wait) = wait.filter(|wait| written.elapsed() >= *wait) else {
+            continue;
+        };
+        // Past the wait the displaced driver can start nothing, and every fence it wrote for
+        // a publication it started has landed: one standing names a publication still under
+        // way, and one this read cannot make out could be hiding one.
+        let standing = match publishing {
+            Ok(Some(publishing))
+                if displaced
+                    .is_some_and(|claim| claim.names(&publishing.run, &publishing.host)) =>
+            {
+                Some(Ok(publishing))
+            }
+            Ok(_) => None,
+            Err(why) => Some(Err(why.to_string())),
+        };
+        match standing {
+            None => {
+                eprintln!(
+                    "onepipeline: {whom} has not acknowledged in {}s, and none of its \
+                     publications is under way on {}: run '{}' starts",
+                    wait.as_secs(),
+                    project.as_str(),
+                    mine.run
+                );
+                return Ok(HandedOver::WaitedOut);
+            }
+            Some(standing) if said.as_ref() != Some(&standing) => {
+                match &standing {
+                    Ok(publishing) => eprintln!(
+                        "onepipeline: {whom} has not acknowledged in {}s, and its publication of \
+                         {} has been under way since {}: run '{}' starts once that has finished, \
+                         or once {whom} acknowledges",
+                        wait.as_secs(),
+                        publishing
+                            .nodes
+                            .iter()
+                            .map(|node| format!("'{node}'"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        publishing.at,
+                        mine.run
+                    ),
+                    Err(why) => eprintln!(
+                        "onepipeline: {whom} has not acknowledged in {}s, and {why}, so a \
+                         publication of its may be under way: run '{}' starts once {whom} \
+                         acknowledges",
+                        wait.as_secs(),
+                        mine.run
+                    ),
+                }
+                said = Some(standing);
+            }
+            Some(_) => {}
+        }
+    }
 }
 
 /// Release this run's claim on its project directly, where the closeout's own projection —
@@ -601,16 +1358,19 @@ enum Driving {
 pub(crate) fn release_left_standing(
     paths: &crate::ledger::RunPaths,
     launch: &crate::ledger::LaunchRecord,
+    term_scope: &[String],
 ) {
     let Ok(project) = launch.project.parse::<QualifiedId>() else {
         return;
     };
     let host = crate::sys::hostname();
+    // llmlint: ignore[changed_behavior_has_e2e] reached only where a closeout projection outlasts its bounded window without failing, which `engine.rs`'s one caller of this function records no journey can drive (the real store suspended mid-command); the name read here is `publicid::on_store`, the one every release uses, and `public_id::a_claim_naming_the_public_id_is_read_back_taken_over_and_released` drives that name through the closeout's and the stop's releases.
+    let run = crate::publicid::on_store(launch);
     // Both read as the launch reads a claim: one that is not one is nobody's to release.
     let ours = |metadata: &BTreeMap<String, Value>| {
         matches!(
             claim_of(project.as_str(), metadata),
-            Ok(Some(claim)) if claim.names(&paths.run, &host)
+            Ok(Some(claim)) if claim.names(&run, &host)
         )
     };
     let landed: BTreeMap<String, Value> = crate::writeback::landed_claim(&paths.dir)
@@ -631,6 +1391,7 @@ pub(crate) fn release_left_standing(
                 DRIVER_KEY,
                 &Value::Null,
                 CLAIM_READ_DEADLINE,
+                term_scope,
             )
         });
     if let Err(why) = released {
@@ -659,27 +1420,92 @@ fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
         .next_back()
 }
 
-/// The idle check's interval: [`IDLE_CLAIM_CHECK`], or the test seam's whole seconds.
-fn idle_claim_check() -> Duration {
-    idle_claim_check_of(std::env::var(IDLE_CLAIM_CHECK_ENV).ok().as_deref())
+/// The claim interval: [`CLAIM_INTERVAL_ENV`]'s whole seconds, or [`CLAIM_INTERVAL`].
+pub(crate) fn claim_interval() -> Duration {
+    claim_interval_of(std::env::var(CLAIM_INTERVAL_ENV).ok().as_deref())
 }
 
-/// The interval the seam's value names: a positive whole number of seconds no longer than the
-/// shipped interval, and the shipped interval for anything else — unset, blank, zero, not a
-/// number, or longer — so a seam set wrong never turns the check off or stretches it past ten
-/// minutes.
-// llmlint: ignore[changed_behavior_has_e2e] what a fallback here produces is the shipped ten-minute interval, which a journey could only observe by idling a driver for ten minutes; the journeys that set the seam drive the parsed value end to end (`an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`), and this module's `an_idle_driver_reads_its_claim_at_least_every_ten_minutes` holds every value that falls back.
-fn idle_claim_check_of(seam: Option<&str>) -> Duration {
-    seam.and_then(|seconds| seconds.trim().parse::<u64>().ok())
+/// The interval the setting's value names: a positive whole number of seconds no longer than
+/// [`MAX_CLAIM_INTERVAL`], and the default for anything else — unset, blank, zero, longer or
+/// not a number — so a setting written wrong never stalls a takeover's reads or overflows a
+/// wait.
+// llmlint: ignore[changed_behavior_has_e2e] what a fallback produces is the five-minute default, which a journey could only observe by holding a takeover for minutes; every takeover journey drives a parsed value end to end (`tests/e2e/continuation.rs` sets the setting on each host), and `the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day` holds every value that falls back.
+fn claim_interval_of(setting: Option<&str>) -> Duration {
+    setting
+        .and_then(|seconds| seconds.trim().parse::<u64>().ok())
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
-        .filter(|interval| *interval <= IDLE_CLAIM_CHECK)
-        .unwrap_or(IDLE_CLAIM_CHECK)
+        .filter(|interval| *interval <= MAX_CLAIM_INTERVAL)
+        .unwrap_or(CLAIM_INTERVAL)
+}
+
+/// How often a takeover reads the claim while it waits: a tenth of the interval, at least
+/// a second and at most thirty apart.
+// llmlint: ignore[changed_behavior_has_e2e] the thirty-second cap binds only on an interval over five minutes, which no journey waits a takeover through; every takeover journey polls at its short interval's floor end to end, and `a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart` holds both ends of the clamp.
+fn takeover_poll(interval: Duration) -> Duration {
+    (interval / TAKEOVER_POLLS_PER_INTERVAL).clamp(TAKEOVER_POLL_MIN, TAKEOVER_POLL_MAX)
+}
+
+/// How long an adopter waits for a displaced driver that does not acknowledge it, from the
+/// moment its own claim landed, before it starts on finding no publication of that driver's
+/// under way: the cancel grace the displaced driver's **own** claim states — the time its
+/// host gives a dispatch to wind down, since a host is given its grace by itself — and
+/// [`TAKEOVER_SLACK`]. No wait proves a driver that reads nothing on a timer has stopped; it
+/// gives a live one the moment to answer, and the fence is what keeps the two drivers'
+/// publications apart. Saturating: the grace is an operator's setting no smaller bound
+/// holds, and a wait that could not be represented is one no takeover outlives anyway.
+pub(crate) fn takeover_wait(terms: ClaimLease) -> Duration {
+    Duration::from_secs(terms.cancel_grace_seconds.get()).saturating_add(TAKEOVER_SLACK)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_superseded_head_is_read_only_as_a_full_commit_id() {
+        let stored = |head: Value| {
+            let mut record = json!({"replaces": "a", "reason": "the review asked",
+                "instruction": "Rename it", "comments": []});
+            if !head.is_null() {
+                record["replaces_head"] = head;
+            }
+            rework_provenance(&record)
+        };
+        let sha1 = "1234567890abcdef1234567890abcdef12345678";
+        let sha256 = "ab".repeat(32);
+        assert_eq!(stored(Value::Null).unwrap().replaces_head, None);
+        assert_eq!(
+            stored(json!(sha1)).unwrap().replaces_head.as_deref(),
+            Some(sha1)
+        );
+        assert_eq!(
+            stored(json!(sha256)).unwrap().replaces_head,
+            Some(sha256.clone())
+        );
+        for refused in [
+            json!("main"),
+            json!("1234567"),
+            json!(format!("{sha1}0")),
+            json!("g234567890abcdef1234567890abcdef12345678"),
+            json!(format!("{sha1}\n")),
+            json!(""),
+        ] {
+            let why = stored(refused.clone()).expect_err("refused");
+            assert!(
+                why.to_string().contains("no full commit id"),
+                "{refused}: {why}"
+            );
+        }
+    }
+
+    /// Lease terms of `interval` and `grace` seconds, each positive.
+    fn terms(interval: u64, grace: u64) -> ClaimLease {
+        ClaimLease {
+            interval_seconds: std::num::NonZeroU64::new(interval).expect("a positive interval"),
+            cancel_grace_seconds: std::num::NonZeroU64::new(grace).expect("a positive grace"),
+        }
+    }
 
     fn claim(run: &str, host: &str) -> Value {
         json!({"run": run, "host": host, "session": null, "pid": 7,
@@ -687,26 +1513,166 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_driver_reads_its_claim_at_least_every_ten_minutes() {
-        assert!(IDLE_CLAIM_CHECK <= Duration::from_secs(600));
-        assert_eq!(IDLE_CLAIM_CHECK, Duration::from_secs(600));
-        assert_eq!(idle_claim_check_of(Some(" 5 ")), Duration::from_secs(5));
-        assert_eq!(idle_claim_check_of(Some("600")), IDLE_CLAIM_CHECK);
+    fn the_claim_interval_is_five_minutes_unless_set_to_a_positive_whole_number_up_to_a_day() {
+        assert_eq!(CLAIM_INTERVAL, Duration::from_secs(300));
+        assert_eq!(claim_interval_of(Some(" 5 ")), Duration::from_secs(5));
+        assert_eq!(claim_interval_of(Some("1200")), Duration::from_secs(1200));
+        assert_eq!(claim_interval_of(Some("86400")), MAX_CLAIM_INTERVAL);
         for unusable in [
             None,
             Some(""),
             Some("0"),
             Some("-5"),
             Some("soon"),
-            Some("601"),
-            Some("1200"),
+            Some("86401"),
+            Some("18446744073709551615"),
         ] {
-            assert_eq!(
-                idle_claim_check_of(unusable),
-                IDLE_CLAIM_CHECK,
-                "{unusable:?}"
+            assert_eq!(claim_interval_of(unusable), CLAIM_INTERVAL, "{unusable:?}");
+        }
+    }
+
+    /// A claim's lease reads only as this build writes one — a positive interval no longer
+    /// than a day, a positive grace, and nothing else — and a driver's publications only as
+    /// a run, a host, the nodes publishing and an instant.
+    #[test]
+    fn a_claims_lease_and_a_drivers_publications_read_only_as_this_build_writes_them() {
+        let with = |lease: Value| {
+            let mut written = claim("a", "h");
+            written["lease"] = lease;
+            BTreeMap::from([(DRIVER_KEY.to_owned(), written)])
+        };
+        let read = claim_of(
+            "p",
+            &with(json!({"interval_seconds": 5, "cancel_grace_seconds": 40})),
+        )
+        .expect("a lease reads")
+        .expect("held");
+        assert_eq!(read.lease, Some(terms(5, 40)));
+        for (lease, says) in [
+            (json!(5), "its `lease` is 5, not a mapping"),
+            (
+                json!({"interval_seconds": 5, "cancel_grace_seconds": 1, "slack": 3}),
+                "its `lease` carries `slack`",
+            ),
+            (
+                json!({"interval_seconds": 0, "cancel_grace_seconds": 1}),
+                "expected a nonzero",
+            ),
+            (
+                json!({"interval_seconds": 86_401, "cancel_grace_seconds": 1}),
+                "a 86401s interval, not one of 1 to 86400 seconds",
+            ),
+            (
+                json!({"interval_seconds": 5, "cancel_grace_seconds": 0}),
+                "expected a nonzero",
+            ),
+            (json!({"interval_seconds": 5}), "missing field"),
+        ] {
+            let refused = claim_of("p", &with(lease.clone()))
+                .expect_err(&format!("{lease} is not a lease"))
+                .to_string();
+            assert!(refused.contains(says), "{lease}: {refused}");
+        }
+        // A claim without one is a claim a build that kept no lease wrote.
+        let bare = BTreeMap::from([(DRIVER_KEY.to_owned(), claim("a", "h"))]);
+        assert_eq!(
+            claim_of("p", &bare).expect("reads").expect("held").lease,
+            None
+        );
+
+        let fence = |value: Value| BTreeMap::from([(PUBLISHING_KEY.to_owned(), value)]);
+        assert_eq!(publishing_of("p", &BTreeMap::new()).expect("absent"), None);
+        assert_eq!(publishing_of("p", &fence(Value::Null)).expect("null"), None);
+        let at = "2026-10-16T09:40:58.551Z";
+        assert_eq!(
+            publishing_of(
+                "p",
+                &fence(json!({"run": "a", "host": "h", "nodes": ["x"], "at": at}))
+            )
+            .expect("reads"),
+            Some(Publishing {
+                run: "a".to_owned(),
+                host: "h".to_owned(),
+                nodes: vec!["x".to_owned()],
+                at: at.to_owned()
+            })
+        );
+        for value in [
+            json!("x"),
+            json!({"run": "a", "host": "h", "nodes": [], "at": at}),
+            json!({"run": "a", "host": "", "nodes": ["x"], "at": at}),
+            json!({"run": "a", "host": "h", "nodes": [""], "at": at}),
+            json!({"run": "a", "host": "h", "nodes": ["x"], "at": "later"}),
+            json!({"run": "a", "host": "h", "nodes": ["x"], "at": at, "pid": 3}),
+        ] {
+            let refused = publishing_of("p", &fence(value.clone()))
+                .expect_err(&format!("{value} is not a driver's publications"))
+                .to_string();
+            assert!(
+                refused.contains("`onepipeline.publishing` is not a driver's publications"),
+                "{value}: {refused}"
             );
         }
+    }
+
+    /// A run letting go acknowledges another run's claim nothing has acknowledged — and no
+    /// claim of its own, none acknowledged already, and nothing that is not a claim.
+    #[test]
+    fn a_run_letting_go_acknowledges_only_another_runs_unacknowledged_claim() {
+        let on = |claim: Value| BTreeMap::from([(DRIVER_KEY.to_owned(), claim)]);
+        let written = acknowledgement_over("p", &on(claim("b", "host-b")), "a", "host-a")
+            .expect("another run's claim is acknowledged");
+        let (read, acknowledged) = stored_claim_of("p", &on(written))
+            .expect("it reads")
+            .expect("held");
+        assert!(read.names("b", "host-b"));
+        assert!(acknowledged.is_some_and(|ack| ack.run == "a" && ack.host == "host-a"));
+
+        let mut already = claim("b", "host-b");
+        already[ACKNOWLEDGED_KEY] =
+            json!({"run": "c", "host": "host-c", "at": "2026-10-11T00:00:01.000Z"});
+        for left in [
+            claim("a", "host-a"),
+            already,
+            json!("not a claim"),
+            Value::Null,
+        ] {
+            assert_eq!(
+                acknowledgement_over("p", &on(left.clone()), "a", "host-a"),
+                None,
+                "{left}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_takeover_polls_a_tenth_of_its_interval_at_least_a_second_and_at_most_thirty_apart() {
+        assert_eq!(
+            takeover_poll(Duration::from_secs(5)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            takeover_poll(Duration::from_secs(60)),
+            Duration::from_secs(6)
+        );
+        assert_eq!(takeover_poll(CLAIM_INTERVAL), Duration::from_secs(30));
+        assert_eq!(takeover_poll(MAX_CLAIM_INTERVAL), Duration::from_secs(30));
+    }
+
+    /// The adopter's wait is the displaced driver's own cancel grace and the slack, whatever
+    /// interval either host reads on.
+    #[test]
+    fn the_takeover_wait_is_the_displaced_cancel_grace_and_the_slack() {
+        assert_eq!(
+            takeover_wait(terms(7, 45)),
+            Duration::from_secs(45) + TAKEOVER_SLACK
+        );
+        assert_eq!(
+            takeover_wait(terms(7, 45)),
+            takeover_wait(terms(86_400, 45))
+        );
+        // A grace no duration can be added to saturates rather than overflowing.
+        assert_eq!(takeover_wait(terms(1, u64::MAX)), Duration::MAX);
     }
 
     #[test]
@@ -745,6 +1711,49 @@ mod tests {
         }
     }
 
+    /// A claim a displaced driver acknowledged reads as the claim it was, with the
+    /// acknowledgement beside it; an acknowledgement that is not one refuses the claim.
+    #[test]
+    fn an_acknowledged_claim_reads_as_the_claim_with_its_acknowledgement() {
+        let mut acknowledged = claim("ship", "builder");
+        acknowledged[ACKNOWLEDGED_KEY] =
+            json!({"run": "old", "host": "elsewhere", "at": "2026-10-11T00:01:00.000Z"});
+        let metadata = BTreeMap::from([(DRIVER_KEY.to_owned(), acknowledged.clone())]);
+        let (held, ack) = stored_claim_of("p", &metadata)
+            .expect("an acknowledged claim")
+            .expect("held");
+        assert!(held.names("ship", "builder"));
+        assert_eq!(
+            ack,
+            Some(Acknowledgement {
+                run: "old".to_owned(),
+                host: "elsewhere".to_owned(),
+                at: "2026-10-11T00:01:00.000Z".to_owned()
+            })
+        );
+        assert_eq!(claim_of("p", &metadata).expect("a claim"), Some(held));
+        for (bad, says) in [
+            (json!("yes"), "invalid type"),
+            (json!({"run": "old", "host": "elsewhere"}), "missing field"),
+            (
+                json!({"run": "old", "host": "elsewhere", "at": "later"}),
+                "not a run, a host and an instant",
+            ),
+            (
+                json!({"run": "old", "host": "elsewhere", "at": "2026-10-11T00:01:00.000Z",
+                       "pid": 9}),
+                "unknown field",
+            ),
+        ] {
+            let mut refused = claim("ship", "builder");
+            refused[ACKNOWLEDGED_KEY] = bad;
+            let why = claim_of("p", &BTreeMap::from([(DRIVER_KEY.to_owned(), refused)]))
+                .expect_err("refused")
+                .to_string();
+            assert!(why.contains(says), "{why}");
+        }
+    }
+
     #[test]
     fn any_claim_refuses_a_launch_that_does_not_take_the_project_over() {
         let held: DriverClaim = serde_json::from_value(claim("ship", "builder")).expect("a claim");
@@ -774,6 +1783,9 @@ mod tests {
         let claim: std::collections::BTreeSet<String> =
             CLAIM_KEYS.iter().map(|key| (*key).to_owned()).collect();
         assert_eq!(claim, properties::<DriverClaim>());
+        let lease: std::collections::BTreeSet<String> =
+            LEASE_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        assert_eq!(lease, properties::<ClaimLease>());
         let mut settled = properties::<crate::payload::NodeSettled>();
         settled.remove("continued");
         settled.insert("remote".to_owned());
@@ -796,8 +1808,8 @@ mod tests {
     }
 
     /// Entry 119's block is what this build does: its keys are the ones this build reads and
-    /// writes, its dispatch and claim read as the boundary reads them, its surface and seam
-    /// are the ones the engine raises and reads, and its interval is the constant.
+    /// writes, its dispatch and claim read as the boundary reads them, and its surface is the
+    /// one the engine raises. Its idle interval and seam are entry 128's to replace.
     #[test]
     fn entry_119s_block_is_this_builds_continuation() {
         let record = include_str!("../docs/contract-divergences.md");
@@ -821,11 +1833,6 @@ mod tests {
             block["surface_kind"],
             json!(crate::engine::DRIVER_SUPERSEDED)
         );
-        assert_eq!(block["test_seam"], json!(IDLE_CLAIM_CHECK_ENV));
-        assert_eq!(
-            block["idle_claim_check_seconds"],
-            json!(IDLE_CLAIM_CHECK.as_secs())
-        );
         let metadata: Map<String, Value> = [(DISPATCH_KEY.to_owned(), block["dispatch"].clone())]
             .into_iter()
             .collect();
@@ -845,6 +1852,120 @@ mod tests {
         assert!(settlement_of("c", Some(&task))
             .expect("the settlement reads")
             .is_some());
+    }
+
+    /// Entry 128's block is what this build does: its setting, interval, deadline, wait and
+    /// poll are the constants, its acknowledged claim reads at the boundary, and the README
+    /// states the setting and its default.
+    #[test]
+    fn entry_128s_block_is_what_this_build_does() {
+        let record = include_str!("../docs/contract-divergences.md");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("128."))
+            .expect("the divergence record carries entry 128");
+        let block: Value = serde_json::from_str(
+            entry
+                .split("```json")
+                .nth(1)
+                .and_then(|rest| rest.split("```").next())
+                .expect("entry 128 carries a json block"),
+        )
+        .expect("the block is JSON");
+        assert_eq!(block["setting"], json!(CLAIM_INTERVAL_ENV));
+        assert_eq!(
+            block["claim_interval_seconds"],
+            json!(CLAIM_INTERVAL.as_secs())
+        );
+        assert_eq!(
+            block["claim_read_deadline_seconds"],
+            json!(CLAIM_READ_DEADLINE.as_secs())
+        );
+        assert_eq!(
+            block["max_claim_interval_seconds"],
+            json!(MAX_CLAIM_INTERVAL.as_secs())
+        );
+        assert_eq!(
+            block["claim_reads"],
+            json!({"timed": false, "before_dispatch": false, "adoption": "its first pass",
+                   "before_publication": "once, after its fence has landed"})
+        );
+        assert_eq!(
+            block["unanswered_read_before_publication"],
+            json!({
+                "holds": "that publication",
+                "retry_seconds": FENCE_RETRY.as_secs(),
+                "rate_limited": "waits out the wait the store named"
+            })
+        );
+        assert_eq!(
+            block["takeover_wait"],
+            json!({"cancel_grace": crate::engine::CANCEL_GRACE_ENV,
+                   "slack_seconds": TAKEOVER_SLACK.as_secs(),
+                   "terms": "the displaced claim's lease",
+                   "without_terms": "acknowledgement only"})
+        );
+        assert_eq!(
+            block["settlement_landing_wait_seconds"],
+            json!(SETTLEMENT_LANDING_WAIT.as_secs())
+        );
+        assert_eq!(block["publishing_key"], json!(PUBLISHING_KEY));
+        assert_eq!(block["fence_retry_seconds"], json!(FENCE_RETRY.as_secs()));
+        assert_eq!(block["fence_linger_seconds"], json!(FENCE_LINGER.as_secs()));
+        let fenced = BTreeMap::from([(PUBLISHING_KEY.to_owned(), block["publishing"].clone())]);
+        assert!(publishing_of("p", &fenced)
+            .expect("the fence reads")
+            .is_some_and(|fence| fence.run == "drafts" && fence.nodes == ["x"]));
+        assert_eq!(
+            block["takeover_poll"],
+            json!({"per_interval": TAKEOVER_POLLS_PER_INTERVAL,
+                   "min_seconds": TAKEOVER_POLL_MIN.as_secs(),
+                   "max_seconds": TAKEOVER_POLL_MAX.as_secs()})
+        );
+        assert_eq!(
+            block["loop_stats_count"],
+            json!(crate::loopstats::CLAIM_READS_KEY)
+        );
+        // What it retires is read nowhere in this build.
+        for retired in block["retired"]
+            .as_array()
+            .expect("entry 128 names what it retires")
+        {
+            let retired = retired.as_str().expect("a setting");
+            for source in [
+                include_str!("continuation.rs"),
+                include_str!("engine.rs"),
+                include_str!("driver.rs"),
+                include_str!("writeback.rs"),
+            ] {
+                assert!(!source.contains(retired), "{retired} is still read");
+            }
+        }
+        assert_eq!(block["acknowledged_key"], json!(ACKNOWLEDGED_KEY));
+        let project = BTreeMap::from([(DRIVER_KEY.to_owned(), block["driver"].clone())]);
+        let (held, acknowledged) = stored_claim_of("p", &project)
+            .expect("the acknowledged claim reads")
+            .expect("held");
+        assert!(held.names("drafts-2", "host-b"));
+        assert_eq!(
+            held.lease,
+            Some(terms(
+                CLAIM_INTERVAL.as_secs(),
+                crate::engine::DEFAULT_CANCEL_GRACE_SECONDS
+            ))
+        );
+        assert!(acknowledged.is_some_and(|ack| ack.run == "drafts" && ack.host == "builder"));
+        let readme = include_str!("../README.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            readme.contains(&format!(
+                "`{CLAIM_INTERVAL_ENV}`, {} by default",
+                CLAIM_INTERVAL.as_secs()
+            )),
+            "the README does not state the claim interval's setting and default"
+        );
     }
 
     /// A dispatch or a settlement that is not one refuses, naming the node and what is wrong.

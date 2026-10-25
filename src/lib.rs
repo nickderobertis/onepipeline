@@ -71,10 +71,12 @@ pub mod vocabulary;
 // public item it does not name is a promise this crate did not make. The binary
 // reaches them through [`run`](crate::run).
 mod agentgraph;
+mod appendstamp;
 mod ask;
 mod boundary;
 mod changes;
 mod checkpoint;
+mod closures;
 mod concurrency;
 mod continuation;
 mod criteria;
@@ -90,10 +92,12 @@ mod flow;
 mod flowwatch;
 mod freespace;
 mod graph;
+mod home;
 mod hooks;
 mod hostphases;
 mod hostview;
 mod journal;
+mod labels;
 mod land;
 mod ledger;
 mod lifecycle;
@@ -102,9 +106,14 @@ mod ordering;
 mod plancheck;
 mod pool;
 mod projection;
+mod publicid;
+mod readjust;
+#[cfg(test)]
+mod readprobe;
 mod refusal;
 mod release;
 mod rendercost;
+mod reply;
 mod review;
 mod shutdown;
 mod stack;
@@ -113,12 +122,16 @@ mod summary;
 mod supersession;
 mod sys;
 mod taskgraph;
+mod trigger;
+mod unanswered;
 mod unpublished;
 mod unwatched;
 mod vcs;
 mod watch;
 mod watchers;
+mod withdrawal;
 mod writeback;
+mod yaml;
 
 pub use error::{Error, Result};
 
@@ -159,3 +172,5 @@ pub fn run(cli: cli::Cli) -> Result<i32> {
     flow::take_inherited();
     driver::dispatch(cli)
 }
+
+mod scratch;

@@ -1,7 +1,7 @@
 //! What the published-artifact smoke *says* when an installed binary fails it.
 //!
-//! `scripts/smoke-published.sh` is run by CI's `install` job and by both
-//! post-publish verify jobs, so its passing branch is exercised continuously
+//! `scripts/smoke-published.sh` is run by CI's `install` job and by every
+//! release build job's verify step, so its passing branch is exercised continuously
 //! against a real installed binary and needs nothing here. Its refusals are read
 //! by somebody looking at one red matrix leg, who has the two lines it printed
 //! and no repository in front of them — and the help-surface refusal is the one

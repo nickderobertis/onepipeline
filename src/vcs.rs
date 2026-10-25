@@ -73,6 +73,44 @@ fn providers() -> Providers<'static> {
     Providers::real()
 }
 
+/// Standings and review feedback from the sibling's single repository read.
+pub(crate) fn review_standings(
+    request: &onevcs::ReviewStandingsRequest,
+) -> Result<onevcs::ReviewStandings> {
+    onevcs::review_standings(&providers(), request).map_err(refusal)
+}
+
+/// Where each named change request of one repository stands, in one batched read.
+pub(crate) fn change_standings(
+    request: &onevcs::ChangeStandingsRequest,
+) -> Result<onevcs::ChangeStandings> {
+    onevcs::change_standings(&providers(), request).map_err(refusal)
+}
+
+/// Move a change request onto `base`, writing its description in the same request.
+pub(crate) fn retarget_change(request: &onevcs::RetargetRequest) -> Result<onevcs::Retargeted> {
+    onevcs::retarget_change(&providers(), request).map_err(refusal)
+}
+
+/// Restore a closed draft's deleted base and reopen it.
+pub(crate) fn reopen_change(request: &onevcs::ReopenRequest) -> Result<onevcs::Reopened> {
+    onevcs::reopen_change(&providers(), request).map_err(refusal)
+}
+
+/// Normalize a repository spelling before collecting a batched host read.
+pub(crate) fn repository_identity(repo: &str) -> Result<String> {
+    providers()
+        .vcs
+        .resolve_identity(repo)
+        .map(|identity| identity.origin)
+        .map_err(refusal)
+}
+
+/// Answer one review comment on the host, as `onevcs`'s `reply_to_comment` does.
+pub(crate) fn reply_to_comment(request: &onevcs::ReplyRequest) -> Result<onevcs::PostedReply> {
+    onevcs::reply_to_comment(&providers(), request).map_err(refusal)
+}
+
 /// A full host snapshot, by URL, including on a host with no local session.
 pub(crate) fn review_comments(change_url: &str) -> Result<onevcs::ReviewRead> {
     onevcs::review_comments(
@@ -251,14 +289,66 @@ pub fn publish(
             body: body.map(str::to_owned),
             draft: draft.cloned(),
             term_scope: term_scope.clone(),
-            // Every publication here reads its checks: deferring them is for a
-            // caller that reads the verdict later, which nothing in this engine does.
+            // First publications and missing-head-record fallbacks watch their checks.
             defer_checks: false,
             adopt: None,
         },
         &NodeCancellation(cancel),
     )
     .map_err(publication_refusal)
+}
+
+/// Push into a recorded review draft; watch it when this host lacks its branch record.
+pub(crate) fn republish(
+    token: &SessionToken,
+    policy: Option<MergePolicy>,
+    title: Option<&str>,
+    body: Option<&str>,
+    change: &str,
+    cancel: &crate::executor::CancellationToken,
+    term_scope: &onevcs::TermScope,
+) -> std::result::Result<Publication, PublishRefused> {
+    let subject = title
+        .map(|title| title.parse::<Subject>().map_err(sibling))
+        .transpose()
+        .map_err(PublishRefused::Refused)?;
+    let adopt = change
+        .parse::<onevcs::Url>()
+        .map_err(|error| PublishRefused::Refused(sibling(format!("review draft URL: {error}"))))?;
+    let adopted = adopt.clone();
+    let answer = onevcs::publish_with_cancellation(
+        &providers(),
+        token,
+        &PublishRequest {
+            policy,
+            title: subject,
+            body: body.map(str::to_owned),
+            draft: None,
+            term_scope: term_scope.clone(),
+            defer_checks: true,
+            adopt: Some(adopt),
+        },
+        &NodeCancellation(cancel),
+    );
+    match answer {
+        // A record naming another branch is the one refusal that must never fall back:
+        // the change request is not this session's, and the planner decides.
+        Err(onevcs::Error::Invalid { reason })
+            if reason.contains("by this host's newest record of it") =>
+        {
+            Err(PublishRefused::NotThisDraft {
+                change: adopted,
+                reason,
+            })
+        }
+        // This refusal proves that nothing was pushed. A different recorded
+        // branch is a distinct refusal and must remain a planner-visible failure.
+        Err(onevcs::Error::UnrecordedChangeHead { .. }) => {
+            eprintln!("onepipeline: review draft {change} has no local head-branch record; watching its existing draft instead");
+            publish(token, policy, title, body, None, cancel, term_scope)
+        }
+        answer => answer.map_err(publication_refusal),
+    }
 }
 
 /// The node's cancellation, as the publication watch asks it.
@@ -288,6 +378,16 @@ pub(crate) enum PublishRefused {
     /// attempt, handed the conflict again, can answer it. Carries the sibling's
     /// own sentence.
     MergeUnfinished(String),
+    /// A deferred republication refused because this host's newest record says the
+    /// review draft carries another branch than the session's: not this session's
+    /// change request, so nothing is pushed and nothing falls back to publishing it.
+    /// Carries the change request and the sibling's own sentence.
+    NotThisDraft {
+        /// The change request the republication named.
+        change: onevcs::Url,
+        /// What the sibling said.
+        reason: String,
+    },
     /// Any other refusal of the call.
     Refused(Error),
 }
@@ -295,7 +395,9 @@ pub(crate) enum PublishRefused {
 impl std::fmt::Display for PublishRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MergeUnfinished(reason) => f.write_str(reason),
+            Self::MergeUnfinished(reason) | Self::NotThisDraft { reason, .. } => {
+                f.write_str(reason)
+            }
             Self::Refused(error) => error.fmt(f),
         }
     }
@@ -398,6 +500,9 @@ pub const DRAFTED: &str = "change-draft";
 /// `change-open` is already asking the team for review.
 pub const REVIEW_DRAFTED: &str = "change-review-draft";
 
+/// A review draft pushed without a check watch, awaiting the next standings read.
+pub(crate) const REVIEW_DRAFTED_UNCHECKED: &str = "change-review-draft-unchecked";
+
 /// How a publication settles the node that made it.
 ///
 /// This crate's own outcome vocabulary, which a plan's readers and `results`
@@ -413,11 +518,7 @@ pub fn outcome_of(outcome: &PublishOutcome) -> &'static str {
         PublishOutcome::ChangeDraft(_) => DRAFTED,
         // Green and done, but not yet lifted: see [`REVIEW_DRAFTED`].
         PublishOutcome::ChangeReviewDraft(_) => REVIEW_DRAFTED,
-        // A push into a review draft with its checks unread answers only a
-        // `defer_checks` publication, which this engine never makes, so receiving
-        // it is a disagreement with `onevcs` about the request: the residual, and
-        // never a word that reads as finished work.
-        PublishOutcome::ChangeReviewDraftUnchecked(_) => Failure::RESIDUAL,
+        PublishOutcome::ChangeReviewDraftUnchecked(_) => REVIEW_DRAFTED_UNCHECKED,
         PublishOutcome::Queued(_) => "queued",
         PublishOutcome::NothingToPublish => "no-changes",
         PublishOutcome::Failed { kind, .. } => failure_of(*kind).outcome(),
@@ -682,11 +783,10 @@ pub fn landing_of(outcome: &PublishOutcome) -> Option<crate::graph::Landing> {
         PublishOutcome::ChangeOpen(_)
         | PublishOutcome::ChangeDraft(_)
         | PublishOutcome::ChangeReviewDraft(_)
+        | PublishOutcome::ChangeReviewDraftUnchecked(_)
         | PublishOutcome::Queued(_) => Some(Landing::Unlanded),
         // Settled as the residual, as `Failed` is: see [`outcome_of`].
-        PublishOutcome::NothingToPublish
-        | PublishOutcome::ChangeReviewDraftUnchecked(_)
-        | PublishOutcome::Failed { .. } => None,
+        PublishOutcome::NothingToPublish | PublishOutcome::Failed { .. } => None,
     }
 }
 
@@ -710,6 +810,14 @@ pub(crate) enum LandingRead {
         /// What could not decide it, on one line.
         because: String,
     },
+}
+
+impl LandingRead {
+    /// Whether this read shows the work on its base: `onevcs` answered, and what
+    /// it answered is landed. A refusal proves nothing either way.
+    pub(crate) fn proves_landed(&self) -> bool {
+        matches!(self, LandingRead::Answered(landed) if landed.is_landed())
+    }
 }
 
 /// Ask `onevcs` whether one branch's work has reached its base, as of now.
@@ -772,10 +880,143 @@ fn read_of(answered: onevcs::Result<onevcs::Landed>) -> LandingRead {
 /// replaces a settlement's own dated claim — so collapsing the other two costs
 /// nothing and a name promising a verdict would.
 pub(crate) fn proved_landed(branch: &str, repo: Option<&str>) -> bool {
-    matches!(
-        landing_now(branch, repo),
-        LandingRead::Answered(landed) if landed.is_landed()
-    )
+    landing_now(branch, repo).proves_landed()
+}
+
+/// [`landing_now`] of each of `nodes` that `state` records a branch for, asked of
+/// that branch in the node's own repository, and handed back by node in the order
+/// asked — taken side by side, see [`side_by_side`].
+///
+/// For the places that take every read at once and wait on all of them: each is
+/// `onevcs` taking the repository from scratch and running `git` tens of times,
+/// none depends on another, and one after another they were a tail as long as
+/// their sum — longest where starting a process is slowest.
+///
+/// Each read is counted against the node it was asked for and the render the
+/// caller is inside, if any — see [`crate::rendercost::within`] — so a read taken
+/// on another thread costs the render exactly what one taken in it would.
+///
+/// **One read per branch and repository**, however many of `nodes` name it: a
+/// rework continues the branch of the node it replaced, so both name one branch in
+/// one repository, and the sibling's answer is about that branch alone. The read
+/// is counted against the first node asked that names it, and handed back for
+/// every one.
+pub(crate) fn landings_now(
+    state: &crate::projection::RunState,
+    nodes: &[&String],
+) -> Vec<(String, LandingRead)> {
+    // The node's own repository, so a branch name two identities both hold is
+    // asked about the one this run's work is in.
+    let asked: Vec<(&String, (&str, Option<&str>))> = nodes
+        .iter()
+        .copied()
+        .filter_map(|node| {
+            let branch = state.branches.get(node)?;
+            let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
+            Some((node, (branch.as_str(), repo)))
+        })
+        .collect();
+    let mut distinct: Vec<(&String, (&str, Option<&str>))> = Vec::new();
+    for (node, read_of) in &asked {
+        if !distinct.iter().any(|(_, taken)| taken == read_of) {
+            distinct.push((node, *read_of));
+        }
+    }
+    let within = crate::rendercost::within();
+    let read = side_by_side(&distinct, helpers_for(distinct.len()), |(node, read_of)| {
+        let _adopted = within.adopted();
+        let _deciding = crate::rendercost::deciding(node);
+        let (branch, repo) = *read_of;
+        landing_now(branch, repo)
+    });
+    asked
+        .into_iter()
+        .map(|(node, read_of)| {
+            let at = distinct
+                .iter()
+                .position(|(_, taken)| *taken == read_of)
+                .expect("every branch asked was read");
+            (node.clone(), read[at].clone())
+        })
+        .collect()
+}
+
+/// `held`, answering as well each of `nodes` that names the branch and repository
+/// a node of `held` names — the rule [`landings_now`] reads by, for answers
+/// already in hand.
+pub(crate) fn sharing_work<T: Clone>(
+    state: &crate::projection::RunState,
+    nodes: &[&String],
+    mut held: BTreeMap<String, T>,
+) -> BTreeMap<String, T> {
+    let work = |node: &str| {
+        let branch = state.branches.get(node)?;
+        let repo = state.graph.get(node).and_then(|node| node.repo.as_deref());
+        Some((branch.as_str(), repo))
+    };
+    for node in nodes {
+        if held.contains_key(*node) {
+            continue;
+        }
+        let Some(named) = work(node) else {
+            continue;
+        };
+        let shared = held
+            .iter()
+            .find(|(other, _)| work(other) == Some(named))
+            .map(|(_, answer)| answer.clone());
+        if let Some(answer) = shared {
+            held.insert((*node).clone(), answer);
+        }
+    }
+    held
+}
+
+/// How many threads besides the caller's [`side_by_side`] starts for `reads`: as
+/// many as the host has cores, counting the caller's, and never more than there
+/// are reads to share.
+fn helpers_for(reads: usize) -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(reads)
+        .saturating_sub(1)
+}
+
+/// `read` of each of `items`, in order, taken by the calling thread and as many as
+/// `helpers` more, each taking the next item not yet taken until none is left.
+///
+/// The caller reads too, and a helper the host will not start is one fewer pair
+/// of hands rather than a refusal: every item is read whatever number started.
+fn side_by_side<T: Sync, R: Send>(
+    items: &[T],
+    helpers: usize,
+    read: impl Fn(&T) -> R + Sync,
+) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let answers = std::sync::Mutex::new(Vec::with_capacity(items.len()));
+    let reading = || loop {
+        let at = next.fetch_add(1, Ordering::Relaxed);
+        let Some(item) = items.get(at) else {
+            return;
+        };
+        let answer = read(item);
+        answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((at, answer));
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..helpers {
+            // Not started is one fewer helper: the queue is the same queue either way.
+            let _ = std::thread::Builder::new().spawn_scoped(scope, reading);
+        }
+        reading();
+    });
+    let mut answers = answers
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    answers.sort_by_key(|(at, _)| *at);
+    answers.into_iter().map(|(_, answer)| answer).collect()
 }
 
 /// The nodes whose publication left its work on the origin with the merge path
@@ -1792,6 +2033,19 @@ fn kind_of(kind: onevcs::EventKind) -> crate::event::EventKind {
 /// How often a follow asks the stream for what has been appended since.
 const FOLLOW_POLL: Duration = Duration::from_millis(20);
 
+/// How often a follow asks whether its session has closed.
+///
+/// Far less often than it reads the stream, because the two cost different
+/// things: a read of the stream is a file read, and the question is
+/// [`onevcs::session`], which runs `git` about ten times in the session's
+/// clone to answer it. What ends a follow is [`Follower::finish`], called before
+/// the close; this is only what ends one whose session something else closed,
+/// so asking it every pass bought nothing but those processes — on a host where
+/// starting one is slow, a core's worth for every session open, and still a
+/// third of one when asked every second. Five seconds is the longest a follow
+/// outlives a close made elsewhere.
+const FOLLOW_CLOSED_ASK: Duration = Duration::from_secs(5);
+
 /// A session's own event stream, followed as `onevcs` writes it.
 ///
 /// Read *once at settlement*, a lifecycle node's push, change request, check
@@ -1818,20 +2072,29 @@ pub fn follow(
     let followed = token.clone();
     let reader = std::thread::Builder::new()
         .name(format!("onevcs-{}-events", token.0))
-        .spawn(move || loop {
-            // Read *before* asking whether the session closed, so a record
-            // written between the two is relayed on the next pass rather than
-            // lost to a follow that stopped one read early.
-            for envelope in next_batch(&mut stream, &followed) {
-                if let Ok(mut reached) = reached.lock() {
-                    reached.reached(&envelope);
+        .spawn(move || {
+            let mut asked = std::time::Instant::now();
+            loop {
+                // Read *before* asking whether the session closed, so a record
+                // written between the two is relayed on the next pass rather than
+                // lost to a follow that stopped one read early.
+                for envelope in next_batch(&mut stream, &followed) {
+                    if let Ok(mut reached) = reached.lock() {
+                        reached.reached(&envelope);
+                    }
+                    sink(envelope);
                 }
-                sink(envelope);
+                if stopping.load(Ordering::SeqCst) {
+                    return;
+                }
+                if asked.elapsed() >= FOLLOW_CLOSED_ASK {
+                    if settled(&followed) {
+                        return;
+                    }
+                    asked = std::time::Instant::now();
+                }
+                std::thread::sleep(FOLLOW_POLL);
             }
-            if stopping.load(Ordering::SeqCst) || settled(&followed) {
-                return;
-            }
-            std::thread::sleep(FOLLOW_POLL);
         });
     match reader {
         Ok(reader) => Some(Follower {
@@ -2129,6 +2392,97 @@ pub(crate) fn merge_in_progress(session: &Session) -> Option<crate::plan::MergeI
         unlisted,
     })
 }
+
+// llmlint: ignore-block[code_lands_in_the_domain_that_owns_it] this merge belongs in
+// `onevcs`, and the pinned 0.49.0 offers no public operation that does it: whether a
+// continued session's open merges its moved base is decided by `onevcs`'s crate-private
+// `base_merge::decide` from the identity's rules file alone, with no per-open override,
+// and its git helpers are private too. The op-readjust amendment requires a restacked
+// draft to carry its new base's head whatever that policy resolves, so this helper stays
+// here, operating only on the session worktree `onevcs` opened; publication still goes
+// through `onevcs`. The missing operation is a per-open base-merge override on
+// `onevcs::SessionRequest` (a `base_merge: Some(BaseMerge::Always)` that the open honours
+// over the rules file); once `onevcs` ships it, a restack's open asks for it and this
+// helper is deleted.
+/// Merge the head of `session`'s base into its branch, in its worktree, where the
+/// branch does not carry it already: `Ok(None)` for a branch that carries it or a merge
+/// that concluded, and `Ok(Some(conflict))` for one git stopped on, left in progress for
+/// a worker to conclude.
+///
+/// What a restack owes whatever the identity's base-merge policy: `onevcs` merges a moved
+/// base at a continued session's open only where it conflicts or the host requires an
+/// up-to-date branch, and a restacked draft has to carry its new base's work either way,
+/// or its diff against that base is not its own. Merge only, never a rebase: the branch
+/// only grows. The base is read off the session clone's `origin/<base>`, which `onevcs`
+/// brings up to the origin at the open, and off the local branch where that is absent.
+pub(crate) fn bring_base_in(
+    session: &Session,
+) -> std::result::Result<Option<onevcs::OpenConflict>, String> {
+    let at = &session.worktree;
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(at)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| format!("git {args:?}: {error}"))
+    };
+    let resolve = |name: &str| -> Option<String> {
+        git(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{name}^{{commit}}"),
+        ])
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    };
+    let base = resolve(&format!("origin/{}", session.base))
+        .or_else(|| resolve(&session.base))
+        .ok_or_else(|| format!("the session's base {} names no commit", session.base))?;
+    let tip = resolve("HEAD").ok_or_else(|| "the session's branch names no commit".to_owned())?;
+    if git(&["merge-base", "--is-ancestor", &base, &tip])?
+        .status
+        .success()
+    {
+        return Ok(None);
+    }
+    let message = format!("Merge {} into {}", session.base, session.branch);
+    let merged = git(&["merge", "--no-ff", "--no-edit", "-m", &message, &base])?;
+    if merged.status.success() {
+        return Ok(None);
+    }
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches either ending below:
+    // a session the identity's policy opened clean is one whose base `onevcs` found merging
+    // cleanly into this very branch, so a conflict here needs the base to move between the
+    // open and this merge, and a merge git refuses with nothing unmerged needs a damaged
+    // worktree. `bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make`
+    // holds both over real git repositories; the clean merge every journey takes is driven by
+    // `a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`.
+    let unmerged = git(&["diff", "--name-only", "--diff-filter=U"])?;
+    let paths: Vec<String> = String::from_utf8_lossy(&unmerged.stdout)
+        .lines()
+        .map(str::to_owned)
+        .filter(|path| !path.is_empty())
+        .collect();
+    if paths.is_empty() {
+        let _ = git(&["merge", "--abort"]);
+        return Err(format!(
+            "merging {} into {} failed: {}",
+            session.base,
+            session.branch,
+            String::from_utf8_lossy(&merged.stderr).trim()
+        ));
+    }
+    Ok(Some(onevcs::OpenConflict {
+        paths,
+        base_commit: base,
+        branch_tip: tip,
+    }))
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+// llmlint: ignore-end[code_lands_in_the_domain_that_owns_it]
 
 /// One commit's line as a conflicted dispatch is shown it: a subject is the
 /// committer's prose, so it is cut where a line in a task stops being one.
@@ -2464,6 +2818,13 @@ pub fn is_merge_completed(kind: &crate::event::EventKind) -> bool {
     *kind == kind_of(onevcs::EventKind::MergeCompleted)
 }
 
+/// Whether an envelope is one of the two records `onevcs` writes for a landing — a
+/// `merge-completed`, or the `change-merged` beside it on the change-request path — each of
+/// which reports the issues the landing closes.
+pub(crate) fn is_landing(kind: &crate::event::EventKind) -> bool {
+    is_merge_completed(kind) || *kind == kind_of(onevcs::EventKind::ChangeMerged)
+}
+
 /// The commit one publication reached its base at, off the sibling's own record.
 ///
 /// The whole boundary read in one named place rather than a validator handed back
@@ -2504,6 +2865,9 @@ pub fn request_for(node: &crate::plan::Node) -> Option<SessionRequest> {
         // merge in progress, and the worker it is dispatched to concludes it:
         // see `lifecycle::merge_resolution`.
         refuse_conflicts: false,
+        // onevcs's session-open rules probe still runs, as it did before the
+        // field existed: this crate does not merge a session's base itself.
+        caller_merges_base: false,
     })
 }
 
@@ -2553,6 +2917,89 @@ mod tests {
 
     use super::*;
     use crate::plan::Node;
+
+    /// Run git in `at`, as a person setting a repository up, and hand back its stdout.
+    fn git_out(at: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    /// A repository with `main` and a branch `draft` off it, each having written
+    /// `shared.md` differently, checked out on `draft`, as a session's worktree.
+    fn diverged(name: &str) -> Session {
+        let at =
+            std::env::temp_dir().join(format!("onepipeline-base-in-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&at);
+        std::fs::create_dir_all(&at).expect("a scratch repository");
+        git_out(&at, &["init", "--quiet", "--initial-branch=main"]);
+        git_out(&at, &["config", "user.name", "Test"]);
+        git_out(&at, &["config", "user.email", "test@example.com"]);
+        std::fs::write(at.join("shared.md"), "first\n").expect("written");
+        git_out(&at, &["add", "shared.md"]);
+        git_out(&at, &["commit", "--quiet", "-m", "first"]);
+        git_out(&at, &["checkout", "--quiet", "-b", "draft"]);
+        std::fs::write(at.join("shared.md"), "the draft's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "draft"]);
+        git_out(&at, &["checkout", "--quiet", "main"]);
+        std::fs::write(at.join("shared.md"), "the base's\n").expect("written");
+        git_out(&at, &["commit", "--quiet", "-am", "base"]);
+        git_out(&at, &["checkout", "--quiet", "draft"]);
+        Session {
+            token: SessionToken("s-test".into()),
+            worktree: at,
+            branch: "draft".into(),
+            base: "main".into(),
+            conflict: None,
+        }
+    }
+
+    /// A base whose merge conflicts is left in progress and answered as the conflict an
+    /// open would have reported; a merge git refuses with nothing unmerged — local
+    /// changes it would overwrite — is aborted and refused; and a branch already carrying
+    /// its base is left as it is.
+    #[test]
+    fn bring_base_in_hands_on_a_conflict_and_refuses_a_merge_git_will_not_make() {
+        let session = diverged("conflict");
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        let base = git_out(&session.worktree, &["rev-parse", "main"]);
+        let conflict = bring_base_in(&session)
+            .expect("the merge was made")
+            .expect("it conflicted");
+        assert_eq!(conflict.paths, ["shared.md"]);
+        assert_eq!(conflict.branch_tip, tip);
+        assert_eq!(conflict.base_commit, base);
+        assert!(session.worktree.join(".git").join("MERGE_HEAD").is_file());
+
+        let session = diverged("refused");
+        std::fs::write(session.worktree.join("shared.md"), "uncommitted\n").expect("written");
+        let refused = bring_base_in(&session).expect_err("git would not merge");
+        assert!(
+            refused.contains("merging main into draft failed"),
+            "{refused}"
+        );
+        assert!(!session.worktree.join(".git").join("MERGE_HEAD").exists());
+
+        let session = diverged("carried");
+        git_out(
+            &session.worktree,
+            &["merge", "--quiet", "-X", "ours", "--no-edit", "main"],
+        );
+        let tip = git_out(&session.worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(bring_base_in(&session), Ok(None));
+        assert_eq!(git_out(&session.worktree, &["rev-parse", "HEAD"]), tip);
+        for name in ["conflict", "refused", "carried"] {
+            let _ = std::fs::remove_dir_all(
+                std::env::temp_dir()
+                    .join(format!("onepipeline-base-in-{name}-{}", std::process::id())),
+            );
+        }
+    }
 
     /// Every `FailureKind` the sibling distinguishes.
     ///
@@ -3133,6 +3580,7 @@ mod tests {
             plan_name: "demo".into(),
             plan_id: "plans:demo".into(),
             run: "demo-1".into(),
+            public_name: None,
         };
         let cut = Node {
             id: "service".into(),
@@ -3202,16 +3650,14 @@ mod tests {
             "change-review-draft"
         );
         assert_eq!(REVIEW_DRAFTED, "change-review-draft");
-        // A push into a review draft with its checks unread answers a request this
-        // engine never makes, so it is the residual and claims no landing: nothing
-        // read its checks, and no word that reads as finished work may say so.
+        // A deferred republication remains an unlanded draft at its push.
         assert_eq!(
             outcome_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            Failure::RESIDUAL
+            REVIEW_DRAFTED_UNCHECKED
         );
         assert_eq!(
             landing_of(&PublishOutcome::ChangeReviewDraftUnchecked(url.clone())),
-            None
+            Some(crate::graph::Landing::Unlanded)
         );
         assert_eq!(outcome_of(&PublishOutcome::Queued(url)), "queued");
         assert_eq!(outcome_of(&PublishOutcome::NothingToPublish), "no-changes");
@@ -4223,6 +4669,297 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A follow nobody finishes still relays its stream as it grows, and ends on
+    /// its own once it asks whether its session closed — every
+    /// [`FOLLOW_CLOSED_ASK`] rather than on every read of the stream.
+    ///
+    /// The session here has no record at all, which [`settled`] answers as closed
+    /// for the reason it gives; a session somebody else closed takes the same arm.
+    /// Driven through [`follow`] itself over a real stream on disk, and timed only
+    /// as loosely as the interval it is about.
+    ///
+    /// The cadence is held here rather than by a journey. The arm it paces is driven
+    /// end to end by `tests/e2e/unreadable_sessions.rs`, where a live attached run's
+    /// follow meets its session's record going unreadable and says so; but *how
+    /// often* it asks prints nothing — a follow that asked on every pass would end the
+    /// same way, only sooner and dearer — so the interval is asserted where the clock
+    /// it runs on can be watched without the binary's own instrumentation.
+    #[test]
+    fn a_follow_nobody_finishes_relays_its_stream_and_ends_once_it_asks_after_its_session() {
+        let _home = super::scratch_home_held();
+        let root = std::env::temp_dir().join(format!("onepipeline-asked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("streams")).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let token = "s-closed-elsewhere";
+        let record = |seq: u64, kind: &str| {
+            serde_json::json!({
+                "v": 1,
+                "ts": "2026-01-01T00:00:00.000Z",
+                "stream": token,
+                "seq": seq,
+                "source": "vcs",
+                "kind": kind,
+                "labels": {},
+                "payload": {},
+                "artifacts": [],
+            })
+            .to_string()
+        };
+        let stream = root.join("streams").join(format!("{token}.ndjson"));
+        std::fs::write(&stream, format!("{}\n", record(1, "session-opened")))
+            .expect("the stream is written");
+
+        let relayed = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&relayed);
+        let began = std::time::Instant::now();
+        let follower = follow(
+            &SessionToken(token.into()),
+            None,
+            Box::new(move |envelope| sink.lock().expect("the relay").push(envelope.seq)),
+        )
+        .expect("the stream is followed");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(
+            &stream,
+            format!("{}\n{}\n", record(1, "session-opened"), record(2, "push")),
+        )
+        .expect("the stream grows");
+
+        let reader = follower.reader.as_ref().expect("the follow has a reader");
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            !reader.is_finished(),
+            "the follow asked whether its session closed sooner than every {FOLLOW_CLOSED_ASK:?}"
+        );
+        let deadline = FOLLOW_CLOSED_ASK + Duration::from_secs(5);
+        while !reader.is_finished() && began.elapsed() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            reader.is_finished(),
+            "a follow whose session closed elsewhere was still running after {deadline:?}"
+        );
+        assert_eq!(
+            *relayed.lock().expect("the relay"),
+            vec![1, 2],
+            "the follow did not relay its stream, before and after it started, before it ended"
+        );
+        let _ = follower.finish();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every item [`side_by_side`] is handed is read once and answered in the order
+    /// it was handed, whatever number of helpers is asked for — none at all among
+    /// them, which is also what a host that starts none of them leaves.
+    #[test]
+    fn reads_side_by_side_are_each_answered_once_in_the_order_asked() {
+        for helpers in [0, 1, 7] {
+            for count in [0, 1, 9] {
+                let items: Vec<usize> = (0..count).collect();
+                let calls = std::sync::atomic::AtomicUsize::new(0);
+                let read = side_by_side(&items, helpers, |item| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    item * 10
+                });
+                assert_eq!(
+                    read,
+                    items.iter().map(|item| item * 10).collect::<Vec<_>>(),
+                    "{count} items over {helpers} helpers were not each answered in order"
+                );
+                assert_eq!(
+                    calls.into_inner(),
+                    count,
+                    "an item was read twice or not at all"
+                );
+            }
+        }
+    }
+
+    /// With a helper to take one, two reads are under way at the same moment.
+    ///
+    /// Held here rather than by a journey: what it is about is invisible on every
+    /// command's output — a render prints the same lines whether its reads ran one
+    /// after another or together — and a journey could only infer it from the host's
+    /// clock, which is the load this exists to cut. So each read waits for another
+    /// to be under way beside it, and says whether one was: read one after another,
+    /// the first waits out the whole of its patience alone.
+    #[test]
+    fn reads_side_by_side_are_under_way_at_once() {
+        let under_way = std::sync::Mutex::new(0_usize);
+        let arrived = std::sync::Condvar::new();
+        let met = side_by_side(&[(), ()], 1, |()| {
+            let mut count = under_way.lock().expect("the count");
+            *count += 1;
+            arrived.notify_all();
+            let (count, waited) = arrived
+                .wait_timeout_while(count, Duration::from_secs(10), |count| *count < 2)
+                .expect("the count");
+            drop(count);
+            !waited.timed_out()
+        });
+        assert_eq!(
+            met,
+            [true, true],
+            "the two reads were not under way at once"
+        );
+    }
+
+    /// [`landings_now`] reads each node the run recorded a branch for, of that
+    /// branch, and hands the answers back by node in the order asked; a node with no
+    /// branch has nothing to read and is left out.
+    #[test]
+    fn landings_now_reads_each_node_s_recorded_branch_in_the_order_asked() {
+        let _home = super::scratch_home_held();
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-side-by-side-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+
+        let mut state = crate::projection::RunState::default();
+        for node in ["a", "c", "d"] {
+            state.branches.insert(node.into(), format!("me/{node}"));
+        }
+        let nodes: Vec<String> = ["d", "a", "b", "c"].map(String::from).to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let read = landings_now(&state, &asked);
+        let expected: Vec<(String, LandingRead)> = ["d", "a", "c"]
+            .map(|node| (node.to_owned(), landing_now(&format!("me/{node}"), None)))
+            .to_vec();
+        assert_eq!(read, expected);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two nodes naming one branch in one repository — a rework and the node it
+    /// replaced — are read once between them, and each is handed that one answer;
+    /// the same branch in another repository is a read of its own.
+    ///
+    /// Counted off the render record [`crate::rendercost`] writes, which is the
+    /// account of every read a render takes.
+    ///
+    /// Here rather than in a journey because nothing outside the process can count
+    /// it: the reads this saves are the driver's close-out's, which runs outside any
+    /// render, so no record a journey reads names them — and from outside, one read
+    /// and two of the same branch answer the same. The journey that takes this path,
+    /// a rework closing out beside the node it replaced, is
+    /// `tests/e2e/review_round.rs`, which holds its cost only as the round's whole
+    /// count of `git` processes; telling the repositories apart is held here alone,
+    /// because no offline journey registers one branch name in two repositories.
+    #[test]
+    fn landings_now_reads_a_branch_two_nodes_name_once() {
+        let _home = super::scratch_home_held();
+        let _measuring = crate::rendercost::MEASURING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-one-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a scratch state root");
+        std::env::set_var(onevcs_home(), &root);
+        let record = root.join("render-cost.jsonl");
+        std::env::set_var(crate::rendercost::RENDER_COST_ENV, &record);
+
+        let mut state = crate::projection::RunState::default();
+        for (node, repo) in [
+            ("a", "owner/service"),
+            ("a-rework-1", "owner/service"),
+            ("b", "owner/other"),
+        ] {
+            state.graph.insert(crate::plan::Node {
+                id: node.into(),
+                repo: Some(repo.into()),
+                ..crate::plan::Node::default()
+            });
+        }
+        for node in ["a", "a-rework-1", "b"] {
+            state.branches.insert(node.into(), "me/a".into());
+        }
+        let nodes: Vec<String> = ["a-rework-1", "a", "b"].map(String::from).to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let read = {
+            let _render =
+                crate::rendercost::rendering(crate::rendercost::Rendered::Summary, "one-read");
+            landings_now(&state, &asked)
+        };
+        std::env::remove_var(crate::rendercost::RENDER_COST_ENV);
+
+        let by_node: Vec<&str> = read.iter().map(|(node, _)| node.as_str()).collect();
+        assert_eq!(
+            by_node,
+            ["a-rework-1", "a", "b"],
+            "handed back in the order asked"
+        );
+        assert_eq!(
+            read[0].1, read[1].1,
+            "the two nodes were told different things"
+        );
+        let written = std::fs::read_to_string(&record).expect("the render was recorded");
+        let reads: Vec<serde_json::Value> = written
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a JSON line"))
+            .filter(|act: &serde_json::Value| act["act"] == "landing-read")
+            .collect();
+        let asked_of: Vec<(&str, &str)> = reads
+            .iter()
+            .map(|act| {
+                (
+                    act["node"].as_str().unwrap_or_default(),
+                    act["repo"].as_str().unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(asked_of.len(), 2, "{written}");
+        assert!(
+            asked_of.contains(&("a-rework-1", "owner/service")),
+            "{written}"
+        );
+        assert!(asked_of.contains(&("b", "owner/other")), "{written}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An answer in hand for one node answers each other node naming the same
+    /// branch in the same repository, and no node naming it in another, naming
+    /// another branch, or naming none.
+    ///
+    /// Here rather than in a journey for the reason `landings_now`'s own test above
+    /// gives: one read and two of one branch answer the same from outside, and no
+    /// offline journey registers one branch name in two repositories.
+    #[test]
+    fn an_answer_in_hand_answers_every_node_naming_its_branch_in_its_repository() {
+        let mut state = crate::projection::RunState::default();
+        for (node, repo, branch) in [
+            ("a", "owner/service", Some("me/a")),
+            ("a-rework-1", "owner/service", Some("me/a")),
+            ("elsewhere", "owner/other", Some("me/a")),
+            ("b", "owner/service", Some("me/b")),
+            ("unpublished", "owner/service", None),
+        ] {
+            state.graph.insert(crate::plan::Node {
+                id: node.into(),
+                repo: Some(repo.into()),
+                ..crate::plan::Node::default()
+            });
+            if let Some(branch) = branch {
+                state.branches.insert(node.into(), branch.into());
+            }
+        }
+        let nodes: Vec<String> = ["a", "a-rework-1", "elsewhere", "b", "unpublished"]
+            .map(String::from)
+            .to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+        let held = BTreeMap::from([("a-rework-1".to_owned(), "the rework's answer")]);
+        let shared = sharing_work(&state, &asked, held);
+        assert_eq!(
+            shared,
+            BTreeMap::from([
+                ("a".to_owned(), "the rework's answer"),
+                ("a-rework-1".to_owned(), "the rework's answer"),
+            ])
+        );
+    }
+
     /// The variable naming the sibling's state root, spelled once.
     ///
     /// `onevcs` publishes no constant for it, so the test that points it at a
@@ -4470,6 +5207,6 @@ mod tests {
 
     /// What [`proved_landed`] decides, without a repository to ask.
     fn proved_landed_from(read: &LandingRead) -> bool {
-        matches!(read, LandingRead::Answered(landed) if landed.is_landed())
+        read.proves_landed()
     }
 }

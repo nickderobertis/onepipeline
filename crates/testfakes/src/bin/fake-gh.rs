@@ -35,13 +35,16 @@
 //! holding a count, is the host landing an armed change at that many reads of it
 //! after it was armed — its required checks passing while nobody was publishing.
 //!
-//! And one on the draft's: `gh.draft.finishes-after`, holding seconds, is the work
-//! on a draft's head finishing that long after the host was first asked about the
-//! draft. Until then the draft reports `gh.checks.draft`, and its workflow runs and
-//! check suites `gh.runs.draft` and `gh.suites.draft`; from then on it reports
+//! And one on the draft's: `gh.draft.finishes-once-reported` is the work on a
+//! draft's head finishing once this host has told its caller that work is still
+//! running — a rollup naming a check that has not completed, or a workflow-run or
+//! check-suite read naming one in progress — and not on any clock, so how long a
+//! machine takes between two reads cannot decide what a journey meets. Until then
+//! the draft reports `gh.checks.draft`, and its workflow runs and check suites
+//! `gh.runs.draft` and `gh.suites.draft`; from the next `pr view` on it reports
 //! `gh.checks` as a ready change would, and those runs and suites completed. Each
 //! check rollup starts a poll: its check-name and activity reads reuse that phase
-//! until the next rollup, so a timer expiring between reads cannot mix phases. What
+//! until the next rollup, so the work finishing between reads cannot mix phases. What
 //! the runs and suites are for is `onevcs`'s question whether anything on a head is
 //! still running before it lifts a draft early, which it asks of exactly those two
 //! reads. `gh.no-ready-trigger` is the workflow that does not run on
@@ -91,8 +94,13 @@ enum Change {
     /// is one. `pr ready` is the only thing that moves it, to
     /// [`Open`](Change::Open).
     Draft,
-    /// The host landed it, at [`MERGE_SHA`].
+    /// The host landed it, at [`MERGE_SHA`] — or, merged by a person, at the commit
+    /// its merge record names.
     Merged,
+    /// A person or the host closed it without merging, ready for review when it closed.
+    Closed,
+    /// Closed without merging while it was a draft, which a reopen restores.
+    ClosedDraft,
 }
 
 impl Change {
@@ -102,6 +110,8 @@ impl Change {
             Change::Open => "open",
             Change::Draft => "draft",
             Change::Merged => "merged",
+            Change::Closed => "closed",
+            Change::ClosedDraft => "closed-draft",
         }
     }
 
@@ -110,6 +120,8 @@ impl Change {
             "open" => Some(Change::Open),
             "draft" => Some(Change::Draft),
             "merged" => Some(Change::Merged),
+            "closed" => Some(Change::Closed),
+            "closed-draft" => Some(Change::ClosedDraft),
             _ => None,
         }
     }
@@ -118,6 +130,11 @@ impl Change {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let dir = fake::script_dir();
+    // A person's move on the host, which a journey makes and no `gh` invocation is: it
+    // is never recorded on the ledger of what the host was asked.
+    if args.first().map(String::as_str) == Some(PERSON) {
+        return holding_the_records(&dir, || person(&args[1..], &dir));
+    }
     fake::record(&dir, "gh", &args);
 
     // Recorded first, so a journey scripting the outage can still assert this
@@ -133,6 +150,16 @@ fn main() -> ExitCode {
         args.get(1).map(String::as_str),
     ) {
         (Some("api"), Some("user")) => user(&args),
+        (Some("api"), Some(path)) if reply_route(path) => {
+            holding_the_records(&dir, || post_reply(&args, &dir, path))
+        }
+        (Some("api"), Some(path))
+            if path.starts_with("repos/")
+                && path.contains("/pulls/")
+                && path.split('/').count() == 5 =>
+        {
+            holding_the_records(&dir, || patch_pull(&args, &dir, path))
+        }
         (Some("api"), Some("graphql")) => review_read(&args, &dir),
         (Some("api"), Some(path)) if path.starts_with("repos/") && path.split('/').count() == 3 => {
             repository(&args, &dir, path)
@@ -328,7 +355,7 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
             let mut required: Vec<String> = declared_required(dir);
             required.sort();
             required.dedup();
-            let rules = if required.is_empty() {
+            let mut rules = if required.is_empty() {
                 serde_json::json!([])
             } else {
                 serde_json::json!([{
@@ -341,6 +368,14 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
                     },
                 }])
             };
+            // `gh.up-to-date-not-required` is a host whose rules say outright that a
+            // branch need not be up to date with its base before it merges.
+            if dir.join("gh.up-to-date-not-required").exists() {
+                if let Some(rule) = rules.get_mut(0) {
+                    rule["parameters"]["strict_required_status_checks_policy"] =
+                        serde_json::json!(false);
+                }
+            }
             println!("{rules}");
             ExitCode::SUCCESS
         }
@@ -352,18 +387,55 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
     }
 }
 
-/// `gh api repos/R`: the repository itself, which `onevcs` 0.44.0 on asks for its
-/// visibility at every write that could reach a public destination.
+/// `gh api repos/R --include`: the repository itself, which `onevcs` 0.44.0 on asks for
+/// its visibility at every write that could reach a public destination, and 0.56.0 on
+/// asks with `--include`, so the response's status line and headers come first and a
+/// request the host did not answer is told from one it refused.
 ///
 /// `private` unless a journey scripts `gh.visibility`: a private destination is one
 /// the public boundary screens nothing for, which is what every journey here wrote
 /// before there was a boundary to ask.
+///
+/// `gh.visibility.rate-limited` is the host **not answering** that read: GitHub's own
+/// `403` for a primary rate limit — no requests remaining, and the epoch it resets at,
+/// which the file holds — written as `gh api --include` writes any response, status line
+/// and headers on stdout ahead of the body, with `gh`'s one line on stderr and exit 1.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the response is GitHub's, which
+// declares it nowhere this repository can read, and `onevcs::GitHub::visibility`'s parser of
+// it is private. Its gate is the real linked `onevcs` reading this answer: every journey that
+// publishes reads the `200` as the visibility it names, and
+// `tests/e2e/publication_boundary.rs`'s
+// `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
+// asserts the `403`'s status, limit, resource, remaining and reset as onevcs read them, so a
+// shape that drifts from what onevcs parses fails a journey rather than a double nobody checks.
 fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
-    if args.len() != 2 {
-        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    if args.len() != 3 || args[2] != "--include" {
+        return fake::refuse(&format!(
+            "gh api {path} takes exactly `--include` here: {args:?}"
+        ));
     }
     if path.split('/').any(str::is_empty) {
         return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
+    if let Some(reset) = read_if_present(&dir.join("gh.visibility.rate-limited")) {
+        let reset: u64 = reset.trim().parse().unwrap_or_else(|_| {
+            fake::fail(&format!(
+                "gh.visibility.rate-limited holds {reset:?}, which is not the epoch second the limit resets at"
+            ))
+        });
+        let message = "API rate limit exceeded for user ID 1.";
+        print!(
+            "HTTP/2.0 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\n\
+             X-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 0\r\n\
+             X-Ratelimit-Reset: {reset}\r\nX-Ratelimit-Resource: core\r\n\
+             X-Ratelimit-Used: 5000\r\n\r\n{}",
+            serde_json::json!({
+                "message": message,
+                "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+            })
+        );
+        eprintln!("gh: {message} (HTTP 403)");
+        return ExitCode::from(1);
     }
     let visibility = match read_if_present(&dir.join("gh.visibility")) {
         None => Visibility::Private,
@@ -373,8 +445,8 @@ fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
             ))
         }),
     };
-    println!(
-        "{}",
+    print!(
+        "HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{}",
         serde_json::json!({
             "visibility": visibility.word(),
             "private": visibility != Visibility::Public,
@@ -553,9 +625,7 @@ fn record(dir: &Path, id: &str, state: Change) {
             fake::fail(&format!("cannot create {}: {error}", parent.display()));
         }
     }
-    if let Err(error) = std::fs::write(&path, state.as_str()) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, state.as_str());
 }
 
 /// Run one write of `opened.jsonl` while no other process of this host is writing
@@ -582,7 +652,13 @@ fn holding_the_records(dir: &Path, write: impl FnOnce() -> ExitCode) -> ExitCode
             .open(&lock)
         {
             Ok(_) => break,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Windows answers a create of a file another process is still deleting
+            // with `PermissionDenied`, not `AlreadyExists`: the lock is being let go,
+            // so it is waited for like one still held.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || (cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
                 if std::time::Instant::now() >= deadline {
                     fake::fail(&format!(
                         "{} was held for a minute by a writer that never let it go",
@@ -692,9 +768,15 @@ fn origin_of(dir: &Path, repo: &str) -> Option<PathBuf> {
 /// than trusted for where it came from — `onevcs` decides which checks are about
 /// which commit by comparing it. Read off a journey's script through the same
 /// check, so a seeded thread naming anything else is refused as it is read.
-#[derive(Debug, serde::Deserialize)]
-#[serde(try_from = "String")]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(try_from = "String", into = "String")]
 struct Sha(String);
+
+impl From<Sha> for String {
+    fn from(sha: Sha) -> Self {
+        sha.0
+    }
+}
 
 impl TryFrom<String> for Sha {
     type Error = String;
@@ -822,7 +904,12 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
             ("--head", Shape::Named),
             ("--base", Shape::Named),
             ("--state", Shape::Exact("open")),
-            ("--json", Shape::Exact("number,url,state,headRefOid")),
+            // `onevcs` 0.52.0 reads the draft state and the description in the
+            // same listing, rather than viewing each change request again.
+            (
+                "--json",
+                Shape::Exact("number,url,state,headRefOid,isDraft,title,body"),
+            ),
         ],
         &[],
     ) {
@@ -849,11 +936,15 @@ fn list(args: &[String], dir: &Path) -> ExitCode {
         })
         .map(|change| {
             let head = head_of(dir, &change);
+            let draft = recorded(dir, &change_key(dir, &change)) == Some(Change::Draft);
             serde_json::json!({
                 "number": change.number,
                 "url": url_of(&change),
                 "state": "OPEN",
                 "headRefOid": head.as_str(),
+                "isDraft": draft,
+                "title": change.title,
+                "body": change.body,
             })
         })
         .collect();
@@ -1011,6 +1102,14 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Some("state,mergeCommit") => "state,mergeCommit",
         // Retirement reads the merged head in the same host response as the merge.
         Some("state,mergeCommit,headRefOid") => "state,mergeCommit,headRefOid",
+        // `onevcs` 0.56 reads the issues a merged change request closes in the same view
+        // as the merge, for the `closes` its landing reports.
+        Some("state,mergeCommit,closingIssuesReferences") => {
+            "state,mergeCommit,closingIssuesReferences"
+        }
+        Some("state,mergeCommit,headRefOid,closingIssuesReferences") => {
+            "state,mergeCommit,headRefOid,closingIssuesReferences"
+        }
         Some("statusCheckRollup") => "statusCheckRollup",
         // The rollup *and* the commit it was reported against, in one read.
         // `onevcs` 0.15.0 asks for the pair because a rollup read on its own
@@ -1028,7 +1127,8 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         // `change show` and after every `change describe`: what a drafter is
         // shown of the worker's own description, and what a journey reads back
         // to hold the description the closeout wrote to the one the host has.
-        Some("title,body") => "title,body",
+        // `onevcs` 0.52.0 reads the draft state in that same view.
+        Some("title,body,isDraft") => "title,body,isDraft",
         // Whether the change can merge into its base. `onevcs` 0.38.0 reads it
         // while it watches a merge it armed, so a conflict the host confirms
         // ends the watch as `sync-conflict` rather than waiting out its bound.
@@ -1070,6 +1170,15 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         fake::fail(&format!("cannot write {}: {error}", path.display()));
     }
     let reported = scripted_checks(dir, &id, state);
+    // Only a read that asked for the rollup has been told what is still running.
+    if fields.contains("statusCheckRollup")
+        && reported_draft_running(dir, &id, state)
+        && reported
+            .iter()
+            .any(|check| !matches!(check.state, State::Settled(_)))
+    {
+        report_running(dir, &id);
+    }
     let head = head_of(dir, &opened);
     // A fixture that pushed the host's merge can report its actual base commit.
     let merge_commit = if dir.join("gh.real-merge-commit").exists() {
@@ -1088,7 +1197,11 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // record rather than from anything this invocation was given.
             "title": opened.title,
             "body": opened.body,
-            "state": if merged { "MERGED" } else { "OPEN" },
+            "state": match state {
+                Change::Merged => "MERGED",
+                Change::Closed | Change::ClosedDraft => "CLOSED",
+                Change::Open | Change::Draft => "OPEN",
+            },
             "mergeable": "MERGEABLE",
             "mergeStateStatus": "CLEAN",
             "headRefOid": head.as_str(),
@@ -1098,6 +1211,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "isDraft": state == Change::Draft,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": merge_commit.as_str()})),
             "mergedAt": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
+            "closingIssuesReferences": closing_issues(dir),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
             // repository whose only bar is the `command:` gate its rules name.
@@ -1108,6 +1222,38 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         })
     );
     ExitCode::SUCCESS
+}
+
+/// The issues every change request on this host closes, as GitHub answers
+/// `closingIssuesReferences`: one node per `owner/name#N` a journey scripted in
+/// `gh.closes`, whitespace-separated, and none where it scripted nothing.
+fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
+    let scripted = read_if_present(&dir.join("gh.closes")).unwrap_or_default();
+    let named = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    scripted
+        .split_whitespace()
+        .map(|issue| {
+            let read = issue.split_once('#').and_then(|(repository, number)| {
+                let (owner, name) = repository.split_once('/')?;
+                let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+                (named(owner) && named(name)).then_some((owner, name, number))
+            });
+            let Some((owner, name, number)) = read else {
+                fake::fail(&format!(
+                    "gh.closes holds {issue:?}, which is not owner/name#N"
+                ))
+            };
+            serde_json::json!({
+                "number": number,
+                "repository": {"name": name, "owner": {"login": owner}},
+            })
+        })
+        .collect()
 }
 
 /// Where a check is, and — once it has finished — how it ended.
@@ -1279,7 +1425,9 @@ impl Check {
     /// A check that has started carries `startedAt`. Where `rerun` is set, the run a
     /// ready change reports is a different run from the draft's: a workflow that runs
     /// on `ready_for_review` re-runs on a lift, and `onevcs` 0.36.0 tells a run
-    /// attached after a lift from the draft's by that start alone.
+    /// attached after a lift from the draft's by that start alone. A check that
+    /// concluded carries `completedAt` too, which `onevcs` 0.56.6 records on its
+    /// `change-check` beside the start.
     fn rollup_entry(&self, rerun: bool) -> serde_json::Value {
         let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
         if self.state != State::Queued {
@@ -1291,6 +1439,11 @@ impl Check {
         }
         if let State::Settled(conclusion) = self.state {
             entry["conclusion"] = serde_json::json!(conclusion.wire());
+            entry["completedAt"] = serde_json::json!(if rerun {
+                READY_RUN_COMPLETED
+            } else {
+                DRAFT_RUN_COMPLETED
+            });
         }
         entry
     }
@@ -1302,6 +1455,12 @@ const DRAFT_RUN_STARTED: &str = "2026-01-01T00:00:00Z";
 /// When the run a ready change reported started — a later run than the draft's.
 const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
 
+/// When the run a draft reported concluded.
+const DRAFT_RUN_COMPLETED: &str = "2026-01-01T00:03:00Z";
+
+/// When the run a ready change reported concluded.
+const READY_RUN_COMPLETED: &str = "2026-01-01T00:08:00Z";
+
 /// What this host reports about one change request's checks.
 ///
 /// Scripted `gh.checks`, one check per line, with `gh.checks.<NUMBER>` beside it
@@ -1309,8 +1468,8 @@ const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
 /// this host to answer differently about each. `gh.checks.draft`, where scripted,
 /// is what the host reports **while the change is a draft**, over both: the
 /// repository whose workflows skip a draft, whose checks run only once it is
-/// lifted — or, where `gh.draft.finishes-after` is scripted, only until the work on
-/// the draft's head finishes ([`draft_running`]).
+/// lifted — or, where `gh.draft.finishes-once-reported` is scripted, only until the
+/// work on the draft's head finishes ([`draft_running`]).
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
@@ -1340,46 +1499,35 @@ fn reran_on_lift(dir: &Path, change: Change) -> bool {
 /// Whether change request `id` is a draft whose head is still being worked on, which
 /// is when it reports the `.draft` scripts.
 ///
-/// Without `gh.draft.finishes-after` that is the whole of its time as a draft. With
-/// it, the work finishes that many seconds after this host was first asked about the
-/// draft — the moment written down at that first ask, because nothing carries a clock
-/// between two invocations of a program that exits. A script that is not a number of
-/// seconds is fatal, for [`unreachable`]'s reason.
+/// Without `gh.draft.finishes-once-reported` that is the whole of its time as a draft.
+/// With it, the work finishes once this host has reported it still running
+/// ([`report_running`]): a journey about a draft held while something runs meets that
+/// hold however long the machine takes to reach the read that decides it, where a
+/// clock started at the host's first answer would have the work finish unseen on a
+/// slow one.
 fn draft_running(dir: &Path, id: &str, change: Change) -> bool {
     if change != Change::Draft {
         return false;
     }
-    let Some(after) = fake::node_script(dir, "gh", "draft.finishes-after") else {
-        return true;
-    };
-    let after: f64 = after
-        .parse()
-        .ok()
-        .filter(|after: &f64| after.is_finite() && *after >= 0.0)
-        .unwrap_or_else(|| {
-            fake::fail(&format!(
-                "gh.draft.finishes-after holds {after:?}, which is not a number of seconds"
-            ))
-        });
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_else(|error| fake::fail(&format!("the clock is before the epoch: {error}")))
-        .as_millis();
-    let path = dir
-        .join("gh")
-        .join(format!("{}.first-asked", fake::segment(id)));
-    let first = match read_if_present(&path) {
-        Some(first) => first.trim().parse::<u128>().unwrap_or_else(|_| {
-            fake::fail(&format!("{} holds {first:?}, not a moment", path.display()))
-        }),
-        None => {
-            if let Err(error) = std::fs::write(&path, now.to_string()) {
-                fake::fail(&format!("cannot write {}: {error}", path.display()));
-            }
-            now
-        }
-    };
-    (now.saturating_sub(first) as f64) < after * 1000.0
+    !dir.join("gh.draft.finishes-once-reported").exists() || !running_reported(dir, id).exists()
+}
+
+/// Where it is written down that this host told its caller the work on draft `id`'s
+/// head was still running, because nothing carries that between two invocations of a
+/// program that exits.
+fn running_reported(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh")
+        .join(format!("{}.running-reported", fake::segment(id)))
+}
+
+/// Write down that a read just reported the work on draft `id`'s head as running, so
+/// it finishes from the next `pr view` on — the reads of the poll this one belongs to
+/// keep its phase ([`reported_draft_running`]).
+fn report_running(dir: &Path, id: &str) {
+    let path = running_reported(dir, id);
+    if let Err(error) = std::fs::write(&path, "") {
+        fake::fail(&format!("cannot write {}: {error}", path.display()));
+    }
 }
 
 /// The last rollup's phase, persisted between the host's separate reads.
@@ -1397,8 +1545,8 @@ fn draft_phase_path(dir: &Path, id: &str) -> PathBuf {
 }
 
 /// Reuse the last rollup's phase until another rollup reports the required check.
-/// Reads before any rollup fall back to the scripted clock, and a ready change
-/// finishes immediately regardless of what the last draft rollup reported.
+/// Reads before any rollup fall back to whether the work was reported running, and a
+/// ready change finishes immediately regardless of what the last draft rollup reported.
 fn reported_draft_running(dir: &Path, id: &str, change: Change) -> bool {
     if change != Change::Draft {
         return false;
@@ -1569,17 +1717,27 @@ fn activity(dir: &Path, opened: Option<&Opened>, kind: Kind) -> Vec<Activity> {
     };
     let id = change_key(dir, opened);
     let running = reported_draft_running(dir, &id, state_of_opened(dir, opened));
-    Activity::scripted(dir, kind)
+    let records: Vec<Activity> = Activity::scripted(dir, kind)
         .into_iter()
         .map(|record| if running { record } else { record.finished() })
-        .collect()
+        .collect();
+    // The empty suite never completes and holds nothing, so it reports nothing running.
+    if running
+        && records.iter().any(|record| {
+            !matches!(record.state, State::Settled(_))
+                && record.record != (Record::Suite { runs: 0 })
+        })
+    {
+        report_running(dir, &id);
+    }
+    records
 }
 
 /// `gh api repos/O/R/actions/runs?head_sha=SHA&per_page=N`
 ///
 /// The workflow runs on one commit, in GitHub's shape: `total_count` beside every
 /// `workflow_runs` entry, each carrying its own `head_sha`, `status`, and a
-/// `conclusion` that is `null` until it completes. `onevcs` 0.48.1 asks it before it
+/// `conclusion` that is `null` until it completes. `onevcs` asks it, from 0.48.1 on, before it
 /// lifts a draft whose checks show nothing still running, and holds the draft while
 /// a run on its head is not `completed`. Unscripted, it is the commit no workflow ran
 /// on.
@@ -1838,9 +1996,7 @@ fn edit(args: &[String], dir: &Path) -> ExitCode {
             })
         })
         .collect();
-    if let Err(error) = std::fs::write(&path, format!("{}\n", rewritten.join("\n"))) {
-        fake::fail(&format!("cannot write {}: {error}", path.display()));
-    }
+    write_file(&path, &format!("{}\n", rewritten.join("\n")));
     println!("{}", url_of(&edited));
     ExitCode::SUCCESS
 }
@@ -1951,6 +2107,18 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         }
     }
     let field = |key: &str| fields.get(key).map(String::as_str);
+    if fields.len() == 3
+        && field("owner").is_some()
+        && field("name").is_some()
+        && field("query").is_some_and(|query| query.contains("c0: pullRequest(number:"))
+    {
+        return standings_read(
+            field("query").unwrap(),
+            field("owner").unwrap(),
+            field("name").unwrap(),
+            dir,
+        );
+    }
     let required = [
         "query",
         "owner",
@@ -2238,3 +2406,1006 @@ fn review_wire(read: &onevcs::ReviewRead) -> serde_json::Value {
     json!({"data": {"rateLimit": {"cost": read.cost.graphql_points}, "repository": {"pullRequest": {"url": read.change_url, "reviewThreads": page(threads.into_values().collect()), "comments": page(conversation), "reviews": page(reviews)}}}})
 }
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
+/// Serve aliased standings through the sibling's remote double, retaining its ledger.
+fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode {
+    use onevcs::{ChangeId, RemoteHost};
+    let mut delimiters = Vec::new();
+    for character in query.chars() {
+        match character {
+            '{' | '(' => delimiters.push(character),
+            '}' | ')' => {
+                let expected = if character == '}' { '{' } else { '(' };
+                if delimiters.pop() != Some(expected) {
+                    return fake::refuse("standings query has unbalanced delimiters");
+                }
+            }
+            _ => {}
+        }
+    }
+    if !delimiters.is_empty() {
+        return fake::refuse("standings query has unbalanced delimiters");
+    }
+    if !query.starts_with("query($owner: String!, $name: String!)")
+        || !query.contains("rateLimit { cost } repository(owner: $owner, name: $name) {")
+        || !query.contains("url number state isDraft body baseRefName headRefName headRefOid")
+        || !query.contains("statusCheckRollup")
+    {
+        return fake::refuse("standings query is not the repository standings operation");
+    }
+    let mut changes = Vec::new();
+    for (at, fragment) in query.split("pullRequest(number: ").skip(1).enumerate() {
+        let Some(number) = fragment
+            .split(')')
+            .next()
+            .and_then(|number| number.parse::<NonZeroU64>().ok())
+        else {
+            return fake::refuse("standings query names an invalid change request");
+        };
+        if !query.contains(&format!(" c{at}: pullRequest(number: {number})")) {
+            return fake::refuse("standings query has an unknown alias");
+        }
+        changes.push(ChangeId(number.to_string()));
+    }
+    if changes.is_empty() {
+        return fake::refuse("standings query names no complete change requests");
+    }
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let path = if repository_host.is_file() {
+        repository_host
+    } else if dir.join("review-host.json").is_file() {
+        dir.join("review-host.json")
+    } else {
+        return own_standings(query, owner, name, &changes, dir);
+    };
+    let host = match onevcs_testing::FileHost::create(path) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    // `gh.standings-own`: where each change stands is this host's own record of it — the
+    // change requests `pr create` opened, the commits a person's merge wrote onto the origin
+    // — while the remote double answers the feedback read with it and charges the read on
+    // its ledger, as one aliased query of the real host is one call with one charge.
+    if dir.join("gh.standings-own").exists() {
+        let charged = if query.contains("reviewThreads(") {
+            host.review_standings(
+                "main",
+                &changes
+                    .iter()
+                    .cloned()
+                    .map(|change| (change, None))
+                    .collect::<Vec<_>>(),
+            )
+            .map(|answer| (answer.reads, answer.cost))
+        } else {
+            host.change_standings("main", &changes)
+                .map(|answer| (Vec::new(), answer.cost))
+        };
+        let (reads, cost) = match charged {
+            Ok(charged) => charged,
+            Err(error) => return fake::refuse(&error.to_string()),
+        };
+        return match own_standing_list(owner, name, &changes, dir) {
+            Ok(standings) => {
+                println!("{}", standings_wire(&standings, &reads, cost, dir));
+                ExitCode::SUCCESS
+            }
+            Err(refused) => refused,
+        };
+    }
+    // The root is used only to classify landings in the double. GitHub's wire
+    // carries the merged base and the real reader classifies against its request.
+    let answer = if query.contains("reviewThreads(") {
+        host.review_standings(
+            "main",
+            &changes
+                .iter()
+                .cloned()
+                .map(|change| (change, None))
+                .collect::<Vec<_>>(),
+        )
+        .map(|answer| (answer.standings, answer.reads, answer.cost))
+    } else {
+        host.change_standings("main", &changes)
+            .map(|answer| (answer.standings, Vec::new(), answer.cost))
+    };
+    match answer {
+        Ok((standings, reads, cost)) => {
+            println!("{}", standings_wire(&standings, &reads, cost, dir));
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
+}
+
+/// Translate sibling-owned standings and verdicts into GitHub's response fields.
+fn standings_wire(
+    standings: &[onevcs::ChangeStanding],
+    reads: &[onevcs::ReviewRead],
+    cost: onevcs::ReadCost,
+    dir: &Path,
+) -> serde_json::Value {
+    use onevcs::{ChangeState, ChecksVerdict};
+    use serde_json::{json, Value};
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false}, "nodes": nodes});
+    let mut repository =
+        json!({"defaultBranchRef": {"name": "main"}, "rulesets": page(Vec::new())});
+    let mut protections = Vec::new();
+    let mut required =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for standing in standings {
+        let names = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => waiting.clone(),
+            ChecksVerdict::Failed { failed } => failed.clone(),
+            ChecksVerdict::PassedWithSkipped { skipped } => skipped.clone(),
+            ChecksVerdict::Passed => vec!["verified".to_owned()],
+            ChecksVerdict::NoneRequired => Vec::new(),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        required
+            .entry(standing.base.clone())
+            .or_default()
+            .extend(names);
+    }
+    for (at, standing) in standings.iter().enumerate() {
+        let (state, commit, merged_at, deleted) = match &standing.state {
+            ChangeState::Open => ("OPEN", None, None, false),
+            ChangeState::Closed { base_deleted } => ("CLOSED", None, None, *base_deleted),
+            ChangeState::Merged {
+                commit, merged_at, ..
+            } => ("MERGED", Some(commit), merged_at.as_ref(), false),
+            _ => panic!("the linked double emitted an unknown change state"),
+        };
+        let (names, conclusion, status) = match &standing.checks {
+            ChecksVerdict::Pending { waiting } => (waiting.clone(), Value::Null, "IN_PROGRESS"),
+            ChecksVerdict::Failed { failed } => (failed.clone(), json!("FAILURE"), "COMPLETED"),
+            ChecksVerdict::PassedWithSkipped { skipped } => {
+                (skipped.clone(), json!("SKIPPED"), "COMPLETED")
+            }
+            ChecksVerdict::Passed => (vec!["verified".to_owned()], json!("SUCCESS"), "COMPLETED"),
+            ChecksVerdict::NoneRequired => (Vec::new(), Value::Null, "COMPLETED"),
+            _ => panic!("the linked double emitted an unknown check verdict"),
+        };
+        let declared = &required[&standing.base];
+        protections.push(json!({"databaseId": at + 1, "pattern": standing.base, "requiredStatusCheckContexts": declared}));
+        let contexts = declared.iter().map(|name| {
+            let (status, conclusion) = if names.contains(name) {
+                (status, conclusion.clone())
+            } else {
+                ("COMPLETED", json!("SUCCESS"))
+            };
+            json!({"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion, "isRequired": true})
+        }).collect::<Vec<_>>();
+        let mut pull = json!({
+            "url": standing.url, "state": state, "isDraft": standing.draft,
+            "body": standing.body, "baseRefName": standing.base,
+            "headRefName": standing.head_branch, "headRefOid": standing.head,
+            "mergedAt": merged_at, "mergeCommit": commit.map(|commit| json!({"oid": commit})),
+            "baseRef": if deleted { Value::Null } else { json!({"name": standing.base}) },
+            "headRef": {"target": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}},
+            "closingIssuesReferences": {"nodes": closing_issues(dir)},
+        });
+        if let Some(read) = reads.get(at) {
+            let wire = review_wire(read);
+            for field in ["reviewThreads", "comments", "reviews"] {
+                pull[field] = wire["data"]["repository"]["pullRequest"][field].clone();
+            }
+        }
+        repository[format!("c{at}")] = pull;
+    }
+    repository["branchProtectionRules"] = page(protections);
+    json!({"data": {"rateLimit": {"cost": cost.graphql_points}, "repository": repository}})
+}
+
+/// Whether `path` is one of the two routes `onevcs` posts a review reply to: a review
+/// thread's `pulls/<n>/comments/<id>/replies`, or the conversation's
+/// `issues/<n>/comments`.
+fn reply_route(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["repos", _, _, "pulls", _, "comments", _, "replies"]
+            | ["repos", _, _, "issues", _, "comments"]
+    )
+}
+
+/// Which of GitHub's three comment objects a node id names, by its prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeKind {
+    /// `PRRC_`: a comment in a review thread.
+    Thread,
+    /// `IC_`: a comment on the pull request's conversation.
+    Issue,
+    /// `PRR_`: a review, whose summary is the comment.
+    Review,
+}
+
+/// The kind and database id a GitHub comment node id names, as GitHub hands one out:
+/// `PRRC_`, `IC_` or `PRR_` and the URL-safe base64 of the MessagePack array
+/// `[0, repository, object]`.
+fn comment_node(id: &str) -> Option<(NodeKind, u64)> {
+    let (prefix, payload) = id.split_once('_')?;
+    let kind = match prefix {
+        "PRRC" => NodeKind::Thread,
+        "IC" => NodeKind::Issue,
+        "PRR" => NodeKind::Review,
+        _ => return None,
+    };
+    let (mut word, mut held, mut bytes) = (0u32, 0, Vec::new());
+    for symbol in payload.trim_end_matches('=').bytes() {
+        let value = match symbol {
+            b'A'..=b'Z' => symbol - b'A',
+            b'a'..=b'z' => symbol - b'a' + 26,
+            b'0'..=b'9' => symbol - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            _ => return None,
+        };
+        word = (word << 6) | u32::from(value);
+        held += 6;
+        if held >= 8 {
+            held -= 8;
+            bytes.push(u8::try_from((word >> held) & 0xff).ok()?);
+        }
+    }
+    let (&marker, mut rest) = bytes.split_first()?;
+    if marker != 0x93 {
+        return None;
+    }
+    let mut numbers = Vec::new();
+    while let Some((&first, tail)) = rest.split_first() {
+        let width = match first {
+            small @ 0x00..=0x7f => {
+                numbers.push(u64::from(small));
+                rest = tail;
+                continue;
+            }
+            0xcc => 1,
+            0xcd => 2,
+            0xce => 4,
+            0xcf => 8,
+            _ => return None,
+        };
+        let number = tail.get(..width)?;
+        numbers.push(
+            number
+                .iter()
+                .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte)),
+        );
+        rest = tail.get(width..)?;
+    }
+    match numbers.as_slice() {
+        [0, _repository, object] => Some((kind, *object)),
+        _ => None,
+    }
+}
+
+/// `gh api <route> --method POST -f body=<text>`: one reply, posted through the
+/// sibling's remote double so its ledger records the call and its state holds the
+/// reply — in the comment's thread where it has one, and as a conversation comment
+/// linking it otherwise, exactly as `onevcs` addresses the two.
+///
+/// `gh.reply.fail` refuses every post with what it holds, and `gh.reply.fail-after`
+/// holding a count refuses every post after that many were accepted.
+fn post_reply(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    use onevcs::RemoteHost;
+    let [_, _, method, post, field, body] = args else {
+        return fake::refuse(&format!(
+            "gh api {path} was not given exactly --method POST -f body=…"
+        ));
+    };
+    if method != "--method" || post != "POST" || field != "-f" {
+        return fake::refuse(&format!("gh api {path} was not a POST of one field"));
+    }
+    let Some(text) = body.strip_prefix("body=") else {
+        return fake::refuse(&format!("gh api {path} posted no body field"));
+    };
+    if let Some(said) = fake::node_script(dir, "gh", "reply.fail") {
+        eprintln!("{said}");
+        return ExitCode::from(1);
+    }
+    if let Some(after) = fake::node_script(dir, "gh", "reply.fail-after") {
+        let Ok(after) = after.parse::<usize>() else {
+            return fake::refuse("gh.reply.fail-after is not a count");
+        };
+        let accepted = std::fs::read_to_string(dir.join("gh.reply.accepted.calls"))
+            .ok()
+            .and_then(|count| count.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        if accepted >= after {
+            eprintln!("HTTP 502: the host would not take the reply");
+            return ExitCode::from(1);
+        }
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    let (owner, name, number) = (parts[1], parts[2], parts[4]);
+    let (wanted, database, text) = if parts[3] == "pulls" {
+        let Ok(database) = parts[6].parse::<u64>() else {
+            return fake::refuse("a thread reply's route names no comment");
+        };
+        (NodeKind::Thread, database, text.to_owned())
+    } else {
+        let Some((first, rest)) = text.split_once("\n\n") else {
+            return fake::refuse("a conversation reply carries no `Re:` line");
+        };
+        let Some((kind, database)) = first
+            .rsplit_once("#issuecomment-")
+            .map(|(_, id)| (NodeKind::Issue, id))
+            .or_else(|| {
+                first
+                    .rsplit_once("#pullrequestreview-")
+                    .map(|(_, id)| (NodeKind::Review, id))
+            })
+        else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment");
+        };
+        let Ok(database) = database.parse::<u64>() else {
+            return fake::refuse("a conversation reply's `Re:` line links no comment id");
+        };
+        (kind, database, rest.to_owned())
+    };
+    let Some(key) = text
+        .rsplit_once("<!-- onevcs:reply ")
+        .and_then(|(_, marker)| {
+            marker
+                .split_whitespace()
+                .find_map(|word| word.strip_prefix("key="))
+        })
+        .map(str::to_owned)
+    else {
+        return fake::refuse("a reply carries no onevcs reply marker");
+    };
+    let repository_host = dir.join(format!(
+        "review-host.{}.{}.json",
+        fake::segment(owner),
+        fake::segment(name)
+    ));
+    let at = if repository_host.is_file() {
+        repository_host
+    } else {
+        dir.join("review-host.json")
+    };
+    let host = match onevcs_testing::FileHost::create(&at) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let change = onevcs::ChangeId(number.to_owned());
+    let held = match host.state() {
+        Ok(state) => state
+            .review_comments
+            .get(&change)
+            .cloned()
+            .unwrap_or_default(),
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let Some(comment) = held
+        .iter()
+        .find(|comment| comment_node(&comment.id.0) == Some((wanted, database)))
+        .map(|comment| comment.id.clone())
+    else {
+        eprintln!("HTTP 404: no comment {database} on pull request {number}");
+        return ExitCode::from(1);
+    };
+    match host.reply_to_comment(&change, &comment, &text, &key) {
+        Ok(posted) => {
+            fake::count(dir, "gh.reply.accepted");
+            println!(
+                "{}",
+                serde_json::json!({"node_id": posted.id.0, "html_url": posted.url})
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => fake::refuse(&error.to_string()),
+    }
+}
+
+/// The hidden first argument that makes an invocation a person's move on the host.
+const PERSON: &str = "__person";
+
+/// What a person's merge left: the branch it merged into, the commit that reached it,
+/// when, and the head it merged — which outlives a deleted head branch.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergedRecord {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the branch and the moment are the
+    // host's own words as the standings wire carries them back — `baseRefName` and an RFC 3339
+    // `mergedAt` — written only by `person_merge` from a branch `pr create` recorded and this
+    // program's own clock; the two commits are `Sha`s, held to an object id both ways.
+    into: String,
+    commit: Sha,
+    merged_at: String,
+    head: Sha,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+}
+
+fn merged_record_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join("gh-merged")
+        .join(format!("{}.json", fake::segment(id)))
+}
+
+fn merged_record(dir: &Path, id: &str) -> Option<MergedRecord> {
+    let text = read_if_present(&merged_record_path(dir, id))?;
+    Some(serde_json::from_str(&text).unwrap_or_else(|error| {
+        fake::fail(&format!(
+            "the merge record of {id} is not one this host wrote: {error}"
+        ))
+    }))
+}
+
+/// Replace `path` with `text` whole: written beside it and renamed over it.
+///
+/// The readers of these files take no lock, and a write in place truncates before
+/// it writes, so a read between the two sees an empty or half-written record — a
+/// change request reported missing, which under load is a retarget refused for a
+/// change request this host opened. A rename is seen whole or not at all.
+fn write_file(path: &Path, text: &str) {
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            fake::fail(&format!("cannot create {}: {error}", parent.display()));
+        }
+    }
+    let mut beside = path.as_os_str().to_owned();
+    beside.push(format!(".{}.tmp", std::process::id()));
+    let beside = PathBuf::from(beside);
+    if let Err(error) = std::fs::write(&beside, text) {
+        fake::fail(&format!("cannot write {}: {error}", beside.display()));
+    }
+    // Windows refuses the rename while a reader holds the target open without
+    // sharing its deletion, which a reader lets go of within moments.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::rename(&beside, path) {
+            Ok(()) => return,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => fake::fail(&format!("cannot write {}: {error}", path.display())),
+        }
+    }
+}
+
+/// Rewrite every record `pr create` wrote, with `change` applied to the one numbered
+/// `number` of `repo`.
+fn rewrite_opened(dir: &Path, repo: &str, number: NonZeroU64, change: impl Fn(&mut Opened)) {
+    let mut found = false;
+    let lines: Vec<String> = opened_changes(dir)
+        .into_iter()
+        .map(|mut opened| {
+            if opened.repo == repo && opened.number == number {
+                change(&mut opened);
+                found = true;
+            }
+            serde_json::to_string(&opened).unwrap_or_else(|error| {
+                fake::fail(&format!("a record does not serialise: {error}"))
+            })
+        })
+        .collect();
+    if !found {
+        fake::fail(&format!("no change request {number} of {repo} was opened"));
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    write_file(&dir.join("gh").join("opened.jsonl"), &text);
+}
+
+/// Whether the origin behind `repo` holds `branch`.
+fn origin_holds(dir: &Path, repo: &str, branch: &str) -> bool {
+    let (Some(origin), Some(branch)) = (origin_of(dir, repo), Branch::parse(branch)) else {
+        return false;
+    };
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&origin)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(branch.as_ref_name())
+        .output()
+        .is_ok_and(|answer| answer.status.success())
+}
+
+/// The verdict a journey scripted for the required checks on `head`, as
+/// `gh-head-verdict/<head>` holds it — `passed`, `none`, `pending:<names>`,
+/// `failed:<names>` or `skipped:<names>` — and every required check passed otherwise.
+fn head_verdict(dir: &Path, head: &str) -> onevcs::ChecksVerdict {
+    let Some(scripted) = read_if_present(&dir.join("gh-head-verdict").join(fake::segment(head)))
+    else {
+        return onevcs::ChecksVerdict::Passed;
+    };
+    verdict_of(&scripted).unwrap_or_else(|why| fake::fail(&why))
+}
+
+/// A scripted verdict: `passed`, `none`, `pending:<names>`, `failed:<names>` or
+/// `skipped:<names>`, and nothing else.
+fn verdict_of(scripted: &str) -> Result<onevcs::ChecksVerdict, String> {
+    let scripted = scripted.trim();
+    let named = |names: &str| -> Result<Vec<String>, String> {
+        let names: Vec<String> = names.split(',').map(str::to_owned).collect();
+        if names
+            .iter()
+            .any(|name| name.trim().is_empty() || name.trim() != name)
+        {
+            return Err(format!(
+                "{scripted:?} names an empty or padded check: list one name or more, \
+                 comma-separated"
+            ));
+        }
+        Ok(names)
+    };
+    match scripted.split_once(':') {
+        None if scripted == "passed" => Ok(onevcs::ChecksVerdict::Passed),
+        None if scripted == "none" => Ok(onevcs::ChecksVerdict::NoneRequired),
+        Some(("pending", names)) => Ok(onevcs::ChecksVerdict::Pending {
+            waiting: named(names)?,
+        }),
+        Some(("failed", names)) => Ok(onevcs::ChecksVerdict::Failed {
+            failed: named(names)?,
+        }),
+        Some(("skipped", names)) => Ok(onevcs::ChecksVerdict::PassedWithSkipped {
+            skipped: named(names)?,
+        }),
+        _ => Err(format!(
+            "{scripted:?} is no verdict a head can be scripted with: `passed`, `none`, or \
+             `pending:`, `failed:` or `skipped:` with the checks named"
+        )),
+    }
+}
+
+/// Answer an aliased standings read out of this host's own records: every change
+/// request `pr create` opened, as `pr ready`, a person's merge, close or retarget, and
+/// a retarget or reopen through the API left it.
+fn own_standings(
+    query: &str,
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> ExitCode {
+    // `gh.standings-outage.<owner>.<name>` is this one repository's read refused, as a
+    // host answering an error for it would, while every other repository's is answered.
+    if dir
+        .join(format!(
+            "gh.standings-outage.{}.{}",
+            fake::segment(owner),
+            fake::segment(name)
+        ))
+        .exists()
+    {
+        return fake::refuse(&format!(
+            "the standings of {owner}/{name} could not be read"
+        ));
+    }
+    let standings = match own_standing_list(owner, name, changes, dir) {
+        Ok(standings) => standings,
+        Err(refused) => return refused,
+    };
+    let reads: Vec<onevcs::ReviewRead> = if query.contains("reviewThreads(") {
+        standings
+            .iter()
+            .map(|standing| onevcs::ReviewRead {
+                change_url: standing.url.to_string(),
+                comments: Vec::new(),
+                marker: onevcs::ReadMarker(WRITTEN_AT.to_owned()),
+                unchanged: false,
+                cost: onevcs::ReadCost::default(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let cost = onevcs::ReadCost {
+        graphql_points: 1,
+        rest_requests: 0,
+    };
+    println!("{}", standings_wire(&standings, &reads, cost, dir));
+    ExitCode::SUCCESS
+}
+
+/// Where each of `changes` stands, by this host's own records of them.
+fn own_standing_list(
+    owner: &str,
+    name: &str,
+    changes: &[onevcs::ChangeId],
+    dir: &Path,
+) -> Result<Vec<onevcs::ChangeStanding>, ExitCode> {
+    let repo = format!("{owner}/{name}");
+    let opened = opened_changes(dir);
+    let mut standings = Vec::new();
+    for change in changes {
+        let Some(held) = opened
+            .iter()
+            .find(|held| held.repo == repo && held.number.to_string() == change.0)
+        else {
+            return Err(fake::refuse(&format!(
+                "no pull request {} in {repo}",
+                change.0
+            )));
+        };
+        let id = change_key(dir, held);
+        let state = state_of_opened(dir, held);
+        let merged = merged_record(dir, &id);
+        let head = merged
+            .as_ref()
+            .map_or_else(|| head_of(dir, held), |merged| Sha(merged.head.0.clone()))
+            .as_str()
+            .to_owned();
+        let url = url_of(held)
+            .parse::<onevcs::Url>()
+            .unwrap_or_else(|error| fake::fail(&format!("this host's own URL: {error}")));
+        standings.push(onevcs::ChangeStanding {
+            url,
+            body: held.body.clone(),
+            base: held.base.clone(),
+            head_branch: held.head.clone(),
+            head: onevcs::Sha(head.clone()),
+            draft: matches!(state, Change::Draft | Change::ClosedDraft),
+            state: match state {
+                Change::Open | Change::Draft => onevcs::ChangeState::Open,
+                Change::Closed | Change::ClosedDraft => onevcs::ChangeState::Closed {
+                    base_deleted: !origin_holds(dir, &repo, &held.base),
+                },
+                Change::Merged => onevcs::ChangeState::Merged {
+                    into: merged
+                        .as_ref()
+                        .map_or_else(|| held.base.clone(), |merged| merged.into.clone()),
+                    commit: onevcs::Sha(
+                        merged
+                            .as_ref()
+                            .map_or_else(|| MERGE_SHA.to_owned(), |merged| merged.commit.0.clone()),
+                    ),
+                    landing: false,
+                    merged_at: merged
+                        .as_ref()
+                        .map(|merged| merged.merged_at.clone())
+                        .or_else(|| read_if_present(&merged_at(dir, &id))),
+                },
+            },
+            checks: head_verdict(dir, &head),
+        });
+    }
+    Ok(standings)
+}
+
+/// `gh api repos/O/N/pulls/<n> --method PATCH -f base=B [-f body=…]` and
+/// `… --method PATCH -f state=open`: a retarget writing the description with it, and a
+/// reopen — each answered with the pull request as this host now holds it.
+fn patch_pull(args: &[String], dir: &Path, path: &str) -> ExitCode {
+    let segments: Vec<&str> = path.split('/').collect();
+    let repo = format!("{}/{}", segments[1], segments[2]);
+    let Ok(number) = segments[4].parse::<NonZeroU64>() else {
+        return fake::refuse(&format!("{path} names no pull request number"));
+    };
+    if args.get(2).map(String::as_str) != Some("--method")
+        || args.get(3).map(String::as_str) != Some("PATCH")
+    {
+        return fake::refuse("a pull request is written with --method PATCH and nothing else");
+    }
+    let mut fields = std::collections::BTreeMap::new();
+    for pair in args[4..].chunks(2) {
+        let [flag, value] = pair else {
+            return fake::refuse("a PATCH field has no value");
+        };
+        if flag != "-f" {
+            return fake::refuse(&format!("a PATCH takes -f fields, not {flag}"));
+        }
+        let Some((key, value)) = value.split_once('=') else {
+            return fake::refuse(&format!("{value:?} is no key=value field"));
+        };
+        if !["base", "body", "state"].contains(&key) || fields.insert(key, value).is_some() {
+            return fake::refuse(&format!("a PATCH of {key:?} is not one this host takes"));
+        }
+    }
+    let Some(held) = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+    else {
+        return fake::refuse(&format!("no pull request {number} in {repo}"));
+    };
+    let id = change_key(dir, &held);
+    let state = state_of_opened(dir, &held);
+    if let Some(open) = fields.get("state") {
+        if *open != "open" || fields.len() != 1 {
+            return fake::refuse("a reopen writes state=open alone");
+        }
+        let reopened = match state {
+            Change::Closed => Change::Open,
+            Change::ClosedDraft => Change::Draft,
+            _ => return fake::refuse(&format!("pull request {number} is not closed")),
+        };
+        record(dir, &id, reopened);
+    } else {
+        if state == Change::Merged || matches!(state, Change::Closed | Change::ClosedDraft) {
+            return fake::refuse(&format!("pull request {number} is not open"));
+        }
+        let base = fields.get("base").map(|base| (*base).to_owned());
+        let body = fields.get("body").map(|body| (*body).to_owned());
+        if base.is_some() && dir.join("gh.retarget-refused").exists() {
+            return fake::refuse(&format!("pull request {number} could not be retargeted"));
+        }
+        if let Some(base) = &base {
+            if !origin_holds(dir, &repo, base) {
+                return fake::refuse(&format!("{repo} has no branch {base}"));
+            }
+        }
+        rewrite_opened(dir, &repo, number, |opened| {
+            if let Some(base) = &base {
+                opened.base.clone_from(base);
+            }
+            if let Some(body) = &body {
+                opened.body.clone_from(body);
+            }
+        });
+    }
+    let now = opened_changes(dir)
+        .into_iter()
+        .find(|held| held.repo == repo && held.number == number)
+        .unwrap_or_else(|| fake::fail("the record just written is gone"));
+    // In `gh.standings-own` the remote double keeps the ledger of every call it would
+    // answer, so the write is put to it too: its state follows, and its ledger charges it.
+    if dir.join("gh.standings-own").exists() && dir.join("review-host.json").is_file() {
+        use onevcs::RemoteHost;
+        let change = onevcs::ChangeId(number.to_string());
+        let mirrored =
+            onevcs_testing::FileHost::create(dir.join("review-host.json")).and_then(|host| {
+                match fields.get("state") {
+                    Some(_) => host.reopen_change(&change).map(|_| ()),
+                    None => host
+                        .retarget_change(&change, &now.base, fields.get("body").copied())
+                        .map(|_| ()),
+                }
+            });
+        if let Err(error) = mirrored {
+            return fake::refuse(&format!("the remote double refused the write: {error}"));
+        }
+    }
+    let state = state_of_opened(dir, &now);
+    println!(
+        "{}",
+        serde_json::json!({
+            "number": now.number,
+            "state": if matches!(state, Change::Closed | Change::ClosedDraft) { "closed" } else { "open" },
+            "draft": matches!(state, Change::Draft | Change::ClosedDraft),
+            "base": {"ref": now.base},
+            "body": now.body,
+        })
+    );
+    ExitCode::SUCCESS
+}
+
+/// A person's move: `merge <repo> <number> squash|merge-commit kept|deleted-retarget|deleted-close`,
+/// `close <repo> <number>`, `retarget <repo> <number> <base>`, and
+/// `verdict <head> <verdict>`.
+///
+/// A merge is made on the origin itself — a squash commit or a merge commit of the
+/// head onto the base the change request targets now — and recorded as merged at that
+/// commit; a deleted head is deleted from the origin, and every open change request
+/// based on it is retargeted onto the merged one's base or closed, as `how` says.
+fn person(args: &[String], dir: &Path) -> ExitCode {
+    let arg = |at: usize| args.get(at).map(String::as_str).unwrap_or_default();
+    let takes = match arg(0) {
+        "merge" => 5,
+        "retarget" => 4,
+        "close" | "verdict" => 3,
+        other => return fake::refuse(&format!("{other:?} is no person's move")),
+    };
+    if args.len() != takes {
+        return fake::refuse(&format!(
+            "a person's `{}` takes {} arguments after it and was given {}: {args:?}",
+            arg(0),
+            takes - 1,
+            args.len().saturating_sub(1)
+        ));
+    }
+    let addressed = || -> Result<Opened, String> {
+        let repo = arg(1);
+        let number = arg(2)
+            .parse::<NonZeroU64>()
+            .map_err(|_| format!("{:?} is no pull request number", arg(2)))?;
+        opened_changes(dir)
+            .into_iter()
+            .find(|held| held.repo == repo && held.number == number)
+            .ok_or_else(|| format!("no pull request {number} in {repo}"))
+    };
+    let moved = match arg(0) {
+        "merge" => addressed().and_then(|held| {
+            let how = Merging::of(arg(3))?;
+            let after = HeadAfter::of(arg(4))?;
+            person_merge(dir, &held, how, after)
+        }),
+        "close" => addressed().and_then(|held| {
+            let closed = match state_of_opened(dir, &held) {
+                Change::Open => Change::Closed,
+                Change::Draft => Change::ClosedDraft,
+                _ => return Err(format!("pull request {} is not open", held.number)),
+            };
+            record(dir, &change_key(dir, &held), closed);
+            Ok(())
+        }),
+        "retarget" => addressed().and_then(|held| {
+            let base = Branch::parse(arg(3))
+                .filter(|base| origin_holds(dir, &held.repo, &base.0))
+                .ok_or_else(|| format!("{:?} is no branch the origin holds", arg(3)))?;
+            rewrite_opened(dir, &held.repo, held.number, |opened| {
+                opened.base.clone_from(&base.0);
+            });
+            Ok(())
+        }),
+        "verdict" => Sha::parse(arg(1))
+            .ok_or_else(|| format!("{:?} is not a commit", arg(1)))
+            .and_then(|head| {
+                verdict_of(arg(2))?;
+                write_file(
+                    &dir.join("gh-head-verdict")
+                        .join(fake::segment(head.as_str())),
+                    arg(2),
+                );
+                Ok(())
+            }),
+        other => Err(format!("{other:?} is no person's move")),
+    };
+    match moved {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(why) => fake::refuse(&why),
+    }
+}
+
+/// How a person merges: one squash commit, or a merge commit of the head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Merging {
+    Squash,
+    MergeCommit,
+}
+
+impl Merging {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "squash" => Ok(Self::Squash),
+            "merge-commit" => Ok(Self::MergeCommit),
+            other => Err(format!("{other:?} is no way to merge")),
+        }
+    }
+}
+
+/// What becomes of a merged head, and of what was based on it once it is deleted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadAfter {
+    Kept,
+    Deleted,
+    DeletedRetargeting,
+    DeletedClosing,
+}
+
+impl HeadAfter {
+    fn of(word: &str) -> Result<Self, String> {
+        match word {
+            "kept" => Ok(Self::Kept),
+            "deleted" => Ok(Self::Deleted),
+            "deleted-retarget" => Ok(Self::DeletedRetargeting),
+            "deleted-close" => Ok(Self::DeletedClosing),
+            other => Err(format!("{other:?} is not what becomes of a head")),
+        }
+    }
+}
+
+fn git_in(at: &Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(at)
+        .env("GIT_AUTHOR_NAME", "A Person")
+        .env("GIT_AUTHOR_EMAIL", "person@example.com")
+        .env("GIT_COMMITTER_NAME", "A Person")
+        .env("GIT_COMMITTER_EMAIL", "person@example.com")
+        .output()
+        .map_err(|error| format!("git {args:?}: {error}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    } else {
+        Err(format!(
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn person_merge(dir: &Path, held: &Opened, how: Merging, after: HeadAfter) -> Result<(), String> {
+    let number = held.number;
+    let origin = origin_of(dir, &held.repo)
+        .ok_or_else(|| format!("no origin is written down for {}", held.repo))?;
+    let id = change_key(dir, held);
+    if !matches!(state_of_opened(dir, held), Change::Open | Change::Draft) {
+        return Err(format!("pull request {number} is not open"));
+    }
+    let work = dir
+        .join("gh-person")
+        .join(format!("{}-{number}", fake::segment(&held.repo)));
+    let _ = std::fs::remove_dir_all(&work);
+    let merged = (|| -> Result<(String, String), String> {
+        std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+        let origin = origin.to_string_lossy().into_owned();
+        git_in(&work, &["clone", "--quiet", &origin, "."])?;
+        let head = git_in(&work, &["rev-parse", &format!("origin/{}", held.head)])?;
+        git_in(
+            &work,
+            &[
+                "checkout",
+                "--quiet",
+                "-B",
+                &held.base,
+                &format!("origin/{}", held.base),
+            ],
+        )?;
+        let message = format!("{} (#{number})", held.title);
+        let theirs = format!("origin/{}", held.head);
+        match how {
+            Merging::Squash => {
+                git_in(&work, &["merge", "--squash", "--quiet", &theirs])?;
+                git_in(&work, &["commit", "--quiet", "-m", &message])?;
+            }
+            Merging::MergeCommit => {
+                git_in(
+                    &work,
+                    &["merge", "--no-ff", "--quiet", "-m", &message, &theirs],
+                )?;
+            }
+        }
+        let commit = git_in(&work, &["rev-parse", "HEAD"])?;
+        git_in(
+            &work,
+            &[
+                "push",
+                "--quiet",
+                "origin",
+                &format!("HEAD:refs/heads/{}", held.base),
+            ],
+        )?;
+        if after != HeadAfter::Kept {
+            git_in(
+                &work,
+                &["push", "--quiet", "origin", "--delete", &held.head],
+            )?;
+        }
+        Ok((commit, head))
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    let (commit, head) = merged?;
+    let commit = Sha::parse(&commit).ok_or_else(|| format!("git answered {commit:?}"))?;
+    let head = Sha::parse(&head).ok_or_else(|| format!("git answered {head:?}"))?;
+    record(dir, &id, Change::Merged);
+    let record_text = serde_json::to_string(&MergedRecord {
+        into: held.base.clone(),
+        commit,
+        merged_at: fake::now(),
+        head,
+    })
+    .map_err(|error| format!("a merge record does not serialise: {error}"))?;
+    write_file(&merged_record_path(dir, &id), &record_text);
+    if matches!(
+        after,
+        HeadAfter::DeletedRetargeting | HeadAfter::DeletedClosing
+    ) {
+        for dependant in opened_changes(dir)
+            .into_iter()
+            .filter(|other| other.repo == held.repo && other.base == held.head)
+        {
+            let key = change_key(dir, &dependant);
+            match (after, state_of_opened(dir, &dependant)) {
+                (HeadAfter::DeletedClosing, Change::Open) => record(dir, &key, Change::Closed),
+                (HeadAfter::DeletedClosing, Change::Draft) => {
+                    record(dir, &key, Change::ClosedDraft);
+                }
+                (HeadAfter::DeletedRetargeting, Change::Open | Change::Draft) => {
+                    rewrite_opened(dir, &held.repo, dependant.number, |opened| {
+                        opened.base.clone_from(&held.base);
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}

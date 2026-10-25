@@ -1,0 +1,171 @@
+{
+  "run_id": "dag-ui-project-centric",
+  "project": "plans:I_kwDOTXCWqs8AAAABY116yA",
+  "dir": "/home/nick/projects/ai-orchestrator",
+  "graph": "/home/nick/projects/ai-orchestrator/graphs/dag-scope.yaml",
+  "graph_run": "dag-scope-1792609162374-1162445",
+  "observer_runs": [
+    "dag-scope-1792609162374-1162445"
+  ],
+  "node_graph": "/home/nick/projects/ai-orchestrator/graphs/node-scope.yaml",
+  "pr_author_graph": "/home/nick/projects/ai-orchestrator/graphs/pr-author.yaml",
+  "review_reply_graph": "/home/nick/projects/ai-orchestrator/graphs/review-reply.yaml",
+  "launcher": "claude-code",
+  "session": "f73c3a0b-4633-5d11-82cd-948c4e6f4d7b",
+  "pid": 1162444,
+  "host": "U-17UN402ICR95C",
+  "started": "linux-proc-stat:31646465",
+  "started_at": "2026-10-21T18:59:22.338Z",
+  "heartbeat_interval": 1800,
+  "writeback_item_budget": 12,
+  "success_hook": "/home/nick/projects/ai-orchestrator/scripts/run-ended.sh",
+  "failure_hook": "/home/nick/projects/ai-orchestrator/scripts/run-ended.sh",
+  "hook_timeout": 600,
+  "dispatch_env_hook": "/home/nick/projects/ai-orchestrator/scripts/dispatch-env-hook.sh",
+  "dispatch_env_hook_timeout": 60,
+  "adoptions": 0,
+  "bus_config": {
+    "version": 1,
+    "transport": {
+      "kind": "local"
+    },
+    "profile": "planner-channel",
+    "authors": {
+      "monitor": {
+        "capabilities": [
+          "retry",
+          "requeue",
+          "cancel",
+          "finding",
+          "add"
+        ],
+        "refusals": {
+          "amend": "what a node is judged against is a decomposition decision the planner owns",
+          "attest": "a human action is attested by the person who took it, never by a watcher",
+          "complete": "whether the run is finished is the planner's verdict, not an observation",
+          "decline": "declining a reviewer's feedback answers its reviewer for the change, which is the planner's decision rather than an observation",
+          "drop": "removing work from the graph is a decomposition decision the planner owns",
+          "note": "a note may bind a criterion the node's judge decides against, which is the planner's decision rather than an observation",
+          "reparent": "rewiring dependencies is a decomposition decision the planner owns",
+          "retitle": "a change request's title is the subject that lands on the base, which is the planner's decision rather than an observation",
+          "rework": "starting work on a reviewer's feedback answers its reviewers with new instructions, which is the planner's decision rather than an observation",
+          "settle": "settling a node from evidence declares an outcome this run never observed, which is the planner's decision rather than an observation",
+          "withdraw-note": "taking back a note the planner sent overrules the planner's own correction to a running dispatch, which is the planner's decision rather than an observation"
+        }
+      }
+    },
+    "validators": [
+      {
+        "on": "replies",
+        "when": {
+          "carries": "commands"
+        },
+        "kind": "command",
+        "command": [
+          "scripts/envelope-review.sh"
+        ],
+        "cache": {
+          "dir": ".cache/envelope-passes",
+          "bar_fingerprint": [
+            "uv",
+            "run",
+            "python",
+            "-m",
+            "orchestrator.envelope_review",
+            "--bar-fingerprint"
+          ]
+        }
+      }
+    ],
+    "codecs": {
+      "monitor": {
+        "queue": "surfaces",
+        "reply_window_seconds": 3000,
+        "session_env": "ORCHESTRATOR_MONITOR_SESSION_SECONDS",
+        "asker_env": "ONEPIPELINE_CHANNEL_ASKER",
+        "select": "op",
+        "frames": {
+          "judge": {
+            "schema": "agent.onejudge-frame.judge@8",
+            "bindings": [
+              {
+                "when": {
+                  "field": "kind",
+                  "equals": "numeric"
+                },
+                "do": "refuse",
+                "message": "a `numeric` score is not one this binding gives: a planner rules with a `completion` boolean, which is no score on a scale; it scores `boolean` criteria alone"
+              },
+              {
+                "do": "ask",
+                "record": {
+                  "kind": "monitor-completion",
+                  "source": "proposal",
+                  "message": "The monitor's conversation has ended and onejudge is scoring that conversation against the monitor's own completion bar. You are this member's judge side, so the score is yours: did this watch meet the bar quoted below? Reply `completion: true` if it did, `false` if it did not. THE RUN IS NOT BLOCKED ON THIS and nothing waits for you: the question is non-blocking, no answer is read as `false`, and the run settles either way.\n\n{frame.criterion}"
+                },
+                "blocking": false,
+                "response": {
+                  "value": {
+                    "from": "reply.completion"
+                  },
+                  "reason": {
+                    "from": [
+                      "reply.reason",
+                      "reply.message"
+                    ],
+                    "default": "the planner ruled without saying why"
+                  }
+                },
+                "unanswered": {
+                  "value": false,
+                  "reason": "no ruling on this member's completion bar arrived — nobody ruled within the reply window, or the question was abandoned — so it is scored unsatisfied"
+                }
+              }
+            ]
+          },
+          "supervisor": {
+            "schema": "agent.onejudge-frame.supervisor@8",
+            "bindings": [
+              {
+                "when": {
+                  "field": "turn.outcome",
+                  "equals": "lost"
+                },
+                "do": "raise",
+                "record": {
+                  "kind": "monitor-failed",
+                  "blocking": false,
+                  "source": "proposal",
+                  "message": "monitor turn failed: {frame.turn.cause} on {frame.turn.harness}. It said nothing, so there is nothing to answer."
+                },
+                "fail": "the monitor's turn was lost: {frame.turn.cause} on {frame.turn.harness}; a `monitor-failed` surface says so"
+              },
+              {
+                "do": "answer",
+                "response": {
+                  "completion": false,
+                  "message": "Your turn was taken and no planner surface was raised for it: prose reaches nobody. A report reaches the planner only as a `finding` op in a reply envelope, which arrives once and carries the node it is about. Your next turn opens after the graph's hold, and reads the detailed stream from the cursor your last read ended with, not the last few lines.",
+                  "reason": "the monitor took its turn; a report reaches the planner as a finding"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "schemas": [
+      "https://raw.githubusercontent.com/nickderobertis/onepipeline/v0.80.2/schemas/planner-channel.json@1",
+      "https://raw.githubusercontent.com/nickderobertis/onejudge/onejudge-v0.20.0/schemas/judge-seat-frames.json@8"
+    ]
+  },
+  "maintenance_config": {
+    "version": 1,
+    "default": {
+      "every": "1d"
+    }
+  },
+  "branch_template": "{% if task.key %}{{ task.key }}{% else %}{{ plan.name }}{% endif %}/{{ node.id }}",
+  "template_root": "/home/nick/projects/ai-orchestrator/templates",
+  "require_rendered": true,
+  "oneharness_sessions": "/home/nick/projects/ai-orchestrator/runs/dag-ui-project-centric/oneharness-sessions.jsonl"
+}

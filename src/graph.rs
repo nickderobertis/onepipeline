@@ -600,8 +600,13 @@ pub(crate) fn dispatch_sets(
     Ok(sets)
 }
 
-/// Apply a complete ordered list through oneagentgraph's loader and schema.
-pub(crate) fn validate_graph_sets(reference: &str, sets: &[String], context: &str) -> Result<()> {
+/// Apply a complete ordered list through oneagentgraph's loader and schema, answering with the
+/// graph it validated.
+pub(crate) fn validate_graph_sets(
+    reference: &str,
+    sets: &[String],
+    context: &str,
+) -> Result<oneagentgraph::config::GraphConfig> {
     let mut resolver = oneagentgraph::resolve::Resolver::new();
     let content = resolver
         .resolve(
@@ -611,7 +616,7 @@ pub(crate) fn validate_graph_sets(reference: &str, sets: &[String], context: &st
         .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?
         .content
         .clone();
-    let mut document: serde_json::Value = serde_norway::from_str(&content)
+    let mut document: serde_json::Value = crate::yaml::from_str(&content)
         .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?;
     for entry in sets {
         let override_ = oneagentgraph::run::parse_set(entry).map_err(|why| {
@@ -625,15 +630,12 @@ pub(crate) fn validate_graph_sets(reference: &str, sets: &[String], context: &st
             ))
         })?;
     }
-    let graph: oneagentgraph::config::GraphConfig = serde_norway::from_value(
-        serde_norway::to_value(&document)
-            .map_err(|why| Error::Invalid(format!("{context} graph '{reference}': {why}")))?,
-    )
-    .map_err(|why| {
-        Error::Invalid(format!(
-            "{context} graph '{reference}' sets {sets:?}: {why}"
-        ))
-    })?;
+    let graph: oneagentgraph::config::GraphConfig =
+        crate::taskgraph::read(document).map_err(|why| {
+            Error::Invalid(format!(
+                "{context} graph '{reference}' sets {sets:?}: {why}"
+            ))
+        })?;
     oneagentgraph::config::validate(&graph).map_err(|why| {
         Error::Invalid(format!(
             "{context} graph '{reference}' sets {sets:?}: {why}"
@@ -644,7 +646,7 @@ pub(crate) fn validate_graph_sets(reference: &str, sets: &[String], context: &st
             "{context} graph '{reference}' sets {sets:?}: {why}"
         ))
     })?;
-    Ok(())
+    Ok(graph)
 }
 
 /// Check each affected dispatch with the graph loader and schema oneagentgraph runs.
@@ -686,7 +688,7 @@ pub(crate) fn validate_dispatch_sets(
             Some(step) => format!("node '{}' step '{step}'", node.id),
             None => format!("node '{}'", node.id),
         };
-        validate_graph_sets(graph, &sets, &context)
+        validate_graph_sets(graph, &sets, &context).map(drop)
     };
     if let Some(steps) = &node.steps {
         let agents: Vec<_> = steps
@@ -965,6 +967,12 @@ pub(crate) fn stacking_bases<'a>(
 /// refuses to fail in. So the name is refused where a plan is read.
 pub(crate) const RESERVED_PERSONA: &str = "`pr-author` is the persona this crate dispatches a      change request's drafting under, so a node's own worker cannot run as it";
 
+/// What a plan naming the reserved reply-drafting persona is told, on
+/// [`RESERVED_PERSONA`]'s terms: a node claiming it would be composed as a reply
+/// drafting and lose the overrides it declared.
+pub(crate) const RESERVED_REPLY_PERSONA: &str = "`review-reply` is the persona this crate \
+     dispatches a review comment's reply drafting under, so a node's own worker cannot run as it";
+
 /// Check one node's shape.
 pub fn validate_node(node: &Node) -> Result<()> {
     check_node(node).map_err(Error::from)
@@ -983,6 +991,9 @@ pub(crate) fn check_node(node: &Node) -> std::result::Result<(), Refusal> {
     }
     if node.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
         return Err(named(RESERVED_PERSONA).field("persona"));
+    }
+    if node.persona.as_deref() == Some(crate::reply::PERSONA) {
+        return Err(named(RESERVED_REPLY_PERSONA).field("persona"));
     }
     // A kept branch is a lifecycle node's, so a node that cuts none has nothing
     // for `preserve` to keep — and a draft is a state of a change request, which a
@@ -1284,6 +1295,12 @@ fn check_steps(node: &Node, steps: &[Step]) -> std::result::Result<(), Refusal> 
             }
             if step.persona.as_deref() == Some(crate::lifecycle::PR_AUTHOR_PERSONA) {
                 return Err(named(format!("step '{}': {RESERVED_PERSONA}", step.id)));
+            }
+            if step.persona.as_deref() == Some(crate::reply::PERSONA) {
+                return Err(named(format!(
+                    "step '{}': {RESERVED_REPLY_PERSONA}",
+                    step.id
+                )));
             }
             // The same rule the node above is held to: a control this build
             // cannot apply stops the plan here rather than at the step's launch.
@@ -1858,6 +1875,22 @@ mod tests {
     }
     use super::*;
     use crate::plan::{Goal, PLAN_SCHEMA_VERSION};
+
+    /// An override that makes the graph one its schema refuses is refused naming the key path
+    /// of the field at fault, as the overridden document carries no line to name instead.
+    #[test]
+    fn an_override_the_graph_schema_refuses_is_named_by_its_key_path() {
+        let graph = concat!(env!("CARGO_MANIFEST_DIR"), "/graphs/dag-scope.yaml");
+        let sets = ["members.check-in.kind=nonsense".to_owned()];
+        let said = validate_graph_sets(graph, &sets, "dag-scope")
+            .expect_err("a member kind the schema does not have is refused")
+            .to_string();
+        assert!(said.contains(graph), "{said}");
+        assert!(
+            said.contains("members.check-in.kind: unknown variant `nonsense`"),
+            "{said}"
+        );
+    }
 
     /// A node identity is what a node has, and nothing else can be made into
     /// one.

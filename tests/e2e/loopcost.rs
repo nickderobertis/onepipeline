@@ -67,9 +67,52 @@ const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);
 /// So the patience is that sum with room, and a hold nobody releases still fails
 /// first, as an `until` timeout.
 fn measured(name: &str) -> World {
-    World::new(name)
+    measuring(World::new(name))
+}
+
+/// `world`, with what [`measured`] gives every journey here.
+///
+/// Applied over a world rather than only made fresh, so a setting the world
+/// already carries is one these override.
+///
+/// **And a claim read no window here can reach.** A driver reads its project's
+/// claim on its own interval from its launch, whatever the run is doing, so a
+/// journey whose set-up ends close to that interval opens its window over the
+/// read: the scale journey's hundred dispatches ended four to five minutes in on
+/// a Windows runner, inside the shipped five, and each of its drivers' windows
+/// held one claim read and the store bytes that pass read. So the interval is
+/// pinned at [`PINNED_CLAIM_INTERVAL`], longer than any journey here runs, and
+/// the one read a driver makes is its launch's, before any window opens.
+fn measuring(world: World) -> World {
+    world
         .with_env(LOOP_STATS_ENV, "1")
         .with_env(RENDEZVOUS_SECONDS_ENV, "900")
+        .with_env(
+            CLAIM_INTERVAL_ENV,
+            &PINNED_CLAIM_INTERVAL.as_secs().to_string(),
+        )
+}
+
+/// The claim interval a measured driver reads on: a day, the longest the setting
+/// takes, and longer than every journey here by far.
+const PINNED_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
+
+/// The setting naming how often a driver reads the claim on its project, in whole
+/// seconds.
+const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+
+/// What a window says when a paced claim read landed inside it.
+///
+/// A claim read is paced work the driver owes on its own interval whatever the
+/// run is doing, and not an idle pass's cost, so a window holding one has not
+/// measured what these journeys claim — and is named as that, rather than as
+/// whatever that read happened to cost.
+fn holds_no_claim_read(run: &str, did: &Counts) {
+    assert_eq!(
+        did.claim_reads, 0,
+        "{run}'s driver read its project's claim inside the window, which measures an idle \
+         pass and not a paced read: {did:?}"
+    );
 }
 
 /// The records a run wrote that change what the graph is: what "one per recorded
@@ -233,6 +276,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
         "the graph's statuses were re-derived: {did:?}"
     );
     assert_eq!(did.publications, 0, "the board was re-published: {did:?}");
+    holds_no_claim_read("idle", &did);
     assert_eq!(did.store_bytes, 0, "the run store was read: {did:?}");
     assert_eq!(
         did.upstream_reads, 0,
@@ -334,6 +378,9 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         .map(|(nth, run)| counts(&world, run).since(before[nth]))
         .collect();
 
+    for (nth, run) in ["small", "large"].iter().enumerate() {
+        holds_no_claim_read(run, &did[nth]);
+    }
     // Within a constant factor of one another, rather than in proportion to the
     // runs. Both are nought, which is inside any factor there is.
     assert!(
@@ -361,6 +408,56 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// How often [`a_claim_read_due_inside_a_window_is_held_out_of_it`]'s world reads
+/// its claim, were nothing to hold that read out of the window: the shortest
+/// interval the setting takes, so the window over it costs seconds.
+const CLAIM_DUE_INSIDE_A_WINDOW: Duration = Duration::from_secs(1);
+
+// llmlint: ignore-block[tests_mirror_real_usage] whether a driver read its project's claim
+// inside an interval is reported by nothing a user reads — a read that finds the project its own
+// writes no record — so the driver's own count of its claim reads is the only observation of it.
+// The binary, the plan store, the dispatch and the setting are the real ones.
+// llmlint: ignore-block[e2e_not_mocked] one node held in flight across the window, as every
+// journey here holds one — see the module note above.
+/// A measured window holds no paced claim read, however soon the world it is
+/// measured over would otherwise have one due.
+///
+/// The scale journey's window opens once a hundred dispatches have run, and a
+/// driver reads its claim [every five minutes](CLAIM_INTERVAL_ENV) from its launch:
+/// on a runner slow enough that those dispatches end between four and five minutes
+/// in, the read lands in the window, and what it costs reads as an idle pass's.
+/// Waiting that long here would be a slow runner's timing restated; a world whose
+/// claim is due every second puts a read in every window instead, which is the
+/// same ordering on any host.
+#[test]
+fn a_claim_read_due_inside_a_window_is_held_out_of_it() {
+    let world = measuring(World::new("loopcost-claim").with_env(
+        CLAIM_INTERVAL_ENV,
+        &CLAIM_DUE_INSIDE_A_WINDOW.as_secs().to_string(),
+    ));
+    world.script("hold.wait", "hold");
+    let plan = world.plan("claim", &plan_of("claim", vec![agent("hold", &[])]));
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the dispatch to start", |world| {
+        recorded(world, "claim", "node-dispatched", "hold")
+    });
+    reporting(&world, "claim");
+
+    let before = counts(&world, "claim");
+    // Three intervals, so a read due on that interval lands inside whichever
+    // instant the window opened at.
+    std::thread::sleep(3 * CLAIM_DUE_INSIDE_A_WINDOW);
+    let did = counts(&world, "claim").since(before);
+    holds_no_claim_read("claim", &did);
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("claim", "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The two things a pass does about whole state are paid once per recorded state
 /// change, not once per pass.

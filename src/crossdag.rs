@@ -116,8 +116,11 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 /// this does do is *refresh* what the quiet readers see, which is what makes
 /// theirs free.
 fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    let journal = RunPaths::under(root, &reference.run).journal();
+    let before = crate::appendstamp::Stamp::read(&journal);
     let status = read_settled_status(root, reference);
-    remember(root, reference, status);
+    let after = crate::appendstamp::Stamp::read(&journal);
+    remember(root, reference, status, (before == after).then_some(after));
     status
 }
 
@@ -159,8 +162,12 @@ static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
 /// One upstream node, under the runs root it was asked beneath.
 type Asked = (PathBuf, String, String);
 
+type JournalStamp = Option<crate::appendstamp::Stamp>;
+
 /// What that question answered, and when it was paid for.
-type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>)>;
+// The outer option withholds provenance when the journal moved during its read;
+// the inner option records a source journal that did not exist.
+type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>, Option<JournalStamp>)>;
 
 fn key(root: &Path, reference: &Reference) -> Asked {
     (
@@ -183,16 +190,21 @@ fn answered_within(
 ) -> Option<Option<NodeStatus>> {
     answers()
         .get(&key(root, reference))
-        .filter(|(read_at, _)| read_at.elapsed() < age)
-        .map(|(_, status)| *status)
+        .filter(|(read_at, _, _)| read_at.elapsed() < age)
+        .map(|(_, status, _)| *status)
 }
 
-fn remember(root: &Path, reference: &Reference, status: Option<NodeStatus>) {
+fn remember(
+    root: &Path,
+    reference: &Reference,
+    status: Option<NodeStatus>,
+    stamp: Option<JournalStamp>,
+) {
     let mut answers = answers();
     // Dropped as they go stale rather than on a size, so what is held is one
     // entry per upstream a live graph is actually asking about.
-    answers.retain(|_, (read_at, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
-    answers.insert(key(root, reference), (Instant::now(), status));
+    answers.retain(|_, (read_at, _, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
+    answers.insert(key(root, reference), (Instant::now(), status, stamp));
 }
 
 fn read_settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
@@ -388,14 +400,57 @@ impl Observer {
 /// edit is judged against. Both need the same answer the loop would get; neither
 /// may append to the journal.
 pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status_recently)
+}
+
+/// A retained view must notice upstream changes before calling itself unchanged.
+/// Refresh the quiet readers' cache too, so a subsequent `RunView::open` agrees.
+pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status)
+}
+
+/// The input metadata belonging to the answers a quiet view actually reused.
+/// Never label a cached answer with the metadata of a newer journal. A retained
+/// view can then keep an unchanged answer after the shared cache expires,
+/// without re-reading either journal merely because time passed.
+pub(crate) fn resolution_stamps(
+    root: &Path,
+    graph: &Graph,
+    held: &BTreeMap<String, NodeStatus>,
+) -> Option<BTreeMap<String, JournalStamp>> {
+    let answered = answers();
+    let mut stamps = BTreeMap::new();
+    for dependency in edges(graph).into_keys() {
+        let Some(reference) = parse(&dependency) else {
+            continue;
+        };
+        let (_, status, stamp) = answered.get(&key(root, &reference))?;
+        if held.get(&dependency) != Some(&satisfied_status(*status)) {
+            return None;
+        }
+        let stamp = stamp.as_ref()?;
+        stamps.insert(dependency, stamp.clone());
+    }
+    Some(stamps)
+}
+
+fn satisfied_status(status: Option<NodeStatus>) -> NodeStatus {
+    match status {
+        Some(NodeStatus::Done) => NodeStatus::Done,
+        _ => NodeStatus::Blocked,
+    }
+}
+
+fn resolve_with(
+    root: &Path,
+    graph: &Graph,
+    read: fn(&Path, &Reference) -> Option<NodeStatus>,
+) -> BTreeMap<String, NodeStatus> {
     edges(graph)
         .into_keys()
         .filter_map(|dependency| {
             let reference = parse(&dependency)?;
-            let status = match settled_status_recently(root, &reference) {
-                Some(NodeStatus::Done) => NodeStatus::Done,
-                _ => NodeStatus::Blocked,
-            };
+            let status = satisfied_status(read(root, &reference));
             Some((dependency, status))
         })
         .collect()

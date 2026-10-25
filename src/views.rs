@@ -76,6 +76,9 @@ use crate::verbs::Grouping;
 /// reports: a root that was skipped is named on the same output a run is.
 pub use crate::ledger::Skipped;
 
+#[path = "views_transcript.rs"]
+pub mod transcript;
+
 /// Where one run's durable state lives.
 ///
 /// Re-exported where the views are, because it is the type a consumer already
@@ -238,7 +241,7 @@ pub struct Paused {
 const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
-const RUN_READING_SCHEMA_VERSION: u32 = 1;
+const RUN_READING_SCHEMA_VERSION: u32 = 2;
 
 /// Whether a run is driven or ended, as one document a script reads:
 /// `onepipeline status <RUN> --json`.
@@ -262,11 +265,25 @@ const RUN_READING_SCHEMA_VERSION: u32 = 1;
     ])
 )]
 pub struct RunReading {
+    /// Effective opaque labels, including the overlay.
+    // llmlint: ignore[invalid_states_unrepresentable] the public reading is the contract's string-to-string map, matching RunSummary and LaunchRecord; launch and overlay deserializers validate keys and values through LabelKey/LabelValue before RunView can serve them, and reading accepts no independent label input. Changing this field's Rust type would change that shared view contract.
+    pub labels: BTreeMap<String, String>,
+    /// Effective project group; null suppresses grouping.
+    // llmlint: ignore[invalid_states_unrepresentable] this is the contract's nullable string view field, matching RunSummary and LaunchRecord; explicit groups and origins are validated with RunGroup at launch and deserialization, and overlays carry RunGroup. The reader only projects those checked records; a new public field type would change the shared view contract.
+    pub group: Option<String>,
     /// The version of this document.
-    #[schemars(extend("const" = 1))]
+    #[schemars(extend("const" = 2))]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
+    /// What the run is named by wherever the destination is not private: the run id itself
+    /// where the linked `onevcs`'s public-output check passes it as metadata bound for a
+    /// public destination, over every private identity registered on the host, and
+    /// otherwise `run-` followed by the first 12 lowercase hex digits of the SHA-256 of the
+    /// run id's UTF-8 bytes. Decided once, at the launch, and kept in its record; a run
+    /// whose record holds none reads the same derivation over its id.
+    // llmlint: ignore[invalid_states_unrepresentable] a field of the published `RunReading`, which the approved contract fixes as exactly its fields and `schemas/run-reading.schema.json` types as a string; the checked id is `publicid::PublicId` everywhere inside the crate, and `reading` is the only constructor, filling it from `publicid::of_record`, so a public newtype here would add surface the contract does not name and check nothing the crate's own type does not.
+    pub public_id: String,
     // llmlint: ignore-block[invalid_states_unrepresentable] these five fields are the
     // `status <RUN> --json` document exactly as the approved contract fixes it — `word` and
     // `liveness` as the printed words, and `driven`, `ending` and `paused` as three fields
@@ -292,6 +309,141 @@ pub struct RunReading {
     /// The decision the run is paused on, or `null` for a run that is not.
     pub paused: Option<Paused>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Every command envelope claimed off the run's queue and not answered yet,
+    /// in claim order — omitted when there is none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unanswered: Vec<UnansweredEnvelope>,
+    /// Every live note the run's live driver holds in a receiver's inbox — its
+    /// envelope already answered, with that note `queued` — in envelope order:
+    /// omitted when there is none, and when no driver is live.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbox: Vec<InboxNote>,
+}
+
+/// One envelope's live note waiting in a receiver's inbox, as `status <RUN>
+/// --json` reads it: the envelope is answered, and its `delivery` is `queued`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct InboxNote {
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
+    /// The receiving node and since when its note has waited there, as the run's
+    /// live driver last wrote it — `queued`, the one state a note in an inbox has.
+    pub delivery: InboxDelivery,
+}
+
+/// One command envelope claimed off a run's queue with no outcome yet, as
+/// `status <RUN> --json` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct UnansweredEnvelope {
+    /// The channel envelope id — a decimal string in the document.
+    #[serde(with = "crate::channel::deliveries::envelope_id")]
+    #[schemars(with = "String")]
+    pub envelope: u64,
+    /// Where its live note stands, as the run's live driver last wrote it —
+    /// omitted where no driver is live, which leaves the envelope to be answered
+    /// by the run's next driver, and where the live driver holds no live note of
+    /// it or behind one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<Delivery>,
+}
+
+/// Where one claimed envelope's live note stands — the one type the run's
+/// live-delivery sidecar and this reading both carry.
+pub use crate::channel::deliveries::{Delivery, InboxDelivery};
+
+/// Each envelope claimed off the run's queue with no outcome, in claim order,
+/// with where its live note stands when a driver is live.
+///
+/// Read together with the driver's liveness, because the sidecar is the live
+/// driver's own account: a driver that is gone delivers nothing, so whatever it
+/// left behind says nothing, and every such envelope is the next driver's to
+/// answer. Of an envelope with several receivers still delivering, the earliest
+/// is the one named.
+fn unanswered_of(view: &RunView, liveness: DriverLiveness) -> Vec<UnansweredEnvelope> {
+    let ids = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
+    let live = (!liveness.is_undriven())
+        .then(|| crate::channel::deliveries::LiveDeliveries::read(&view.paths))
+        .flatten();
+    ids.into_iter()
+        .map(|envelope| UnansweredEnvelope {
+            envelope,
+            delivery: live
+                .as_ref()
+                .and_then(|live| live.of_envelope(envelope).next().cloned()),
+        })
+        .collect()
+}
+
+/// Each live note the run's live driver holds in a receiver's inbox, from its
+/// sidecar — nothing where no driver is live, since a driver that is gone holds
+/// no inbox and the next one records an answer for each note it left.
+///
+/// **Nor one whose every note the journal has already answered.** A driver
+/// journals what a receiver made of its notes and only then rewrites the
+/// sidecar, so a read between the two finds a note both answered and still
+/// queued; the journal is the record, and the note is read as answered.
+fn inbox_of(view: &RunView, liveness: DriverLiveness) -> Vec<InboxNote> {
+    if liveness.is_undriven() {
+        return Vec::new();
+    }
+    let Some(live) = crate::channel::deliveries::LiveDeliveries::read(&view.paths) else {
+        return Vec::new();
+    };
+    let held: Vec<InboxNote> = live
+        .deliveries
+        .into_iter()
+        .filter_map(|entry| {
+            Some(InboxNote {
+                envelope: entry.envelope,
+                delivery: entry.delivery.into_inbox()?,
+            })
+        })
+        .collect();
+    if held.is_empty() {
+        return held;
+    }
+    let channel = crate::channel::ChannelState::new(&view.paths);
+    let delivered = crate::withdrawal::readable(&view.events);
+    held.into_iter()
+        .filter(|note| !lane_answered(view, &channel, &delivered, note))
+        .collect()
+}
+
+/// Whether the journal answers every note `note`'s envelope sent its receiver:
+/// each delivered or refused. An envelope this reader cannot find is not
+/// answered here — the sidecar's word stands.
+fn lane_answered(
+    view: &RunView,
+    channel: &crate::channel::ChannelState,
+    delivered: &[(Option<u64>, crate::edits::Operation)],
+    note: &InboxNote,
+) -> bool {
+    let InboxDelivery::Queued { node, .. } = &note.delivery;
+    let Some(sent) = channel.commands_of(note.envelope) else {
+        // llmlint: ignore-block[changed_behavior_has_e2e] no verb reaches this arm: the sidecar
+        // names only an envelope its driver claimed off the queue, and the queue keeps every
+        // envelope it was sent, so it is unreadable only where the channel's files are damaged —
+        // and the answer there is the reading every build before this one gave, the sidecar's own.
+        return false;
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    sent.commands
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| {
+            matches!(command, crate::channel::Command::Note { id, .. } if id == node)
+        })
+        .all(|(index, command)| {
+            crate::withdrawal::delivered(
+                delivered,
+                note.envelope,
+                u32::try_from(index).unwrap_or(u32::MAX),
+            )
+            .is_some()
+                || refused_note(&view.events, note.envelope, index, command).is_some()
+        })
 }
 
 /// Read one run's ending, its pause, or neither, off its fold.
@@ -314,14 +466,20 @@ pub fn reading(view: &RunView) -> RunReading {
         Reached::Paused(paused) => (None, Some(paused.clone())),
         Reached::Neither => (None, None),
     };
+
     RunReading {
+        labels: view.launch.labels.clone(),
+        group: view.launch.group.clone(),
         schema_version: RUN_READING_SCHEMA_VERSION,
         run_id: view.paths.run.clone(),
+        public_id: crate::publicid::of_record(&view.launch).into_string(),
         word: standing.word(),
         liveness: liveness.as_str(),
         driven: !liveness.is_undriven(),
         ending,
         paused,
+        unanswered: unanswered_of(view, liveness),
+        inbox: inbox_of(view, liveness),
     }
 }
 
@@ -474,6 +632,11 @@ struct HostShutdown {
     /// decode. The identity is part of the key because two repositories may carry
     /// one branch name, and what became of it in one says nothing of the other.
     branches: Option<BTreeMap<(String, String), crate::payload::PreservedWord>>,
+}
+
+/// Whether this run is still awaiting adoption after a host shutdown.
+pub(crate) fn host_shutdown(view: &RunView) -> bool {
+    HostShutdown::of(view).is_some()
 }
 
 impl HostShutdown {
@@ -823,6 +986,7 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
                 launch.recorded_host(),
                 launch.driver_pid(),
                 state.let_go_by.as_ref(),
+                paths,
             ),
         launch.recorded_host(),
         launch.driver_pid(),
@@ -834,19 +998,34 @@ pub fn liveness(launch: &LaunchRecord, state: &RunState, paths: &RunPaths) -> Dr
 }
 
 /// Whether the driver a record names is the one a run's journal records letting
-/// go of the run to fire its run-end hook.
+/// go of the run, and that driver has released it.
 ///
-/// That driver is still a live process while it awaits the hook, and it holds
-/// nothing: the ownership lock is released before the hook starts. So it is
+/// That driver can still be a live process once it has let go — awaiting its
+/// run-end hook, or finishing its watch — and it holds nothing then. So it is
 /// matched by what the journal stamped — the host and pid of the stream that
-/// wrote the firing — against the claim the record makes, and a driver that
+/// wrote the record — against the claim the record makes, and a driver that
 /// adopted the run since is a different claim.
+///
+/// **And by the lock.** A driver journals its scratch record inside its final
+/// handover, *before* it releases the ownership lock, so the record alone names
+/// a driver that still holds the run: read as let go there, the run reads as
+/// nothing driving it, and an adoption made on that word is refused by the lock
+/// it cannot take — or a fault arranged on the lock is removed by the release
+/// that follows. Only once the lock no longer names that driver has it let go.
 pub(crate) fn let_go(
     recorded_host: Option<&str>,
     pid: Option<std::num::NonZeroU32>,
     let_go_by: Option<&crate::projection::DriverClaim>,
+    paths: &RunPaths,
 ) -> bool {
-    let_go_by.is_some_and(|claim| claim.is(recorded_host, pid))
+    match (recorded_host, pid) {
+        (Some(host), Some(pid))
+            if let_go_by.is_some_and(|claim| claim.is(Some(host), Some(pid))) =>
+        {
+            !ledger::lock_may_be_held_by(paths, host, pid.get())
+        }
+        _ => false,
+    }
 }
 
 /// The same verdict, over the six things a record says and the run's own
@@ -952,6 +1131,18 @@ pub(crate) fn landings_the_run_re_read(state: &mut RunState, paths: &RunPaths) {
 /// are exactly `not landed` and `could not be decided`, and a view that reused
 /// yesterday's would be the stale claim this exists to stop making.
 ///
+/// **One exception: an attach stream**, which renders after every batch of
+/// records for as long as the run goes. There a node's read is carried across
+/// that stream's consecutive renders for at most [`STREAM_READ_REUSE`] — see
+/// [`StreamReads`] — and is taken again at once after the stream records a
+/// settlement or restack of that node or its change merging, and on the stream's
+/// final render — the one made once the run's loop has finished, or the one
+/// printing the driver's exit where that came first — which reports the run as it
+/// settled and carries nothing from the renders before it, taking up only the
+/// answers the run's own close-out read once its loop had settled (see
+/// [`closed_out`]). `status`, `results` and `watch` carry nothing and read on
+/// every render.
+///
 /// Nested scopes are one render: `status` prints [`RunView::summary`] inside
 /// itself, and a second scope there would empty the memo half-way through and
 /// ask every node twice.
@@ -974,15 +1165,357 @@ thread_local! {
     /// supervisory look costs to say one thing.
     //
     // llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as — `RunPaths.run`, `RunState::landings`, `RunState::branches` — for the reason `src/ledger.rs`'s file-level suppression records, and `src/AGENTS.md` names a `RunId` newtype as interface drift. Newtypes at these two sites alone would disagree with every neighbour and convert at every boundary. Neither value is unchecked: the run id crossed `ledger::is_valid_run_id` when the run was launched, and the node id is one the run's own journal projected into its graph.
-    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), std::rc::Rc<LandingRead>>> =
+    static READ_THIS_RENDER: std::cell::RefCell<BTreeMap<(String, String), Carried>> =
         const { std::cell::RefCell::new(BTreeMap::new()) };
+
+    /// Whether the renders on this thread are an attach stream's, which carry the
+    /// reads above from one render to the next — see [`StreamReads`].
+    static RENDERING: std::cell::Cell<Renders> = const { std::cell::Cell::new(Renders::EachAlone) };
+}
+
+/// What one render on a thread keeps of the last one's landing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Renders {
+    /// Nothing: every view but an attach stream reads on every render.
+    EachAlone,
+    /// What is still inside [`STREAM_READ_REUSE`] and nothing has moved since.
+    AsOneStream,
+}
+
+/// How long an attach stream carries a node's landing read across its renders.
+///
+/// The stream renders after every batch of records, which on a busy run is
+/// back to back, and each render took every unlanded node's landing from
+/// scratch — `onevcs` resolving the repository and running `git` some forty
+/// times a node. That was nearly half the processes a busy attached command
+/// started, and, one read after another, a tail after its run had finished. Ten
+/// seconds is a merge somebody else performs going unreported for no longer than
+/// a person takes to look up from it; the stream's own records end the reuse
+/// sooner, and its last render carries none of it.
+pub(crate) const STREAM_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One landing read a render holds, and when it was taken.
+struct Carried {
+    read: std::rc::Rc<LandingRead>,
+    taken: std::time::Instant,
+}
+
+impl Carried {
+    /// Whether, at `now`, the read is still inside [`STREAM_READ_REUSE`].
+    fn still_carried(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.taken) < STREAM_READ_REUSE
+    }
+}
+
+/// An attach stream's renders, carrying their reads from one to the next while
+/// this is held.
+///
+/// Held by [`crate::driver`]'s attach loop on the thread that renders, and by
+/// nothing else, so no other view ever reuses a read. It names the run it renders,
+/// which is what lets that run's close-out hand it its reads — see [`closed_out`].
+//
+// llmlint: ignore[invalid_states_unrepresentable] a run id is the plain string this whole crate spells it as, for the reason the suppression on `READ_THIS_RENDER` records.
+pub(crate) struct StreamReads(String);
+
+impl StreamReads {
+    /// Begin carrying reads across this thread's renders of `run`.
+    pub(crate) fn begin(run: &str) -> Self {
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        RENDERING.set(Renders::AsOneStream);
+        *handoff().streamed.entry(run.to_owned()).or_default() += 1;
+        Self(run.to_owned())
+    }
+
+    /// Make ready for the render of `fresh`, the records the stream is about to
+    /// print, `concluded` once the run's loop has finished.
+    ///
+    /// The stream's last render reports the run as it settled, so it carries no
+    /// read from the renders before it — as does the render printing the driver's
+    /// exit, which is the last one where nothing is left to print after it; before
+    /// them, a node's read is carried only until the stream records something that
+    /// moves it.
+    pub(crate) fn before_render(&self, run: &str, fresh: &[&Envelope], concluded: bool) {
+        // First, so a close-out read the run moved past is not what its last render
+        // takes up, whichever of the two branches below that render is.
+        let mut handed = handoff();
+        handed.let_go_of_lapsed(std::time::Instant::now());
+        for node in fresh.iter().filter_map(|event| moved_by(event)) {
+            handed.reads.remove(&(run.to_owned(), node.to_owned()));
+        }
+        drop(handed);
+        if concluded {
+            self.start_from_close_out(run);
+        } else {
+            self.forget_moved(run, fresh);
+        }
+    }
+
+    /// Carry nothing from the renders before into the next, which is the one
+    /// reporting the run as it settled — except the reads the run's own close-out
+    /// took in this process, after its loop's last settlement, still inside
+    /// [`STREAM_READ_REUSE`] and moved by nothing the stream recorded since: see
+    /// [`closed_out`]. Taken up, they are the stream's own to carry, and the
+    /// hand-off lets go of them.
+    fn start_from_close_out(&self, run: &str) {
+        let mut handed = handoff();
+        handed.let_go_of_lapsed(std::time::Instant::now());
+        let settled: Vec<((String, String), Carried)> = handed
+            .taken_up(run)
+            .into_iter()
+            .map(|(key, (read, taken))| {
+                let carried = Carried {
+                    read: std::rc::Rc::new(read),
+                    taken,
+                };
+                (key, carried)
+            })
+            .collect();
+        drop(handed);
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.clear();
+            reads.extend(settled);
+        });
+    }
+
+    /// Take a node's landing afresh where the stream just recorded something that
+    /// moves it — see [`moved_by`]. Every other record of its session is a step
+    /// of a publication whose outcome the run records as the node's settlement or
+    /// restack, and is let go of there: letting go at each step read the node
+    /// again on every render of its publication, some forty `git` each time, to
+    /// answer what the read before it had.
+    ///
+    /// And every node's, where the stream just recorded the driver exiting: the
+    /// render printing that reports the run as it settled, and the stream's last
+    /// pass renders only what it has not printed yet — so where the exit was
+    /// printed before the run's loop was seen to finish, that render is the
+    /// stream's final one.
+    fn forget_moved(&self, run: &str, events: &[&Envelope]) {
+        if events.iter().any(|event| {
+            event.source == Source::Pipeline && event.kind.0 == PipelineKind::DriverExited.as_str()
+        }) {
+            self.start_from_close_out(run);
+            return;
+        }
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            for node in events.iter().filter_map(|event| moved_by(event)) {
+                reads.remove(&(run.to_owned(), node.to_owned()));
+            }
+        });
+    }
+}
+
+/// The node whose landing `event` can move, if it can move one: the run's record
+/// of the node settling or restacking, which is where it records what each
+/// publication of the node did, and the sibling's record of a change merging,
+/// which is the landing itself.
+fn moved_by(event: &Envelope) -> Option<&str> {
+    let moves = match event.source {
+        Source::Vcs => crate::vcs::is_landing(&event.kind),
+        Source::Pipeline => {
+            event.kind.0 == PipelineKind::NodeSettled.as_str()
+                || event.kind.0 == PipelineKind::NodeRestacked.as_str()
+        }
+        Source::Agentgraph => false,
+    };
+    moves.then_some(event.labels.node.as_deref()).flatten()
+}
+
+/// Hand the landing reads the run's close-out just took to an attach stream
+/// rendering the same run in this process, for its last render.
+///
+/// The driver's close-out — see `engine`'s `landings_after_asking_again` — asks
+/// every unlanded node's landing once the run's loop has settled its last node,
+/// and the attached stream's last render, a moment later, asked every one of them
+/// again: ten branches read twice over in the closing seconds of every attached
+/// command. Both report the run as it settled, so the render takes the close-out's
+/// answer — inside [`STREAM_READ_REUSE`] of when it was `taken`, only where the
+/// sibling answered it, and only where the stream recorded nothing that moves the
+/// node since — and reads the rest.
+///
+/// Held only for a run an attach stream in this process is rendering, so a
+/// detached driver's close-out, and `readjust`'s, hold nothing; and let go of when
+/// that render takes them up, when they pass the window, and when the stream ends.
+///
+/// Each read comes with when it was asked, which for one the close-out took up
+/// from the stream — see [`streamed_for_close_out`] — is when the stream asked it,
+/// so handing it back never stretches its window.
+pub(crate) fn closed_out(run: &str, reads: &[(String, LandingRead, std::time::Instant)]) {
+    let mut handed = handoff();
+    handed.let_go_of_lapsed(std::time::Instant::now());
+    if !handed.streamed.contains_key(run) {
+        return;
+    }
+    handed.reads.retain(|(closed, _), _| closed != run);
+    // A refusal is not handed over: the last render asks again rather than repeat
+    // that nothing could decide it a moment ago.
+    handed.reads.extend(
+        reads
+            .iter()
+            .filter(|(_, read, _)| matches!(read, LandingRead::Answered(_)))
+            .map(|(node, read, taken)| ((run.to_owned(), node.clone()), (read.clone(), *taken))),
+    );
+}
+
+/// The landing reads an attach stream rendering `run` in this process asked of
+/// `nodes` and the run's close-out can take up rather than ask again, each with
+/// when the stream asked it.
+///
+/// The hand-off [`closed_out`] makes, run the other way. The stream reads a node
+/// again at its next render after the run records it settling or restacking, so
+/// the close-out a moment later — see `engine`'s `landings_after_asking_again` —
+/// asked again what the stream had just asked: a restacking command read every
+/// draft above the reworked one twice over in its closing seconds. A read is taken
+/// up only where the sibling answered it, only inside [`STREAM_READ_REUSE`] of when
+/// it was asked, and only where this process recorded nothing that moves the node
+/// after it was asked — see [`recorded`] — which is every record that does: while
+/// the driver holds the run it is the one writer of a node's settlement and
+/// restack, and it relays the records of the sessions it opened.
+pub(crate) fn streamed_for_close_out(
+    run: &str,
+    nodes: &[&String],
+) -> BTreeMap<String, (LandingRead, std::time::Instant)> {
+    let mut handed = handoff();
+    handed.let_go_of_lapsed(std::time::Instant::now());
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let (read, asked) = handed
+                .streamed_reads
+                .get(&(run.to_owned(), (*node).clone()))?;
+            Some(((*node).clone(), (read.clone(), *asked)))
+        })
+        .collect()
+}
+
+/// Note that this process just appended `envelope` to `run`'s journal, so a
+/// stream read asked before it of a node it moves is not taken up by the close-out.
+///
+/// Called by [`crate::journal::Journal`] once the record is in the file, so a read
+/// asked after this is asked of a store that holds it.
+pub(crate) fn recorded(run: &str, envelope: &Envelope) {
+    let Some(node) = moved_by(envelope) else {
+        return;
+    };
+    let mut handed = handoff();
+    if !handed.streamed.contains_key(run) {
+        return;
+    }
+    let key = (run.to_owned(), node.to_owned());
+    handed.streamed_reads.remove(&key);
+    handed.moved.insert(key, std::time::Instant::now());
+}
+
+/// The reads [`closed_out`] hands an attach stream and the ones it hands the
+/// close-out back — see [`streamed_for_close_out`] — and the runs a stream in this
+/// process is rendering.
+///
+/// Process-wide rather than per thread like [`READ_THIS_RENDER`], because the
+/// close-out runs on the engine's thread and the stream renders on the driver's.
+//
+// llmlint: ignore[invalid_states_unrepresentable] a run id and a node id are the plain strings this whole crate spells them as, for the reason the suppression on `READ_THIS_RENDER` above records.
+struct Handoff {
+    /// Each run an attach stream is rendering, and how many streams render it.
+    streamed: BTreeMap<String, usize>,
+    /// Each read handed over and not yet taken up, keyed by run and node, and when
+    /// it was taken.
+    reads: BTreeMap<(String, String), (LandingRead, std::time::Instant)>,
+    /// Each answered read a stream asked, keyed by run and node, and when it was
+    /// asked — the newest per node, and none asked before [`moved`](Self::moved)
+    /// says this process last recorded the node moving.
+    streamed_reads: BTreeMap<(String, String), (LandingRead, std::time::Instant)>,
+    /// When this process last recorded each node of a streamed run moving.
+    moved: BTreeMap<(String, String), std::time::Instant>,
+}
+
+impl Handoff {
+    /// Let go of every read past [`STREAM_READ_REUSE`] at `now`, which nothing
+    /// would take up.
+    fn let_go_of_lapsed(&mut self, now: std::time::Instant) {
+        let inside =
+            |taken: &std::time::Instant| now.saturating_duration_since(*taken) < STREAM_READ_REUSE;
+        self.reads.retain(|_, (_, taken)| inside(taken));
+        self.streamed_reads.retain(|_, (_, asked)| inside(asked));
+    }
+
+    /// Keep a stream's read of `node`, asked at `asked`, for the run's close-out —
+    /// where the sibling answered it, the run is streamed, and nothing moved the
+    /// node after it was asked.
+    fn streamed_read(
+        &mut self,
+        run: &str,
+        node: &str,
+        read: &LandingRead,
+        asked: std::time::Instant,
+    ) {
+        if !matches!(read, LandingRead::Answered(_)) || !self.streamed.contains_key(run) {
+            return;
+        }
+        let key = (run.to_owned(), node.to_owned());
+        if self.moved.get(&key).is_some_and(|moved| *moved >= asked) {
+            return;
+        }
+        self.streamed_reads.insert(key, (read.clone(), asked));
+    }
+
+    /// Every read held for `run`, let go of here.
+    fn taken_up(
+        &mut self,
+        run: &str,
+    ) -> Vec<((String, String), (LandingRead, std::time::Instant))> {
+        let (taken, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.reads)
+            .into_iter()
+            .partition(|((closed, _), _)| closed == run);
+        self.reads = kept.into_iter().collect();
+        taken
+    }
+}
+
+static HANDOFF: std::sync::Mutex<Handoff> = std::sync::Mutex::new(Handoff {
+    streamed: BTreeMap::new(),
+    reads: BTreeMap::new(),
+    streamed_reads: BTreeMap::new(),
+    moved: BTreeMap::new(),
+});
+
+/// [`HANDOFF`], whoever panicked while holding it: each entry is a whole read.
+fn handoff() -> std::sync::MutexGuard<'static, Handoff> {
+    HANDOFF
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl Drop for StreamReads {
+    fn drop(&mut self) {
+        RENDERING.set(Renders::EachAlone);
+        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        let mut handed = handoff();
+        let last = match handed.streamed.get_mut(&self.0) {
+            Some(streams) if *streams > 1 => {
+                *streams -= 1;
+                false
+            }
+            _ => true,
+        };
+        if last {
+            handed.streamed.remove(&self.0);
+            handed.reads.retain(|(closed, _), _| *closed != self.0);
+            handed
+                .streamed_reads
+                .retain(|(streamed, _), _| *streamed != self.0);
+            handed.moved.retain(|(streamed, _), _| *streamed != self.0);
+        }
+    }
 }
 
 /// Begin rendering `view` over `run`.
 fn rendering(view: Rendered, run: &str) -> Rendering {
     let render = crate::rendercost::rendering(view, run);
     if render.outermost() {
-        READ_THIS_RENDER.with_borrow_mut(BTreeMap::clear);
+        let now = std::time::Instant::now();
+        READ_THIS_RENDER.with_borrow_mut(|reads| match RENDERING.get() {
+            Renders::EachAlone => reads.clear(),
+            Renders::AsOneStream => reads.retain(|_, carried| carried.still_carried(now)),
+        });
     }
     Rendering(render)
 }
@@ -1139,35 +1672,111 @@ fn reported_landing_of(
 }
 
 /// One node's landing, read now — or handed back from the read this render
-/// already took of it.
+/// already took of it, or, inside an attach stream, the one it carries.
 fn read_now(run: &str, node: &str, branch: &str, repo: &str) -> std::rc::Rc<LandingRead> {
     let key = (run.to_owned(), node.to_owned());
-    if let Some(read) = READ_THIS_RENDER.with_borrow(|reads| reads.get(&key).cloned()) {
+    if let Some(read) = READ_THIS_RENDER
+        .with_borrow(|reads| reads.get(&key).map(|held| std::rc::Rc::clone(&held.read)))
+    {
         return read;
     }
     // Everything the decision costs is counted against this node, which is what
     // makes "no other per-node work" a measurement rather than a promise.
+    let asked = std::time::Instant::now();
     let read = {
         let _deciding = crate::rendercost::deciding(node);
         std::rc::Rc::new(crate::vcs::landing_now(branch, Some(repo)))
     };
-    READ_THIS_RENDER.with_borrow_mut(|reads| {
-        reads.insert(key, std::rc::Rc::clone(&read));
-    });
+    hold(run, node, std::rc::Rc::clone(&read), asked);
     read
 }
 
-/// Everything a view needs about one run, read once.
+/// Hold a read of one node, asked at `asked`, for the rest of this render, and,
+/// inside an attach stream, for the renders after it — and for the run's
+/// close-out, see [`streamed_for_close_out`].
+fn hold(run: &str, node: &str, read: std::rc::Rc<LandingRead>, asked: std::time::Instant) {
+    if RENDERING.get() == Renders::AsOneStream {
+        handoff().streamed_read(run, node, &read, asked);
+    }
+    READ_THIS_RENDER.with_borrow_mut(|reads| {
+        reads.insert(
+            (run.to_owned(), node.to_owned()),
+            Carried {
+                read,
+                taken: std::time::Instant::now(),
+            },
+        );
+    });
+}
+
+/// Everything a view needs about one run, read once or kept current with
+/// [`refresh`](Self::refresh).
+///
+/// Refresh returns [`Refreshed::Unchanged`] without parsing or folding a journal
+/// record when the journal and externally resolved view data are unchanged.
+/// [`Refreshed::Appended`] preserves the previous events exactly as a prefix;
+/// only appended records are read, parsed and folded, in merge order.
+/// [`Refreshed::Reread`] reads the whole store when its prefix changed, it shrank,
+/// appended records sort before held records under the checkpoint coverage rule,
+/// or labels, cross-DAG resolution or landing information changed incompatibly
+/// with suffix processing. After every outcome, `events`, `state` and `launch`
+/// equal a fresh [`open`](Self::open), including its label overlay and external
+/// resolution. Existing callers of `open` retain the same behavior.
 #[derive(Debug)]
 pub struct RunView {
     /// Where the run's state lives.
     pub paths: RunPaths,
-    /// Who launched it, and with what.
+    /// Launch attribution with effective labels and group applied for this reading.
+    /// The stored launch record remains immutable.
     pub launch: LaunchRecord,
     /// Its merged event store, in merge order.
     pub events: Vec<Envelope>,
     /// What the journal says about it.
     pub state: RunState,
+    refresh: RefreshCursor,
+}
+
+/// What changed when a long-lived [`RunView`] refreshed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    /// Nothing changed; no journal record was parsed or folded.
+    Unchanged,
+    /// Only the suffix starting at `first` was read, parsed and folded.
+    Appended {
+        /// The previous event count; earlier events are unchanged.
+        first: usize,
+    },
+    /// The whole store was read again, as by [`RunView::open`].
+    Reread,
+}
+
+#[derive(Debug)]
+struct RefreshCursor {
+    dir: PathBuf,
+    stamp: Option<crate::appendstamp::Stamp>,
+    receipt: Option<crate::appendstamp::Receipt>,
+    coverage: crate::checkpoint::Coverage,
+    result: Option<serde_json::Value>,
+    upstreams: Option<BTreeMap<String, Option<crate::appendstamp::Stamp>>>,
+}
+
+fn upstream_stamps(
+    paths: &RunPaths,
+    state: &RunState,
+) -> BTreeMap<String, Option<crate::appendstamp::Stamp>> {
+    let root = paths
+        .dir
+        .parent()
+        .map_or_else(ledger::runs_root, Path::to_path_buf);
+    crate::crossdag::edges(&state.graph)
+        .keys()
+        .filter_map(|edge| {
+            let reference = crate::crossdag::parse(edge)?;
+            let journal = RunPaths::under(&root, &reference.run).journal();
+            let stamp = crate::appendstamp::Stamp::read(&journal);
+            Some((edge.clone(), stamp))
+        })
+        .collect()
 }
 
 impl RunView {
@@ -1179,7 +1788,9 @@ impl RunView {
                 root: paths.dir.parent().unwrap_or(Path::new(".")).to_path_buf(),
             });
         }
-        let launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        let stamp = crate::appendstamp::Stamp::read(&paths.journal());
+        let mut launch: LaunchRecord = ledger::read_json(&paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(paths, &launch)?;
         let mut events = crate::journal::read(&paths.journal());
         crate::journal::merge_order(&mut events);
         // Resumed from the run's checkpoint rather than folded from nothing: the
@@ -1199,12 +1810,136 @@ impl RunView {
                 .map_or_else(ledger::runs_root, Path::to_path_buf),
             &state.graph,
         );
+        let receipt = stamp.as_ref().and_then(|stamp| {
+            (Some(stamp) == crate::appendstamp::Stamp::read(&paths.journal()).as_ref())
+                .then(|| crate::appendstamp::Receipt::read(&paths.journal(), stamp))
+                .flatten()
+        });
+        let mut coverage = crate::checkpoint::Coverage::default();
+        for event in &events {
+            coverage.absorb(Some(event), 0);
+        }
+        coverage.bytes = stamp.as_ref().map_or(0, |stamp| stamp.len);
+        let refresh = RefreshCursor {
+            dir: paths.dir.clone(),
+            stamp,
+            receipt,
+            coverage,
+            result: ledger::read_json_opt(&paths.result()),
+            upstreams: crate::crossdag::resolution_stamps(
+                &paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+                &state.cross_dag,
+            ),
+        };
         Ok(Self {
             paths: paths.clone(),
             launch,
             events,
             state,
+            refresh,
         })
+    }
+
+    /// Bring this view up to date, preserving its event prefix on an append.
+    ///
+    /// See [`RunView`] and [`Refreshed`] for the outcomes and equality guarantee.
+    /// An unsuccessful refresh leaves the previous view intact.
+    pub fn refresh(&mut self) -> crate::Result<Refreshed> {
+        let journal = self.paths.journal();
+        let stamp = crate::appendstamp::Stamp::read(&journal);
+        let mut launch: LaunchRecord = ledger::read_json(&self.paths.launch())?;
+        (launch.labels, launch.group) = crate::labels::effective(&self.paths, &launch)?;
+        let result = ledger::read_json_opt::<serde_json::Value>(&self.paths.result());
+        let upstreams = upstream_stamps(&self.paths, &self.state);
+        if self.refresh.upstreams.as_ref() != Some(&upstreams) {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &self.state.graph,
+            );
+            return self.reread();
+        }
+        let external_changed = serde_json::to_value(&launch)
+            .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            != serde_json::to_value(&self.launch)
+                .map_err(|error| crate::Error::Invalid(error.to_string()))?
+            || result != self.refresh.result;
+        if self.paths.dir != self.refresh.dir || external_changed {
+            return self.reread();
+        }
+        if stamp == self.refresh.stamp {
+            return Ok(Refreshed::Unchanged);
+        }
+        let receipt = stamp
+            .as_ref()
+            .and_then(|stamp| crate::appendstamp::Receipt::read(&journal, stamp));
+        let continuous = receipt
+            .as_ref()
+            .zip(self.refresh.receipt.as_ref())
+            .is_some_and(|(now, previous)| now.continues(previous));
+        if !continuous
+            || stamp
+                .as_ref()
+                .is_none_or(|stamp| stamp.len <= self.refresh.coverage.bytes)
+        {
+            return self.reread();
+        }
+        #[cfg(test)]
+        refresh_tests::before_appended_read();
+        let (mut grown, offset) = crate::journal::appended_range(
+            &journal,
+            self.refresh.coverage.bytes,
+            stamp
+                .as_ref()
+                .map_or(0, |stamp| stamp.len - self.refresh.coverage.bytes),
+        );
+        if stamp.as_ref().is_none_or(|stamp| offset != stamp.len)
+            || crate::appendstamp::Stamp::read(&journal) != stamp
+            || !grown
+                .iter()
+                .all(|event| self.refresh.coverage.is_in_front_of(event))
+        {
+            return self.reread();
+        }
+        crate::journal::merge_order(&mut grown);
+        let first = self.events.len();
+        let mut state = self.state.clone();
+        for event in &grown {
+            crate::projection::fold_one(&mut state, event);
+        }
+        if upstream_stamps(&self.paths, &state) != upstreams {
+            crate::crossdag::resolve_for_refresh(
+                &self
+                    .paths
+                    .dir
+                    .parent()
+                    .map_or_else(ledger::runs_root, Path::to_path_buf),
+                &state.graph,
+            );
+            return self.reread();
+        }
+        landings_the_run_re_read(&mut state, &self.paths);
+        self.state = state;
+        for event in &grown {
+            self.refresh.coverage.absorb(Some(event), 0);
+        }
+        self.events.extend(grown);
+        self.refresh.coverage.bytes = offset;
+        self.refresh.stamp = stamp;
+        self.refresh.receipt = receipt;
+        Ok(Refreshed::Appended { first })
+    }
+
+    fn reread(&mut self) -> crate::Result<Refreshed> {
+        *self = Self::open(&self.paths)?;
+        Ok(Refreshed::Reread)
     }
 
     /// How the run is being driven.
@@ -1927,21 +2662,55 @@ impl<'a> Row<'a> {
     }
 
     /// How the run is being driven, read from the host now.
+    ///
+    /// **A driver the document names as over is asked of the launch record
+    /// too.** The document copies the record's claim at each append, and a
+    /// driver claims a run by rewriting the record without appending: a detached
+    /// launch's retained driver, until its loop first appends, leaves a document
+    /// current against the journal that names the launcher it took over from —
+    /// a process that has exited. Read off the document alone that run is
+    /// `DRIVER DEAD` while its driver is working. So where the document's claim
+    /// reads over and the record names another, the record's is the one judged;
+    /// a run whose driver did die names the same claim in both and pays the one
+    /// read, and a live one pays nothing.
     fn liveness(&self) -> DriverLiveness {
-        driver_liveness(
-            self.summary.stop_recorded
-                || let_go(
-                    self.summary.host.as_deref(),
-                    self.summary.pid,
-                    self.summary.let_go_by.as_ref(),
-                ),
+        let judged = |host: Option<&str>, pid, started: Option<&str>| {
+            driver_liveness(
+                self.summary.stop_recorded
+                    || let_go(host, pid, self.summary.let_go_by.as_ref(), &self.paths),
+                host,
+                pid,
+                started,
+                self.summary.last_write_at,
+                self.summary.awaiting_human_action,
+                &self.paths,
+            )
+        };
+        let (host, pid, started) = (
             self.summary.host.as_deref(),
             self.summary.pid,
             self.summary.started.as_deref(),
-            self.summary.last_write_at,
-            self.summary.awaiting_human_action,
-            &self.paths,
-        )
+        );
+        let verdict = judged(host, pid, started);
+        if verdict != DriverLiveness::DriverDead || self.summary.stop_recorded {
+            return verdict;
+        }
+        match ledger::read_json_opt::<LaunchRecord>(&self.paths.launch()) {
+            Some(launch)
+                if (
+                    launch.recorded_host(),
+                    launch.driver_pid(),
+                    launch.driver_stamp(),
+                ) != (host, pid, started) =>
+            {
+                judged(
+                    launch.recorded_host(),
+                    launch.driver_pid(),
+                    launch.driver_stamp(),
+                )
+            }
+            _ => verdict,
+        }
     }
 
     /// Whether anything is watching the run, where its driver tier leaves room
@@ -2068,12 +2837,10 @@ pub struct Projects {
 /// One project's runs, as a grouped listing reads them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProjectGroup {
-    /// The qualified onetaskgraph project id every run in the group was launched
-    /// with, or `None` for the runs whose summary carries none.
-    // llmlint: ignore[invalid_states_unrepresentable] the id as `RunSummary::project` carries it — a serialized field of a document an older build wrote, for the reason `src/summary.rs`'s file-level suppression states — grouped on by equality and never parsed; the qualified-id type is `taskgraph::QualifiedId`, private, and parsing a recorded id into it would refuse a row this build lists today.
+    /// The effective qualified project group, or `None` for ungrouped runs.
+    // llmlint: ignore[invalid_states_unrepresentable] ProjectGroup.project is the existing public Option<String> field the contract preserves; replacing it with RunGroup would change that public shape beyond the tasked field additions. Its value is projected from RunSummary.group, whose launch and overlay inputs are validated, and grouping only compares those recorded ids.
     pub project: Option<String>,
-    /// The plan's name, off the newest run in the group that recorded one: what
-    /// a header labels the project by, beside its id.
+    /// The newest launch name from the project or its copies, else the native id.
     pub name: Option<String>,
     /// The newest [`RunSummary::last_write_at`] in the group — the recency the
     /// group is ordered by.
@@ -2093,14 +2860,13 @@ pub const GROUP_HEADER: &str = "== ";
 impl Projects {
     /// Group a listing's rows by project.
     ///
-    /// Keyed by [`RunSummary::project`], an empty project being the `None`
-    /// group. Groups take their order from their newest run and their name from
-    /// the newest run that carries one; runs keep the listing's order inside a
-    /// group.
+    /// Keyed by effective [`RunSummary::group`]. Groups take their order from
+    /// newest activity and their name from the newest launch belonging to that
+    /// project or a recorded copy; runs keep the listing's order inside a group.
     pub fn of(listing: &Listing) -> Self {
         let mut groups: Vec<ProjectGroup> = Vec::new();
         for summary in &listing.summaries {
-            let project = (!summary.project.is_empty()).then(|| summary.project.clone());
+            let project = summary.group.clone();
             let group = match groups.iter_mut().find(|group| group.project == project) {
                 Some(group) => group,
                 None => {
@@ -2113,11 +2879,31 @@ impl Projects {
                     groups.last_mut().expect("the group just pushed")
                 }
             };
-            if group.name.is_none() {
-                group.name.clone_from(&summary.name);
-            }
             group.last_write_at = group.last_write_at.max(summary.last_write_at);
             group.runs.push(summary.clone());
+        }
+        for group in &mut groups {
+            group.name = group
+                .runs
+                .iter()
+                .rev()
+                .filter(|run| {
+                    let launch = ledger::read_json::<LaunchRecord>(
+                        &RunPaths::under(&listing.root, &run.run_id).launch(),
+                    );
+                    run.group.is_some()
+                        && (run.group.as_deref() == Some(run.project.as_str())
+                            || launch.is_ok_and(|launch| launch.project_origin == run.group))
+                })
+                .max_by_key(|run| &run.started_at)
+                .and_then(|run| run.name.clone())
+                .or_else(|| {
+                    group.project.as_deref().map(|id| {
+                        id.split_once(':')
+                            .map_or(id, |(_, native)| native)
+                            .to_owned()
+                    })
+                });
         }
         groups.sort_by(|a, b| {
             b.last_write_at
@@ -2491,6 +3277,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&note_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
         // them would otherwise find drafts with no dispatch behind them.
@@ -2585,7 +3372,10 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             if *node_status != NodeStatus::Ready {
                 continue;
             }
-            match held_for_release(view, id).or_else(|| held_for_workspace(view, id)) {
+            match held_for_release(view, id)
+                .or_else(|| held_for_workspace(view, id))
+                .or_else(|| held_for_source(view, id))
+            {
                 Some(held) => out.push_str(&format!("  {id}: {held}\n")),
                 None => out.push_str(&format!(
                     "  {id}: ready — {}\n",
@@ -2614,6 +3404,14 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         for node in view.state.reworks.keys() {
             if let Some(reworked) = rework_phrase(&view.state, node) {
                 out.push_str(&format!("  {}: {reworked}\n", one_line(node)));
+            }
+        }
+        // What people merging drafts on the host did to the stack, and what the run
+        // did about it: how each landing was found, what was absorbed into another
+        // draft, where each draft was readjusted onto, and whose verdict is owed.
+        for id in statuses.keys() {
+            for said in readjust_phrases(&view.state, id) {
+                out.push_str(&format!("  {id}: {said}\n"));
             }
         }
         for (id, node_status) in &statuses {
@@ -2744,6 +3542,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
                 .parent()
                 .unwrap_or_else(|| Path::new(ledger::DEFAULT_RUNS_DIR)),
         ));
+        out.push_str(&crate::scratch::lines(view, Some(5)));
         if providers == Providers::Reported {
             if let Some(health) = crate::agentgraph::health() {
                 out.push_str(&format!("  providers: {health}\n"));
@@ -3240,22 +4039,10 @@ struct Outstanding {
 /// while nine of the eleven had landed, and an adoption node was dispatched three
 /// times against work that was already on its base.
 fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
-    let statuses = view.state.statuses();
+    let summarised = summarised(view);
+    read_side_by_side(view, &summarised);
     let mut outstanding = Outstanding::default();
-    for (node, _) in view
-        .state
-        .landings
-        .iter()
-        // A node whose change is held as a draft has not landed and is not one of
-        // these: this list is work an operator has to *decide* about — a change
-        // sitting open that nobody merged — and a draft is a change this run is
-        // deliberately holding and will lift itself. It has a line of its own,
-        // which says what it is waiting on.
-        .filter(|(node, _)| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
-        // A reworked node's change is its replacement's now — the same branch and
-        // the same change request — so it is counted once, under the replacement.
-        .filter(|(node, _)| !view.state.reworks.contains_key(*node))
-    {
+    for node in summarised {
         match reported_landing(view, render, node).stands() {
             Stands::NotLanded => outstanding.not_landed.push(node.clone()),
             Stands::Undecided => outstanding.undecided.push(node.clone()),
@@ -3263,6 +4050,57 @@ fn outstanding_landings(view: &RunView, render: &Rendering) -> Outstanding {
         }
     }
     outstanding
+}
+
+/// Take, side by side, the landing reads `nodes` will ask this render for and it
+/// does not already hold — see [`crate::vcs::landings_now`] — so the render finds
+/// each one taken rather than taking them one after another.
+///
+/// The same reads [`reported_landing_of`] would take, of the same nodes, counted
+/// against the same render: a node recorded landed or stated is never read, a
+/// node with no branch or no repository has nothing to read, and a node this
+/// render or the attach stream it is part of already holds is not read again.
+fn read_side_by_side(view: &RunView, nodes: &[&String]) {
+    let run = &view.paths.run;
+    let wanted: Vec<&String> = nodes
+        .iter()
+        .copied()
+        .filter(|node| {
+            !view.state.stated_landings.contains_key(*node)
+                && view.state.landings.get(*node) != Some(&Landing::Landed)
+                && view
+                    .state
+                    .graph
+                    .get(node)
+                    .is_some_and(|node| node.repo.is_some())
+        })
+        .filter(|node| {
+            let key = (run.clone(), (*node).clone());
+            !READ_THIS_RENDER.with_borrow(|reads| reads.contains_key(&key))
+        })
+        .collect();
+    let asked = std::time::Instant::now();
+    for (node, read) in crate::vcs::landings_now(&view.state, &wanted) {
+        hold(run, &node, std::rc::Rc::new(read), asked);
+    }
+}
+
+/// The nodes whose landing [`outstanding_landings`] reports on, in id order.
+fn summarised(view: &RunView) -> Vec<&String> {
+    let statuses = view.state.statuses();
+    view.state
+        .landings
+        .keys()
+        // A node whose change is held as a draft has not landed and is not one of
+        // these: this list is work an operator has to *decide* about — a change
+        // sitting open that nobody merged — and a draft is a change this run is
+        // deliberately holding and will lift itself. It has a line of its own,
+        // which says what it is waiting on.
+        .filter(|node| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
+        // A reworked node's change is its replacement's now — the same branch and
+        // the same change request — so it is counted once, under the replacement.
+        .filter(|node| !view.state.reworks.contains_key(*node))
+        .collect()
 }
 
 /// The nodes whose work is complete and whose change is held back as a draft,
@@ -3363,6 +4201,21 @@ fn held_for_workspace(view: &RunView, id: &str) -> Option<String> {
     ))
 }
 
+/// What a ready node reads as while the driver holds it for a source declared private that
+/// could not be asked about it, or `None` for a node no such hold holds.
+///
+/// Off the run's own record, on [`held_for_release`]'s terms: the hold is the `node-held`
+/// with a `source` reason, read through the engine's own reader of one.
+fn held_for_source(view: &RunView, id: &str) -> Option<String> {
+    let hold = view
+        .state
+        .holds
+        .get(id)?
+        .iter()
+        .find_map(crate::engine::source_held)?;
+    Some(format!("held — {}", one_line(&hold.describe())))
+}
+
 /// The kinds of hold a run records a node under, in the words its `node-held`
 /// records and an elapsed watch's summary both spell them with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
@@ -3378,6 +4231,8 @@ pub(crate) enum HoldKind {
     Release,
     /// Held for room in its repository identity's workspace.
     Workspace,
+    /// Held for a source declared private that could not be asked about it.
+    Source,
 }
 
 impl HoldKind {
@@ -3389,6 +4244,7 @@ impl HoldKind {
             Self::Decision => "decision",
             Self::Release => "release",
             Self::Workspace => "workspace",
+            Self::Source => "source",
         }
     }
 }
@@ -3575,7 +4431,19 @@ fn working(activity: &crate::projection::NodeActivity) -> String {
         progress.events(),
         ago(progress.last_at())
     );
-    match &activity.doing {
+    // A reference is described now rather than when it was folded: the one
+    // line its resolver gives, or the diagnostic naming the file it could not
+    // read.
+    let doing = activity.doing.as_ref().map(|doing| match doing {
+        crate::projection::Doing::Said(said) => said.clone(),
+        crate::projection::Doing::Referenced(reference) => {
+            match transcript::resolve(&reference.transcript()) {
+                Ok(resolved) => one_line(&voiced(&resolved)),
+                Err(unresolved) => one_line(&unresolved.to_string()),
+            }
+        }
+    });
+    match doing {
         Some(doing) => format!("now {doing} ({counted})"),
         // Absent rather than guessed: the dispatch has recorded something and
         // has not named a tool, so the count and the age are the whole of what
@@ -3977,11 +4845,22 @@ fn summarize(event: &Envelope) -> String {
             }
         }
     }
-    // The agent's own words, which name no tool and so said nothing past the
-    // kind: its text or its reasoning, on the one line oneharness draws it on.
-    // A tool's activity is left as the kind alone, as it always was — its
-    // detail is `status`'s readout and the transcript's, not this stream's.
-    if event.kind.0 == "turn-activity" {
+    // A turn record referencing its history: the one line describing what it
+    // holds — a tool call's command, path, pattern or argument, a message's or
+    // an instruction's first line — or the diagnostic saying it could not be
+    // read. Never cut here: the description is bounded already, and a path cut
+    // short names no file.
+    let referenced = described(event);
+    if let Some(said) = &referenced {
+        if !said.is_empty() {
+            detail.push_str(&format!(" {said}"));
+        }
+    }
+    // The agent's own words in a record carrying a copy, which name no tool and
+    // so said nothing past the kind: its text or its reasoning, on the one line
+    // oneharness draws it on. A tool's copy is left as the kind alone, as it
+    // always was — its detail is `status`'s readout and the transcript's.
+    else if event.kind.0 == "turn-activity" {
         let field = |key: &str| event.payload.get(key).and_then(serde_json::Value::as_str);
         if let Some(said) = field("kind")
             .and_then(Voice::of)
@@ -3994,13 +4873,41 @@ fn summarize(event: &Envelope) -> String {
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect();
-    if surface || kept {
+    if surface || kept || referenced.is_some() {
         return stripped;
     }
     if stripped.chars().count() <= CAP {
         return stripped;
     }
     stripped.chars().take(CAP).collect()
+}
+
+/// The one line describing a turn record that references its history — the
+/// resolver's description, or `transcript unavailable: <path>: <why>` — and
+/// `None` for every record that carries no reference.
+pub(crate) fn described(event: &Envelope) -> Option<String> {
+    if event.source != Source::Agentgraph || !event.payload.contains_key("transcript") {
+        return None;
+    }
+    transcript::of_record(&event.kind.0, &event.payload).map(|resolved| match resolved {
+        Ok(resolved) if event.kind.0 == "turn-activity" => voiced(&resolved),
+        Ok(resolved) => resolved.description,
+        Err(unresolved) => unresolved.to_string(),
+    })
+}
+
+/// An activity's description as a readout draws it: the agent's own words and
+/// reasoning under the marks oneharness's text view draws them with — the same
+/// line a copy of them reads as — and a tool's description as it is.
+fn voiced(resolved: &transcript::Resolved) -> String {
+    let voice = match resolved.text {
+        transcript::Text::Message(_) => Some(Voice::Message),
+        transcript::Text::Reasoning(_) => Some(Voice::Reasoning),
+        _ => None,
+    };
+    voice
+        .and_then(|voice| voice.block(&resolved.description))
+        .unwrap_or_else(|| resolved.description.clone())
 }
 
 /// How a landing reads on a rendered line.
@@ -4145,20 +5052,233 @@ fn driver_exit_lines(view: &RunView) -> String {
             )),
         }
     }
-    let unanswered = crate::channel::ChannelState::new(&view.paths).claimed_unanswered();
-    if !unanswered.is_empty() {
+    let liveness = view.liveness();
+    let unanswered = unanswered_of(view, liveness);
+    if unanswered.is_empty() {
+        return out;
+    }
+    let ids = unanswered
+        .iter()
+        .map(|envelope| envelope.envelope.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if liveness.is_undriven() {
         out.push_str(&format!(
-            "  claimed with no outcome: command envelope(s) {} — taken off the queue and not \
+            "  claimed with no outcome: command envelope(s) {ids} — taken off the queue and not \
              answered yet, so their submitters have been told nothing; the run's next driver \
-             answers each before anything it claims itself\n",
-            unanswered
-                .iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
+             answers each before anything it claims itself\n"
+        ));
+        return out;
+    }
+    out.push_str(&format!(
+        "  claimed with no outcome: command envelope(s) {ids} — taken off the queue and not \
+         answered yet; the run's live driver answers each\n"
+    ));
+    let live = crate::channel::deliveries::LiveDeliveries::read(&view.paths);
+    for envelope in &unanswered {
+        let said: Vec<String> = live
+            .iter()
+            .flat_map(|live| live.of_envelope(envelope.envelope))
+            .map(delivery_phrase)
+            .collect();
+        let said = if said.is_empty() {
+            "claimed by the live driver, which has not said where it stands".to_string()
+        } else {
+            said.join("; ")
+        };
+        out.push_str(&format!("    envelope {}: {said}\n", envelope.envelope));
+    }
+    out
+}
+
+/// How many notes answered `queued` that have left their inbox `status` names
+/// with what became of each, the latest first being the last printed.
+const NOTES_SHOWN: usize = 5;
+
+/// What `status` says of the run's queued notes: each the live driver holds in
+/// a receiver's inbox, and then each of the latest [`NOTES_SHOWN`] answered
+/// `queued` that has left it, with its own record — taken, carried or refused.
+///
+/// An envelope carrying a live note is answered as the note is handed to its
+/// receiver's inbox, so a submitter is told at once what applied and what waits
+/// for a turn; these lines are where the rest of that note's story is read.
+fn note_lines(view: &RunView) -> String {
+    let inbox = inbox_of(view, view.liveness());
+    let mut out = String::new();
+    for note in &inbox {
+        let InboxDelivery::Queued {
+            node,
+            since,
+            deadline,
+        } = &note.delivery;
+        let until = deadline.map_or_else(String::new, |deadline| {
+            format!(
+                ", until its deadline {}",
+                sys::rfc3339_from_millis(deadline)
+            )
+        });
+        out.push_str(&format!(
+            "  inbox: {node} holds envelope {}'s note, queued since {}{until} — the \
+             envelope is answered, and {node}'s turn takes the note when it takes notes\n",
+            note.envelope,
+            sys::rfc3339_from_millis(*since)
+        ));
+    }
+    let channel = crate::channel::ChannelState::new(&view.paths);
+    // The latest answer per envelope: a withdrawal answers one again.
+    let answers: BTreeMap<u64, crate::channel::CommandOutcome> = channel
+        .outcomes()
+        .into_iter()
+        .map(|outcome| (outcome.id, outcome))
+        .collect();
+    let waiting = |id: u64, node: &str| {
+        inbox.iter().any(|note| {
+            note.envelope == id
+                && matches!(&note.delivery, InboxDelivery::Queued { node: at, .. } if at == node)
+        })
+    };
+    let mut left: Vec<(u64, usize, crate::channel::Command)> = Vec::new();
+    for (id, answer) in &answers {
+        let queued: Vec<usize> = answer
+            .results
+            .iter()
+            .filter(|result| result.outcome == crate::channel::CommandVerdict::Queued)
+            .map(|result| result.index)
+            .collect();
+        if queued.is_empty() {
+            continue;
+        }
+        let Some(sent) = channel.commands_of(*id) else {
+            continue;
+        };
+        for index in queued {
+            if let Some(command @ crate::channel::Command::Note { id: node, .. }) =
+                sent.commands.get(index)
+            {
+                if !waiting(*id, node) {
+                    left.push((*id, index, command.clone()));
+                }
+            }
+        }
+    }
+    let earlier = left.len().saturating_sub(NOTES_SHOWN);
+    if earlier > 0 {
+        out.push_str(&format!(
+            "  {earlier} earlier note(s) answered queued are not shown here\n"
+        ));
+    }
+    let delivered = crate::withdrawal::readable(&view.events);
+    for (id, index, command) in left.split_off(earlier) {
+        let crate::channel::Command::Note { id: node, .. } = &command else {
+            continue;
+        };
+        let result = crate::withdrawal::delivered(
+            &delivered,
+            id,
+            u32::try_from(index).unwrap_or(u32::MAX),
+        )
+        .map(|reached| {
+            format!(
+                "note-delivered {}",
+                crate::withdrawal::disposition(&reached)
+            )
+        })
+        .or_else(|| refused_note(&view.events, id, index, &command))
+        .unwrap_or_else(|| {
+            "no answer is recorded yet: the driver that handed it is gone, and the run's next \
+                 driver records one"
+                .to_string()
+        });
+        out.push_str(&format!(
+            "  note: envelope {id}'s note {index} to {node}, answered queued — {result}\n"
         ));
     }
     out
+}
+
+/// The refusal the run journalled for `command`, at `index` of envelope `id`,
+/// if it journalled one: named by its index, or — in a record written before
+/// refusals named one — by the command as sent.
+fn refused_note(
+    events: &[Envelope],
+    id: u64,
+    index: usize,
+    command: &crate::channel::Command,
+) -> Option<String> {
+    let sent = serde_json::json!(command);
+    events.iter().find_map(|event| {
+        let at = event
+            .payload
+            .get("index")
+            .and_then(serde_json::Value::as_u64);
+        (event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditRejected)
+            && event
+                .payload
+                .get("envelope")
+                .and_then(serde_json::Value::as_u64)
+                == Some(id)
+            && at.map_or_else(
+                || event.payload.get("command") == Some(&sent),
+                |at| usize::try_from(at).ok() == Some(index),
+            ))
+        .then(|| {
+            let reason = event
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no reason was recorded");
+            // A refusal's reason is recorded as its error reads, `refused: …`.
+            format!(
+                "refused: {}",
+                one_line(reason.strip_prefix("refused: ").unwrap_or(reason))
+            )
+        })
+    })
+}
+
+/// What `status` says of one claimed envelope's live note.
+fn delivery_phrase(delivery: &Delivery) -> String {
+    match delivery {
+        Delivery::Queued {
+            node,
+            since,
+            deadline,
+        } => match deadline {
+            Some(deadline) => format!(
+                "its note queued in {node}'s inbox since {}, until its deadline {}",
+                sys::rfc3339_from_millis(*since),
+                sys::rfc3339_from_millis(*deadline)
+            ),
+            None => format!(
+                "its note queued in {node}'s inbox since {}",
+                sys::rfc3339_from_millis(*since)
+            ),
+        },
+        Delivery::Delivering {
+            node,
+            since,
+            deadline,
+        } => match deadline {
+            Some(deadline) => format!(
+                "delivering a live note to {node} since {}, until its deadline {}",
+                sys::rfc3339_from_millis(*since),
+                sys::rfc3339_from_millis(*deadline)
+            ),
+            None => format!(
+                "delivering a live note to {node} since {}",
+                sys::rfc3339_from_millis(*since)
+            ),
+        },
+        Delivery::Held {
+            node,
+            since,
+            behind_envelope,
+        } => format!(
+            "held behind envelope {behind_envelope}'s note to {node} since {}",
+            sys::rfc3339_from_millis(*since)
+        ),
+    }
 }
 
 /// What a view says about the records the run's own store does not hold whole,
@@ -4389,6 +5509,9 @@ pub fn results(view: &RunView) -> String {
         if let Some(restacked) = restack_phrase(&view.state, &node.id) {
             out.push_str(&format!(" — {restacked}"));
         }
+        for said in readjust_phrases(&view.state, &node.id) {
+            out.push_str(&format!(" — {said}"));
+        }
         out.push('\n');
         if let Some(title) = unverified_title_phrase(&view.state, &node.id) {
             out.push_str(&format!("      {title}\n"));
@@ -4467,8 +5590,11 @@ pub fn results(view: &RunView) -> String {
     out.push_str(&superseded_lines(view));
     // Under the graph, because a hook is the run's rather than any node's.
     out.push_str(&crate::hooks::results_lines(view));
+    // And what the store answered when the run's home was marked `done`, the run's too.
+    out.push_str(&crate::home::results_line(view));
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
+    out.push_str(&crate::scratch::lines(view, None));
     out.push_str(&journal_loss_line(view));
     out
 }
@@ -4522,6 +5648,76 @@ fn rework_phrase(state: &RunState, id: &str) -> Option<String> {
         one_line(&rework.replacement),
         one_line(&rework.reason)
     ))
+}
+
+/// What readjustment found and did about a node, each a phrase both views print:
+/// how its landing was found, the draft it was absorbed into, where its last
+/// readjustment moved it and why, and a check verdict still owed.
+fn readjust_phrases(state: &RunState, id: &str) -> Vec<String> {
+    let mut said = Vec::new();
+    if let Some(landed) = state.landed_how.get(id) {
+        said.push(match (&landed.detected_by, &landed.via) {
+            (crate::payload::LandingDetection::AbsorberLanded, Some(via)) => format!(
+                "landed with {} at {}, which it was merged into",
+                one_line(via),
+                one_line(&landed.commit)
+            ),
+            _ => format!(
+                "landed at {}, found merged on the host by a readjustment",
+                one_line(&landed.commit)
+            ),
+        });
+    }
+    if let Some(into) = state.absorbed.get(id) {
+        if !state.landed_how.contains_key(id) {
+            said.push(format!(
+                "merged into {}'s branch, and lands only with it",
+                one_line(into)
+            ));
+        }
+    }
+    if let Some(readjusted) = state.readjusted.get(id) {
+        let onto = if readjusted.to.stack_parents.is_empty() {
+            format!("the root {}", one_line(&readjusted.to.base))
+        } else {
+            format!(
+                "{} ({})",
+                one_line(&readjusted.to.base),
+                readjusted
+                    .to
+                    .stack_parents
+                    .iter()
+                    .map(|parent| one_line(parent))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let content = match readjusted.content {
+            crate::payload::ReadjustContent::Merged => "",
+            crate::payload::ReadjustContent::Pending => ", nothing merged yet: `retry` merges it",
+        };
+        said.push(format!(
+            "readjusted onto {onto} from {} after {} landed or merged, change request {}{content}",
+            one_line(&readjusted.from.base),
+            readjusted
+                .cause
+                .iter()
+                .map(|cause| one_line(cause))
+                .collect::<Vec<_>>()
+                .join(", "),
+            match readjusted.retarget {
+                crate::payload::RetargetWord::Retargeted => "retargeted",
+                crate::payload::RetargetWord::Unchanged => "already on it",
+                crate::payload::RetargetWord::None => "not moved",
+            }
+        ));
+    }
+    if state.outcomes.get(id).map(String::as_str) == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED)
+        && !state.superseded.contains_key(id)
+    {
+        said.push("check verdict outstanding until the next trigger reads it".to_owned());
+    }
+    said
 }
 
 /// What the last restack a node published did — the parent it was brought onto,
@@ -4617,22 +5813,34 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                     .unwrap_or_default()
             };
             match event.kind.0.as_str() {
-                "turn-started" => out.push_str(&format!(
-                    "  turn {}\n",
-                    event
-                        .payload
-                        .get("turn")
-                        .map_or_else(|| "-".to_string(), ToString::to_string)
-                )),
+                "turn-started" => {
+                    out.push_str(&format!(
+                        "  turn {}\n",
+                        event
+                            .payload
+                            .get("turn")
+                            .map_or_else(|| "-".to_string(), ToString::to_string)
+                    ));
+                    out.push_str(&referenced_text(event, "instruction"));
+                }
+                "turn-message" => {
+                    out.push_str(&referenced_text(event, &format!("{} said", field("role"))));
+                }
                 "turn-activity" => out.push_str(&activity_lines(
                     "    ",
                     field("kind"),
                     field("name"),
-                    // Read out of the payload the same way a retained report's
-                    // event is: a result's text is under `output` and it carries
-                    // no `detail` at all, so a third column read out of `detail`
-                    // was blank on every observation a turn made.
-                    &ActivityText::of(field("kind"), |key| event.payload.get(key)),
+                    // Read through the resolver: a record referencing its
+                    // history is shown the whole of what the history holds,
+                    // and one carrying a copy is read the same way a retained
+                    // report's event is — a result's text is under `output`
+                    // and it carries no `detail` at all, so a third column read
+                    // out of `detail` was blank on every observation a turn
+                    // made.
+                    &ActivityText::relayed(&event.payload),
+                    // Not cut: a copy is inside the journal's bound already,
+                    // and a reference's text is the whole of what was said.
+                    usize::MAX,
                 )),
                 _ => {}
             }
@@ -4668,7 +5876,11 @@ pub fn transcript(view: &RunView, only: Option<&str>) -> String {
                 }
                 for item in turn.activity {
                     out.push_str(&activity_lines(
-                        "      ", &item.kind, &item.name, &item.text,
+                        "      ",
+                        &item.kind,
+                        &item.name,
+                        &item.text,
+                        MAX_TOOL_OUTPUT_CHARS,
                     ));
                 }
             }
@@ -4702,22 +5914,54 @@ pub(crate) fn nodes_with_agent_records(view: &RunView, only: Option<&str>) -> Ve
     nodes
 }
 
-/// How much of a tool's own output one transcript line prints.
+/// How much of a tool's own output one line of a **retained report** prints.
 ///
-/// Explicit rather than incidental, because the two sources this verb reads are
-/// bounded differently. A `turn-activity` summary is inside
+/// Explicit rather than incidental, because the sources this verb reads are
+/// bounded differently. A `turn-activity` copy is inside
 /// [`MAX_PAYLOAD_TEXT_BYTES`](crate::event::MAX_PAYLOAD_TEXT_BYTES) by the time
 /// it is in the store — this crate's own promise about its own envelope, cut and
-/// marked at ingest — while a retained report's output is the harness's raw
-/// bytes with nothing bounding them at all: reports on this host carry single
-/// outputs past sixty kilobytes, and one of those splatted whole into a terminal
-/// is the rendering this ceiling exists to prevent.
+/// marked at ingest — and a `turn-activity` reference is shown the whole of what
+/// its history file holds, which is what a reader opens the transcript for; so
+/// neither is cut here. A retained report's output is the harness's raw bytes
+/// with nothing bounding them at all: reports on this host carry single outputs
+/// past sixty kilobytes, and one of those splatted whole into a terminal beside
+/// the journal's own record of the same call is the rendering this ceiling
+/// exists to prevent.
 ///
-/// So it is that same bound, read as a **character** ceiling against a byte one:
-/// a text inside 4096 bytes is inside 4096 characters, which is what makes this
-/// unable to cut anything the run's own journal kept. What it does cut on the
-/// report path it counts out loud.
+/// So it is the journal's bound, read as a **character** ceiling against a byte
+/// one. What it cuts on the report path it counts out loud.
 const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
+
+/// The whole text a `turn-started` or `turn-message` references, laid out under
+/// `label` — or, for a reference that resolved to nothing, the diagnostic that
+/// says so on the label's own line.
+///
+/// Nothing for a record carrying a copy instead, which this view has never
+/// drawn and still does not: a journal written before references renders as it
+/// did, and the copy is the producer's bounded summary rather than the text.
+fn referenced_text(event: &Envelope, label: &str) -> String {
+    if !event.payload.contains_key("transcript") {
+        return String::new();
+    }
+    let label = one_line(label);
+    match transcript::of_record(&event.kind.0, &event.payload) {
+        Some(Ok(resolved)) => {
+            let (transcript::Text::Instruction(text)
+            | transcript::Text::Message(text)
+            | transcript::Text::Reasoning(text)) = &resolved.text
+            else {
+                return format!("    {label}  {}\n", one_line(&resolved.description));
+            };
+            let mut out = format!("    {label}\n");
+            for line in text.lines() {
+                out.push_str(&format!("      {}\n", one_line(line)));
+            }
+            out
+        }
+        Some(Err(unresolved)) => format!("    {label}  {}\n", one_line(&unresolved.to_string())),
+        None => String::new(),
+    }
+}
 
 /// One event of a turn as the transcript lays it out, under `indent`.
 ///
@@ -4726,7 +5970,13 @@ const MAX_TOOL_OUTPUT_CHARS: usize = crate::event::MAX_PAYLOAD_TEXT_BYTES;
 /// they are oneharness's own text view of them ([`Voice::block`]), `›` before
 /// what it said and `(thinking)` before what it reasoned, a paragraph laid out
 /// under its mark rather than flattened into a column beside no tool name.
-fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> String {
+fn activity_lines(
+    indent: &str,
+    kind: &str,
+    name: &str,
+    text: &ActivityText,
+    ceiling: usize,
+) -> String {
     let ActivityText::Spoken {
         voice,
         text,
@@ -4737,11 +5987,11 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
             "{indent}{} {}  {}\n",
             one_line(kind),
             one_line(name),
-            activity_text(text)
+            activity_text(text, ceiling)
         );
     };
     let whole = text.chars().count();
-    let kept: String = text.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
+    let kept: String = text.chars().take(ceiling).collect();
     let Some(block) = voice.block(&kept) else {
         // Said and empty is still said: the kind alone, rather than nothing a
         // reader could tell from the event never having arrived.
@@ -4751,7 +6001,7 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
         .lines()
         .map(|line| format!("{indent}{line}\n"))
         .collect();
-    let notes = omissions(whole, *truncated);
+    let notes = omissions(whole, *truncated, ceiling);
     if !notes.is_empty() {
         out.insert_str(out.len() - 1, &format!(" … [{}]", notes.join("; ")));
     }
@@ -4761,10 +6011,10 @@ fn activity_lines(indent: &str, kind: &str, name: &str, text: &ActivityText) -> 
 /// What a rendered text leaves out, said rather than dropped: how much of it a
 /// reader is looking at when this view cut it, and whether the producer had
 /// already cut it short.
-fn omissions(whole: usize, truncated: Truncation) -> Vec<String> {
+fn omissions(whole: usize, truncated: Truncation, ceiling: usize) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
-    if whole > MAX_TOOL_OUTPUT_CHARS {
-        notes.push(format!("{MAX_TOOL_OUTPUT_CHARS} of {whole} characters"));
+    if whole > ceiling {
+        notes.push(format!("{ceiling} of {whole} characters"));
     }
     match truncated {
         Truncation::Whole => {}
@@ -4799,9 +6049,9 @@ fn omissions(whole: usize, truncated: Truncation) -> Vec<String> {
 ///
 /// The agent's own words are laid out by [`activity_lines`] rather than put in
 /// a column; handed one anyway, this reads it as the text it carries.
-fn activity_text(text: &ActivityText) -> String {
+fn activity_text(text: &ActivityText, ceiling: usize) -> String {
     let (output, truncated) = match text {
-        ActivityText::Acted(detail) => return one_line(detail),
+        ActivityText::Acted(detail) | ActivityText::Unavailable(detail) => return one_line(detail),
         ActivityText::Returned { output, truncated }
         | ActivityText::Spoken {
             text: output,
@@ -4814,8 +6064,8 @@ fn activity_text(text: &ActivityText) -> String {
     }
     let stripped = one_line(output);
     let whole = stripped.chars().count();
-    let mut text: String = stripped.chars().take(MAX_TOOL_OUTPUT_CHARS).collect();
-    let notes = omissions(whole, truncated);
+    let mut text: String = stripped.chars().take(ceiling).collect();
+    let notes = omissions(whole, truncated, ceiling);
     if !notes.is_empty() {
         text.push_str(&format!(" … [{}]", notes.join("; ")));
     }
@@ -4923,6 +6173,415 @@ fn review_lines(view: &RunView) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Why the attach stream's carrying is held by unit tests over its own render
+    /// scopes rather than by a journey: a read carried and a read taken afresh print
+    /// the same line whenever nothing moved in between, which is the only case the
+    /// carrying exists for, so no command's output tells them apart. What a journey
+    /// can see — the round's git processes, bounded in `tests/e2e/review_round.rs` —
+    /// is the cost carrying saves, not which read a render took; these drive the real
+    /// render scope, the real stream guard and the real records the stream is handed.
+    fn reads_held() -> Vec<String> {
+        READ_THIS_RENDER.with_borrow(|reads| reads.keys().map(|(_, node)| node.clone()).collect())
+    }
+
+    fn holding(nodes: &[&str]) {
+        for node in nodes {
+            hold(
+                "demo",
+                node,
+                std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                    because: "unread".into(),
+                }),
+                std::time::Instant::now(),
+            );
+        }
+    }
+
+    /// A stream's next render keeps the reads still inside their window, and lets go of
+    /// one past it; a render outside a stream keeps nothing, and neither does one after
+    /// the stream ends.
+    #[test]
+    fn a_stream_render_keeps_its_reads_inside_their_window_and_no_other_render_does() {
+        let stream = StreamReads::begin("demo");
+        holding(&["fresh"]);
+        let stale = std::time::Instant::now()
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        READ_THIS_RENDER.with_borrow_mut(|reads| {
+            reads.insert(
+                ("demo".to_owned(), "stale".to_owned()),
+                Carried {
+                    read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                        because: "unread".into(),
+                    }),
+                    taken: stale,
+                },
+            );
+        });
+        drop(rendering(Rendered::Summary, "demo"));
+        assert_eq!(reads_held(), ["fresh"], "the stream's next render");
+        drop(stream);
+        assert!(
+            reads_held().is_empty(),
+            "a stream that ended left its reads behind"
+        );
+
+        holding(&["alone"]);
+        drop(rendering(Rendered::Status, "demo"));
+        assert!(
+            reads_held().is_empty(),
+            "a render outside a stream kept a read"
+        );
+    }
+
+    /// What an attach stream lets go of before each render, over the records that
+    /// render is about to print — the one call the driver's attach loop makes: a
+    /// node's read goes where the stream records it settling or restacking, or its
+    /// change merging; it stays through the steps of a publication — a fetch, a
+    /// push, the publication itself — through a record of its own that moves
+    /// nothing, an agent's, and another node's; and every read goes before the
+    /// render made once the run's loop has finished, and before the one printing
+    /// the driver's exit.
+    ///
+    /// A structural assertion rather than a journey, and for a reason beyond the one
+    /// above: the stream's last render folds the run's own settled report — see
+    /// [`landings_the_run_re_read`] — so a change the driver's close-out found landed
+    /// prints landed whether or not that render read it again, and a move made between
+    /// two renders is visible only as a landing that changed with no record of the
+    /// node, which no offline journey can time inside the window.
+    #[test]
+    fn an_attach_stream_lets_go_of_a_read_where_a_record_moves_its_landing() {
+        let stream = StreamReads::begin("demo");
+        for (lets_go, record) in [
+            (
+                true,
+                relayed(
+                    EventKind("merge-completed".into()),
+                    Source::Vcs,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+            (
+                true,
+                relayed(
+                    EventKind("change-merged".into()),
+                    Source::Vcs,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+            (
+                false,
+                relayed(EventKind("push".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                false,
+                relayed(EventKind("fetch".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                false,
+                relayed(EventKind("published".into()), Source::Vcs, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeSettled, Some("a"), &[]),
+            ),
+            (
+                true,
+                event(crate::journal::PipelineKind::NodeRestacked, Some("a"), &[]),
+            ),
+            (
+                false,
+                event(crate::journal::PipelineKind::NodeDispatched, Some("a"), &[]),
+            ),
+            (
+                false,
+                relayed(
+                    EventKind("turn-message".into()),
+                    Source::Agentgraph,
+                    Some("a"),
+                    &[],
+                ),
+            ),
+        ] {
+            holding(&["a", "b"]);
+            stream.before_render("demo", &[&record], false);
+            let expected: &[&str] = if lets_go { &["b"] } else { &["a", "b"] };
+            assert_eq!(
+                reads_held(),
+                expected,
+                "{:?} {}",
+                record.source,
+                record.kind.0
+            );
+        }
+        holding(&["a", "b"]);
+        stream.before_render("demo", &[], true);
+        assert!(
+            reads_held().is_empty(),
+            "the final render carried a read into it"
+        );
+        holding(&["a", "b"]);
+        stream.before_render(
+            "demo",
+            &[&event(
+                crate::journal::PipelineKind::DriverExited,
+                None,
+                &[],
+            )],
+            false,
+        );
+        assert!(
+            reads_held().is_empty(),
+            "the render printing the driver's exit carried a read into it"
+        );
+    }
+
+    /// The stream's last render takes up the run's close-out reads in place of
+    /// asking again — only the answered ones, only the run's own, only inside the
+    /// window, and only where nothing the stream recorded since moved the node; a
+    /// render before the last takes up none of them.
+    ///
+    /// Not a journey, because the last render prints the same line from a read it
+    /// took up as from one it asked again, and a refusal, a lapsed window or a move
+    /// between the two reads is visible only as a landing a person changed inside a
+    /// ten-second window, which no offline journey can time — the reason this
+    /// module's carrying is held here at all.
+    #[test]
+    fn the_last_render_of_a_stream_takes_up_the_close_out_s_answered_reads() {
+        let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
+        let refused = crate::vcs::LandingRead::Refused {
+            because: "no answer".into(),
+        };
+        let now = std::time::Instant::now();
+        let stale = now
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        let stream = StreamReads::begin("closing");
+
+        closed_out(
+            "closing",
+            &[
+                ("kept".into(), answered(), now),
+                ("moved".into(), answered(), now),
+                ("refused".into(), refused, now),
+            ],
+        );
+        closed_out("other", &[("elsewhere".into(), answered(), now)]);
+        stream.before_render("closing", &[], false);
+        assert!(
+            reads_held().is_empty(),
+            "a render before the last took one up"
+        );
+
+        let moved = event(
+            crate::journal::PipelineKind::NodeRestacked,
+            Some("moved"),
+            &[],
+        );
+        stream.before_render("closing", &[&moved], true);
+        assert_eq!(reads_held(), ["kept"], "the last render's reads");
+        let held = READ_THIS_RENDER.with_borrow(|reads| {
+            reads
+                .get(&("closing".to_owned(), "kept".to_owned()))
+                .map(|carried| (*carried.read).clone())
+        });
+        assert_eq!(held, Some(answered()), "the close-out's own answer");
+
+        // A close-out read the window has passed is asked again.
+        closed_out("closing", &[("kept".into(), answered(), stale)]);
+        stream.before_render("closing", &[], true);
+        assert!(
+            reads_held().is_empty(),
+            "a read past its window was taken up"
+        );
+        drop(stream);
+    }
+
+    /// What the close-out hands over is held no longer than a render could want
+    /// it: never for a run no stream in this process renders, and let go of once
+    /// the last render took it up, once it passed its window, and once the stream
+    /// ended — while an answer inside all three still reaches that render.
+    ///
+    /// Not a journey, because what is held, and for how long, changes no line any
+    /// command prints: a read let go of is asked again and answers the same.
+    #[test]
+    fn the_close_out_s_hand_off_is_let_go_of_once_nothing_could_take_it_up() {
+        let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
+        let now = std::time::Instant::now();
+        let stale = now
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+
+        // A run no stream renders — a detached driver's, `readjust`'s — holds nothing.
+        closed_out("unwatched", &[("a".into(), answered(), now)]);
+        assert!(
+            handed_over("unwatched").is_empty(),
+            "an unwatched run held its reads"
+        );
+
+        let stream = StreamReads::begin("reclaimed");
+        // Past its window, a read is let go of by the next hand-off or render.
+        closed_out("reclaimed", &[("old".into(), answered(), stale)]);
+        assert_eq!(handed_over("reclaimed"), ["old"]);
+        stream.before_render("reclaimed", &[], false);
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "a lapsed read was held"
+        );
+
+        closed_out(
+            "reclaimed",
+            &[("a".into(), answered(), now), ("b".into(), answered(), now)],
+        );
+        assert_eq!(
+            handed_over("reclaimed"),
+            ["a", "b"],
+            "what the close-out handed over"
+        );
+        stream.before_render("reclaimed", &[], false);
+        assert_eq!(
+            handed_over("reclaimed"),
+            ["a", "b"],
+            "a render before the last let go of what the last will want"
+        );
+        stream.before_render("reclaimed", &[], true);
+        assert_eq!(reads_held(), ["a", "b"], "the last render's reads");
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "taken up, and still held"
+        );
+
+        // Handed over again and never taken up: the stream's end lets go of it.
+        closed_out("reclaimed", &[("c".into(), answered(), now)]);
+        assert_eq!(handed_over("reclaimed"), ["c"]);
+        drop(stream);
+        assert!(handed_over("reclaimed").is_empty(), "outlived its stream");
+        closed_out("reclaimed", &[("d".into(), answered(), now)]);
+        assert!(
+            handed_over("reclaimed").is_empty(),
+            "held after its stream ended"
+        );
+    }
+
+    /// The run's close-out takes up what a stream rendering it just asked — only the
+    /// answered reads, only the streamed run's, only inside the window of when each
+    /// was asked, and only where this process recorded nothing moving the node after
+    /// it was asked, whichever side of the read the record landed on; a read asked
+    /// outside a stream, and any once the stream ends, is asked again.
+    ///
+    /// Not a journey, for the reason above made sharper: the close-out writes the
+    /// same `result.json` from a read it took up as from one it asked again, and
+    /// the cases that tell them apart — a refusal, a lapsed window, a move recorded
+    /// while the stream's read was out — need a host refusing one call or a record
+    /// landing inside one read, neither of which an offline journey can place. What a
+    /// journey sees is the reads this saves, bounded by `tests/e2e/review_round.rs`.
+    #[test]
+    fn the_close_out_takes_up_a_stream_s_answered_read_of_a_node_nothing_moved_since() {
+        let answered = || crate::vcs::LandingRead::Answered(onevcs::Landed::No);
+        let refused = crate::vcs::LandingRead::Refused {
+            because: "no answer".into(),
+        };
+        let restacked = |node| event(crate::journal::PipelineKind::NodeRestacked, Some(node), &[]);
+        let now = std::time::Instant::now();
+        let stale = now
+            .checked_sub(STREAM_READ_REUSE)
+            .expect("an instant a window ago");
+        let nodes: Vec<String> = [
+            "kept",
+            "refused",
+            "moved",
+            "late",
+            "stale",
+            "untouched",
+            "unread",
+        ]
+        .map(String::from)
+        .to_vec();
+        let asked: Vec<&String> = nodes.iter().collect();
+
+        hold("taking", "alone", std::rc::Rc::new(answered()), now);
+        let stream = StreamReads::begin("taking");
+        let read = |node: &str, read, asked| {
+            hold("taking", node, std::rc::Rc::new(read), asked);
+        };
+        read("kept", answered(), now);
+        read("refused", refused, now);
+        // Moved after it was asked, the record landing once the read was held.
+        read("moved", answered(), now);
+        super::recorded("taking", &restacked("moved"));
+        // Moved after it was asked, the record landing while the read was out.
+        let before = std::time::Instant::now();
+        super::recorded("taking", &restacked("late"));
+        read("late", answered(), before);
+        read("stale", answered(), stale);
+        // A record that moves nothing lets go of nothing.
+        read("untouched", answered(), std::time::Instant::now());
+        super::recorded(
+            "taking",
+            &event(
+                crate::journal::PipelineKind::NodeDispatched,
+                Some("untouched"),
+                &[],
+            ),
+        );
+        // And a move recorded before the read was asked does not stop it.
+        super::recorded("taking", &restacked("kept"));
+        read("kept", answered(), std::time::Instant::now());
+
+        let taken = streamed_for_close_out("taking", &asked);
+        assert_eq!(
+            taken.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["kept", "untouched"],
+            "what the close-out took up"
+        );
+        assert_eq!(taken["kept"].0, answered(), "the stream's own answer");
+        assert!(
+            streamed_for_close_out("elsewhere", &asked).is_empty(),
+            "another run's close-out took a read up"
+        );
+        assert!(
+            streamed_for_close_out("taking", &[&"alone".to_owned()]).is_empty(),
+            "a read asked outside the stream was taken up"
+        );
+
+        drop(stream);
+        assert!(
+            streamed_for_close_out("taking", &asked).is_empty(),
+            "a read outlived its stream"
+        );
+    }
+
+    /// The nodes the close-out's hand-off holds for `run`.
+    fn handed_over(run: &str) -> Vec<String> {
+        handoff()
+            .reads
+            .keys()
+            .filter(|(closed, _)| closed == run)
+            .map(|(_, node)| node.clone())
+            .collect()
+    }
+
+    /// A read is carried inside its window and taken again once the window has
+    /// passed, measured from when the read was taken.
+    #[test]
+    fn a_carried_landing_read_lapses_at_the_end_of_its_window() {
+        let taken = std::time::Instant::now();
+        let carried = Carried {
+            read: std::rc::Rc::new(crate::vcs::LandingRead::Refused {
+                because: "unread".into(),
+            }),
+            taken,
+        };
+        assert!(carried.still_carried(taken));
+        assert!(
+            carried.still_carried(taken + STREAM_READ_REUSE - std::time::Duration::from_millis(1))
+        );
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE));
+        assert!(!carried.still_carried(taken + STREAM_READ_REUSE * 6));
+    }
+
     use super::*;
     use crate::event::{EventKind, Labels, ENVELOPE_VERSION};
     use crate::filter::Filters;
@@ -5099,7 +6758,7 @@ mod tests {
         );
     }
 
-    fn plan() -> Plan {
+    pub(super) fn plan() -> Plan {
         Plan {
             schema_version: PLAN_SCHEMA_VERSION,
             goal: Some(crate::plan::Goal {
@@ -5117,10 +6776,13 @@ mod tests {
         }
     }
 
-    fn launch(pid: u32) -> LaunchRecord {
+    pub(super) fn launch(pid: u32) -> LaunchRecord {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -5128,6 +6790,7 @@ mod tests {
             observer_ending: String::new(),
             node_graph: String::new(),
             pr_author_graph: String::new(),
+            review_reply_graph: String::new(),
             node_validator: String::new(),
             envelope_reviewer: String::new(),
             launcher: "claude-code".into(),
@@ -5157,6 +6820,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
@@ -5803,6 +7468,121 @@ mod tests {
             view.liveness(),
             DriverLiveness::Driving,
             "a pid means nothing across machines"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `status` names what became of the latest notes answered `queued` that have
+    /// left their inbox — each by its own record, taken or refused — and says how
+    /// many earlier ones it leaves out rather than dropping them silently. Seven
+    /// notes, each in an envelope of its own: the first two are left out, and the
+    /// last five are each named once, with the record that answered it.
+    ///
+    /// Built from a real run directory and channel rather than a driven run: a
+    /// journey reaching six queued notes holds six turns open one after another,
+    /// and what is under test is only how the reading bounds what it prints.
+    #[test]
+    fn status_names_the_latest_queued_notes_results_and_counts_the_rest() {
+        let root = scratch("queued-notes");
+        let note = |text: &str| -> crate::channel::Command {
+            serde_json::from_value(json!({
+                "op": "note", "id": "build", "addressee": "worker", "text": text,
+            }))
+            .expect("a note command")
+        };
+        let texts: Vec<String> = (0..7).map(|at| format!("note number {at}")).collect();
+        let mut events = vec![event(
+            crate::journal::PipelineKind::RunStarted,
+            None,
+            &[("plan", json!(plan()))],
+        )];
+        for (id, text) in texts.iter().enumerate() {
+            let command = json!(note(text));
+            events.push(if id == 6 {
+                event(
+                    crate::journal::PipelineKind::EditRejected,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        ("reason", json!("refused: the note was not delivered")),
+                        ("envelope", json!(id)),
+                        ("index", json!(0)),
+                    ],
+                )
+            } else {
+                event(
+                    crate::journal::PipelineKind::EditCommitted,
+                    None,
+                    &[
+                        ("author", json!("planner")),
+                        ("command", command),
+                        (
+                            "operations",
+                            json!([{
+                                "kind": "note-delivered", "node": "build",
+                                "addressee": "worker", "text": text,
+                                "reached": "worker", "turn": "turn-end",
+                                "envelope": id, "index": 0,
+                            }]),
+                        ),
+                    ],
+                )
+            });
+        }
+        let paths = write_run(&root, "demo", dead_pid(), &events);
+        let channel = crate::channel::ChannelState::new(&paths);
+        for text in &texts {
+            let id = channel
+                .submit(crate::channel::Author::planner(), &[note(text)])
+                .expect("queued");
+            channel
+                .answer_commands(&crate::channel::CommandOutcome {
+                    id,
+                    applied: true,
+                    reason: None,
+                    results: vec![crate::channel::CommandResult {
+                        index: 0,
+                        op: "note".into(),
+                        outcome: crate::channel::CommandVerdict::Queued,
+                        reason: None,
+                        refusal: None,
+                        turn: None,
+                    }],
+                })
+                .expect("answered");
+        }
+        let view = RunView::open(&paths).expect("the run reads");
+        let lines = note_lines(&view);
+        assert!(
+            lines.contains("  2 earlier note(s) answered queued are not shown here\n"),
+            "{lines}"
+        );
+        for id in 0..2 {
+            assert!(
+                !lines.contains(&format!("envelope {id}'s note")),
+                "an earlier note was named: {lines}"
+            );
+        }
+        for id in 2..6 {
+            assert!(
+                lines.contains(&format!(
+                    "  note: envelope {id}'s note 0 to build, answered queued — note-delivered \
+                     `worker` (turn: turn-end)\n"
+                )),
+                "{lines}"
+            );
+        }
+        assert!(
+            lines.contains(
+                "  note: envelope 6's note 0 to build, answered queued — refused: the note was \
+                 not delivered\n"
+            ),
+            "{lines}"
+        );
+        assert!(
+            !lines.contains("inbox:"),
+            "a dead driver's inbox was read: {lines}"
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -6989,7 +8769,7 @@ mod tests {
     fn a_heartbeat_is_reported_beside_the_age_of_the_work_rather_than_as_work() {
         let now = sys::now_millis();
         let rendered = working(&crate::projection::NodeActivity {
-            doing: Some("Bash red-green.sh".into()),
+            doing: Some(crate::projection::Doing::Said("Bash red-green.sh".into())),
             progress: recorded(4, now - 600_000),
             last_heartbeat_at: Some(now),
         });
@@ -7278,10 +9058,13 @@ mod tests {
     /// view's own.
     #[test]
     fn a_control_character_in_an_output_is_stripped_like_every_other_value() {
-        let rendered = activity_text(&ActivityText::Returned {
-            output: "first\r\nsecond\u{1b}[2K".to_string(),
-            truncated: Truncation::Whole,
-        });
+        let rendered = activity_text(
+            &ActivityText::Returned {
+                output: "first\r\nsecond\u{1b}[2K".to_string(),
+                truncated: Truncation::Whole,
+            },
+            MAX_TOOL_OUTPUT_CHARS,
+        );
         assert_eq!(rendered, "first  second [2K");
     }
 
@@ -7295,10 +9078,13 @@ mod tests {
     #[test]
     fn a_truncation_flag_this_build_cannot_read_is_said_rather_than_assumed() {
         let text = |flag: Option<serde_json::Value>| {
-            activity_text(&ActivityText::Returned {
-                output: "what it returned".to_string(),
-                truncated: Truncation::of(flag.as_ref()),
-            })
+            activity_text(
+                &ActivityText::Returned {
+                    output: "what it returned".to_string(),
+                    truncated: Truncation::of(flag.as_ref()),
+                },
+                MAX_TOOL_OUTPUT_CHARS,
+            )
         };
         assert_eq!(text(None), "what it returned");
         assert_eq!(text(Some(json!(false))), "what it returned");
@@ -7666,7 +9452,7 @@ mod tests {
     fn a_row_counting_a_status_word_this_build_cannot_read_is_judged_by_its_driver_alone() {
         let root = scratch("unknown-status-word");
         let mut summary: RunSummary =
-            serde_json::from_str(include_str!("../tests/golden/run-summary-v10.json"))
+            serde_json::from_str(include_str!("../tests/golden/run-summary-v11.json"))
                 .expect("the summary golden reads");
         // Naming a driver this host proves gone: nothing drives the run, so what
         // its graph holds is what decides its word.
@@ -7699,3 +9485,7 @@ mod tests {
         assert_eq!(EndingKind::Stopped.word(), "ENDED stopped");
     }
 }
+
+#[cfg(test)]
+#[path = "views_refresh_tests.rs"]
+mod refresh_tests;

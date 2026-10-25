@@ -39,10 +39,12 @@
 //!
 //! What reaches the run's record is **one** `pool-maintenance` entry per sweep
 //! that did something — a slot ran, a due slot could not be maintained, an
-//! identity was `Claimed`, its maintenance configuration could not be read, or
-//! one failed — carrying per identity and slot what ran and how it ended. A
-//! sweep on which every identity answered `NoMaintainCommand`, `NoSlots`,
-//! `NotDue` or `InUse` writes nothing: those are
+//! identity was `Claimed`, one's `onevcs.toml` could not be read
+//! (`MaintenanceUnreadable`), or one failed — carrying per identity and slot what
+//! ran, how it ended, and the slot's `disk` before and after it, as the sibling
+//! reports them. Which command runs is the sibling's to resolve: the repository's
+//! own declaration, else the host's `maintain`. A sweep on which every identity answered
+//! `NoMaintainCommand`, `NoSlots`, `NotDue` or `InUse` writes nothing: those are
 //! the schedule and the pool working, they are the common case on a schedule
 //! measured in days, and a record of them would be a record of nothing.
 //!
@@ -52,8 +54,8 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -104,6 +106,30 @@ pub const DEFAULT_PACE_SECONDS: u64 = 600;
 /// at its concurrency ceiling or on a host with no free slot re-asks on this
 /// cadence rather than on every pass, and a dispatch settling wakes it sooner.
 const RECHECK: Duration = Duration::from_secs(60);
+
+/// The test failpoint a driver's first sweep meets inside its first identity,
+/// before asking the sibling about it, so a journey can hold a sweep in progress.
+const IDENTITY_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_IDENTITY_GATE";
+
+/// The test failpoint a driver meets the first time it raises a sweep's stop, before
+/// it waits for the sweep, so a journey knows the stop is up.
+const STOP_GATE_ENV: &str = "ONEPIPELINE_TEST_MAINTENANCE_STOP_GATE";
+
+/// The test failpoint a retirement pass meets at every identity, once it has begun
+/// reading what the run names there and before it retires anything, so a journey can
+/// order what the run comes to name against that read.
+const NAMES_GATE_ENV: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
+
+/// How often a retirement pass waiting on the loop for what the run names looks
+/// at its sweep's `stop`: the loop that would answer may be the one joining it.
+const NAMES_STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Meet `variable`'s failpoint the first time `met` is asked, and never again.
+fn meet_once(met: &AtomicBool, variable: &str) {
+    if !met.swap(true, Ordering::SeqCst) {
+        let _ = crate::ordering::meet(variable);
+    }
+}
 
 /// The schedule document a launch names: how often each identity's idle slots
 /// are maintained.
@@ -175,8 +201,7 @@ impl MaintenanceConfig {
             source,
         })?;
         let named = |why: String| Error::Invalid(format!("{spelling} {}: {why}", path.display()));
-        let config: Self =
-            serde_norway::from_str(&text).map_err(|failure| named(failure.to_string()))?;
+        let config: Self = crate::yaml::from_str(&text).map_err(named)?;
         if config.version != SCHEDULE_VERSION {
             return Err(named(format!(
                 "`version` is {}, and this build reads {SCHEDULE_VERSION} — set `version: \
@@ -299,8 +324,9 @@ impl Maintained {
     fn is_recorded(&self) -> bool {
         match &self.outcome {
             Err(_)
-            | Ok(IdentityOutcome::Claimed { .. })
-            | Ok(IdentityOutcome::MaintenanceUnreadable { .. }) => true,
+            | Ok(IdentityOutcome::Claimed { .. } | IdentityOutcome::MaintenanceUnreadable { .. }) => {
+                true
+            }
             Ok(IdentityOutcome::Slots(slots)) => slots.iter().any(|slot| {
                 matches!(
                     slot.outcome,
@@ -666,6 +692,8 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
     };
     let mut identities = Vec::with_capacity(keys.len());
     let unreached = visit(&keys, stop, |identity| {
+        static MET: AtomicBool = AtomicBool::new(false);
+        meet_once(&MET, IDENTITY_GATE_ENV);
         identities.push(maintain(config, identity.clone()));
     });
     (
@@ -678,13 +706,16 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
     )
 }
 
-/// Retire each identity's finished branches, leaving alone every branch in
-/// `named` as it stands when the pass reaches that identity.
+/// Retire each identity's finished branches, leaving alone every branch the run
+/// names as the pass reaches that identity.
 ///
-/// Read per identity rather than once for the sweep, because the loop keeps it
-/// current while the sweep runs: a node that came to name a branch after the
-/// sweep started — a retry pinned to it, a node added naming it — is left alone
-/// by every identity the pass has yet to reach.
+/// Asked of the loop at each identity rather than once for the sweep, so a node
+/// that came to name a branch after the sweep started — a retry pinned to it, a
+/// node added naming it — is left alone by every identity the pass has yet to
+/// reach. Asked rather than read off a copy the loop refreshes: the loop answers
+/// on its own thread, which applies an edit before it answers the edit's
+/// envelope, so every edit answered before the pass reached an identity is in
+/// what that identity is told — however far the rest of the loop's pass has got.
 ///
 /// A pass of its own once every identity is maintained, rather than one
 /// interleaved with them, so the maintenance is recorded when it is done: a
@@ -692,16 +723,21 @@ fn maintain_pools(config: &MaintenanceConfig, stop: &AtomicBool) -> (PoolsMainta
 /// record held back behind it reaches a reader only after the next sweep may
 /// already have maintained the same slots again.
 ///
-/// Once `stop` is raised no further identity is begun; the one in progress runs
-/// its whole `retire_finished`, every deletion and record in it included.
-fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Retirements {
+/// An identity is begun once the loop has answered for it, and the one in
+/// progress runs its whole `retire_finished`, every deletion and record in it
+/// included. Once `stop` is raised no further identity is: the loop raising it is
+/// closing, and answers nothing more.
+fn retire(keys: &[String], tx: &Sender<Message>, stop: &AtomicBool) -> Retirements {
     let mut retirements = Retirements::default();
     if keys.is_empty() {
         return retirements;
     }
     let providers = onevcs::Providers::real();
-    let unreached = visit(keys, stop, |identity| {
-        let current = named.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    for (at, identity) in keys.iter().enumerate() {
+        let Some(current) = named_now(tx, stop) else {
+            retirements.unreached = keys[at..].to_vec();
+            break;
+        };
         let named = resolved(&current, |repo| {
             providers
                 .vcs
@@ -720,9 +756,35 @@ fn retire(keys: &[String], named: &Mutex<Vec<Named>>, stop: &AtomicBool) -> Reti
                 },
             ),
         );
-    });
-    retirements.unreached = unreached;
+    }
     retirements
+}
+
+/// Every branch a live node of this run names, as the loop answers on its own
+/// thread; `None` where it never will — `stop` is raised, because the loop that
+/// would answer is closing and joining this thread, or the loop has gone.
+fn named_now(tx: &Sender<Message>, stop: &AtomicBool) -> Option<Vec<Named>> {
+    let (answer, answered) = mpsc::channel();
+    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+    // reaches the two `None`s for a loop that has gone — the send refused, the answer
+    // dropped unanswered: the loop keeps its receiver, and with it every queued
+    // request's answer, until it has joined this thread, because `close`, `retired`
+    // and the sweep's `Drop` join it first and `converge` drops its `Maintenance`
+    // before its receiver. The unit test
+    // `a_pass_waits_on_the_loop_for_what_the_run_names_and_no_longer` holds that a
+    // gone loop begins nothing. A closing loop's stop, the arm below, is driven by
+    // `maintenance::a_closing_driver_cuts_a_retirement_pass_waiting_on_what_the_run_names`.
+    tx.send(Message::Naming(answer)).ok()?;
+    let _ = crate::ordering::meet(NAMES_GATE_ENV);
+    loop {
+        match answered.recv_timeout(NAMES_STOP_POLL) {
+            Ok(named) => return Some(named),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            Err(RecvTimeoutError::Timeout) if stop.load(Ordering::SeqCst) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 fn maintain(config: &MaintenanceConfig, identity: String) -> Maintained {
@@ -779,12 +841,7 @@ impl Sweep {
     /// Start one sweep. `None` where this host will not start a thread, which
     /// is reported and costs nothing else: the schedule is asked again at the
     /// next pace.
-    fn start(
-        config: MaintenanceConfig,
-        named: Arc<Mutex<Vec<Named>>>,
-        paths: &RunPaths,
-        tx: Sender<Message>,
-    ) -> Option<Self> {
+    fn start(config: MaintenanceConfig, paths: &RunPaths, tx: Sender<Message>) -> Option<Self> {
         let started_at = crate::sys::now_rfc3339();
         // The marker before the thread, so no reader meets a live sweep with
         // nothing on disk saying so. A marker that could not be written costs
@@ -813,7 +870,7 @@ impl Sweep {
                 let retirements = if cut {
                     Retirements::never_begun(keys)
                 } else {
-                    retire(&keys, &named, &stopping)
+                    retire(&keys, &tx, &stopping)
                 };
                 let _ = tx.send(Message::Retired(Box::new(retirements)));
             });
@@ -851,6 +908,8 @@ impl Sweep {
     /// its retirement pass — the stop reaches nothing and the wait is its exit.
     fn join(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        static MET: AtomicBool = AtomicBool::new(false);
+        meet_once(&MET, STOP_GATE_ENV);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -909,6 +968,7 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
                 crate::views::one_line
             )
     );
+    out.push_str(&freed_line(&record.payload));
     if let Some(error) = record.payload.get("error").and_then(Value::as_str) {
         out.push_str(&format!(
             "      the host's identities could not be enumerated: {}\n",
@@ -937,6 +997,15 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
             (Some(error), _) => format!("failed — {}", crate::views::one_line(error)),
             (None, Some(outcome)) => {
                 match serde_json::from_value::<IdentityOutcome>(outcome.clone()) {
+                    // Not on a cadence: nothing was due or run, because the
+                    // repository's own declaration could not be read.
+                    Ok(outcome @ IdentityOutcome::MaintenanceUnreadable { .. }) => {
+                        out.push_str(&format!(
+                            "      {identity} — {}\n",
+                            identity_phrase(&outcome)
+                        ));
+                        continue;
+                    }
                     Ok(outcome) => identity_phrase(&outcome),
                     Err(_) => "an outcome this build does not read".to_owned(),
                 }
@@ -966,15 +1035,81 @@ pub(crate) fn results_lines(view: &crate::views::RunView) -> String {
     out
 }
 
+/// The record's `freed` summary line, or nothing where no slot freed bytes.
+///
+/// A slot frees `before_bytes - after_bytes` of the `disk` the sibling measured
+/// around its command, where that is above zero: one that grew, or whose `disk`
+/// is `null` because a measure failed, frees nothing and is not counted. Each
+/// identity is named by its key's last path segment with its slots summed,
+/// largest first, equal figures in the record's own order.
+fn freed_line(payload: &Map<String, Value>) -> String {
+    let mut by_identity: Vec<(String, u64)> = Vec::new();
+    let mut slots = 0usize;
+    for entry in payload
+        .get("identities")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(Ok(IdentityOutcome::Slots(maintained))) = entry
+            .get("outcome")
+            .map(|outcome| serde_json::from_value::<IdentityOutcome>(outcome.clone()))
+        else {
+            continue;
+        };
+        let freed: Vec<u64> = maintained
+            .iter()
+            .filter_map(|slot| match &slot.outcome {
+                SlotOutcome::Ran {
+                    disk: Some(disk), ..
+                } => disk
+                    .before_bytes
+                    .checked_sub(disk.after_bytes)
+                    .filter(|freed| *freed > 0),
+                _ => None,
+            })
+            .collect();
+        if freed.is_empty() {
+            continue;
+        }
+        slots += freed.len();
+        let name = entry.get("identity").and_then(Value::as_str).map_or_else(
+            || "an unnamed identity".to_owned(),
+            |identity| crate::views::one_line(identity.rsplit('/').next().unwrap_or(identity)),
+        );
+        by_identity.push((
+            name,
+            freed
+                .iter()
+                .fold(0u64, |sum, bytes| sum.saturating_add(*bytes)),
+        ));
+    }
+    if by_identity.is_empty() {
+        return String::new();
+    }
+    by_identity.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
+    let total = by_identity
+        .iter()
+        .fold(0u64, |sum, (_, bytes)| sum.saturating_add(*bytes));
+    format!(
+        "  pool maintenance: freed {} across {slots} slot(s) ({})\n",
+        crate::freespace::gib(total),
+        by_identity
+            .iter()
+            .map(|(name, bytes)| format!("{name} {}", crate::freespace::gib(*bytes)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
 /// One identity's outcome, in the sibling's own words.
 fn identity_phrase(outcome: &IdentityOutcome) -> String {
     match outcome {
         IdentityOutcome::NoMaintainCommand => "no maintain command".to_owned(),
+        IdentityOutcome::MaintenanceUnreadable { reason } => {
+            format!("maintenance unreadable: {}", crate::views::one_line(reason))
+        }
         IdentityOutcome::NoSlots => "no slots".to_owned(),
-        IdentityOutcome::MaintenanceUnreadable { reason } => format!(
-            "maintenance configuration unreadable — {}",
-            crate::views::one_line(reason)
-        ),
         IdentityOutcome::Claimed { by_pid } => {
             format!("claimed — another pool maintain (pid {by_pid}) was maintaining it")
         }
@@ -1059,9 +1194,6 @@ pub(crate) struct Maintenance {
     pace: Duration,
     last_started: Option<Instant>,
     sweep: Option<Sweep>,
-    /// Every branch a live node of this run names, as of the loop's last pass:
-    /// shared with the running sweep, whose retirement pass reads it.
-    named: Arc<Mutex<Vec<Named>>>,
 }
 
 impl Maintenance {
@@ -1076,7 +1208,6 @@ impl Maintenance {
             pace: pace(),
             last_started: None,
             sweep: None,
-            named: Arc::default(),
         }
     }
 
@@ -1093,30 +1224,18 @@ impl Maintenance {
     /// running, and the pace has elapsed since it last started one. A launch
     /// naming no schedule starts nothing, ever.
     ///
-    /// `named` is every branch a live node of this run names, which the sweep's
-    /// retirement pass leaves alone. It is asked when a sweep starts and on every
-    /// pass while one runs, so the pass reads what the run names as it reaches
-    /// each identity rather than what it named when the sweep began.
-    pub(crate) fn consider(
-        &mut self,
-        idle: bool,
-        paths: &RunPaths,
-        tx: &Sender<Message>,
-        named: impl FnOnce() -> Vec<Named>,
-    ) {
+    /// What the run names, which the sweep's retirement pass leaves alone, the
+    /// pass asks of the loop over `tx` as it reaches each identity — see
+    /// [`Message::Naming`].
+    pub(crate) fn consider(&mut self, idle: bool, paths: &RunPaths, tx: &Sender<Message>) {
         let Some(config) = &self.config else {
             return;
         };
-        if self.sweep.is_some() {
-            *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
-            return;
-        }
-        if !idle || !crate::engine::due(self.last_started, self.pace) {
+        if self.sweep.is_some() || !idle || !crate::engine::due(self.last_started, self.pace) {
             return;
         }
         self.last_started = Some(Instant::now());
-        *self.named.lock().unwrap_or_else(PoisonError::into_inner) = named();
-        self.sweep = Sweep::start(config.clone(), Arc::clone(&self.named), paths, tx.clone());
+        self.sweep = Sweep::start(config.clone(), paths, tx.clone());
     }
 
     /// How long until this driver could next start a sweep, for the loop's wait.
@@ -1638,9 +1757,65 @@ mod tests {
             .is_some_and(|error| error.contains("the registry could not be read")));
     }
 
+    /// A slot frees only what its `disk` shows it shrank by: one that grew, one
+    /// whose measure failed and one whose `disk` is absent free nothing, and do not
+    /// stop the others being summed, counted and ordered.
+    #[test]
+    fn the_freed_line_sums_only_the_slots_that_shrank_largest_identity_first() {
+        let gib = 1024 * 1024 * 1024;
+        let slot = |number, disk: Option<(u64, u64)>| SlotMaintenance {
+            number,
+            outcome: SlotOutcome::Ran {
+                outcome: MaintenanceOutcome::Succeeded,
+                duration_ms: 1,
+                log: None,
+                disk: disk.map(|(before_bytes, after_bytes)| onevcs::SlotDisk {
+                    before_bytes,
+                    after_bytes,
+                }),
+            },
+        };
+        let sweep = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![
+                quiet(
+                    "github.com/owner/small",
+                    IdentityOutcome::Slots(vec![
+                        slot(1, Some((gib, gib / 2))),
+                        slot(2, Some((0, gib))),
+                        slot(3, None),
+                    ]),
+                ),
+                quiet(
+                    "github.com/owner/large",
+                    IdentityOutcome::Slots(vec![slot(1, Some((3 * gib, gib)))]),
+                ),
+                quiet(
+                    "github.com/owner/grew",
+                    IdentityOutcome::Slots(vec![slot(1, Some((gib, gib)))]),
+                ),
+            ]),
+            unreached: Vec::new(),
+        };
+        assert_eq!(
+            freed_line(&sweep.payload()),
+            "  pool maintenance: freed 2.5 GiB across 2 slot(s) (large 2.0 GiB, small 0.5 GiB)\n"
+        );
+
+        let nothing = PoolsMaintained {
+            started_at: "2026-09-20T00:00:00.000Z".into(),
+            identities: Ok(vec![quiet(
+                "github.com/owner/grew",
+                IdentityOutcome::Slots(vec![slot(1, Some((1, 2))), slot(2, None)]),
+            )]),
+            unreached: Vec::new(),
+        };
+        assert_eq!(freed_line(&nothing.payload()), "");
+    }
+
     /// A sweep on which nothing was due and nothing was wrong writes nothing; one
     /// on which a slot ran, a due slot could not be maintained, an identity was
-    /// claimed or one failed writes one record carrying exactly those identities,
+    /// claimed, one's declaration was unreadable or one failed writes one record carrying exactly those identities,
     /// each with the sibling's own outcome shape.
     #[test]
     fn a_sweep_is_recorded_where_something_ran_or_a_due_slot_could_not_and_never_otherwise() {
@@ -1696,30 +1871,22 @@ mod tests {
             assert!(held.is_recorded(), "{kept:?} was not recorded");
         }
 
-        // A configuration the sibling could not read ran nothing, but it is a
-        // refusal rather than the schedule working, so it is recorded the way a
-        // failed identity is — in the sibling's own shape.
+        // So is a repository whose own declaration could not be read: its
+        // maintenance has stopped, and nothing else would say so.
         let unreadable = PoolsMaintained {
             started_at: "2026-09-20T00:00:00.000Z".into(),
-            identities: Ok(vec![
-                quiet("a", IdentityOutcome::NoSlots),
-                quiet(
-                    "b",
-                    IdentityOutcome::MaintenanceUnreadable {
-                        reason: "onevcs.toml could not be parsed".into(),
-                    },
-                ),
-            ]),
+            identities: Ok(vec![quiet(
+                "a",
+                IdentityOutcome::MaintenanceUnreadable {
+                    reason: "onevcs.toml: invalid type".into(),
+                },
+            )]),
             unreached: Vec::new(),
         };
         assert!(unreadable.is_recorded());
-        let payload = Value::Object(unreadable.payload());
-        let identities = payload["identities"].as_array().expect("an array");
-        assert_eq!(identities.len(), 1, "{payload}");
-        assert_eq!(identities[0]["identity"], "b");
         assert_eq!(
-            identities[0]["outcome"]["maintenance-unreadable"]["reason"],
-            "onevcs.toml could not be parsed"
+            Value::Object(unreadable.payload())["identities"][0]["outcome"],
+            json!({"maintenance-unreadable": {"reason": "onevcs.toml: invalid type"}})
         );
 
         let something = PoolsMaintained {
@@ -1819,10 +1986,7 @@ mod tests {
                     outcome: MaintenanceOutcome::Succeeded,
                     duration_ms: 12,
                     log: Some(onevcs::ArtifactId("a-1".into())),
-                    disk: Some(onevcs::SlotDisk {
-                        before_bytes: 4_096,
-                        after_bytes: 1_024,
-                    }),
+                    disk: None,
                 },
                 "ran — succeeded in 12 ms, log a-1",
             ),
@@ -1868,9 +2032,9 @@ mod tests {
         assert_eq!(identity_phrase(&IdentityOutcome::NoSlots), "no slots");
         assert_eq!(
             identity_phrase(&IdentityOutcome::MaintenanceUnreadable {
-                reason: "onevcs.toml: expected a table\nat line 3".into(),
+                reason: "onevcs.toml\nline 4".into()
             }),
-            "maintenance configuration unreadable — onevcs.toml: expected a table at line 3"
+            "maintenance unreadable: onevcs.toml line 4"
         );
         assert_eq!(
             identity_phrase(&IdentityOutcome::Slots(vec![
@@ -2042,6 +2206,56 @@ mod tests {
         assert!(Retirements::default().payload().get("cut_short").is_none());
     }
 
+    /// A retirement pass is told what the loop answers it at the moment it asks,
+    /// and begins no identity the loop does not answer for: not where the stop is
+    /// raised while it waits — the loop that would answer is the one joining it —
+    /// and not where the loop has gone.
+    #[test]
+    fn a_pass_waits_on_the_loop_for_what_the_run_names_and_no_longer() {
+        let named = vec![Named {
+            repo: Some("tail".to_owned()),
+            branch: "keep/late".to_owned(),
+        }];
+        let (tx, rx) = mpsc::channel();
+        let stop = AtomicBool::new(false);
+        let answering = {
+            let named = named.clone();
+            std::thread::spawn(move || match rx.recv() {
+                Ok(Message::Naming(answer)) => answer.send(named).is_ok(),
+                _ => false,
+            })
+        };
+        assert_eq!(named_now(&tx, &stop), Some(named));
+        assert!(answering.join().expect("the loop answers"));
+
+        // Asked, and never answered, until the stop is up.
+        let (tx, rx) = mpsc::channel::<Message>();
+        let stop = Arc::new(AtomicBool::new(false));
+        let raising = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                let asked = rx.recv();
+                stop.store(true, Ordering::SeqCst);
+                asked.is_ok_and(|message| matches!(message, Message::Naming(_)))
+            })
+        };
+        let keys = vec![
+            "github.com/owner/service".to_owned(),
+            "github.com/owner/tail".to_owned(),
+        ];
+        assert_eq!(retire(&keys, &tx, &stop).unreached, keys);
+        assert!(raising.join().expect("the loop raised the stop"));
+
+        // The loop has gone: nothing begun, nothing waited on.
+        let (tx, rx) = mpsc::channel::<Message>();
+        drop(rx);
+        let stop = AtomicBool::new(false);
+        assert_eq!(named_now(&tx, &stop), None);
+        let gone = retire(&keys, &tx, &stop);
+        assert_eq!(gone.unreached, keys);
+        assert!(gone.retired.is_empty() && gone.failed.is_empty());
+    }
+
     /// A driver with no schedule starts nothing and waits on nothing; one with a
     /// schedule waits until its pace, and — where the pace is due but the pass
     /// was not idle — asks again on the recheck rather than at once.
@@ -2070,13 +2284,13 @@ mod tests {
         // Due now, and the pass was not idle: nothing starts, and the wait is
         // the recheck rather than zero.
         assert_eq!(scheduled.next_due(), RECHECK);
-        scheduled.consider(false, &paths, &tx, Vec::new);
+        scheduled.consider(false, &paths, &tx);
         assert!(!scheduled.is_sweeping());
         assert_eq!(scheduled.next_due(), RECHECK);
         // Started once: the wait is then the pace, and a second idle pass
         // inside it starts nothing more.
         scheduled.last_started = Some(Instant::now());
-        scheduled.consider(true, &paths, &tx, Vec::new);
+        scheduled.consider(true, &paths, &tx);
         assert!(!scheduled.is_sweeping());
         let until = scheduled.next_due();
         assert!(

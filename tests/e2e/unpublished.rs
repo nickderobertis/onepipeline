@@ -144,6 +144,7 @@ fn held_session(world: &World, repository: &Repository, branch: &str) -> onevcs:
                 .into_iter()
                 .collect(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             })
             .expect("a live session opens")
     });
@@ -1763,6 +1764,7 @@ fn a_printed_landing_command_runs_this_hosts_drafter() {
                     .into_iter()
                     .collect(),
                 refuse_conflicts: false,
+                caller_merges_base: false,
             })
             .expect("a session opens");
         commit(&world, &session.worktree, "t.txt", "t\n", "feat: third");

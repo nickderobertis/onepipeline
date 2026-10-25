@@ -1,0 +1,42 @@
+{
+  "name": "onepipeline-llmlint-diff",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/llmlint_diff",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "command": "just setup-llmlint"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/llmlint_diff"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/llmlint_diff"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/llmlint_diff"
+    },
+    "test": {
+      "command": "node --test tests/llmlint_diff/*.test.mjs",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/nx.json",
+        "{workspaceRoot}/project.json",
+        "{workspaceRoot}/justfile",
+        "{workspaceRoot}/scripts/nx.sh",
+        "{workspaceRoot}/llmlint.yml",
+        "{workspaceRoot}/oneharness.toml",
+        "{workspaceRoot}/package-lock.json",
+        { "runtime": "llmlint --version" }
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

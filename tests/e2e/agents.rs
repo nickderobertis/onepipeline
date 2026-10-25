@@ -1218,3 +1218,39 @@ mod unscanned {
     }
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The reply drafter, run by the real `oneagentgraph` over the paid-turn double, is a
+/// session of its own in the run's history — under `review-reply`, labelled with the
+/// node whose draft carries the comment and the drafting's attempt — and is composed
+/// with nothing of the node's: the run's node sets name a member its graph lacks, and the
+/// decline it drafts still posts.
+#[test]
+fn a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets() {
+    let world = crate::stacked_drafts::team_world("reply-drafting-history");
+    let run = "replyhistory";
+    let (_, host) = crate::review_reply::launched_with_replies(&world, run);
+    let left = crate::review_reply::conversation(1201, 1);
+    crate::review::add(&host, 1, left.clone());
+    crate::review::review(&world, run);
+    let sets = crate::review::reply(
+        &world,
+        run,
+        json!([{"op": "set-run-node-sets", "sets": ["members.worker.agent.model=nonesuch"]}]),
+    );
+    assert_eq!(sets.code, 0, "{}\n{}", sets.stdout, sets.stderr);
+    let envelope = json!({"version": 3, "commands": [{"op": "decline", "id": "a",
+        "comments": [crate::review_reply::named(&left)], "reason": "out of scope"}]})
+    .to_string();
+    let declined = world.run_with_stdin_on(world.agentgraph_cmd(&["reply", run]), &envelope);
+    assert_eq!(declined.code, 0, "{}\n{}", declined.stdout, declined.stderr);
+    let reply = crate::review_reply::the_reply_to(&host, 1, &left);
+    assert!(reply.body.contains("label=declined"), "{}", reply.body);
+
+    let lines = pointers(&world, run);
+    let drafted = scoped(&lines, Scope::ReviewReply);
+    assert_eq!(drafted.len(), 1, "{lines:?}");
+    assert_eq!(label(drafted[0], NODE_LABEL), Some("a"));
+    assert_eq!(label(drafted[0], ATTEMPT_LABEL), Some("1"));
+    assert_eq!(label(drafted[0], STEP_LABEL), None);
+    resolves(drafted[0]);
+}

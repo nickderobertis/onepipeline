@@ -6,19 +6,19 @@ code takes the nearest thing that does exist, and the divergence is recorded
 here as a proposal for the planner who owns the contract. Nothing on this list is
 resolved unilaterally.
 
-Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107 and 117** have since been **ruled on by the planner who
+Entries **1–9, 23–32, 34, 74, 75, 77, 78, 79, 81, 82, 83, 89, 91, 94, 96, 97, 99, 100, 102, 106, 107, 117 and 135** have since been **ruled on by the planner who
 owns the contract**, and `docs/contract.md` was amended to carry each ruling. They stay
 for the record: each states what diverged, what was ruled, and where the amended
 contract now says it.
 
-Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–121 are open**, except **52**, which entry 60
+Entries **10–22, 33, 35–40, 46–73, 76, 80, 84–88, 92, 93, 95, 98, 111, 113–115, 117, 119–127 are open**, except **52**, which entry 60
 supersedes: that proposal added a second manager-note op beside `context`, and 60
 collapses the two into one, so the shape lives in 60 and 52 keeps only the
 history that produced it. Each open entry states what the code does today and the
 proposal it is waiting on. Most are questions for a *producer* rather than for
 this crate, because `oneagentgraph` and `onevcs` are independent tools that expose
 general integration hooks only and nothing in them may know about this one; the
-rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–121 — are for the planner who owns the contract, and
+rest — 36 to 40, 46 to 73, 80, 84 to 88, 92, 93, 95, 98, 111, 113 to 115, 117, 119–127 — are for the planner who owns the contract, and
 name the sentence in it they would change. Entry 40 is for both: its plan-schema and event-kind
 halves are the contract owner's, and the two things it could not compile are
 `onevcs`'s. Entry 76 is for `onemessagebus` and for a node of this crate's own. An
@@ -1148,6 +1148,41 @@ Two rules bound it:
   whose landing an earlier read could not decide, are exactly the two answers a
   later merge changes.
 
+That second rule has **one exception, and it is this crate's behaviour rather
+than a resolution of this proposal: an attach stream.** `start --attach` and the
+other attached commands render after every batch of records for as long as the
+run goes, and on a busy run that is back to back — each render taking every
+unlanded node's landing from scratch, about forty `git` processes a node, was
+nearly half of what a ten-draft review round started, and on a host where
+starting a process is slow that round ran past its journey's bound. So within
+one attach stream a node's read is carried across the stream's consecutive
+renders for at most a short, fixed window (`views::STREAM_READ_REUSE`), and is
+taken again at once after the stream records a settlement or restack of that
+node, or its change merging. The rest of a session's records — a fetch, a
+push, the publication itself — are steps whose outcome the run records as that
+settlement or restack; letting go at each of them read a restacked node again
+on every render of its publication, half of what was left of a busy attached
+command's reads. The stream's final render — the one reporting the run as it
+settled, made once the run's loop has finished or, where the driver's exit was
+printed before that, the render printing it — carries nothing from the renders
+before it. What it reports was read once the run's loop had settled: the
+driver's close-out (`engine::landings_after_asking_again`) reads every
+unlanded node a moment earlier in the same process, and the final render takes
+those answers up (`views::closed_out`) rather than asking each branch a second
+time — inside the same window, only where the sibling answered, and only where
+the stream recorded nothing that moved the node since — and reads the rest.
+The hand-off runs the other way too: the stream reads a node again just after
+the run records it settling or restacking, so the close-out a moment later
+takes up the stream's read of each node rather than asking its branch again
+(`views::streamed_for_close_out`) — inside the same window of when the stream
+asked it, only where the sibling answered, and only where the driver recorded
+nothing moving the node after it was asked — and reads the rest. The close-out
+reads a branch two nodes name, a rework and the node it replaced, once.
+`status`, `results` and `watch` carry nothing and read on every render.
+Whichever view it is, the summary takes the reads it needs side by side rather
+than one after another, as the driver's own close-out does, and each is still
+counted against the render and the node it was taken for.
+
 A read that cannot decide is reported as **undecided**, distinctly from landed and
 from not landed, with the settlement's own dated claim behind it — the property
 the dated phrasing was protecting, kept. `tests/e2e/landing.rs` drives all of it
@@ -1178,6 +1213,15 @@ already been decided against fails there by name. **Proposal (for `onevcs`): a
 landing read that takes a repository and several references — or a resolved-repository handle
 that answers them — so a render pays one open for a repository however many of its
 nodes it prints.**
+
+`onevcs` 0.56.9 publishes that read, `landing_statuses(references, repo)`, and it
+shares the registry, the repository and its base across the references. It does not
+yet share what costs most: each reference still asks every session copy on record
+whether it is a repository and holds the branch (`status::holders_of`), about thirty
+of a read's sixty-odd `git` processes. Measured over the busy review round in
+`tests/e2e/review_round.rs`, taking this crate's reads through it started 5,596 `git`
+processes for landing reads against about 5,600 one at a time, so this crate still
+takes them one at a time, and the proposal stands for those per-copy checks.
 
 **What is still open on this side is the contract's wording.** It describes a
 landing as what the settlement observed; nothing in it says a view reads again, or
@@ -3392,6 +3436,19 @@ contract's vocabulary has nowhere to put one. So this crate now ships:
   either would name a graph run that had ended and stay silent about a run nobody
   will watch again, so the listing asks the launch record, and only for a run its
   driver tier leaves room to say so.
+
+  *Implementation behaviour, not a contract divergence:* that restart is held
+  still by `stop`. A stop of a run launched with an observer graph holds the
+  run's observer restarts — the run directory's `observer-restart.lock`, which
+  the driver makes as it starts watching — for its whole teardown, from before it
+  cancels the recorded observer until it has answered, waiting out a restart
+  already under way so the observer it cancels is the one now watching. While
+  the hold is held the driver restarts nothing and says so on its log, so no
+  observer starts behind the teardown's cancel or its listing. A stop that
+  cannot take the hold signals nothing and refuses, naming the lock, and a
+  driver that cannot take it restarts nothing until it can. A stop that refused
+  lets the hold go, and the run it left running is watched again at the
+  driver's next look.
 - **`views::Listing`**, the bounded counterpart of `Survey`, which carries the
   run roots it could not read with each root's own reason — on the same terms
   `Survey::skipped` already states, because a cheap listing that reported only
@@ -3450,8 +3507,9 @@ cannot go on describing a document the build stopped writing:
 
 ```json
 {
-  "schema_version": 10,
+  "schema_version": 11,
   "fields": [
+    "labels", "group",
     "schema_version",
     "run_id",
     "last_write_at",
@@ -3753,6 +3811,20 @@ stating one; and the profile's v3 document already admits it, because its `Comma
 leaves an op's own fields open. Describing it in that document is a follow-up
 recorded for `onemessagebus-agent`.
 
+**`assets_from` follows that same version ruling.** For issue #805 the manager
+confirmed that optional `node.assets_from` on `add` and a `retry` replacement rides
+envelope version 3, citing the #296 precedent above (manager reply
+`c-ef6e619f5f1b5ab68480081476614d78`). Versions 2 and 3 remain unchanged. The field
+is omitted when absent, so old envelopes round-trip unchanged; the v3 golden
+covers a stated qualified task id. Describing the field in the
+`onemessagebus-agent` v3 profile document is a recorded follow-up.
+
+The manager also confirmed that `PLAN_SCHEMA_VERSION` stays at 3 for the persisted
+node (`c-bc54e989161708d7313d27f279d480e0`): optional `adoption` and `consumes`
+already followed that rule in section 40. An older snapshot without `assets_from`
+reads and serializes byte-identically; a snapshot carrying it round-trips at the
+same version. Store-backed plan metadata still cannot state it.
+
 **A ready node's own fields already move without replacing it, and this is the
 documenting rather than the building.** Moving one node off a kind of dependency
 wait had been done by dropping and re-adding it and its dependent, purely because
@@ -3919,7 +3991,7 @@ each change is argued:
   did. The vocabulary is `settled`, `surface`, `nothing-driving`, `node-settled`
   and `node=<ID>`, and it is validated when the command is invoked — see below.
   A fifth word, `run-joined`, is a flow watch's alone (entry 114) and refused on
-  a run's.
+  a run's, and so is a sixth, `landing-progress` (entry 123).
   Given none, the wait returns on `surface` and `node-settled`; given any, those
   named replace that set.
 
@@ -4063,7 +4135,8 @@ but only one that knew which node to name, which a supervisor asking "is anythin
 waiting for a person?" does not.
 
 **`monitor` carries the same cursor, so an observer keeps no file of its own.**
-The surface is `onepipeline monitor <RUN> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`.
+The surface is `onepipeline monitor <RUN> | --flow <ID> [--filter NAME|SPEC | --all] [--cursor <CURSOR>]`,
+where `--flow` in the place of `<RUN>` reads a flow's landings instead (entry 123).
 `monitor` has no cursor otherwise, so the host's observer persona kept one in two
 files in its working directory, and that directory was a publication checkout: in
 the run that closed `ai-orchestrator` #855 the observer's `monitor.cursor` and
@@ -4676,7 +4749,8 @@ present and two are present only when the envelope carried the half they name:
   "reply": {"present": "always", "values": "a whole number"},
   "state": {"present": "always", "values": ["delivered", "applied", "queued"]},
   "verdict": {"present": "with a verdict half", "values": ["delivered"]},
-  "commands": {"present": "with commands", "values": ["applied", "queued"]}
+  "commands": {"present": "with commands", "values": ["applied", "queued"]},
+  "notes": {"present": "with a note, once applied", "each": ["queued", "applied"]}
 }
 ```
 
@@ -4711,6 +4785,22 @@ reads **this entry** — every key, the words each may answer, and which half ea
 one's presence depends on — and drives an envelope of each shape through the
 verb, so a key, a word, or a presence rule that moves on either side fails there
 rather than drifting.
+
+**Amended: `notes`, ruled.** The manager ruled on the plan node `op-envelope-outcome`, as
+rule 6 of the amendment entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled)
+states, that the receipt gains one optional key and nothing else. `notes` is an object from
+each node a note in the envelope named to that note's result: `queued` while it waits in
+its receiver's inbox for that receiver's turn, which is what a run's live driver answers
+for every live note it hands off, and `applied` for a note this process applied itself
+with nothing driving the run, or one `deliver: next` carried to its node's next dispatch.
+Of several notes to one node, one waiting makes that node's word `queued`. The key is
+absent when the envelope carries no note, and when its commands are not answered yet —
+`state` `queued`, which says nothing about any note. A submitter can tell from the receipt
+alone that a note waits, without reading the channel. Older readers ignore the key, which
+`a_reader_of_the_older_receipt_still_reads_every_answer` holds. It is declared once, as
+`verbs::Receipt::notes`, whose values are the channel layout's own `CommandVerdict`, and
+the block above states it; the journeys read `each` as the words each node's value may
+take.
 
 ## 65. One journal kind means both "a command was accepted" and "the graph changed" — OPEN
 
@@ -5728,10 +5818,15 @@ failure is reported changes.
 
 The budget is nameable three ways, in the order entry 41 states and for the same
 reason: the flag, then the environment variable, then the launch config field,
-then the shipped default. It is resolved **once**, at the launch, and retained in
-the launch record beside the pacemaker interval — so a driver a fresh `adopt`
-starts bounds its copies as the launch chose, and a record written before the
-field existed reads and resolves to the default. The value is a positive whole
+then the shipped default. It is resolved at launch and retained in the launch
+record beside the pacemaker interval. `adopt --writeback-item-budget SECONDS`
+replaces it under the ownership lock before the new driver projects anything,
+including before a detached driver is spawned. An adoption naming no budget
+keeps the recorded value and ignores the environment. The additive SDK entry point
+`verbs::adopt_with_writeback_item_budget(paths, how, budget)` accepts an optional
+whole-second budget; `verbs::adopt` and `verbs::Adopt` keep their existing shapes.
+A record written before
+the field existed reads and resolves to the default. The value is a positive whole
 number of seconds. **Zero is refused wherever it is read** — flag, variable, or
 config key — by the spelling that carried it, because zero is no budget at all:
 multiplied through, it leaves the floor as the whole deadline for every plan
@@ -5765,6 +5860,7 @@ replays.
 
 ```json
 {
+  "sdk_verbs": ["adopt_with_writeback_item_budget"],
   "budget": {
     "flag": "--writeback-item-budget",
     "environment": "ONEPIPELINE_WRITEBACK_ITEM_BUDGET",
@@ -5996,15 +6092,16 @@ for each engine-owned key whose value moved, `metadata_remove` for each one no l
 (a retry's new head carries no settlement or landing keys of its own yet), `content` and `title`
 where the text moved, `delivers` where it moved — the store re-evaluates each ticket as `task
 status` does — and `depends_on`, the whole declared set with each far end the item its lineage's
-root keys, where the edges moved. Labels, repositories, project membership and every key the
+root keys, where the set of edges moved (a `deps` reordered moves none). Labels, repositories, project membership and every key the
 engine does not own are never named, so a person's edit to any field stands until the run next
 changes that same field. The baseline advances per item as each update lands, recording the
 fields the store says it wrote. An item that does not exist — an `add`ed node — is created by
 one member copy naming only the lineages being created, over a shadow store holding only their
-documents and the project's; that copy lands the project item beside them, so the attempt reads
-the project once and the shadow restates it exactly, and the copy writes nothing to it: the one
-project read any attempt makes, ruled by the planner because the store's member copy always
-plans the project item. An engine-owned project key (`onepipeline.goal`, `.concurrency`,
+documents and the project's origin. Since onetaskgraph 0.11.0, `CopyScope::MembersOnly`
+resolves the existing counterpart without reading or writing the project item. A missing
+counterpart is refused before any write. A typed refusal naming a missing routed member
+project triggers a full member copy for that project's initial creation, restating the
+existing home from one read; every other error propagates unchanged. An engine-owned project key (`onepipeline.goal`, `.concurrency`,
 `.name`, `.schema_version`) whose value differs from the baseline is written with
 `set_project_metadata`, one key per call; the project's title, description and labels are never
 written.
@@ -6131,7 +6228,7 @@ it creates an item, which entry 93 states: once per item created, inside that at
                           "delivered": [{"ticket": "tickets:board/build", "deliverer": "plans:delivers-plan/build",
                                          "outcome": "written", "from": "todo", "to": "queued",
                                          "pruned": ["plans:delivers-plan/gone"]}],
-                          "calls": {"project-copy": 1, "project-show": 1, "task-show": 1}}
+                          "calls": {"project-copy": 1, "task-show": 1}}
   },
   "retired": {
     "record": "<run dir>/writeback-store.json",
@@ -6142,11 +6239,11 @@ it creates an item, which entry 93 states: once per item created, inside that at
   "member_projection": {
     "reads": ["project-show", "task-show"],
     "task_show_per": ["lineage the landed baseline does not hold, by the id the run knows for it"],
-    "project_show_per": "attempt that creates an item, once, so the shadow project restates the destination and the copy writes nothing to it",
+    "project_show_per": "only initial creation of a missing routed member project, after MembersOnly refuses",
     "never_reads": ["task-list"],
     "carries": "the lineages whose projection differs from the landed baseline (entry 93)",
     "existing_item": {"call": "task-update", "names": "only the fields whose projection differs from the baseline", "never_names": ["labels", "repositories", "project membership", "a metadata key the engine does not own"]},
-    "created_item": {"call": "project-copy", "copy_scope": "CopyScope::Members", "names": "only the lineages being created"},
+    "created_item": {"call": "project-copy", "copy_scope": "CopyScope::MembersOnly", "names": "only the lineages being created"},
     "project_keys": {"call": "project-metadata-set", "per": "engine-owned key whose value differs from the baseline"},
     "never_written": ["the project's title", "the project's description", "the project's labels"],
     "carrying_nothing": "no store call at all: items [], calls {}, actions null",
@@ -7755,6 +7852,11 @@ pass a closing driver stopped at an identity boundary.
 **A node pinned to a branch a pass retired still dispatches**: `onevcs` cuts the named
 branch fresh from the base.
 
+**The maintenance record beside it.** The `pool-maintenance` record the same sweep journals
+for its maintenance pass is written on entry 97's condition, which since `onevcs` 0.50.0
+also covers an identity answered `maintenance-unreadable`, and its per-identity payload is
+that library's report unchanged, each `ran` slot carrying its `disk`.
+
 Driven end to end by `tests/e2e/retirement.rs` against the linked `onevcs` over real git
 and a bare origin: the recording on each of the three landing paths, with the first
 attempt's branch then classified `superseded-with-changes` by that library while it still
@@ -7840,12 +7942,13 @@ update names its edges, and the store sends only their difference — and its ba
 landed. A stop's
 release reads it in the stopping process and advances it by what the release wrote.
 
-**The project is read once by an attempt that creates an item, and by no other.** The member
-copy that creates it always lands the project item beside it, so the shadow project restates
-the destination's own title, description, labels and metadata, read for that attempt, and the
-copy writes nothing to it; the planner ruled that read in over rewriting the project from a
-shadow built with none. An engine-owned project key whose value moved is written by itself
-(`set_project_metadata`), and `project_metadata` advances as each lands.
+**Member creation does not read or write the project item.** Since onetaskgraph 0.11.0,
+`CopyScope::MembersOnly` resolves the counterpart using the shadow project's origin alone.
+The ordinary shadow carries no destination fields to restate. A typed no-project-counterpart
+refusal naming a routed destination falls back to a full member copy for its initial project
+creation, after one read restates the home. Other errors propagate. Settlement updates keep
+projecting status. An engine-owned project key whose value
+moved is written by itself (`set_project_metadata`), and `project_metadata` advances as each lands.
 
 **One page read remains, and it is the copy's own.** When a copy *creates* an item — the one an
 `add`ed node needs — `onetaskgraph`'s `Engine::copy` first looks for an item already recording
@@ -8080,6 +8183,28 @@ maintenance pass was cut short, `branches-retired` is written with empty `retire
 and every enumerated identity unreached; where the identities could not be enumerated, the
 `error` record is written with no `cut_short`. `results` renders the cut on the
 `pool-maintenance` lines it prints. Reversing this costs one optional key on two documents.
+
+**Since `onevcs` 0.50.0: one more record condition, and the freed bytes.** A proposal to
+the planner who owns the contract, carried by the plan that linked that release;
+`docs/contract.md`'s record clause is unchanged until that ruling. That release runs the
+maintenance command a repository declares in its own `onevcs.toml`, read from its
+publication checkout's base, before the host's `maintain`; a declaration it cannot read runs
+nothing and answers `IdentityOutcome::MaintenanceUnreadable`. So a `pool-maintenance` record
+is journalled when some slot `ran`, is `unavailable` or is `broken`, or some identity was
+`claimed`, failed, or answered `maintenance-unreadable` — the last because that repository's
+cleanup has stopped and nothing else would say so. A pass in which nothing ran and nothing
+went wrong still writes nothing. The per-identity payload is still the sibling's own
+`IdentityOutcome` as it serializes it, so the new outcome reads
+`{"maintenance-unreadable": {"reason": …}}` and every `ran` slot carries `disk`,
+`{"before_bytes", "after_bytes"}` — its worktree's allocated bytes immediately before and
+after the command — or `null` where a measure failed. `outcome` was already that library's
+JSON, so `agent.pipeline.pool-maintenance@2` keeps its version. `results` prints, directly
+under the sweep's header, `pool maintenance: freed <X.X> GiB across <n> slot(s) (<name> <X.X>
+GiB, …)` for a pass in which some slot's `before_bytes` exceeds its `after_bytes` — counting
+only those slots, naming each identity by its key's last path segment with its slots summed,
+largest first — and `<identity> — maintenance unreadable: <reason>` among the per-identity
+lines. `tests/e2e/maintenance.rs` drives each condition, the freed line, a slot that grew and
+one whose `disk` is `null` over real pooled slots.
 
 **Where it is held.** `tests/e2e/maintenance.rs`'s
 `a_closing_driver_stops_its_sweep_after_the_identity_in_progress` settles a run inside the
@@ -8783,7 +8908,7 @@ home's `onetaskgraph.members`, under the floor deadline, and only then. A source
 home's source routes to but holds no member in is not one of the run's, and an item
 there is refused. Where the home cannot be read, that is said, and the item is refused.
 A stop reads the baseline only after it has served any wait the store asked for.
-`create` still copies through the store with `CopyScope::Members` and `destination` the
+`create` copies through the store with `CopyScope::MembersOnly` (since 0.11.0) and `destination` the
 home's source; the store's routing places each item, and the engine never chooses a
 source. `writeback-landed.json` and `writeback-projections.jsonl` keep their schemas and
 their versions; each item's qualified destination names its own source. The words, the
@@ -8791,7 +8916,7 @@ their versions; each item's qualified destination names its own source. The word
 of the plan in whichever source it lives.
 
 **A live `add`.** An `add` whose node names a `repo` the home's source routes elsewhere
-lands in that source's member project, through the same routed `Members` copy, created
+lands in that source's member project, through the routed member copy, created
 if the plan had none there. The engine's own compile of the edit is unchanged.
 
 **Where it is held.** `tests/e2e/multi_source.rs` runs each journey over two `local-md`
@@ -8859,6 +8984,11 @@ plan `accepted-follow-ups-1002-plan` (node `op-320`); the planner who owns the c
 ruled the one edge its wording left open on that node.** An envelope claimed behind one
 awaiting a live note's answer is held only when it names a node the awaiting envelope
 names, and every other envelope is judged and applied on the pass that claims it.
+**Amended per receiver** by the plan node `op-note-holds` (onepipeline#1011, #801, #803,
+#754), as [*Per receiver*](#per-receiver--ruled) below states: what holds a later envelope
+is now each node that receives a still-outstanding live note, or that an earlier envelope
+still held names, never every node an envelope named, and a `finding` holds nothing and
+is held by nothing.
 
 **What was wrong.** Since `a72e88e` a live note is offered off the run's single writer,
 so relay, settlement and heartbeats go on while a conversation decides. But the
@@ -8890,22 +9020,239 @@ no node — is never held. A held envelope is answered when it is applied, as be
 envelope that offers a note is handed to a delivery thread of its own, so a note to one
 conversation never waits on another conversation's turn.
 
-**What this build does.** `tests/note/main.rs`'s
-`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` holds a worker turn
-with a `[note build, amend docs]` envelope outstanding and drives four envelopes behind
-it through `reply`: an `amend` to `other` and a `finding` about no node are committed and
-answered while the note still waits, and a `finding` about `build`, a second `amend` to
-`docs`, an `add` and a `reparent` naming `build` only among their `deps`, and an `amend`
-naming only the node that held `add` creates — sent through the planner channel's bus,
-since `reply` checks it against the record before queueing it — stay unanswered until the
-note is, then commit after it in claim order; a record naming
-`build` that does not decode is refused as it is claimed, not held. `notes_to_two_conversations_wait_in_both_inboxes_at_once`
-holds two workers' turns and has a note to each waiting in both inboxes at once, with an
-envelope naming both nodes unanswered until both notes are recorded. Two notes answered
-one at a time is not a state the doubled turn can arrange — its hold is one pair of gates
-for every conversation — so `src/engine.rs`'s
-`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` drives the real queue
-and the real reconciler with two deliveries outstanding and answers them in turn.
+**What this build did, until the per-receiver ruling below.** `tests/note/main.rs`'s
+`only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` held a worker turn
+with a `[note build, amend docs]` envelope outstanding, and held a `finding` about `build`
+and a second `amend` to `docs` behind it beside the `add` and `reparent` naming `build`.
+That journey is updated to the per-receiver rule rather than removed. The `amend` to
+`docs` now commits as its envelope is handed, so the second one and the finding are
+applied while the note waits, and the `add`, the `reparent` and the `amend` of the node
+`add` creates are still held behind the note, in claim order. A record naming `build`
+that does not decode is still refused as it is claimed.
+`notes_to_two_conversations_wait_in_both_inboxes_at_once` holds two workers' turns, so a
+note to each waits in both inboxes at once, and an envelope naming both nodes (an `add`
+depending on both) stays unanswered until both notes are recorded.
+`an_envelope_naming_two_outstanding_notes_waits_for_both_answers` in `src/engine.rs`
+drives the real queue and the real reconciler with receivers outstanding and answers them
+in turn.
+
+### Per receiver — ruled
+
+**Ruling: the plan node `op-note-holds` states the rule below as its task, and the manager
+ruled its one open edge under correlation `c-b8edb4a54dbad328c59a3397e95b0251`.** It
+replaces the hold the paragraphs above describe wherever the two differ. The sentence of
+the Channel paragraph it amends is the one this entry's first ruling put there.
+
+**What was wrong.** One live note waiting on one busy worker held everything the hold above
+reached. That meant the envelope's other receivers, every edit to any node the envelope
+named, and every finding about those nodes. The hold could last hours, and `status` said
+the envelope would be answered by *the run's next driver*. That is what a manager reads
+just before resending an edit or adopting a run. In onepipeline#1011, #801, #803 and #754
+managers took a slow worker for a lost message and reached for destructive levers.
+
+**The rule this build applies.**
+
+1. **Fan-out.** The notes an envelope offers to several receivers are offered concurrently,
+   with one delivery per receiver. A receiver's notes keep the envelope's order among
+   themselves. Each receiver's `note-delivered` `edit-committed` record is written when
+   that receiver answers. A receiver with no live turn is answered without waiting for any
+   other receiver, whether its note is queued, carried or refused.
+2. **Everything else commits as the envelope is handed.** An envelope that offers a live
+   note commits its other commands in command order on the pass that hands the notes off,
+   before any note is offered. That is safe because a note stages nothing that the commands
+   after it are validated against. Only the notes stay outstanding. This closes the
+   `[note A, drop C]` edge above without holding `C`: the `drop` is in the record before
+   any later `[amend C]` is judged. A `retitle` among them
+   that the host refuses still refuses the envelope whole, with nothing offered.
+3. **The hold is per receiver.** A later envelope is held only while it names a node that
+   receives an outstanding live note, or a node named by an earlier envelope that is
+   itself still held. A node named only by an envelope's non-note commands holds nothing
+   once rule 2 has committed them. A receiver's hold is
+   released as soon as its own note is answered, whatever the envelope's other receivers
+   are doing. Order is still kept for each node. A later command naming a node waits for
+   that node's outstanding note, or for the held envelope naming it, in claim order. An
+   envelope naming neither is not held by notes to other nodes.
+4. **Findings are never held.** A `finding` names no node for this purpose, whether it is
+   blocking or not and whatever node it is about. It edits nothing that an edit to its node
+   could overtake, and what a monitor finds about a node is most worth reading while that
+   node's turn is still running. So a finding surfaces on the planner channel when it
+   arrives. An envelope that carries a finding beside a command that is held is still one
+   envelope, and it is judged in its turn.
+5. **One outcome, and it never claims less than happened.** The envelope keeps one
+   `CommandOutcome`, written once every receiver has answered. If every command committed,
+   it is `applied` as before. A receiver's conversation can still refuse its note after the
+   other commands committed: that is the reach-nobody refusal, or a `cancel` preempting it.
+   Then the outcome is `applied: false` with a `reason` opening `applied in part:`, which
+   names the commands that committed and those that refused. Each result says the same:
+   `applied` for a command that committed and is in the record, `refused` with its own
+   reason, and `validated` for a note never offered because an earlier note to the same
+   node refused. What committed is not undone, so only what refused is resent. No
+   `CommandVerdict` is added. The channel types' own docs are the published layout
+   document's text, whose version `docs/contract.md` fixes, so the shape is stated here and
+   in `engine::partly_applied`.
+6. **A driver that dies mid-delivery.** The successor answers each command with a record
+   from that record, and commits the rest from what the predecessor wrote down. It refuses
+   a live note that the predecessor was still delivering, with a reason saying whether it
+   was read is not known, and journals that refusal once. It does not offer that note a
+   second time. An envelope with no record at all is judged afresh, as before.
+7. **Truthful status.** The live driver keeps `channel/deliveries.json` beside the
+   channel's queues. It writes the file atomically whenever what it holds outstanding or
+   held changes, and empties it as it exits. The shape is
+   `{schema_version: 1, deliveries: [{envelope, node, state: "delivering" | "held", since,
+   behind_envelope}]}`, where `behind_envelope` is present only when held. It is declared
+   once, as `channel::deliveries::Delivery`, which both the writer and `status` import.
+   Old readers ignore the file, and its absence means no live delivery information. Read
+   together with driver liveness, `status` names each claimed, unanswered envelope in one
+   of three ways. It is *delivering a live note to `<node>` since `<time>`*, or *held
+   behind envelope `<id>`'s note to `<node>`*. When no driver is live it keeps the existing
+   *claimed with no outcome … the run's next driver answers each* line, because a driver
+   that is gone delivers nothing. `status --json` carries the same additively, as an
+   `unanswered` array of `{envelope, delivery?}` on `RunReading`, omitted when empty, where
+   `delivery` is `{state, node, since, behind_envelope?}`. `docs/contract.md` names
+   neither the field nor the file. Both are additive and omitted when empty, so the
+   reading's `schema_version` stays `1`. `schemas/run-reading.schema.json` is regenerated
+   from the type, and a test holds the sidecar's type to it.
+
+**What this build did, until the hand-off amendment below.** `tests/note/main.rs` drove
+each rule through the binary, with each worker's turn held on its own gates (`turn.gates`
+in the doubled harness):
+
+- `a_note_to_each_of_two_receivers_is_recorded_as_each_answers` and
+  `each_of_three_receivers_of_one_envelope_is_recorded_as_it_answers` cover fan-out.
+- `a_note_held_on_one_receiver_holds_nothing_that_names_only_others` covers the
+  per-receiver hold.
+- `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` covers a
+  later edit held behind a held envelope, then applied after it.
+- `only_an_envelope_naming_what_a_waiting_note_names_is_held_behind_it` covers commits at
+  hand and both findings and edits to the envelope's other nodes being unheld.
+- `a_finding_about_a_node_surfaces_while_its_note_waits` covers a finding, non-blocking and
+  blocking.
+- `a_note_refused_after_the_commands_beside_it_committed_is_answered_applied_in_part`
+  covers the partial outcome, read back.
+- `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held` covers
+  status, both forms, before and after the driver is killed, beside a docs-only `amend`
+  applied while the note waits.
+
+`src/engine.rs` covers the rest with unit tests:
+
+- `an_envelope_naming_two_outstanding_notes_waits_for_both_answers` covers one receiver
+  releasing its node and no other.
+- `a_handed_envelope_its_driver_died_delivering_is_answered_from_what_committed` covers
+  recovery.
+- `src/channel/deliveries.rs`'s
+  `the_sidecar_entry_is_the_delivery_the_run_reading_schema_states` reconciles the
+  sidecar's type with the schema.
+
+### Answered at hand-off — ruled
+
+**Ruling: the manager ruled the rule below on the plan node `op-envelope-outcome`, as an
+amendment of rule 5 of the per-receiver ruling above, and rule 6 as an amendment of entry
+64's receipt.** It replaces that rule 5, and wherever the per-receiver ruling's other rules
+say when an envelope is answered or what holds a later one, this is what they now say. The
+cancel exception below keeps its first point and loses what it said of held envelopes,
+since none is held. Entry 136 records the bundle versions it raised.
+
+**What was wrong.** Under the per-receiver ruling an envelope carrying a live note committed
+its other commands as it was handed, but its one `CommandOutcome` was written only once
+every receiver had answered, and a receiver answers only when its running turn ends. A later
+envelope naming that node was held behind the note. So `[amend X, note X]`, and a later
+`[amend X]`, to a node whose worker was in a turn of hours went unanswered for hours, which
+a manager cannot tell from a lost message: in one recorded run two such envelopes waited
+more than four hours behind one turn. Separately, the reconciler claimed every fresh
+envelope up front, and an error processing one aborted the pass and left the rest claimed
+in memory until a later driver's recovery.
+
+**The rule this build applies.**
+
+1. **An envelope's `CommandOutcome` is written when its notes are handed to their
+   receivers' inboxes, on the pass that hands them off.** A note waiting for its
+   receiver's turn has the per-command result `queued`, a new `CommandVerdict` variant
+   (`"queued"` on the wire). Every other command's result is what it was. The envelope is
+   `applied` when nothing refused. A note a committed `withdraw-note` took back before it
+   was handed is still refused there, and such an envelope is answered applied in part.
+2. **The receiver's later take or refusal is that note's own record, and the outcome is
+   never rewritten.** A note a turn takes, or a delivery carries, is journalled as its
+   `edit-committed` `note-delivered` operation, naming its envelope and index, as before.
+   A note its receiver refuses is journalled as its own `edit-rejected`, naming its
+   envelope and the note's `index` (a key that record gains, optional, so a record
+   written before it reads unchanged), and is surfaced as any refusal is. A note never
+   offered because an earlier note of its envelope to the same receiver refused is
+   journalled refused the same way, since its envelope's answer said `queued`. `status`
+   shows each. The `turn` entry 133 puts on a delivered note's result is then on that
+   note's `note-delivered` record alone, since the result it would sit on is `queued`. A `withdraw-note` of a queued note is still answered as entry 133 states: it
+   answers its envelope again with that note refused, since withdrawing is a later
+   command and not the receiver's answer.
+3. **Only a later note to the same receiver keeps order behind an outstanding note.** It
+   is judged and answered on the pass that claims it, its note `queued` too, and waits
+   in the driver, unoffered, until the earlier note to that receiver is answered, so a
+   receiver takes its notes in the order they were sent. A later non-note command naming
+   that node commits at once, and nothing else waits behind a note. A `cancel` of the node
+   answers, in its conversation's place, each note to it outstanding — offered or still
+   waiting behind another — `refused` and naming the cancel, as the exception below
+   states; those notes' envelopes keep the outcome they were given.
+4. **A live driver answers every envelope it claims.** An envelope whose processing fails
+   is answered `applied: false`, its reason naming the failure, unless it was answered
+   before it failed, and every envelope claimed with it is still processed and answered on
+   that pass. Only a failure to write that answer ends the pass, and the answer and the
+   envelopes the pass had not reached are kept for the same driver's next pass, which
+   writes the answer first. An undecodable record whose refusal cannot be answered is kept
+   the same way.
+5. **`channel/deliveries.json` and `status` keep telling which notes wait in which inbox**,
+   with `queued` in place of a held envelope where that is now the state. The sidecar's
+   `Delivery` gains `{state: "queued", node, since, deadline?}`, which this build writes
+   for every note it has handed off and not recorded an answer for. `delivering` and
+   `held` stay in the type, read from a driver built before this, and this build writes
+   neither. `status --json` carries the queued notes additively, as an `inbox` array of
+   `{envelope, delivery}` on `RunReading`, omitted when empty, so the reading's
+   `schema_version` stays `1`. The human `status` prints an `inbox:` line for each, and a
+   `note:` line with what became of each of the latest five notes answered `queued` that
+   have left their inbox. A driver that dies with notes queued leaves what it wrote down
+   for their envelope, and the next driver journals a refusal of each that has no record
+   of its own, as it did for a note it was still delivering, without writing the outcome
+   again.
+6. **The `reply` receipt gains one optional key, `notes`**, as entry 64 now states.
+
+**What this build does.** `tests/note/main.rs` drives each rule through the binary:
+
+- `an_envelope_is_answered_as_its_note_is_queued_and_the_receiver_takes_its_notes_in_order`
+  holds a worker's turn, sends `[amend X, note X]` through `reply`, and reads the outcome,
+  the receipt, the journal, `status`, `status --json` and the sidecar while the turn is
+  held. It then sends `[amend X]` and `[note X]`, and once the turn ends reads both notes
+  journalled in the order sent with no outcome rewritten.
+- `a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`
+  covers rule 2's refusal.
+- `an_envelope_whose_processing_fails_is_answered_refused_beside_those_claimed_with_it`
+  covers rule 4 with a failpoint, the driver still running.
+- `a_receiver_still_delivering_when_its_driver_died_is_refused_by_the_next` covers the
+  successor's refusal of a queued note.
+- `notes_to_one_conversation_are_delivered_and_recorded_in_the_order_they_were_claimed`
+  covers rule 3's order with three envelopes to one receiver, and
+  `a_cancel_refuses_the_note_offered_to_its_node_and_the_one_queued_behind_it` covers a
+  cancel refusing a note still waiting behind another.
+- `status_names_each_receivers_inbox_and_drops_each_as_it_answers` and
+  `status_shows_a_pending_notes_deadline_beside_its_delivering_state` cover rule 5's
+  readings.
+
+The other journeys the two sections above name are updated to these rules, and those named
+for a hold that no longer exists are renamed for what they now prove:
+`nothing_but_a_later_note_to_its_node_waits_behind_a_waiting_note`,
+`a_note_waiting_on_a_receiver_holds_back_no_edit_to_any_node`,
+`a_queued_note_its_receiver_refuses_is_journalled_and_leaves_its_outcome_as_it_was`,
+`a_cancel_waits_on_no_other_nodes_note_in_an_envelope_that_amended_its_node` and the cancel
+journey above. `status_reads_a_held_delivery_as_delivering_and_what_waits_behind_it_as_held`
+and `a_later_edit_to_a_node_a_held_envelope_names_waits_behind_that_envelope` are replaced
+by the first journey listed here, which reads the same sidecar and `status` lines and the
+same unreadable sidecars.
+
+`src/engine.rs`'s
+`a_cancel_preempts_the_notes_queued_for_its_node_and_nothing_waits_behind_them`,
+`nothing_waits_behind_an_outstanding_note_and_the_sidecar_names_each_queued` and
+`a_receivers_waiting_notes_are_offered_once_the_earlier_note_is_answered` drive the real
+reconciler with deliveries outstanding, and
+`answers_a_pass_could_not_write_are_kept_with_what_it_had_not_reached` drives it over a real
+queue whose outcome log refuses a write and then takes one. `src/views.rs`'s
+`status_names_the_latest_queued_notes_results_and_counts_the_rest` holds the bound on the
+`note:` lines.
 
 ### A `cancel` preempts the note its node never answers — proposal, open
 
@@ -8953,12 +9300,14 @@ held and answered as any envelope naming X is:
    **Its second instance**, ruled by the manager under correlation
    `c-5c26b236ce422980982aa3a1ed425a11`: an envelope already *outstanding* that names X
    while its delivery waits on another node Y's conversation — `[note Y, amend X]` — is
-   overtaken too, so a cancel of X never waits on Y's worker. Its delivery thread offers
-   no live note into X it has not offered yet, and refuses each as preempted, naming the
-   cancelling envelope. Once Y answers, every command of it but its notes is validated
-   again against X's cancelled state, so an `amend` of X commits after the cancel or is
-   refused on its merits, and the envelope gets exactly one answer with the existing
-   verdicts — `delivered` for the note Y read, should another command refuse.
+   overtaken too, so a cancel of X never waits on Y's worker. Under the per-receiver rule
+   above, nothing of it but its notes is outstanding — the `amend` of X committed as it was
+   handed, ahead of the cancel claimed after it — so what is left of this instance is its
+   notes: a receiver X whose conversation is being waited on is preempted as point 1 says,
+   one not yet offered is refused as preempted by its own delivery thread, and the
+   envelope's other receivers are left to their conversations. The envelope gets exactly
+   one answer once they have, **applied in part** where a note to X was preempted beside
+   commands that committed.
 5. **Everything else keeps the ordering above**: envelopes claimed after the cancel, and
    every envelope that cancels nothing.
 
@@ -8971,17 +9320,19 @@ these five points state it.
 **What this build does.** `tests/note/main.rs`'s
 `a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it` holds
 `build`'s turn for the whole journey with a note to it unanswered — in an envelope also
-carrying a note to `lint` and an amend of it — and an `amend` of `build`, a second note
+carrying a note to `lint`, offered at once to `lint`'s own held turn, and an amend of
+`lint`, committed as the envelope was handed — and an `amend` of `build`, a second note
 to it beside a command that refuses on its own, a cancel of it in an envelope that
 refuses and one from an author the run never declared queued behind, and then cancels
 `build`: neither refused cancel preempts anything; within thirty seconds of the valid
-one the amend is applied ahead of it and both refused cancels refused ahead of it, both notes are answered `refused` naming the cancel and
-journalled once each, the first envelope's other commands are reported `validated` and
-never applied, the second's own refusal is kept and journalled, neither the second note
-nor the note to `lint` reaches a worker, the cancel is applied, `build` settles
-cancelled and `status`
-names no envelope claimed with no outcome — and the preempted delivery's late answer,
-read while another node's held turn keeps the run driven, records nothing a second time.
+one the amend is applied ahead of it and both refused cancels refused ahead of it, both
+notes to `build` are refused naming the cancel and journalled once each, the second
+envelope's own refusal is kept and journalled, the second note never reaches a worker,
+the cancel is applied and `build` settles cancelled — and the preempted delivery's late
+answer, read while `lint`'s held turn keeps the run driven, records nothing a second
+time. Once `lint` answers, the first envelope is answered once, applied in part — its
+note to `build` refused, its note to `lint` and its amend applied — and `status` names no
+envelope claimed with no outcome.
 `a_cancel_overtakes_an_envelope_also_waiting_on_another_nodes_note` is point 4: the
 cancel is applied while `lint`'s note still waits, a held live note to `build` that also
 names `lint` is preempted at once rather than overtaken, and the envelope naming both
@@ -8989,14 +9340,15 @@ nodes is judged after the cancel once `lint`'s note is answered.
 `a_cancel_overtakes_an_envelope_naming_its_node_and_delivering_elsewhere` is point 4's
 second instance, `[note lint, amend build]` waiting on `lint`: the cancel of `build` is
 applied within thirty seconds with `lint`'s turn still held, and once it is released the
-envelope is answered once, its note and its amend each recorded once, the amend after
-the cancel. `an_overtaken_delivery_offers_no_note_into_the_cancelled_node` holds
-`[note lint, note build]` the same way: the note to `build` is never offered, and is
-answered `refused` naming the cancel beside the note `lint` read, `delivered`.
-`an_overtaken_envelope_is_judged_again_against_the_cancelled_node` overtakes
-`[note lint, cancel build]` with a second cancel of `build`: once `lint` answers, that
-envelope's own cancel is refused for a node already parked, recorded once as
-`edit-rejected` and never committed, and the envelope is answered once.
+envelope is answered once, applied, its note and its amend each recorded once, the amend
+ahead of the cancel. `an_untaken_note_into_a_cancelled_node_is_preempted_beside_one_another_node_read`
+holds `[note lint, note build]` with both notes offered: the note to `build` is refused
+naming the cancel as soon as the cancel is claimed, and once `lint` answers the envelope
+is answered once, applied in part — `applied` for the note `lint` read, `refused` for the
+one the cancel preempted. `a_cancel_beside_a_live_note_is_applied_as_its_envelope_is_handed`
+holds `[note lint, cancel build]` on `lint`: its cancel is applied within thirty seconds
+with `lint` still held, a second cancel of `build` is refused for a node already parked,
+and once `lint` answers the envelope is answered once, applied, its cancel recorded once.
 `src/engine.rs`'s
 `a_cancel_preempts_its_nodes_note_and_overtakes_only_what_waits_elsewhere` drives the
 real reconciler with deliveries outstanding — one of them past a note another
@@ -9834,7 +10186,9 @@ labelled with the head's own id would name a node the launched plan does not hol
 A task key, `{"branch": string, "base": string, "opened_at": RFC 3339}`, written by
 the projection that follows a node's session opening and removed by the one that
 follows its settlement. `branch` is the session's, `base` the one `onevcs`'s
-`session-opened` names, and `opened_at` that record's own time. A cold host reads it
+`session-opened` names, and `opened_at` the time of the first record of that session the
+journal holds — an open is journalled twice, as the dispatch relays it and as `onevcs`
+streams it, and the second never moves the key. A cold host reads it
 to pin an in-flight node to the branch it was working on.
 
 ### `onepipeline.driver`
@@ -9915,6 +10269,9 @@ cannot be launched.
 
 ### The supersession check
 
+*Entry 128 replaces when this check reads the claim, and adds the takeover's wait and the
+acknowledgement; what follows is what this entry proposed.*
+
 A live driver reads the claim at launch — the launch's own read, which refused or
 admitted it, covers its driver's first pass — and at adoption, before its first
 projection; once at the start of each pass that would dispatch or publish — at the first dispatch
@@ -9948,8 +10305,8 @@ no such guard — each host cuts its branch under its own prefix — so two host
 first-publishing one node at the same instant can each open one; that is an accepted
 limit, by the manager's ruling.
 
-**A test seam.** `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS` shortens the 600-second idle
-check, in whole seconds. It exists so a journey can show an idle driver noticing a
+**A test seam.** *Retired by entry 128, whose setting replaces it.*
+`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS` shortened the 600-second idle check, in whole seconds. It exists so a journey can show an idle driver noticing a
 takeover without waiting ten minutes; nothing an operator configures sets it.
 
 **What would close it.** A ruling adding the read settlement, the two keys, the
@@ -10014,11 +10371,10 @@ a fresh `ONEVCS_HOME` and a `HOSTNAME` of its own:
   `a_launch_whose_store_cannot_be_read_is_refused_rather_than_read_as_unclaimed`,
   `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over` and
   `an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`;
-- supersession: `a_superseded_driver_reads_the_claim_at_the_pass_that_would_dispatch_and_dispatches_nothing`,
-  `a_pass_that_dispatches_three_nodes_reads_the_claim_once` (the store's own count of
-  project reads), `a_superseded_driver_publishes_nothing_after_the_check_but_finishes_a_publication_under_way`,
-  `an_idle_superseded_driver_notices_within_one_idle_check_and_publishes_nothing`, and
-  `two_cold_hosts_launching_one_project_at_once_leave_one_driver_and_every_draft_alone`.
+- supersession, as entry 128 now has it: `a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over`,
+  `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them` (the store's own
+  count of project reads), and
+  `two_cold_hosts_launching_one_project_at_once_leave_every_draft_alone`.
 
 `tests/e2e/store.rs`'s two relaunch journeys now continue what they relaunch, the
 retried one under the root's id. `tests/smoke/continuation.rs` is the live tier's:
@@ -10160,7 +10516,7 @@ Warm and cold are the design targets; the 10x bound is a temporary relaxation fr
 its 0.5 s design target, by the user's ruling of 2026-10-11 to land now, and a
 later gap-closing run owns the remaining 10x warm cost. Each was last measured on
 onevcs 0.48.0, whose decision read reads only the sessions the launcher label
-selects (onevcs #356, first released in 0.45.0); this build links 0.48.1, on which
+selects (onevcs #356, first released in 0.45.0); this build links 0.52.0, on which
 none was re-measured.
 
 ```json
@@ -10526,6 +10882,1802 @@ and JSON results renderer to their SDK calls. `tests/contract.rs`'s
 above, and the recorded `review-comments-read` in `tests/recorded/pipeline-kinds.jsonl`
 comes from the discovery journey.
 
-The planner's dependency ruling retains `onevcs` 0.48.1 and `onevcs-testing` 0.17.0:
-those releases already carry this API; testing 0.18.0 requires onevcs 0.49.0 and
-would resolve a second engine under this manifest's unchanged pin.
+The planner's dependency ruling retained `onevcs` 0.48.1 and `onevcs-testing` 0.17.0
+for this change: those releases already carry this API; testing 0.18.0 requires
+onevcs 0.49.0 and would have resolved a second engine under the manifest's pin of the
+time. The link has since moved to `onevcs` 0.52.0 and `onevcs-testing` 0.19.4.
+
+## 123. A manager's own landing could die or block with nothing holding its session — OPEN
+
+**Proposal, for the planner who owns the contract: supervise every landing a
+manager starts directly — `onepipeline publish-branch`, `repo-recover` and the
+new `onepipeline integrate` — as work of that manager's flow, as the *Manager
+landings* surface of the Flows section states it.** This entry records why it
+exists, what it adds to the contract's declarations, and where it departs from
+the task that specified it.
+
+**What was wrong.** A landing a manager ran by hand was one blocking call the
+manager's watch and stop hook knew nothing about. A required check failing, a
+change opened and held, or the landing process killed mid-push left nothing owed:
+`unwatched` reported no line, the stop guard let the turn end, and an
+`unwatched --acknowledge` or `unpublished --acknowledge` could close the very run
+or branch the live landing was advancing.
+
+**What this build does.** With `ONEPIPELINE_LAUNCHER_SESSION` naming a manager,
+each of the three verbs resolves every subject — an integration train's every
+member — and registers it, before drafting or forwarding anything, as one
+landing of a flow: the live flow of the same session it runs in, or a flow
+registered for that landing alone. Registration writes the additive sidecar
+`landings/<landing_id>/request.json` under the flow, whole and renamed into
+place under the lock a branch acknowledgement takes; one that fails starts no
+work, and a flow of another session is refused. The verb then prepares the
+linked `onevcs` operation handle, keeps its id in `operation.json`, calls the
+matching `*_in_operation` entry point, and relays every event that invocation
+records — into the landing's own `events.jsonl` and every associated originating
+run's journal — while the call runs, draining before it settles. Its own
+transitions are six new pipeline kinds, stamped with the producer's
+`significance` word; the forwarded status is recorded in `ending.json`, and a
+process proved gone with none is written `landing-died` by the reader that proves
+it, never a completion. A flow is live while any of its landings is; `watch
+--flow` gains `--until landing-progress` among its defaults, a `--filter`, and a
+cursor that places each landing; `next --flow` and `monitor --flow` read the
+landings' journals through the same profiles; and the shipped `planner` profile
+now leaves out pipeline progress and lets in `vcs` milestones and blockers.
+
+**Shared declarations this adds.** The sidecars, payloads and words below are
+declared once — the sidecars and payloads in `src/flow.rs`, the CLI in
+`src/cli.rs` — and the block is what `tests/contract.rs` and `src/flow.rs`'s own
+tests drive through those types, so this record and the types cannot drift.
+`onevcs::Significance` is re-exported at `onepipeline::vocabulary::Significance`,
+and `MatchFields` gains the optional `significance` field, first, as `onevcs`'s
+does; it travels among the labels' extras as `onevcs` writes it. The
+`agent.event-filter@1` document gains that one optional property, which admits
+filters the capture refused and refuses none it admitted, so its id stays at `@1`
+and the events bundle advances to `1.4.0`. A matcher naming `significance` is
+refused by `oneagentgraph`, which declares no such field, if it is ever handed
+one at its JSON form; no shipped filter is.
+
+**Breaking for an exhaustive Rust caller, and nothing else.**
+`cli::WatchUntil::LandingProgress`, `cli::Command::Integrate` with its
+`IntegrateArgs`, `cli::MonitorArgs::read` becoming `TargetArgs` (so `monitor` takes
+`--flow`), `watch_conditions()` answering seven words, and the new field on
+`vocabulary::MatchFields`. Every command line and every stored record that read
+before reads unchanged: a flow with no `landings/` holds none, a `flow:1:` cursor
+still resumes, and the launch config's own `planner` override is the operator's.
+
+**Departures from the task's wording, ruled or forced.**
+
+1. *Where operation progress is filed.* "The flow journal" is each landing's
+   own `events.jsonl` under the flow: a flow holds several landings, a death is
+   written by whichever reader proves it, and the landing's directory is the one
+   place both writers and every reader already agree on.
+2. *A failed relay.* A landing whose operation progress could not be relayed is
+   settled `landing-refused` — a blocker — and its own flow ends non-zero, owed
+   closure, while the verb's exit status is still the forwarded one.
+3. *A refused command line.* A command line `onevcs` refuses as it stands is
+   still registered and forwarded, so it is refused in the sibling's words; no
+   operation is prepared for work that never starts.
+4. *The bus.* `onevcs` 0.51.0 requires `onemessagebus` 0.9.1, whose YAML parser
+   places a filter refusal by line and column rather than by list path; the
+   contract's marked copy of the bus grammar is re-decided against it unchanged.
+
+   *2026-10-18, re-decided against 0.9.2.* The lock takes `onemessagebus` 0.9.2,
+   which `^0.9.1` permits. Between the two releases only `src/inbox.rs`,
+   `src/spool.rs` and `src/lib.rs` change, and `src/shared_clock.rs` is added: a
+   bounded offer and withdrawal on the inbox. The envelope, the filter grammar and
+   the matcher are byte for byte the same in both, so the manager ruled that
+   `docs/contract.md`'s marked copy is re-decided against 0.9.2 with no change to
+   its text. Only the release it names moves. The filter paragraph's line-and-column
+   placement, re-decided against 0.9.1 above, is the same in 0.9.2.
+
+```json
+{
+  "verbs": ["publish-branch", "repo-recover", "integrate"],
+  "event_kinds": [
+    "landing-registered",
+    "landing-drafting",
+    "landing-started",
+    "landing-finished",
+    "landing-refused",
+    "landing-died"
+  ],
+  "significance": {
+    "landing-registered": "progress",
+    "landing-drafting": "progress",
+    "landing-started": "progress",
+    "landing-finished": "milestone",
+    "landing-refused": "blocker",
+    "landing-died": "blocker"
+  },
+  "terminal_kinds": ["landing-finished", "landing-refused", "landing-died"],
+  "bundle_versions": {"events": "1.4.0"},
+  "watch_condition": "landing-progress",
+  "flow_watch_default_until": ["surface", "node-settled", "run-joined", "landing-progress"],
+  "flow_cursor": "flow:2:<flow>:<landing>@<byte>/...:<run>@<byte>/...",
+  "legacy_flow_cursor": "flow:1:<flow>:<run>@<byte>/...",
+  "request": {
+    "schema_version": 1,
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "session": "manager-1",
+    "operation": "integrate",
+    "subjects": [
+      {"identity": "github.com/owner/service", "branch": "a"},
+      {"identity": "github.com/owner/service", "branch": "b"},
+      {"identity": "github.com/owner/service", "branch": "c"}
+    ],
+    "runs": ["build"],
+    "pid": 4242,
+    "host": "builder",
+    "started": "linux-proc-stat:1",
+    "began_at": "2026-10-13T00:00:00.000Z"
+  },
+  "ending": {
+    "schema_version": 1,
+    "landing_id": "landing-0123456789abcdef0000",
+    "status": 0,
+    "at": "2026-10-13T00:01:00.000Z"
+  },
+  "operation": {"schema_version": 1, "operation_id": "o-0123456789abcdef0000"},
+  "transition": {
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "operation": "integrate",
+    "subjects": [{"identity": "github.com/owner/service", "branch": "a"}],
+    "message": "registered for session [0123abcd]"
+  },
+  "terminal": {
+    "landing_id": "landing-0123456789abcdef0000",
+    "flow_id": "integrate",
+    "operation": "integrate",
+    "subjects": [{"identity": "github.com/owner/service", "branch": "a"}],
+    "message": "the forwarded verb finished with status 0",
+    "status": 0
+  },
+  "labels": ["landing_id", "flow_id", "operation_id", "significance"],
+  "planner_profile": {
+    "include": [
+      {"source": "pipeline"},
+      {"source": "vcs", "significance": "milestone"},
+      {"source": "vcs", "significance": "blocker"}
+    ],
+    "exclude": [{"source": "pipeline", "significance": "progress"}]
+  }
+}
+```
+
+**Observation placement, ruled by the manager.** A standalone flow has no graph
+and gains no paid observer: its owning manager watches milestones and blockers,
+and every detail is read with `monitor --flow <ID> --filter detailed` and the
+landing's journal. Where an originating run exists, every operation event is
+mirrored into its journal, which an already-live run observer reading `detailed`
+sees; no settled run is revived and no monitor is started for a flow.
+
+**What would close it.** A ruling adding the *Manager landings* surface to the
+contract's views and channel paragraphs, the six kinds to its kind list, and the
+new `planner` profile to its read-time profiles paragraph.
+
+**How it is held.** `tests/e2e/manager_landings.rs` drives the three verbs through
+the compiled binary over registered disposable repositories and real bare
+origins — ownership before the drafting or operation hook, watch progress and
+cursors, terminal outcomes, deaths by `SIGKILL`, acknowledgement refusals and
+fail-closed Stop decisions. `tests/contract.rs`'s
+`the_manager_landing_contract_is_what_the_divergence_record_names` reads the
+block above, and `src/flow.rs`'s own tests read the same sidecar examples
+through the declared types.
+
+## 124. Review discovery reads each repository's drafts together — OPEN
+
+**What the contract says.** Entry 122 reads feedback per draft. The approved
+readjustment task replaces those calls in `onepipeline review` with the sibling's
+combined standings and review read; `review-comments-read` keeps its existing
+payload shape.
+
+**Proposal (approved by the readjustment task).** The explicit discovery pass
+uses `onevcs::review_standings` over the drafts of each repository and root,
+passing no review marker so discovery can derive replies and rework state from
+the full feedback. Discovery takes each draft's feedback from that answer and
+journals it with the unchanged registered payload. A repository read that fails
+contributes no feedback from that repository, and the performed receipt reports
+the failure. View reads keep their existing per-draft operation.
+
+```json
+{
+  "verb": "review",
+  "discovery_read": "review_standings",
+  "record_kind": "review-comments-read",
+  "record_shape_changed": false,
+  "view_read": "review_comments"
+}
+```
+
+**What this build does.** `tests/e2e/review.rs` drives the compiled binary,
+real linked onevcs and real git with the GraphQL response delegated to
+onevcs-testing's remote double. The discovery journey asserts one
+`review_standings` ledger entry for two drafts and no `review_comments` entry,
+while retaining the feedback surfaces. The repository-read refusal journey
+asserts an unsuccessful batched read produces neither feedback records nor
+comment surfaces. The mixed-lineage journey holds the requested draft set. Additional journeys
+hold alias/origin normalization, separate roots, successful discovery alongside
+a failed repository, an unregistered host followed by recovery, and retained
+records lacking a root or naming a foreign change request. The adapter journey
+round-trips open, merged and closed states (including a deleted base), body,
+head, draft state and every checks verdict through the real onevcs CLI against
+the remote double's typed standings, and refuses a malformed query.
+`tests/contract.rs` holds the block above and the unchanged payload registration.
+
+## 125. Review draft republications defer their check watch — OPEN
+
+**What the contract says.** A first publication watches its checks. The approved
+readjustment task makes a review draft's republication settle at its push, with
+its verdict held for the next explicit trigger.
+
+**Proposal (approved by the task and its fallback amendment).** A republication
+adopts the recorded change request with `defer_checks`. Its engine outcome is
+`change-review-draft-unchecked`, its status is `done`, and its landing remains
+`unlanded`. A clean restack reads no description and writes none. Reworks and
+conflicted restacks keep their existing drafting. The distinct producer refusal
+`UnrecordedChangeHead` falls back to the existing watched publication on the
+same change request; a record naming a different branch stays a refusal.
+
+```json
+{
+  "deferred_outcome": "change-review-draft-unchecked",
+  "status": "done",
+  "landing": "unlanded",
+  "first_publication": "watched",
+  "republication": {"defer_checks": true, "adopt": true},
+  "fallback_refusal": "UnrecordedChangeHead",
+  "fallback": "watched",
+  "branch_mismatch": "refused",
+  "bundle_versions": {"events": "1.4.0", "planner_channel": "1.4.0"}
+}
+```
+
+**What this build does.** The private publication seam defers a recorded review
+republication, falls back only for the producer's missing-record refusal, and
+names that fallback on stderr. The rework journey drives the real binary and
+onevcs over real git and the fake host: first publications watch checks, while
+its rework and clean restack make no check-watch call. The cold-host journey
+continues from the Markdown store with no change-head record, reworks the
+same branch, observes the fallback, and holds the single original change request
+open as a draft. Unit tests hold the outcome, status and landing classifier;
+`tests/contract.rs` reads the block and the generated events bundle together.
+
+## 126. Nothing kept a stack of drafts true while people merged drafts on the host — OPEN
+
+**Proposal, for the planner who owns the contract: one verb, `onepipeline readjust RUN
+[--json]`, and its planner-channel op `readjust`; eight journal kinds, `node-landed`,
+`node-absorbed`, `change-reopened`, `node-readjusted`, `stack-landed-out-of-order`,
+`change-closed`, `node-checks-read` and `readjust-read-failed`; seven surface kinds;
+two outcome words, `change-review-draft-unchecked` (entry 125) and
+`merged-during-rework`; and a `readjust` restack cause.** A draft's placement was
+decided once, at dispatch, from the landings the run had recorded, and the run asked
+the host again only at its end; so the drafts above one a person merged kept targeting
+a landed branch, showing diffs full of merged work. The rule below is the approved
+design of `authoring:pr-feedback-rework` (node `op-readjust`, which owns it; `op-review`,
+`ui-relink` and `aio-adopt` restate it), and this build implements it.
+
+**Readjustment, run first by every trigger and by nothing else.** Every *draft* of the
+run — each lineage head on a repository with its lineage's change request, not recorded
+landed, absorbed or closed, in any status — is read in **one batched standings read
+per (normalized repository, root) group**: `review_standings` in `onepipeline review`,
+whose discovery then reads each draft's feedback out of that same answer, and
+`change_standings` everywhere else. Each answer is journalled once per change: merged
+into the root `node-landed {node, change_url, commit, detected_by: readjust, trigger}`,
+landing it, and `node-landed {…, detected_by: absorber-landed, via}` for what was
+absorbed into it; merged into another node's branch `node-absorbed {node, into,
+change_url, commit}` with a non-blocking `stack-merged-out-of-order`; merged into the
+root while unlanded ancestors' work rode along, `stack-landed-out-of-order {node,
+carried}` with a surface of that name; closed under a parent the same read reports
+merged, its base deleted, recovered — `reopen_change` restoring the parent's branch at
+its merged head, journalled `change-reopened {node, change_url, restored_base}`, the
+retarget then passing `remove_restored_base`; closed otherwise `change-closed {node,
+change_url}` with a non-blocking `change-closed`; merged into a branch neither the
+root nor any node's, **nothing journalled about the node** and a **blocking**
+`change-merged-elsewhere` question naming it, its change request, the merge commit and
+the branch, the node and everything depending on it readjusted by nothing until it is
+answered. A repository whose read failed journals `readjust-read-failed {repo, detail}`
+and its drafts are left exactly as they were; the trigger goes on with the rest. Every
+unlanded draft connected to a landed or absorbed node by same-repository dependency
+edges, in either direction, is then owed a readjustment, folded from the record.
+
+**Placement and the restack.** Each owed draft waits while it, or a dependency's
+lineage head, is in flight or itself owed one — so each parent's push precedes the
+restack of the draft above it — and is then placed by `stack::placement` over the
+fresh record (a landed dependency dropped, an absorbed one replaced by its absorber) and
+restacked by entry 121's procedure: `node-restack-started` with cause `readjust` — onto
+the root's branch at the landing commit for a draft placed on the root — a session on
+its own branch with the new base merged in at the open, a stack base advanced over the
+root before its remaining parents. Whatever the identity's `base_merge` policy, a
+session that opened clean on a base whose head its branch does not carry has that head
+merged into its worktree by the engine — `onevcs`'s `on-conflict` open merges only on a
+conflict or a host requiring up-to-date branches — and a conflict there is handed to the
+draft's worker exactly as one the open stopped on. A clean merge publishes with `defer_checks` and
+`adopt` and no drafting; a conflict is concluded by the draft's worker. After the push,
+and only then, one `retarget_change` moves the change request and writes its
+description with the Stack block rewritten between its markers from the body the read
+returned (`retarget: unchanged` where the host already targeted the base, and no write
+where the placement did not move); the change request stays a draft. `node-readjusted
+{node, from: {base, stack_parents}, to: {base, stack_parents}, cause, head,
+agent_dispatched, retarget: retargeted | unchanged | none, content: merged | pending}`
+is journalled ahead of the node's ordinary `node-settled`. A draft failed or parked
+holding its change request is retargeted at once with no merge (`content: pending`)
+and a non-blocking `readjust-pending` names `retry`, whose placement merges the base;
+a draft a person retargeted by hand is moved back, its `from` naming the replaced base,
+with `change-base-overridden`. A tree-identical republication that answers
+`NothingToPublish` puts its merge head on the origin with `preserve_branch` onto the
+same change request and settles `change-review-draft-unchecked`; one the origin refuses
+settles `failed`, records no readjustment, and stays owed. A retarget the host refuses
+leaves the pushed draft's settlement saying so, records no readjustment and leaves it
+owed, and the next trigger moves it — the host's base, as the latest read saw it,
+counted beside the record's. A reopen the origin or host refuses is said in the receipt
+(exit 1), records nothing and moves nothing of the still-closed draft until a later
+trigger's read recovers it, from a parent recorded landed when that read no longer
+carries the parent. A closed draft, and one merged into an unknown branch, is never
+restacked; once the question about the latter is answered — claimed and answered on
+the planner's queue, as every decision point is — the drafts above it are readjusted
+again.
+
+**Verdicts.** A republication of a review draft — a readjustment's, a restack's, a
+rework's and a repair's — settles `done` at its push as `change-review-draft-unchecked`
+(entry 125); a first publication still watches its checks. Every later trigger's read
+records `node-checks-read {node, head, verdict: pending | passed | passed-with-skipped
+| failed | none-required}` for each draft whose verdict is owed, and for a settled
+review draft whose head on the host moved past the recorded one — a cold host's case —
+once per head. A green verdict reads as `change-review-draft`; `failed` re-dispatches
+the node onto its same branch with the failed checks as its refusal, as a
+`checks-failed` publication's re-dispatch does; `pending` leaves it outstanding and is
+read again by the next trigger — a moved head read `pending` included, which then reads
+as `change-review-draft-unchecked` until a verdict is reached.
+`status`, `results`, and the `review` and `readjust` receipts name every draft whose
+verdict is outstanding.
+
+**Rework.** Applying a `rework` — by the driver or by a `reply` to a run nothing drives
+— readjusts first, so a node found landed is refused naming `add` and one absorbed is
+refused naming its absorber. The read immediately before a rework's republication
+continues that trigger, batched across the republications ready in one pass: a
+replacement whose change request a person merged after it was dispatched — into the
+root, into another node's branch, or into a branch this run does not know — publishes
+nothing, settles `failed` with `merged-during-rework`, keeps its work on its branch,
+and a non-blocking `merged-during-rework` names what goes on: `add`, the absorbing
+node, or the question about the unknown merge. A deferred republication whose change
+request this host's newest record says carries another branch is refused by `onevcs`
+before anything is pushed; it never falls back to a watched publication, settles the
+replacement `failed` saying so, and raises a non-blocking `finding` to the planner. A replacement placed anywhere
+but where its lineage's change request was drafted is retargeted after its push,
+journalled `node-readjusted` as above.
+
+**Triggers.** `trigger` names the one whose read found it: `review`, `readjust`,
+`rework` (applying one, or its republication), `placement` (a restack, or a placement
+of a lifecycle node on unlanded drafts at dispatch — read once per pass and once per
+node however long it is held) and `continuation` (a continuing launch and an adoption,
+after the store and journal are folded and before the first dispatch). Nothing polls:
+no timer, idle pass or interval flag reads anything, and `start` takes no interval.
+
+**The store.** A restack or readjustment in flight projects as the settlement it
+started from, an outcome as `change-review-draft` whether its verdict is read or not,
+and a clean restack's or readjustment's settlement that left its base and stack
+placement (its parents' branches and stack base) where they were writes no task; a
+landing, an absorption, a moved draft's base and stack, a recovery, a red verdict's
+repair and a rework's own fields are written. A cold host reads a draft's head off its
+branch on the origin and its verdict off its first trigger's read.
+
+**The host's calls, counted.** A readjustment's own calls are one batched standings read
+per group and one `retarget_change` or `reopen_change` call per affected change request,
+none bypassing `onevcs`; a retarget writes the description the driver's own batched
+read returned, which a whole-journal re-fold keeps, and a draft no such read answered is
+left owed rather than read alone. Inside each call the linked `onevcs` 0.52.0 — whose two calls
+are unchanged since 0.49.0 — makes its own: a
+`retarget_change` two single-change standings reads (before and after its write) and
+the repository's visibility read its write guard makes; a `reopen_change` two
+single-change standings reads, the same visibility read and the restore push. The
+restack's session open declares that the engine merges the moved base itself
+(`onevcs`'s `caller_merges_base`), so it asks the repository's visibility and never
+whether the host requires an up-to-date branch (`rules/branches/<base>`); the busy review
+round (`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent`) holds
+that none of its restacks or readjustments makes that read.
+
+**The SDK.** `verbs::readjust(paths, session, timeout) -> Result<ReadjustReceipt>`,
+`verbs::render_readjust` and `ReadjustReceipt::exit_code` (the `review` verb's shape,
+exit 1 for a failed host read); `ReviewReceipt::Performed` gains `outstanding:
+Vec<String>`, omitted when empty — a **source-level break** for a consumer that
+constructs or exhaustively destructures it; `cli::Command::Readjust(ReadjustArgs)`;
+`channel::Command::Readjust {}` and `channel::layout::Op::Readjust`. The published
+documents: `schemas/events.json` stays at the unreleased `1.4.0` entry 125 raised it
+to and adds the eight kinds and the `readjust` cause; `schemas/planner-channel.json`
+rises from `1.3.0` to `1.4.0` for the op.
+
+**The host double, substituted.** The task names `onevcs-testing`'s remote double for
+these journeys, but that double is an in-process `RemoteHost`, and the compiled binary
+reaches a host only through `onevcs`'s `gh` subprocess (`ONEVCS_GH`), so it cannot drive
+that double. By the manager's ruling on this node, the journeys run on this repository's
+own `ONEVCS_GH` double, `fake-gh`. Every person move is made through its hidden `__person`
+entry: a squash or merge commit written onto the on-disk origin, the head kept or deleted
+with dependants retargeted or closed, a close, a retarget by hand, and a per-head check
+verdict. The host-call bounds are asserted on its recorded `gh` invocations. The review
+journeys keep reading feedback from `onevcs-testing`'s `FileHost` through `fake-gh`'s
+GraphQL adapter.
+
+**A test seam.** The idle journey shortened the idle claim interval through
+`ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, entry 119's seam; entry 128 retires it, and the
+journey shortens the claim interval through that entry's setting instead.
+
+```json
+{
+  "verb": {"name": "readjust", "op": "readjust", "json_flag": "--json"},
+  "sdk_verbs": ["readjust", "render_readjust"],
+  "receipts": {
+    "performed": {"state": "performed", "error": "github.com/owner/other: the standings could not be read", "outstanding": ["b"]},
+    "quiet": {"state": "performed"},
+    "requested": {"state": "requested", "request": 7}
+  },
+  "triggers": ["review", "readjust", "rework", "placement", "continuation"],
+  "event_kinds": ["node-landed", "node-absorbed", "change-reopened", "node-readjusted", "stack-landed-out-of-order", "change-closed", "node-checks-read", "readjust-read-failed"],
+  "records": {
+    "node-landed": {"node": "a", "change_url": "https://github.com/owner/service/pull/1", "commit": "1f2e3d4c5b6a79881726354453627180918a7b6c", "detected_by": "readjust", "trigger": "readjust"},
+    "node-absorbed": {"node": "b", "into": "a", "change_url": "https://github.com/owner/service/pull/2", "commit": "2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d"},
+    "change-reopened": {"node": "b", "change_url": "https://github.com/owner/service/pull/2", "restored_base": "me/run/a"},
+    "node-readjusted": {"node": "b", "from": {"base": "me/run/a", "stack_parents": ["a"]}, "to": {"base": "main", "stack_parents": []}, "cause": ["a"], "head": "3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e", "agent_dispatched": false, "retarget": "retargeted", "content": "merged"},
+    "stack-landed-out-of-order": {"node": "b", "carried": ["a"]},
+    "change-closed": {"node": "a", "change_url": "https://github.com/owner/service/pull/1"},
+    "node-checks-read": {"node": "b", "head": "3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e", "verdict": "passed"},
+    "readjust-read-failed": {"repo": "github.com/owner/other", "detail": "the standings could not be read"}
+  },
+  "absorbed_landing": {"node": "b", "change_url": "https://github.com/owner/service/pull/2", "commit": "1f2e3d4c5b6a79881726354453627180918a7b6c", "detected_by": "absorber-landed", "trigger": "readjust", "via": "a"},
+  "detected_by": ["readjust", "absorber-landed"],
+  "retarget": ["retargeted", "unchanged", "none"],
+  "content": ["merged", "pending"],
+  "verdicts": ["pending", "passed", "passed-with-skipped", "failed", "none-required"],
+  "surfaces": {
+    "change-closed": false,
+    "stack-merged-out-of-order": false,
+    "stack-landed-out-of-order": false,
+    "readjust-pending": false,
+    "change-base-overridden": false,
+    "merged-during-rework": false,
+    "change-merged-elsewhere": true
+  },
+  "outcomes": ["change-review-draft-unchecked", "merged-during-rework"],
+  "restack_cause": "readjust",
+  "test_seam": "ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS",
+  "bundle_versions": {"events": "1.4.0", "planner_channel": "1.4.0"}
+}
+```
+
+**What this build does.** `tests/e2e/readjust.rs` drives every rule through the compiled
+binary and the real linked `onevcs` over a real origin on disk, with GitHub at
+`onevcs`'s `ONEVCS_GH` seam: the `fake-gh` double answers the batched standings read,
+the retarget and the reopen out of the change requests it holds, and a person's moves —
+a squash or merge commit written onto the origin, a head kept or deleted with the host
+retargeting or closing what was based on it, a close, a retarget by hand, a verdict on a
+head — are made through its hidden `__person` entry, which validates every argument
+before it writes and is recorded on no ledger. The journeys: case 1 with the head kept,
+deleted and retargeted, and deleted and closed (`a_parent_merged_*`); case 2
+(`one_of_several_parents_landing_*`); case 3 (`a_whole_lower_stack_landing_*`); a
+failed read, undriven and driven (`a_repository_whose_read_failed_*`,
+`a_driven_readjust_whose_read_fails_says_so`); the landings around a rework
+(`a_rework_after_a_landing_*`, `a_landing_during_a_rework_*`,
+`a_change_merged_during_its_own_rework_*`, `a_change_absorbed_during_its_own_rework_*`,
+`a_change_merged_elsewhere_during_its_own_rework_*`, `a_rework_of_a_node_merged_since_*`);
+the out-of-order merges (`a_draft_merged_into_its_parent_s_branch_*`,
+`a_draft_above_two_absorptions_*`, `a_draft_merged_into_the_root_ahead_*`,
+`a_failed_draft_is_retargeted_*`, `a_draft_retargeted_by_hand_*`,
+`a_draft_closed_unmerged_*`); the refusals (`a_refused_reopen_*`, `a_refused_retarget_*`,
+`a_tree_identical_republication_the_origin_refuses_*`,
+`a_republication_onto_a_draft_recorded_as_another_branch_s_*`) and a conflicted
+readjustment (`a_conflicted_readjustment_*`) and one under `base_merge: on-conflict`
+over a host not requiring up-to-date branches
+(`a_readjustment_merges_the_root_in_where_the_policy_merges_only_on_a_conflict`);
+deferred verdicts
+(`deferred_republications_*`, `every_deferred_verdict_word_*`,
+`a_cold_host_reads_a_moved_heads_pending_verdict_*`); store writes
+(`the_store_is_written_only_*`); a journey per trigger and the idle driver
+(`review_readjusts_before_discovery`, `a_restack_readjusts_before_it_starts`,
+`a_placement_at_dispatch_*`, `a_continuing_launch_*`, `an_adoption_*`,
+`an_idle_driver_asks_the_host_nothing`); the verb's requested receipt and its refusal
+beside another op (`a_driven_readjust_the_driver_cannot_answer_in_time_*`,
+`a_readjust_beside_another_op_is_refused`); the amendment's two-root grouping and
+unknown branch (`drafts_on_two_roots_*`, `a_draft_merged_into_an_unknown_branch_*`); a
+branch name read as its own repository's, for an absorption and a recovery
+(`drafts_merged_into_same_named_branches_*`, `drafts_closed_under_same_named_branches_*`);
+an absorption and its absorber's landing found by one read
+(`an_absorption_and_its_absorber_s_landing_*`); and a failed read holding a draft an
+earlier trigger left owed (`a_failed_read_leaves_a_draft_*`). The
+rework and restack journeys of entry 121 read a republication
+`change-review-draft-unchecked` at its push and `change-review-draft` once `readjust`
+reads it green. `tests/contract.rs`'s `the_readjustment_is_what_the_divergence_record_names`
+holds the block above against the public types, the registered documents and the
+published bundles.
+
+## 127. Dispatch scratch accumulated for the lifetime of the run directory — OPEN
+
+**Departure.** Divergence 48 says dispatch scratch is thrown away with the run.
+Run directories retain journals and reports indefinitely, so scratch never ended.
+
+**Proposal, approved for the scratch-reclamation plan.** A run reaching
+`SETTLED` removes every directory beneath its `scratch/`, then that root. At
+`ENDED failed`, `ENDED unfinished`, `ENDED stopped` and `PAUSED`, it measures and
+keeps scratch. The first ending producer journals exactly one account: the driver
+letting go, stop after `run-stopped`, or a reply applying an edit to an undriven
+run. This is independent of run-end hooks. A run made live and ending again gets
+a fresh record. `HOST SHUTDOWN` and run-level `PARKED` get none.
+
+The two new `PipelineKind`s register at `agent.pipeline.<kind>@2`:
+
+```json
+{
+  "event_kinds": ["scratch-removed", "scratch-retained"],
+  "scratch-removed": {"trigger": "success", "dirs": 3, "bytes": 4096, "failed": []},
+  "scratch-retained": {"ending": "failed", "dirs": [{"path": "/absolute/run/scratch/dispatch", "bytes": 4096}], "total_bytes": 4096},
+  "bundle_versions": {"events": "1.5.0"}
+}
+```
+
+Removal's `trigger` is `success` or `discard`; each `failed` item is an absolute
+`path` and nonempty `error`. Retention's `ending` is `failed`, `unfinished`,
+`stopped` or `paused`. Bytes are allocated disk usage, measured in one walk at
+that ending or removal, never by a view. Existing journal envelopes stay at 2;
+the additive published events bundle rises to 1.5.0 and is regenerated.
+
+`status RUN` beside free space and `results RUN` after hooks and maintenance read
+the latest scratch record. A retained record prints:
+
+```text
+  scratch kept: <N> dir(s), <X.X> GiB — remove with: onepipeline scratch discard <run-id>
+    <absolute dir>  <X.X> GiB
+```
+
+Directories are largest first. Status lists five, then
+`    … and <k> more, <X.X> GiB — full list: onepipeline results <run-id>`;
+results lists all. While paused the header ends
+`— kept while paused; discard with onepipeline scratch discard <run-id> once the run ends`.
+A partial removal prints in both views
+`  scratch: <k> dir(s) could not be removed: <first path>: <error>`.
+A run whose reading is neither an ending nor a pause (`ACTIVE`, `PARKED`,
+`DRIVER DEAD`, `HOST SHUTDOWN`), including one made live again after an ending,
+prints neither line until its next ending writes a fresh record.
+Neither view walks scratch. `RunReading` and planner surfaces do not change.
+
+`onepipeline scratch discard RUN` resolves exactly one id under the runs root,
+admitting only undriven `SETTLED` or `ENDED failed|unfinished|stopped`, including
+old runs without scratch records. It refuses all other states, unknown and
+path-like ids, and a symlink scratch root, with exit 2 and nothing deleted.
+Links within scratch are removed as links. No journal, report, launch record or
+other run file is removed. Complete removal (including nothing) exits 0;
+partial filesystem failure exits 1 and names every failure on stderr.
+
+Stdout is `removed <N> scratch dir(s) of run <run-id>, <X.X> GiB freed:`, then
+`  <absolute dir>  <X.X> GiB` per removed directory, largest first. With nothing:
+`removed 0 scratch dir(s) of run <run-id>, 0.0 GiB freed` without a list.
+Stderr refusals are `onepipeline scratch discard: run <run-id> is <WORD>, not ended; its scratch is kept and nothing was deleted`,
+`onepipeline scratch discard: <run dir>/scratch is a symlink; nothing was deleted`,
+or `onepipeline scratch discard: no run named '<arg>' under the runs root; deleted nothing`.
+Each filesystem failure is `onepipeline scratch discard: could not remove <absolute dir>: <error>`.
+
+**Manager ruling.** The plan fixes this behavior, revoking divergence 48's lifetime
+restatement. The manager approved the next free entry, then 123 (114 and 122 were
+occupied), and the events bundle's next minor, then 1.4.0 (1.3.0 is entry 122's), with
+new payloads at 2. Entry 123 and bundle 1.4.0 were then taken on `main` by the manager
+landings, so merging `main` moved this record to 124 and the bundle to 1.5.0 under that
+same next-free ruling; a later merge of `main`, whose review readjustment took 124
+through 126 at bundle 1.4.0, moved this record to 127, its bundle staying 1.5.0. Public `verbs::` functions keep CLI parity:
+`scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard>`,
+`ScratchDiscard::exit_code()`, `render_scratch_discard` for stdout and
+`render_scratch_discard_errors` for stderr. `cli::ScratchCommand::Discard { run }`
+is parsing over that call. Land's temporary drafting scratch and historical
+automatic cleanup are outside this proposal.
+
+The manager also ruled that `summary.json` and `checkpoint.json` may refresh as
+normal derived caches when discard appends or reads; all other files outside
+scratch retain their bytes, including the prior journal as an unchanged prefix.
+
+Driver handling uses its own settlement fold, inside the final handover before
+releasing ownership, rather than inferring an ending from its still-live pid.
+The manager directed this after the released-driver liveness investigation.
+
+The manager approved the conservative unreadable-journal guard: a non-strict
+fold cannot prove its displayed ending. Discard refuses it with exit 2 and the
+existing known-run refusal line naming that displayed word; automatic handling
+keeps scratch untouched. No new word, field or planner surface is introduced.
+The driver and an undriven replying writer record scratch inside their final
+handover before releasing ownership, using their own settlement fold.
+
+For partial removal the manager ruled that the public `scratch-removed.dirs` and
+`bytes` count only fully removed dispatch directories, agreeing with stdout.
+Failed directories remain named in `failed`; private workload telemetry separately
+accounts for every entry, directory and byte walked.
+
+The manager approved prevalidating every top-level dispatch path before any
+walk or deletion. A non-UTF-8 path cannot be represented by the fixed payload:
+automatic handling keeps scratch with a diagnostic, and discard refuses with
+exit 2 naming `scratch path is not UTF-8`, leaving scratch and journal unchanged.
+This is the same invalid-filesystem-input class as symlink and unreadable roots.
+
+## 128. Every running driver read its project's claim at every pass that would dispatch or publish — OPEN
+
+**Proposal, for the planner who owns the contract: one setting,
+`ONEPIPELINE_CLAIM_INTERVAL_SECONDS`; `acknowledged` and `lease` fields on entry 119's
+`onepipeline.driver` claim; and one more project key beside it, `onepipeline.publishing`;
+entry 119's idle check and its seam, `ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS`, are
+retired.** Entry 119's supersession check had
+every running driver read its project's claim at the start of each pass that would
+dispatch or publish, so that a driver another one had taken over stopped at its next
+pass. On a GitHub Projects board each read is a quota call, and a busy review round made
+about 31 of them, almost every one confirming that nothing had changed. By the user's
+ruling — "yes redesign adopter should read the claim" — the waiting moves onto the
+adopter: takeovers are rare and deliberate, so the takeover, not every running driver,
+carries the cost. The rules below are this build's; the contract's wording, and entry
+119's, are unchanged until it is ruled on.
+
+**Revised: no timed read, and no lapse.** This entry first had a running driver read its
+claim once per claim interval and work on the lease that read gave it. A driver started
+nothing on a read older than one interval, and ended every dispatch it had in progress
+once no read had confirmed the project its own for two intervals. In one run every read
+found no claim, because the board update carrying it was refused by the plan store's
+write screening, and some reads timed out or were rate limited. Each lapse ended a
+dispatch that was working correctly, six times on one node. The user ruled: "things
+rarely change owners and it's always a very explicit thing by the user. we do not need
+to be monitoring constantly to see if something else is taking ownership", and "even if
+it did work properly and not cause other issues, it's just using a bunch of quota for no
+reason when we're not expecting any change". Board quota is shared by every session on a
+host. The manager then ruled the design below (option A, `c-bd079e31ab9bded2bbc47048ed23e9ed`)
+and the publication hold (`c-9e201e02a82f09b267b00cf621fdfd24`).
+
+### When a driver reads its claim
+
+A running driver reads its project's claim in two places only. **An adoption reads it on
+its first pass**, before it claims anything, as before. **A driver reads it once
+immediately before each publication starts**, after the fence naming that publication has
+landed. One read covers every publication the pass starts together. Nothing reads the claim
+on a timer, nothing reads it before a dispatch, and no read renews or lapses anything. A
+launch's driver starts on the read that let it launch. Each read is bounded at 20 seconds,
+and none is made inside a wait the store asked for.
+
+What a read answers:
+
+- **another run's claim** — neither this run's nor the one its launch knowingly took
+  over — **supersedes** the driver, as entry 119 says. A publication the read was made for
+  is withheld, as is one the pass had not started;
+- **this driver's own claim, the one it took over, or no claim** lets the publications
+  go ahead. No claim can mean the claim never reached the board, or that a run that took
+  the project over has finished and released it;
+- **a read that fails, outlasts its deadline, or is not made inside a wait the store
+  asked for** holds the publications it was made for, and only those. The read is made
+  again five seconds later, or once the store's wait has passed, until one answers. A read
+  the store refuses as rate limited, naming a wait, keeps that wait in the run's directory
+  (`writeback-wait.json`, entry 72), so neither the next read nor write-back asks the store
+  anything before it has passed. No dispatch is ended, no dispatch is kept from starting,
+  and no publication already under way is interrupted. An adoption's own first read that fails is said on its log, and the
+  adoption goes on driving.
+
+The hold is what keeps the two drivers' publications apart, below. A read that publishes
+regardless of its answer would let a displaced driver publish beside its adopter, and the
+store offers nothing else to learn a takeover by: a project write is not conditional, and
+answers only the value of the key it wrote, so the fence's own write cannot carry the
+claim. A build that published on an unanswered read overlapped that way on Windows. The
+manager ruled (`c-9393725b989e73d442cbf70b69d63302`, restated by its note
+`driver-claim-no-polling-r2`, which replaces an interim note that had ruled out any hold)
+that an unanswered or empty read never ends anything in progress and never stops a
+dispatch starting, while the one publication it precedes waits until a read answers,
+never re-reading faster than the store's own rate-limit wait allows.
+
+**The fence.** Before any publication starts, the driver writes the project's
+`onepipeline.publishing` — `{"run", "host", "nodes", "at"}`, the nodes whose publications
+are under way — and reads the claim only once that write has landed. Once a publication has
+settled, and its settlement has landed (entry 129), it writes the key again without that
+node. Where that would leave the key naming none, a driver still driving leaves it standing
+for ten seconds first, and then writes `null`. A publication starting inside that time
+replaces the key in one write, as each draft of a restack does after the one below it, so a
+review round does not pay one write clearing the fence and one naming the next. A fence
+left naming a settled publication only holds a takeover up to ten seconds longer. A
+superseded driver clears at once, and a closeout clears before its release. A write the
+store refuses starts nothing, and is made again five seconds later. A superseded driver reads the key before it clears it, and clears only its
+own.
+
+A driver the read **supersedes** starts nothing more. A dispatch in flight settles
+unpublished with its branch kept, and a publication already under way finishes. It goes
+on projecting what it settles — never the claim, and no closeout's release — so the run
+that took over starts from it. Once nothing of its own is in progress and that projection
+has landed (waited for once, at most 20 seconds, entry 129), it retires its write-back and
+**acknowledges the claim**. An adoption whose first read finds the takeover has started
+nothing, so it owes no acknowledgement and writes nothing.
+
+### The acknowledgement
+
+The superseded driver writes the claim that superseded it back, exactly as it read it,
+with one more key: `acknowledged: {"run", "host", "at"}` — its own run, its host and an
+RFC 3339 instant. It is written once, bounded at 20 seconds, and not written inside a
+wait the store asked for; what could not be written is said on standard error. A claim
+carrying it reads as the claim it was everywhere a claim is read, so it refuses a launch
+and admits a `--take-over` exactly as one without it; an `acknowledged` that is not that
+shape refuses the claim as entry 119's keys do. A run that lets go of the project — at its
+closeout, or at a `stop` whose teardown was clean — has nothing of its own in progress
+either: where the read its release makes first finds another run's claim nothing has
+acknowledged, it writes that acknowledgement instead of releasing. So a takeover of a
+driver that ends before it ever reads the takeover starts then. The next projection of the
+driver that took over writes its claim without it.
+
+### The terms a claim states
+
+Every claim this build writes states the terms its host was given — `lease:
+{"interval_seconds", "cancel_grace_seconds"}`, the claim interval and the cancel grace —
+because a run taking the project over waits out *that* host's grace, not its own: hosts
+are configured one by one. A `lease` naming an interval outside 1 to 86 400 seconds, a
+grace of zero, or any other key refuses the claim, as entry 119's keys do. It is optional:
+a claim without one is a claim an older build wrote, which the events bundle still reads,
+and it is omitted from no claim this build writes. The `DriverClaim` payload gains it, so
+`schemas/events.json` rose to `1.6.0`. Merging `main`, whose scratch reclamation (entry
+127) took that number and bundle `1.5.0` first, moved this record from 127 to 128 and its
+bundle from `1.5.0` to `1.6.0`. The revision rewords the type's description, which entry
+139 records.
+
+**The setting.** `ONEPIPELINE_CLAIM_INTERVAL_SECONDS` — 300 seconds unless it names a
+positive whole number of seconds, a day at most — now governs only what still reads the
+claim on a timer: a takeover's poll while it waits, below. Its claim states it. A launch
+that sets it is not refused, and a value outside the range falls back to the default.
+
+### The takeover
+
+`start --take-over` over a claim — or over a value that is not one — writes its own claim
+on the project before it continues anything, after every check the launch makes, naming
+the run it is about to mint, this host, the launching session, the launcher's pid and the
+instant. It then **starts nothing** until the claim on the store carries an
+`acknowledged`, or until **the takeover wait** — the cancel grace the displaced claim's
+`lease` states, plus ten seconds — has passed since the adopter's write landed *and* a read
+after that finds no `onepipeline.publishing` naming the displaced run on its host. A fence
+that still names one holds the takeover for as long as it stands — until it is cleared or
+the displaced driver acknowledges — and is said once, naming the nodes and when they were
+fenced; one the read cannot make out holds it until an acknowledgement. A claim stating no
+`lease` — or a value that is not a claim — names a driver whose fence this build cannot
+vouch for, so its takeover starts **only on an acknowledgement**, which a driver of this
+build writes once it reads the adopter's claim; taken over on the displaced run's own host,
+that host's records prove a run that nothing drives, as before. Waiting, it reads the claim
+every tenth of its own interval, at least one and at most thirty seconds apart, and says on
+standard error what it waits on and how long. A claim naming another run that replaces its
+own while it waits refuses the launch as `ProjectDriven`, exit 2. Once it may start, it
+**reads the project again**, and continues and pins from that read — so what the displaced
+driver settled while it was being taken over is continued rather than dispatched again —
+and its write-back starts from it.
+
+**Why the fence keeps publications apart.** The displaced driver writes its fence, and
+reads the claim only once the fence has landed. It publishes only on a read that answered
+without naming the adopter. The adopter writes its claim, and reads the fence only once its
+claim has landed. So of the two reads, at least one finds the other's write. Either the
+displaced driver finds the adopter's claim and withholds, or the adopter finds the fence
+and waits for it to clear. A publication is not bounded by any wait — its push and its
+change request are with the host — so this is what holds it. The wait itself proves
+nothing about a driver that reads nothing on a timer. It gives a live driver the moment to
+answer, and lets a dead one be taken over.
+
+**What a dispatch may still do.** A dispatch is not fenced. A live displaced driver that
+has not yet read the takeover — it reads at its next publication, its closeout or its stop
+— may still start a dispatch after the adopter has begun. That dispatch publishes nothing:
+its publication's read finds the adopter's claim, withholds it with its branch kept, and
+the driver stops and acknowledges. The manager accepted this gap. Once the displaced driver
+has read the takeover, it starts no dispatch and no publication.
+
+**The same host.** A claim naming a run of this host, under this host's runs root, whose
+ownership lock is free has no driver, which the host's own records prove: `--take-over`
+writes nothing first and waits on nothing, as before. An `adopt` reads the claim on its
+first pass, as before; a displacement the run's own records carry — its lock, its launch
+record — works as it did.
+
+### What this does not change
+
+Entry 119's limits stand: the claim is not atomic, and two launches reading no claim at
+the same moment both launch, the later claim winning; the other driver stops at its next
+read, now its next publication's, and acknowledges as it lets go. The fence is not atomic
+either: a write of it the store refused may still land later, over a newer one, and a
+superseded driver's read and clear are two calls. Each costs a store write before a pass's
+publications start and one once they have settled, the second saved where another
+publication starts inside the ten seconds, which the comparable plan's record and the busy
+review round count. The acknowledgement is written over the claim without a read beside it: a third
+launch's claim written in that instant is replaced, and that launch is then refused at
+its next look, which is the safe end of that race.
+
+```json
+{
+  "setting": "ONEPIPELINE_CLAIM_INTERVAL_SECONDS",
+  "claim_interval_seconds": 300,
+  "max_claim_interval_seconds": 86400,
+  "claim_read_deadline_seconds": 20,
+  "claim_reads": {"timed": false, "before_dispatch": false, "adoption": "its first pass", "before_publication": "once, after its fence has landed"},
+  "unanswered_read_before_publication": {"holds": "that publication", "retry_seconds": 5, "rate_limited": "waits out the wait the store named"},
+  "takeover_wait": {"cancel_grace": "ONEPIPELINE_CANCEL_GRACE_SECONDS", "slack_seconds": 10, "terms": "the displaced claim's lease", "without_terms": "acknowledgement only"},
+  "takeover_poll": {"per_interval": 10, "min_seconds": 1, "max_seconds": 30},
+  "settlement_landing_wait_seconds": 20,
+  "acknowledged_key": "acknowledged",
+  "driver": {
+    "run": "drafts-2",
+    "host": "host-b",
+    "session": "claude-code:3f9a1c2e",
+    "pid": 41790,
+    "claimed_at": "2026-10-16T09:40:58.551Z",
+    "lease": {"interval_seconds": 300, "cancel_grace_seconds": 300},
+    "acknowledged": {"run": "drafts", "host": "builder", "at": "2026-10-16T09:42:01.002Z"}
+  },
+  "publishing_key": "onepipeline.publishing",
+  "publishing": {"run": "drafts", "host": "builder", "nodes": ["x"], "at": "2026-10-16T09:40:12.090Z"},
+  "fence_retry_seconds": 5,
+  "fence_linger_seconds": 10,
+  "bundle_versions": {"events": "1.6.0"},
+  "retired": ["ONEPIPELINE_IDLE_CLAIM_CHECK_SECONDS", "ONEPIPELINE_TEST_CLAIM_BEGIN_GATE", "ONEPIPELINE_TEST_CLAIM_READ_GATE"],
+  "loop_stats_count": "claim_reads"
+}
+```
+
+**What this build does.** `tests/e2e/continuation.rs` drives it through the compiled binary
+over a real `local-md` store — the scripted one where a journey counts the store's own
+calls — the real linked `onevcs` over a real origin, and GitHub at `onevcs`'s `ONEVCS_GH`
+seam shared by every host, with two real drivers on two hosts:
+
+- the reads: `a_running_driver_reads_its_claim_only_immediately_before_a_publication`
+  counts, over a dispatch running for many of the old intervals, the driver's own
+  `claim_reads` (its `ONEPIPELINE_LOOP_STATS` report) and the store's own count of
+  project reads: none while it dispatches, and one before its publication.
+  `a_pass_that_dispatches_three_nodes_reads_the_store_for_none_of_them` holds that a
+  dispatch reads nothing;
+- the four answers, each on a run with a dispatch in flight for longer than the old lapse,
+  each showing the dispatch is not ended, a later dispatch still starts, another starts
+  and settles while that one's publication waits, and the publication goes ahead once a read
+  answers:
+  `a_claim_read_that_fails_ends_no_dispatch_and_holds_only_its_publication`,
+  `a_claim_read_that_times_out_ends_no_dispatch_and_holds_only_its_publication`,
+  `a_rate_limited_claim_read_ends_no_dispatch_and_holds_only_its_publication` and
+  `a_claim_read_finding_no_claim_ends_no_dispatch_and_publishes`. The rate-limited one also
+  counts, off the store's own record, no project read inside the wait the store named;
+- the takeover of a live driver mid-dispatch:
+  `a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over`, which shows
+  the displaced driver withholding at its publication's read, starting nothing after it,
+  and acknowledging, and the adopter starting on that and continuing the node on its
+  branch, with one change request per branch;
+- the gap: `a_displaced_driver_that_has_not_read_the_takeover_publishes_nothing_it_starts_after_it`
+  has the adopter start once its wait has passed while the displaced driver still runs, and
+  shows the dispatch that driver starts after it withheld at its publication's read;
+- the order: `a_takeover_recorded_before_an_unanswered_read_ahead_of_a_publication_publishes_nothing_of_the_displaced_driver`
+  holds the displaced driver at a failpoint between its fence landing and its read, records
+  the takeover there, and has the board refuse that read — the order a Windows run of
+  `rework::a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished` reached
+  on a build that published on such a read. The publication waits, the next read finds the
+  adopter's claim, and the displaced driver publishes nothing;
+- a dead driver: `a_takeover_whose_displaced_driver_died_proceeds_once_its_wait_has_passed`,
+  and `an_in_flight_dispatch_left_on_the_store_is_continued_by_a_host_that_takes_the_project_over`;
+- the fence: `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`
+  holds the displaced driver's push at the host past the whole takeover wait — with the
+  displaced host given a longer cancel grace than the adopter, so the adopter's own terms
+  would have let it start — and asserts that the adopter mints nothing while it is held and
+  says what it waits on; `a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands`,
+  `a_takeover_finding_a_fence_it_cannot_read_waits_until_it_is_cleared`,
+  `a_takeover_finding_a_fence_naming_no_publication_waits_until_it_is_cleared` and
+  `a_superseded_driver_whose_read_before_clearing_its_fence_fails_still_hands_over` drive
+  the fence's failures;
+  `a_publication_soon_after_the_last_replaces_its_fence_in_one_write` counts one store write
+  between two publications one after the other, and shows the fence cleared once its linger
+  has passed while the driver goes on dispatching, and none left after the closeout;
+- the acknowledgement: `a_takeover_of_a_driver_with_nothing_to_publish_starts_on_the_acknowledgement_its_closeout_writes`,
+  `a_successors_claim_survives_the_closeout_and_the_stop_of_the_run_it_took_over`,
+  `a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement`,
+  `a_takeover_replaced_while_it_waits_is_refused_and_the_one_that_replaced_it_starts` and
+  `a_withheld_publication_puts_its_branch_on_the_origin_when_nothing_else_has`;
+- the board failing: `a_takeover_whose_claim_the_board_refuses_is_refused_before_anything_is_minted`
+  and `a_takeover_waits_out_a_board_that_refuses_a_poll_and_the_acknowledgement`; and
+  `a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch` refuses an
+  `acknowledged` that is not one;
+- adoption: `an_adoption_after_a_takeover_supersedes_before_it_projects_or_dispatches`,
+  and `an_adoption_whose_claim_read_is_not_answered_goes_on_driving`, which replaces entry
+  119's journey of an adoption that went on driving past an unanswered read;
+- `two_cold_hosts_launching_one_project_at_once_leave_every_draft_alone` and
+  `a_claim_of_this_hosts_own_run_refuses_a_launch_naming_adopt_live_or_gone`, which takes
+  a gone run of this host over without waiting, as `tests/e2e/bus_config.rs`'s two
+  takeovers do. `tests/e2e/rework.rs`'s `a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished`
+  and `tests/smoke/continuation.rs`'s live journey wait on their takeover in the background.
+
+`src/continuation.rs`'s unit tests hold the setting's fallback, the wait's sum over the
+displaced claim's own grace, the poll's bounds, the acknowledged claim's shape and its
+refusals, a claim's `lease` and a driver's publications and their refusals, and the block
+above against the constants, the claim boundary and the README.
+
+## 129. Entry 128's bounds let a takeover start before what the displaced driver settled was on the store — OPEN
+
+**Proposal, for the planner who owns the contract, whose ruling kept the deferred
+acknowledgement below: entry 128 promises that a takeover "reads the project again, and
+continues and pins from that read — so what the displaced driver settled while it was being
+taken over is continued rather than dispatched again". Two of its other rules let the
+adopter start before that settlement was on the store, so that read missed it and the
+adopter dispatched a published node again. This build keeps the continuation promise and
+departs from those two rules as follows. Entry 128's wording is unchanged until this is
+ruled on.**
+
+- **The fence lets go of a settled publication only once its settlement has landed.**
+  Entry 128 has the driver rewrite `onepipeline.publishing` without a node "once a
+  publication has settled". This build drops the node only once a projection carrying the
+  node's settlement has landed on the store. Before that, an adopter past its wait that
+  found no fence started without the settlement. That was the Windows failure of
+  `a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_has_finished`,
+  and `a_takeover_reading_before_a_settled_publication_has_landed_waits_until_it_has`
+  drives it.
+- **A superseded driver acknowledges only once what it settled has landed.** Entry 128
+  first said it acknowledges once nothing of its own is in progress "and that projection
+  has landed (waited for at most one interval)"; that wait is now 20 seconds. Read
+  literally, a projection held longer than that one wait is acknowledged anyway: the adopter starts on the acknowledgement, reads
+  the project without the settlement, and dispatches the node twice.
+  `a_settlement_held_past_the_displaced_drivers_wait_holds_the_takeover_until_it_lands`
+  is the evidence: it fails on the literal bound with the fence cleared and the takeover
+  acknowledged. This build keeps the one bounded wait. Past it, the driver goes on passing,
+  saying on standard error that the settlement "has not reached the store" and that it
+  acknowledges once it has. It does not clear its fence, acknowledge, retire its write-back
+  or close out until a projection carrying the settlement has landed.
+- **A superseded driver that owes no acknowledgement still projects a settlement its
+  fence holds the adopter for.** Entry 128 first had a driver whose lease had lapsed
+  project nothing more, because the adopter "may be writing to the board already"; with no
+  lease, the driver that owes none is an adoption whose first read found the takeover. An
+  adopter held by that driver's fence has started nothing, so it writes nothing that
+  projection could overwrite.
+- **A run closing out with a settlement that has not landed leaves its fence naming it.**
+  A later takeover then waits for an acknowledgement, as it does for a driver that died
+  mid-publication.
+
+Refused projections are untouched: entry 72 still attempts a refused snapshot again only
+when the run's graph next changes, and republishing the same snapshot attempts nothing. A
+settlement the store refuses is therefore not on the store, and the fence and the
+acknowledgement wait for it like any other. If the graph never changes, the takeover waits
+until somebody clears the fence, or until the displaced host's own records prove its run
+gone. It never starts without the settlement. That remaining case is a follow-up, not part
+of this record.
+
+## 130. A reviewer was never answered where they left a comment — OPEN
+
+**Proposal, for the planner who owns the contract: one launch flag and launch-config
+key, `--review-reply-graph` / `review_reply_graph`; one reserved persona and history
+scope, `review-reply`; one planner-channel op, `decline`, with its compiled operation
+`decline-applied`; two journal kinds, `review-reply-posted` and
+`review-reply-not-drafted`; one surface kind, `review-reply-pending`; the typed
+refusal `channel::Refusal`, carried as an optional `refusal` beside `reason` on a
+command's outcome; and a reply step at the end of `onepipeline review`.** Discovery
+(entries 122 and 124) brought each comment to its node, and a rework (entry 121)
+answered it with commits, but nothing told the reviewer: the user went back to each
+thread to say what changed. The rule below is the approved design of
+`authoring:pr-feedback-rework` (node `op-review`, which owns it; `ui-relink` and
+`aio-adopt` restate it), and this build implements it.
+
+**The pass, extended.** `onepipeline review <RUN>` — its exit codes and its driven and
+undriven behaviour unchanged, the readjustment still its first step — gains one step
+after discovery: it drafts and posts every **owed** reply. A comment is owed by a
+rework replacement that names it in its `onepipeline.rework` and has settled as a
+review draft (`done`, its outcome `change-review-draft` or
+`change-review-draft-unchecked`), where no marked reply answers its current revision —
+and, where an older reply answered an earlier revision, only where the rework's newest
+commit is later than the edit, so a rework never answers an edit it did not see. One
+drafting runs per replacement, and each reply is posted out of the read the pass has
+just made. On a run nothing drives, `review` returns only once every step is done; on
+a driven run it returns the driver's receipt within `ONEPIPELINE_REPLY_TIMEOUT_SECONDS`,
+`requested` where the driver is still drafting, and the driver finishes after. A
+drafting that cannot post — no drafter configured (`unconfigured`), a dispatch that
+failed or answered nothing its schema accepted (`failed`), or a result the rules
+refuse (`invalid`) — posts nothing, journals `review-reply-not-drafted {node,
+comments, ending, detail}` and raises a non-blocking `review-reply-pending` once per
+set of owed comments and ending; the next pass drafts it again, and the pass still
+exits 0. A post the host refuses is the pass's host failure (exit 1).
+
+**`decline`.** `{op: decline, id, comments: [{id, url}], reason}`, granted to the
+planner alone as `rework` is. Applying it **is** posting its replies: one fresh read of
+the change request (`review_comments(change, None)`), one drafting of the comments no
+`declined` reply answers yet — `## Commits` empty, `## Reason` the op's `reason`
+byte-for-byte, `## Worker transcript` the no-transcript sentence — and one POST per
+reply labelled `declined`, before the edit commits as `decline-applied {node,
+comments, reason, replies: [url]}` (each reply then journalled `review-reply-posted`).
+Nothing is written to the plan store, no branch moves and no worker is dispatched. It
+is refused, each as a `channel::Refusal`: `comment-not-read` for a comment no read of
+the node's lineage journalled; `blank-reason`; `already-answered` naming the reply,
+where a rework's reply answers a named comment, or every named comment is declined
+already — so the same decline sent again posts nothing; and `decline-not-posted
+{node, comments, detail}` where no drafter is configured, the read, the drafting or a
+post failed, any reply posted before the failure staying on the host and the same
+decline sent again posting only the rest. The two record-side refusals are judged by
+the reconciler, so a driven run's outcome carries every one by kind. On a driven run
+the driver applies it, and its receipt may be `queued`.
+
+**The reply drafter.** `start --review-reply-graph <path>`, recorded in `launch.json` as
+`review_reply_graph` and named in launch-config schema 13 by the same key, runs as the
+reserved persona `review-reply` — refused for a node or a step where a plan is read —
+composed without node overrides as `pr-author` is, and stamped under the history scope
+`review-reply` (the contract's scope list names three). Its task is a fixed preamble,
+then `## Change request`, `## Comments` (each comment's id, URL, author, location and
+text), `## Commits` (each commit the rework added between the superseded node's
+settled head and the replacement's: sha, subject and URL), `## Reason` (the rework's
+reason and instruction, byte-for-byte, or the decline's reason) and `## Worker
+transcript` (the retained transcript's path where this host's journal holds it, and the
+sentence below otherwise). Its result, read from `results[].structured` where
+`schema_valid` is true, is `{replies: [{comment, disposition: answered | declined,
+body}]}`, held to: every named comment exactly once and no other, every body non-empty
+and at most 500 characters, an `answered` body carrying a supplied commit URL, a
+`declined` body carrying none, and — for a decline — every reply `declined` and no
+commit URL at all.
+
+**Drafting input from the store and the host alone.** By the manager's ruling on this
+node, the replacement's `onepipeline.rework` carries one more field, `replaces_head` —
+the superseded node's settled head — written with the rest of that record, optional
+and read as before where absent; continuation's `continued.rework` carries it with the
+rework's `reason` and `instruction`, so a cold host drafts what the original would. The
+commits are read off the branch on its origin, fetched into a commit cache under the
+run, so no checkout anybody works in moves; a record written before the field carries
+none, and `## Commits` then holds what the store can show — the replacement's settled
+head alone. The checkpoint advances to version 13 with its golden, because a version-12
+fold would drop those three fields.
+
+**Posting and recovery.** Each reply is one `reply_to_comment` with key
+`sha256(<lineage root>:<comment id>:<revision>)`, label `declined` for a declined one,
+and `verified_absent: true`: the read that decided it was owed has just shown no reply
+carrying that key, so a reply is one POST and no plan-store write. No reply state is
+kept anywhere but the host: a host lost before the post leaves the comment owed, and
+one lost after the host took it leaves a marked reply the next read sees. No thread is
+ever resolved. Two hosts posting the same key at the same instant are the accepted
+limit, by the manager's ruling.
+
+**The typed refusal, by the manager's ruling.** `channel::Refusal` is public and
+`#[non_exhaustive]`, tagged `kind`; `CommandResult` gains the optional `refusal`
+(omitted when absent, so every outcome written before reads unchanged), its `reason`
+the refusal's text; `edit-rejected` carries the same optional `refusal`; and the error
+behind it is the new `Error::Rejected`, which exits as `Refused` does.
+
+**Views.** `status` and `results` name, beside an answered comment, the rework whose
+provenance names it and the short sha of each commit its reply links; `results --json`
+rises to schema version 2 for the two optional fields (`rework`, `commits`), omitted
+where empty.
+
+**What breaks, for an exhaustive Rust caller.** `cli::StartArgs::review_reply_graph`,
+`filter::LaunchConfig::review_reply_graph` and `ledger::LaunchRecord::review_reply_graph`
+are new fields; `agents::Scope::ReviewReply` and `agents::Launched::ReviewReply` new
+variants, and `Scope::ALL` four long; `channel::Command::Decline` and
+`channel::layout::Op::Decline` new variants; `CommandResult::refusal` a new field;
+`event::PipelineKind` two new variants. `Error` is `#[non_exhaustive]` already.
+
+**Test seams.** Debug binaries stop at three more `ONEPIPELINE_REVIEW_FAILPOINT` stages
+(entry 122's seam): `after-reply-post`, after the host took a rework's reply and before
+`review-reply-posted` is journalled; `after-decline-post`, after a decline's replies
+were posted and before `decline-applied` is journalled; and `after-edit-rejected`, after
+a driven reconciler journalled an envelope's `edit-rejected` records and before it
+answered the envelope. Release binaries ignore them; none is a public interface or a
+launch setting.
+
+```json
+{
+  "verb": "review",
+  "launch": {
+    "flag": "--review-reply-graph",
+    "config_key": "review_reply_graph",
+    "launch_record_key": "review_reply_graph",
+    "config_schema_version": 13
+  },
+  "persona": "review-reply",
+  "history_scope": "review-reply",
+  "op": {
+    "op": "decline",
+    "id": "reader-rework-1",
+    "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-501"}],
+    "reason": "Out of scope for this change: the cache is tracked in #42."
+  },
+  "operation_kinds": ["decline-applied"],
+  "decline_applied": {
+    "node": "reader-rework-1",
+    "comments": [{"id": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-501"}],
+    "reason": "Out of scope for this change: the cache is tracked in #42.",
+    "replies": ["https://github.com/owner/service/pull/4#issuecomment-9001"]
+  },
+  "event_kinds": ["review-reply-posted", "review-reply-not-drafted"],
+  "records": {
+    "review-reply-posted": {
+      "node": "reader-rework-1",
+      "comment": "PRRC_kwABzgAAAlk",
+      "disposition": "answered",
+      "url": "https://github.com/owner/service/pull/4#discussion_r9002",
+      "commits": ["1f2e3d4c5b6a79881726354453627180918a7b6c"]
+    },
+    "review-reply-not-drafted": {
+      "node": "reader-rework-1",
+      "comments": ["PRRC_kwABzgAAAlk"],
+      "ending": "invalid",
+      "detail": "comment PRRC_kwABzgAAAlk has no reply"
+    }
+  },
+  "dispositions": ["answered", "declined"],
+  "endings": ["unconfigured", "failed", "invalid"],
+  "surface_kind": "review-reply-pending",
+  "refusals": [
+    {"kind": "comment-not-read", "node": "reader-rework-1", "comment": "IC_kwABzgAAAfU"},
+    {"kind": "blank-reason", "node": "reader-rework-1"},
+    {"kind": "already-answered", "node": "reader-rework-1", "comment": "IC_kwABzgAAAfU", "url": "https://github.com/owner/service/pull/4#issuecomment-9001"},
+    {"kind": "decline-not-posted", "node": "reader-rework-1", "comments": ["IC_kwABzgAAAfU"], "detail": "the reply drafting settled without succeeding"}
+  ],
+  "command_result_refusal_field": "refusal",
+  "task_sections": ["## Change request", "## Comments", "## Commits", "## Reason", "## Worker transcript"],
+  "no_transcript": "No worker transcript is available on this host; draft from the sections above.",
+  "result": {
+    "replies": [
+      {"comment": "PRRC_kwABzgAAAlk", "disposition": "answered", "body": "Retried instead: https://github.com/owner/service/commit/1f2e3d4c5b6a79881726354453627180918a7b6c"},
+      {"comment": "IC_kwABzgAAAfU", "disposition": "declined", "body": "Left as it is: the cache is tracked in #42."}
+    ]
+  },
+  "body_limit": 500,
+  "declined_label": "declined",
+  "key": "sha256(<lineage root>:<comment id>:<revision>)",
+  "verified_absent": true,
+  "rework_metadata": {
+    "replaces": "reader",
+    "reason": "the reviewer asked for a retry instead of a cache",
+    "instruction": "remove the read-through cache and retry a failed read",
+    "comments": [{"id": "PRRC_kwABzgAAAlk", "url": "https://github.com/owner/service/pull/4#discussion_r601"}],
+    "replaces_head": "0a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4"
+  },
+  "continued_rework_added": ["reason", "instruction", "replaces_head"],
+  "store_review_keys": [],
+  "results_schema_version": 2,
+  "results_golden": "tests/golden/review-results-v2.json",
+  "checkpoint_schema_version": 14,
+  "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
+  "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
+}
+```
+
+Merging `main`, whose scratch reclamation (entry 127) and claim lease (entry 128) took
+that number and the events bundles `1.5.0` and `1.6.0` first, moved this record from 127
+to 129 and its events bundle from `1.5.0` to `1.7.0`: the next free entry and the
+bundle's next minor. A later merge of `main`, whose takeover settlement record took 129
+first, moved it to 130. The planner-channel bundle, which neither raised, stays `1.5.0`.
+The engine's reading of turn content through transcript references, which keeps a
+node's last activity in the checkpoint as the `transcript` reference it recorded, moved
+the checkpoint to version 14 with its golden; the block pins the version this build
+reads, so it moved from 13 to 14 with it.
+
+**What this build does.** `tests/e2e/review_reply.rs` drives every rule through the
+compiled binary and the real linked `onevcs` over real git, with GitHub at `onevcs`'s
+`ONEVCS_GH` seam: `fake-gh` answers each reply POST — a thread's `replies` route, or the
+conversation's `issues/<n>/comments` with its `Re:` line — through `onevcs-testing`'s
+remote double, whose ledger and state the journeys read back, and the reply drafter is
+the `oneagentgraph` double answering a `review-reply` dispatch from its task or a
+scripted result held to the graph's own schema. The journeys:
+`a_rework_s_replies_are_drafted_once_and_posted_one_post_each_in_their_threads` (one
+drafting, each section of its task, a thread reply and a linked conversation reply,
+each key, `review-reply-posted`, the ledger's one POST each with no read between, no
+store write, no thread resolved, nothing posted again);
+`a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_host` (its
+task, its one reply labelled `declined`, posted before `decline-applied`, no worker,
+branch or store write, `already-answered` on the identical decline, and `declined` on a
+cold host); `every_decline_refusal_reaches_the_outcome_by_kind_and_posts_nothing_it_should_not`
+(on a driven run, every refusal kind read off the outcome document — an unread comment,
+a blank reason, a failed drafting and each invalid result, a second post refused and
+the resend posting only the rest, and every comment already declined);
+`a_decline_with_no_reply_drafter_is_refused_and_posts_nothing`;
+`a_rework_s_drafting_that_fails_or_answers_against_the_rules_posts_nothing_until_it_drafts`
+(each invalid result and a failed drafting, journalled, surfaced once per ending, and
+posted once drafting succeeds); `with_no_reply_drafter_a_rework_s_replies_stay_owed_and_surfaced`;
+`an_edit_after_its_reply_is_pending_again_and_a_rework_naming_it_answers_the_new_revision`;
+`a_cold_host_reworks_a_stack_on_its_existing_branch_and_change_request_and_replies`;
+the three lost-host journeys, `a_host_lost_after_the_rework_settled_leaves_its_replies_to_the_next_host`,
+`a_host_lost_after_the_host_took_a_reply_leaves_nothing_to_post_again` and
+`a_host_lost_after_a_decline_posted_leaves_the_decline_answered_on_the_next_host`, the
+last two stopped at the seams above; `a_driven_review_still_drafting_at_the_reply_timeout_returns_requested_and_posts_after`;
+and `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_decline`;
+`the_launch_config_names_the_reply_drafter_the_flag_overrides_it_and_a_blank_names_none`;
+`a_drafter_answer_its_schema_refuses_is_never_read_and_the_one_after_it_is`;
+`a_rework_s_reply_the_host_refuses_is_posted_by_the_next_pass_and_the_one_it_took_is_not_again`;
+`a_stored_rework_record_naming_no_superseded_head_drafts_from_the_replacement_s_head_alone`;
+`a_decline_whose_read_of_the_change_request_fails_posts_nothing_and_posts_once_it_reads`;
+`a_decline_of_a_comment_a_rework_answered_is_refused_already_answered_and_posts_nothing`;
+`a_decline_whose_drafting_cannot_start_or_be_given_a_directory_posts_once_it_can`;
+`a_rework_whose_commits_cannot_be_read_surfaces_its_replies_and_posts_once_they_can`;
+`a_decline_the_plan_refuses_names_why_and_posts_nothing`;
+`a_rework_s_drafter_may_decline_one_comment_while_it_answers_another`;
+and `a_typed_refusal_a_lost_driver_never_answered_is_answered_from_the_journal_by_kind`,
+stopped at `after-edit-rejected`. `tests/e2e/agents.rs`'s `a_reply_drafting_is_its_own_scope_in_history_and_takes_none_of_the_node_s_sets`
+runs the drafter through the real `oneagentgraph` and reads its history scope.
+`tests/e2e/plan.rs` holds the reserved persona's refusal. `src/reply.rs` holds the
+task, the rules and the commit links over its own types, and `tests/contract.rs`'s
+`the_review_reply_surface_is_what_the_divergence_record_names` holds the block above
+against the public types, the registered documents and both bundles.
+`tests/e2e/review_round.rs`'s
+`the_busy_review_round_ends_answered_and_true_and_records_what_it_spent` runs the busy
+round `review-round-github-quota` states and records its telemetry, which
+`scripts/review-round-quota-budget.sh` charges for that budget in the root `budgets.yaml`.
+Every call the scripted store received is charged or is its session's handshake or close:
+the driver's own writes of its claim and of entry 128's `onepipeline.publishing` fence,
+which no projection record names, are charged as `driver-metadata-set`, and a store call of
+any other kind fails the round. It also holds that the round makes no board write the store answers as changing nothing,
+that each reworked node's item is written its Queued claim, start, dispatch and settlement
+once each, and that no restack's or readjustment's open reads the base's branch rules.
+The live tier's `tests/smoke/review.rs`,
+`review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_from_the_store`,
+drives the same rework and decline against real pull-request comments on the scratch
+repository, its plan on a local Markdown store every host shares, its drafter the real `oneagentgraph` over the paid-turn stand-in,
+which answers a drafting's turn from its task as the graph double does.
+
+## 131. A plan read without a private source's answer was dispatched as if that source held nothing — OPEN
+
+**Proposal, for the planner who owns the contract: a sixth hold reason, `source`; one
+surface kind, `source-wait`; and one pacing variable, `ONEPIPELINE_SOURCE_POLL_SECONDS`.**
+The planner ruled the behaviour over the planner channel while this build adopted
+`onetaskgraph`'s partial dependency read — hold each affected node, re-read it on every
+later pass, release it the pass the source answers with no relaunch, re-surface it on the
+held-wait cadence naming the source, the nodes and what the reader lacks, and have
+`plan check` say the same; neither refuse the whole load nor dispatch past a possible
+prerequisite. The contract's hold list and kind lists do not name it yet, which is this
+entry.
+
+The store's dependency read now answers, by default, every edge the sources that could
+answer hold, and names in `unanswered` each source declared private it could not ask what
+that source records of the task — a credential absent or refused, a source unreachable or
+rate-limited. A private task records the public tasks that depend on it on its own side,
+so a reader without that source's credential cannot tell whether a node has a prerequisite
+there. Before this entry the engine asked for a complete read, so one such source refused
+the launch of every plan beside it.
+
+What this build does is the block below, and the block is the source.
+
+**The read.** `taskgraph` asks each task's edges with `Completeness::NamingUnasked`; a
+failure in `errors` is still refused as a partial answer, and a source in `unanswered` is
+kept beside the node it was reported for. The plan loads.
+
+**The hold.** `start` journals, after `run-started`, one `node-held` per such node carrying
+a `source` entry, and says on stderr, per source, the source, why it did not answer and the
+nodes it holds; `plan check` says the same on stderr and keeps its stdout and exit code.
+The driver seeds the holds from the record — no driver repeats the launch's read — keeps
+each node out of `start_ready` as it does a release hold, and re-reads the held nodes'
+edges through the store configured from the launch directory, off the loop's thread, every
+`ONEPIPELINE_SOURCE_POLL_SECONDS` — sixty seconds where it is unset or is not a positive
+whole number of seconds, and longer only where a host sets it longer. A re-read that asks every
+source and resolves no prerequisite the run's graph does not already give the node clears
+the hold. One that resolves such a prerequisite keeps the node held with it in `missing`,
+because starting the node then would start it before that prerequisite; an edit giving the
+node the edge — a `reparent` — is what the next read clears it on. A read the store fails
+outright leaves the holds as they are. A node that leaves the waiting statuses holds
+nothing. Nothing times a hold out, and a run whose remaining nodes are held this way is
+neither terminal nor `awaiting-planner`.
+
+**The surface.** A held node raises `source-wait`, non-blocking, source proposal,
+workstream the node, on the cadence `release-wait` uses, naming the source, its reason or
+the missing prerequisite, what clears it, and that nothing times it out. `status` renders
+the hold on the node's line.
+
+Driven end to end by `tests/e2e/store.rs`: a plan in a public source beside a private
+`scripted-source` answering every task query with an authentication failure loads, `plan
+check` exits 0 naming the source and nodes, nothing is dispatched across several re-reads,
+`status` and the surface name the source, and the run completes in edge order once the
+source answers; and a private task carrying a plan node's id and recording another node as
+its dependent keeps that node held naming the prerequisite after the source answers, until
+a `reparent` gives it the edge, after which it starts only once the prerequisite settles.
+`unanswered::tests` holds the block below against the types.
+
+```json
+{
+  "hold": {
+    "kind": "source",
+    "unanswered": [{"source": "vault", "reason": "authentication for this source failed: VAULT_TOKEN is missing or empty"}]
+  },
+  "hold_with_missing": {
+    "kind": "source",
+    "unanswered": [],
+    "missing": ["review"]
+  },
+  "surface_kind": "source-wait",
+  "surface": {"blocking": false, "source": "proposal", "workstream": "the held node"},
+  "poll_env": "ONEPIPELINE_SOURCE_POLL_SECONDS",
+  "default_poll_seconds": 60,
+  "surface_cadence_env": "ONEPIPELINE_RELEASE_SURFACE_SECONDS"
+}
+```
+
+## 132. The issues a landing closed stayed open work on every board the store configures — OPEN
+
+**Proposal, for the planner who owns the contract: one narrowing of "onepipeline writes no
+ticket itself", and one record kind, `landing-closures`.** The "Status writes back" text of
+`docs/contract.md` — and entries 50 and 73 beside it — says the engine writes no ticket: the
+tickets a node's `delivers` names move by the store's own relation. That still holds. What
+this adds is narrower: the engine hands the plan store the GitHub issues a landing *reports
+closed*, and the **store** decides which items of which of its configured sources those
+issues move to `done`. A follow-up ticket whose issue the stack's own landing closed no longer
+reads as open work on the board a person chooses work from, and no recurring scan of a whole
+board spends shared GitHub allowance rediscovering closures the stack performed itself.
+
+What this build does is the block below, and the block is the source.
+
+**No setting.** The engine gains no option, no launch-record field and no flag for this, and
+an adoption replays nothing new. The store configuration is the one the write-back already
+loads for every other store read of the run — `Store::at` over the launch record's directory,
+with every source it declares. The store asks each configured source able to hold an item for
+a GitHub issue and sends every other source — a `local-md` folder, a Linear workspace — no
+request, listing it `unsupported`.
+
+**When, while a run relays a landing.** Once per landing commit: the first relayed `onevcs`
+`merge-completed` or `change-merged` labelled for one of the run's nodes whose `closes` is
+non-empty — the `change-merged` and `merge-completed` of one change request are one landing,
+told apart by nothing but read as one by their commit. And once for each landing the engine's
+own landing verbs perform: `publish-branch`, `repo-recover`, and `integrate`, whose linked
+`onevcs` integrate train reports as `closes` the closing lines its squash carries — one per
+branch the train lands. An event whose `closes` is missing or `[]` causes nothing, so a
+landing that closes no issue costs no request at all.
+
+**When, catching up a landing the run missed.** On a driver's first pass — after
+`driver-adopted` and the adoption-time standings read, `readjust::run` — and whenever the run
+meets a landing recorded for one of its nodes since that node settled — a `node-landed` a
+readjustment journals, or a landing event on a settled node's session stream, which the
+per-pass session read `release::Watch::relay_releases` reads — for a settled draft whose change
+has not landed, whether or not its repository declares a release target, relaying nothing of a
+repository that releases nothing — the driver reads, for every
+node of the run with a recorded landing, that node's own `onevcs` session stream, and hands
+over each landing commit whose `merge-completed` or `change-merged` carries a non-empty
+`closes` and which no `landing-closures` record of the run's journal names yet. It reads only
+the run's own sessions and journal: never a board, never another run. A landing no event of
+the node's session carries with `closes` — an operator `settle` naming a landing, an event an
+older `onevcs` wrote — causes nothing.
+
+**What.** One `onetaskgraph_core::Engine::complete_issues(closes, &[], false)` call per
+landing, naming no source, the landing's `closes` parsed as `IssueRef`s; the store decides per
+source and issue what to write — `updated`, `unchanged`, `skipped` for an issue closed as not
+planned or duplicate, `absent`, `failed` — and lists the sources it sent nothing `unsupported`.
+In a run, the call is made on the write-back's own closure thread, off the reconcile loop and
+best effort like every write-back: a transient failure is asked again on the worker's existing
+retry schedule; a refusal, or an answer the store says failed — an item `failed`, or a ticket
+an `updated` item delivers that the store could not keep in step, which that item's `delivered`
+carries verbatim —
+is the record's `failed` outcome and a **non-blocking** planner surface; none of it changes a
+node's settlement, an edit ruling or a scheduling decision. `publish-branch`, `repo-recover`
+and `integrate` load the store configuration from the directory they run in, as `Store::at`
+does for a launch directory, make the call before they exit and print what the store answered
+on standard error; a directory whose configuration declares no source is asked nothing, and
+the verb says so. Neither changes the verb's exit status.
+
+**The record.** One journal record per landing, kind `landing-closures`, written once the call
+has finished — projected, or failed for good — in the shape below: `node` is `null` for a
+landing a landing verb made outside a run, `items` and `unsupported` are the store's own,
+verbatim, and `class` and `reason` are `null` unless `outcome` is `failed`. A run writes it to
+its own journal; a landing verb to the landing's journal and every associated run's. It is
+declared once in the event vocabulary, beside `node-settled`. A run whose every node has
+settled waits for its closures still owed up to thirty seconds past the projection's close-out
+window, since a board paces its writes and nothing adopts a finished run again; a run stopped
+before then gets the projection's window. A landing whose call never finished — the driver
+stopped while it was being asked again — has no record, so the next adoption makes the call. A
+delivered ticket failing for now is asked again like any transient failure, but the store
+re-evaluates delivered tickets only as it writes their deliverer, so a retry reads that item
+back `unchanged` and says nothing of the ticket: where it finishes with nothing failed, the
+record kept is the attempt that carried the ticket's failure.
+
+Driven end to end by `tests/e2e/closures.rs`: a run on a real `local-direct` landing over two
+loopback boards, a `local-md` source and a Linear source; a change request's
+`change-merged`/`merge-completed` pair; a landing that closes nothing; catch-up after `stop` and
+`adopt`, after a readjustment and after a late landing on a settled node's session stream while
+the driver runs, and after a call the stopped driver never finished; a permanent
+and a transient refusal; and `publish-branch`, `repo-recover` and `integrate` from a directory
+declaring the board and from one declaring nothing. `tests/contract.rs` holds the block's
+`record` and `failed` to the vocabulary's declaration of `landing-closures`, and the events
+bundle `schemas/events.json` publishes at the next minor, `1.8.0`, which adds that one
+document: a stream this build writes is one an earlier reader reads, less the new kind.
+
+```json
+{
+  "kind": "landing-closures",
+  "event_kinds": ["landing-closures"],
+  "record": {
+    "node": "service",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "closes": ["owner/service#7", "owner/service#8"],
+    "outcome": "projected",
+    "items": [
+      {"issue": "owner/service#7", "source": "board", "task": "board:ISSUE-7", "from": "Todo", "to": {"category": "done", "name": "Done"}, "action": "updated"},
+      {"issue": "owner/service#8", "source": "board", "task": "board:ISSUE-8", "from": "Todo", "to": null, "action": "skipped", "reason": "closed as not planned"}
+    ],
+    "unsupported": ["plans", "linear"],
+    "class": null,
+    "reason": null
+  },
+  "failed": {
+    "node": null,
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "closes": ["owner/service#7"],
+    "outcome": "failed",
+    "items": [],
+    "unsupported": [],
+    "class": "refused",
+    "reason": "the source refused the write"
+  },
+  "bundle_versions": {"events": "1.8.0"}
+}
+```
+
+## 133. A manager's note waited for the live turn to end, could not be bounded, and could not be taken back — OPEN
+
+**Proposal, for the planner who owns the contract: three `deliver` values, an optional
+`delivery_timeout_seconds`, a `withdraw-note` op, and a `turn` on a delivered note.** The
+plan node `op-interrupting-notes` (ai-orchestrator#1902, #1622, #1834 and onepipeline#512)
+states the surface as its task. The authority is `Command` in `src/channel.rs`, and the
+block below is reconciled with it by `tests/contract.rs`'s
+`the_interrupting_note_surface_is_what_entry_133_names`.
+
+**What was wrong.** A correction a manager sent reached the worker or supervisor only once
+the turn it was in ended, which can be hours. Nothing bounded that wait, and a note made
+obsolete by a later decision could not be taken back before anyone read it. The record said
+which party took a note, but not whether its turn was interrupted or only reached at its end.
+
+**The rule this build applies.**
+
+1. **`deliver` is `live` (the default), `turn-end` or `next`.** `live` offers the note with
+   onejudge's `Delivery::Interrupt`: the addressed party's live turn is interrupted and its
+   replacement opens on the note, or the note waits for the turn's end where that turn
+   cannot be interrupted. `turn-end` offers it with `Delivery::TurnEnd` and never
+   interrupts. `next` makes no live attempt. `persist` is unchanged, and `next` with
+   `persist: false` is still refused.
+2. **`delivery_timeout_seconds`** is optional, with no default; absent, a note waits for as
+   long as the dispatch runs. It is refused at the envelope when it is `0` or beside
+   `deliver: next`, and every other value is accepted. A deadline past
+   `9999-12-31T23:59:59.999Z` — the latest instant RFC 3339, which `status` writes it in,
+   can name — or past what the host's monotonic clock can name waits until the latest such
+   instant: still a deadline, shown as the one the wait ends at, never an unbounded wait
+   and never a panic. The manager ruled under correlation
+   `c-c8c3785c69589b340261d344cb3e5d0f` to keep that surface and drop the 30-day cap this
+   build first proposed. The RFC 3339 bound beside the clock's was this build's, and the
+   manager agreed it under correlation `c-b0dede45f189ee2daf2990d7ed3dedcf`: a deadline
+   written past year 9999 could not be read back, and the run's whole live-delivery reading
+   then read as none. It is measured from the offer: a note no turn took by then is withdrawn
+   whole (`NoteOffer::wait_until` answers `Expired`), and `persist` decides what follows.
+   `true` records it `carried`, with a `reason` naming the deadline, into the node's next
+   dispatch; `false` refuses it with an `edit-rejected` naming the deadline. That holds for
+   a `live` note whose turn could not be interrupted, or whose redirect was refused, as
+   much as for a `turn-end` one. `status` shows a pending note's deadline beside its
+   `delivering` state, and `status --json` carries it as the `delivering` reading's
+   `deadline`.
+3. **A `note-delivered` record, and the note's result in the channel outcome, carry `turn:
+   interrupted | turn-end`** exactly where `reached` is `worker` or `supervisor`, mapped
+   from onejudge's `Accepted::Interrupted` and `Accepted::AtTurnEnd`. A record or outcome
+   written before this has no `turn` and reads and renders as before. The record also
+   names the note's 0-based `index` in its envelope beside the `envelope` it already named.
+4. **`withdraw-note {envelope, index, reason}`** names the note at command position `index`
+   of envelope `envelope`, and is never held behind any note. A blank `reason`, no such
+   envelope or note, and a note already answered, already composed into a dispatch, or
+   already withdrawn are each refused with an `edit-rejected` naming why, and change
+   nothing. A carried note not yet composed into a dispatch is withdrawn: the run commits
+   `note-withdrawn {node, envelope, index, reason, from: carried, text}`, the next dispatch
+   is composed without it (every other note carried beside it stays in that dispatch's
+   `## Planner context`, and replay reaches the same context), and the original envelope
+   is answered again with that note's command `refused`, carrying the withdrawal's reason.
+   **A later outcome for an envelope id supersedes an earlier one**: `outcome_of` reads the
+   latest. A live note no turn has taken is withdrawn too, with `from: live`: one offered
+   to its conversation through the offer's `NoteWithdrawer` (`oneagentgraph` 0.7.0), which
+   succeeds exactly when no turn took it, while the delivery's wait on it answers
+   `Withdrawn`; one queued behind an earlier note to the same node is never offered; and one
+   whose envelope is held unjudged behind another is skipped when that envelope is judged.
+   It is recorded once, by that `edit-committed`, and its envelope is answered with its
+   command `refused`, carrying the withdrawal's reason. A live note a turn already took is
+   refused naming its disposition, and its outcome is left as it was. A conversation has no
+   undo, so a live note its withdrawer took back stays withdrawn when a later command of the
+   same envelope refuses as it is delivered: its `note-withdrawn` is still committed once,
+   and that envelope is answered applied in part — the withdrawal `applied`, the refusing
+   command `refused`, every other command `validated`. **Ruled.** This was put to the
+   manager as option A of question `c-1090d325ced7472d94d454f1673b7b9b`, and re-asked as
+   `c-4f1358d1b14d36dd70b4c03e8c5f2c52` and `c-cbd47d568d8dd7c56b15aa135b142192`; all
+   three timed out unanswered, and none was taken as approval. The manager approved it under
+   correlation `c-41dfb3e80a73b07b16c16c2083ff9868` ("approve-A"), including the crash
+   recovery — a driver that dies before answering such an envelope leaves the next driver
+   to commit the kept withdrawal exactly once, never offering the note again meanwhile —
+   and the optional `course` field on the engine's internal write-ahead file, omitted where
+   the envelope delivered. The manager also directed that the reproduction and crash-seam
+   journeys be kept, and that the rule be stated in `docs/contract.md`, where it now stands
+   in the planner channel's envelope rules. It adds no op, field, verdict or record kind.
+   The alternatives were (B) staying all-or-nothing, with the note answered by a
+   placeholder reason and no record, and (C) refusing such envelopes at validation.
+
+**On Windows a `live` note never interrupts.** onejudge 0.20.0 opens no out-of-band
+control for a turn off unix, so no turn there can be interrupted whatever its harness
+offers. A `live` note to a running turn there waits for the turn's end, which is rule 1's
+fallback. It is recorded with `turn: turn-end` in the journal and in the note's channel
+outcome, and a deadline bounds the wait as rule 2 says. `tests/note`'s
+`a_live_note_to_a_held_worker_turn_with_no_lever_reaches_it_at_its_end` and
+`a_live_note_to_a_held_judge_turn_with_no_lever_reaches_the_supervisor_at_its_end` hold
+that on Windows with a harness that serves control. On other platforms they use a
+harness that offers none. The journeys that interrupt a turn are unix-only.
+
+**The record's `text`, ruled.** The manager approved the record's `text` under correlation
+`c-6e20576dba29b78e543c876cbb9a85c8`: replay takes a withdrawn note's text off the node it
+was carried onto, and nothing else; a `from: live` withdrawal takes nothing off any node. Beside it the record carries `alike_after` — omitted
+where it is `0` — counting the notes still owed to the node, carried after this one, that
+read the same — the same entry as the planner context writes them, so two texts differing
+only where a blank line is written as a line holding a space count as alike — so replay takes out exactly this one of several identical entries, counted
+back from the latest — approved under correlation `c-a8f7631e42a3be052eee59da9fdc9a9f`,
+and held by `tests/e2e/store.rs`'s
+`a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_after_replay`,
+which carries A, B, A, withdraws the first A, and reads B then A on the board and in the
+next dispatch, live and after an adopting driver replays the journal. Inside a carried entry a blank line is written as a line holding one
+space, so no entry holds the separator and the context always splits into its notes.
+
+**Carried notes accumulate, ruled.** Before this entry each note carried to a node replaced
+the one before it as the node's planner context, so a second carried note dropped the first
+from the next dispatch's `## Planner context` and from the store's `onepipeline.context`.
+The manager ruled under correlation `c-58311ba08bfab18210df2fcd2dd40dab` that this was a
+bug: every carried note is now composed into the next dispatch's planner context, and
+projected into `onepipeline.context`, in carry order, one paragraph each, and a withdrawal
+removes exactly its own. The store journeys that drive repeated `deliver: next` notes read
+the latest note as the context's last entry (`tests/e2e/harness.rs`'s `carries_latest`).
+
+**Carried over.** `cancel`'s preemption of a note still being delivered to its node still
+answers that note refused and ends the conversation that would have read it, and now also
+takes an untaken note back through its `NoteWithdrawer`, so no turn is presented with it. **onepipeline#512**: v0.63.6 already answers a claimed envelope a dead driver left
+exactly once. What remained was an envelope with no outcome for as long as a held turn ran;
+an interrupt removes most of that, and `delivery_timeout_seconds` bounds the rest.
+
+**Beside it.** onejudge 0.20.0's `agent.note@1` gains an optional `delivery`, defaulted to
+the interrupt, which admits every note the 0.8.0 capture admitted; `tests/registry.rs`
+tolerates exactly `/properties/delivery` and `/$defs/Delivery` there. `docs/contract.md`'s
+marked copy of the bus contract is re-decided against `onemessagebus` 0.9.3, whose envelope,
+filter and parser are 0.9.1's. The planner-channel bundle rises to `1.6.0` for the
+outcome's `turn` and the `withdraw-note` op; the events bundle does not move, and stays at
+the `1.8.0` entry 132 raised it to. Merging `main`, whose landing closures took entry 132
+first, moved this record to 133.
+
+```json
+{
+  "deliver": ["live", "turn-end", "next"],
+  "default_deliver": "live",
+  "note": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "turn-end", "delivery_timeout_seconds": 2},
+  "refused_at_the_envelope": [
+    {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "delivery_timeout_seconds": 0}, "refused": "`delivery_timeout_seconds` is 0"},
+    {"command": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "next", "delivery_timeout_seconds": 2}, "refused": "`deliver: next` waits on none"}
+  ],
+  "accepted_largest": {"op": "note", "id": "build", "addressee": "worker", "text": "stop editing src/old.rs", "deliver": "turn-end", "delivery_timeout_seconds": 18446744073709551615},
+  "withdraw_note": {"op": "withdraw-note", "envelope": "3", "index": 0, "reason": "the fixture moved back"},
+  "turn": ["interrupted", "turn-end"],
+  "delivered": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "worker", "turn": "interrupted", "envelope": 3, "index": 0},
+  "delivered_before": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "worker", "envelope": 3},
+  "carried_expired": {"kind": "note-delivered", "node": "build", "addressee": "worker", "text": "stop editing src/old.rs", "reached": "carried", "reason": "no turn took it within its `delivery_timeout_seconds: 2`, so it was withdrawn untaken", "envelope": 3, "index": 0},
+  "withdrawn": {"kind": "note-withdrawn", "node": "build", "envelope": 3, "index": 0, "reason": "the fixture moved back", "from": "carried", "text": "stop editing src/old.rs"},
+  "withdrawn_from": ["live", "carried"],
+  "result": {"index": 0, "op": "note", "outcome": "applied", "turn": "interrupted"},
+  "result_before": {"index": 0, "op": "note", "outcome": "applied"},
+  "delivering": {"envelope": "3", "state": "delivering", "node": "build", "since": "2026-10-19T09:00:00.000Z", "deadline": "2026-10-19T09:00:02.000Z"},
+  "note_delivery_tolerance": ["/properties/delivery", "/$defs/Delivery"],
+  "bundle_versions": {"events": "1.8.0", "planner_channel": "1.6.0"}
+}
+```
+
+## 134. A plan's home stayed open work on its board after every node of its run was done — OPEN
+
+**Proposal, for the planner who owns the contract: one further narrowing of "onepipeline writes
+no ticket itself", and one record kind, `home-status`.** Entry 132 narrows that sentence of
+`docs/contract.md`'s "Status writes back" text to the items the GitHub issues a landing closed
+hold, which the store moves. This narrows it exactly as far again: the engine writes **one item
+of its own — the run's home project, once, to `done`, through the store**. It still writes no
+ticket a `delivers` names and no member project. Nothing in the stack ever marked a plan's home
+finished, so the board a product owner reads every plan off kept every finished plan as open
+work; written once, when every node of the run is `done`, a plan's card tells the truth at the
+moment the plan finishes, for one store call per finished run and none for a run that did not
+finish.
+
+What this build does is the block below, and the block is the source.
+
+**No setting.** The engine gains no option, no launch-record field, no flag and no environment
+variable for this, and an adoption replays nothing new.
+
+**When.** Once per run, when the run reaches the success ending — every node `done`: the ending
+`src/hooks.rs`'s `verdict` calls success and the views print `SETTLED` — at the moment a driver
+judges that ending as it closes the run out: the driver that settles the run's last node, and
+an adoption that finds the run so ended, after `driver-adopted` and the adoption-time standings
+read. A run whose journal already holds a `home-status` record writes nothing more, whatever
+endings follow. A run that ends any other way — `ENDED failed`, `ENDED unfinished`, `ENDED
+stopped`, a host shutdown — or pauses writes nothing to its home; one later carried to the
+success ending — an operator `settle`, a retry that settles — writes it then, as the success
+hook fires then.
+
+**What.** One `onetaskgraph_core::Engine::set_project_status(home, StatusCategory::Done)` call,
+`home` the run's project as its launch recorded it, through the store configuration the
+write-back already loads for the run (`Store::at` over the launch record's directory). The home
+only: no member project the home names at `onetaskgraph.members`, and no task. The call is made
+on the write-back's closure thread, off the reconcile loop and best effort like every
+write-back: a transient failure is asked again on the
+closures' retry schedule, within the close-out window a settled run's closures have; a refusal
+is recorded `failed` and raised as a **non-blocking** planner surface naming the home and the
+store's words; and none of it changes a node's settlement, the run's ending, a hook, an edit
+ruling or a scheduling decision. The call is made once the close-out's projection has landed,
+so the two never write the run's items at once; a driver whose projection is instead waiting on
+a failing store, or inside a wait the store asked for, makes no call, so a store that is failing
+holds no run's ending any longer than it did. Neither that driver nor one still asking again
+when it lets go leaves a record, so the next driver to close the run out — an adoption — makes
+the call.
+
+**The record.** One journal record per run, kind `home-status`, written once the call has
+finished — written, or failed for good — in the shape below: `project` is the home's qualified
+id, `status` the `ProjectStatusSet.status` the store answered, `null` unless `outcome` is
+`written`, and `class` and `reason` are `null` unless `outcome` is `failed`. It is declared once
+in the event vocabulary, beside `landing-closures`. `onepipeline results` names it under the
+run's hooks: the home, the outcome, and the status it reads as or, when failed, the class and
+reason.
+
+Driven end to end by `tests/e2e/closures.rs`: a one-node run from a `local-md` home whose landing
+closes a plan home's issue on one of two loopback boards; a two-node run from a board home,
+written only once its second node settles, and not at all when that node fails or the run is
+stopped — until the failed node is settled `done`; an adoption of a run that settled while the
+board could not take the write; and a board refusing the write for good. And by
+`tests/e2e/linear_writeback.rs`, for a home on Linear. `tests/contract.rs` holds the block's
+`record` and `failed` to the vocabulary's declaration of `home-status`, and the events bundle
+`schemas/events.json` publishes at the next minor, `1.9.0`, which adds that one document: a
+stream this build writes is one an earlier reader reads, less the new kind.
+
+```json
+{
+  "kind": "home-status",
+  "event_kinds": ["home-status"],
+  "record": {
+    "project": "plans:ship-the-widget",
+    "outcome": "written",
+    "status": {"category": "done", "name": "done"},
+    "class": null,
+    "reason": null
+  },
+  "failed": {
+    "project": "board:PLAN-12",
+    "outcome": "failed",
+    "status": null,
+    "class": "refused",
+    "reason": "the source refused the write"
+  },
+  "bundle_versions": {"events": "1.9.0"}
+}
+```
+
+## 135. A run named after a private repository named it on every public tracker and branch it wrote to — RESOLVED
+
+**Ruling: every run has a public id — decided by the planner who owns the contract in
+ai-orchestrator's node `op-link-linear-store`, whose follow-up flow (`aio-adopt-linear-road`)
+reads it.** `docs/contract.md`'s run-reading paragraph and its example now carry `public_id`;
+the field name, its derivation and `schemas/run-reading.schema.json`, which declares it
+required, are fixed by that ruling.
+
+**What was wrong.** A run id is minted from its plan's name, so a plan titled after a private
+repository minted an id carrying that repository's name, and the run wrote it into the driver
+claim and publication fence of every plan store it projected onto, the plan's name beside them,
+and into the branches it cut — on a public tracker and a public repository as on a private
+one. A store whose boundary is switched on refused those writes, so such a run could not report
+its work in public at all.
+
+**The rule.** `public_id` is the run id itself where the linked `onevcs`'s public-output check
+(`check_public_output`) passes the id as metadata bound for a public destination with the term
+scope left out — every private identity registered on the host — and otherwise `run-` followed
+by the first 12 lowercase hex digits of the SHA-256 of the run id's UTF-8 bytes. It is decided
+once, where the id is minted, and kept in the launch record as `public_id`, beside
+`name_withheld` — whether the plan's own name failed the same check — both omitted when empty,
+so every record an earlier build wrote reads unchanged. A record holding no public id reads the
+same derivation over its id, and the hashed form where the check cannot answer, because a read
+must answer and that form names nothing. A launch whose check cannot answer is not refused: its
+public id is the hashed form and the plan's name is withheld, neither carrying a word of the
+plan's title. The node's task first stated a refusal there; the planner who owns the contract
+ruled it out once this build showed it refused every launch on a host holding one private
+repository whose committed declaration cannot be read — including plans naming no private
+repository, which `publication_boundary` and `lifecycle` journeys run on such a host — and the
+hashed form keeps the privacy the refusal protected. The reading's `schema_version` stays `1`,
+which the planner who owns the contract ruled when this build proposed `2`. The run-reading
+contract is frozen for this run, the field is additive, and the schema closes no object, so a
+reader of version 1 keeps reading it, and a bump would break every reader pinned to `1` for no
+gain. A consumer that needs `public_id` checks that the field is present rather than branching on
+the version.
+
+**Where it is written.** On a plan store whose project's source is not declared
+`visibility: private` — the store's own declaration — `onepipeline.driver.run` and
+`onepipeline.publishing.run` carry the public id, and `onepipeline.name` carries it where the
+plan's name is withheld; the driver reads its own claim and fence back by that name, and a
+takeover finds a claimed run of this host by it. A branch rendered for a node whose repository
+the linked `onevcs` reports public renders `plan.name` as the public id where the plan's name is
+withheld. Every other write is unchanged, and a run whose id and name pass writes exactly what
+it wrote before.
+
+**What this build does.** `src/publicid.rs` decides and derives it; `tests/e2e/public_id.rs`
+drives every rule above through the compiled binary.
+
+
+## 136. An envelope carrying a live note went unanswered for as long as its receiver's turn ran — OPEN
+
+**Proposal, for the planner who owns the contract: the Channel paragraph's sentence on what
+holds an envelope behind a live note, and the outcome vocabulary it implies, take the rule
+entry 108's [*Answered at hand-off*](#answered-at-hand-off--ruled) states.** The manager
+ruled that rule on the plan node `op-envelope-outcome`, and this build implements it;
+`docs/contract.md`'s own wording is unchanged until the planner rules on it. The rule is
+stated where it amends what it amends: entry 108 for the reconciler, the sidecar and
+`status`, and entry 64 for the receipt's `notes` key. This entry records what it raised in
+the published bundles.
+
+`CommandVerdict` is a public exhaustive enum of the crate and of the published channel
+layout, so its new `queued` word is one a reader of the layout before it cannot read: the
+planner-channel document's major is raised. The `edit-rejected` record's optional `index`
+is additive, so the events bundle's minor is raised.
+
+**Four Rust source-compatibility breaks, ruled.** The public exhaustive enums gain
+`CommandVerdict::Queued` and `Delivery::Queued` (`Delivery` is re-exported by `views`).
+The public structs gain `Receipt::notes` and `RunReading::inbox`, which also change
+struct literals and exhaustive destructuring. The manager accepted all four in this
+same breaking change under correlation `c-f1a4f2c43bc78b8cb14a6a962a0b97f3`.
+**Additive means wire-additive:** changed wire and disk shapes only add optional fields
+or values; the new receipt and inbox fields are omitted when empty. Every other
+public-type change is a new type.
+
+```json
+{
+  "command_verdict": ["applied", "validated", "delivered", "refused", "queued"],
+  "bundle_versions": {"events": "1.10.0", "planner_channel": "2.0.0"}
+}
+```
+
+## 137. Withdrawn project tasks are outside the executable plan — RESOLVED
+
+**Ruling:** The manager of issue #789 approved excluding withdrawn tasks before node ids
+are claimed or the first launch projection runs. A store task with status category
+`Cancelled` is withdrawn unless its stored `onepipeline.settlement` has status `cancelled`
+and its `onepipeline.projected_status` is `cancelled`. This new additive, projection-only,
+onepipeline-owned metadata key records the board word projected beside a settlement;
+it changes no public type or serialized schema. An engine park records `parked`, so a
+person closing that task afterwards withdraws it. A task the engine itself cancelled stays
+eligible for continuation. The one residual is a `cancelled` settlement with no recorded
+board word, which is kept for compatibility with older projections. Tasks in other status
+categories remain eligible. Dependencies from remaining tasks onto excluded tasks refuse
+launch, naming both qualified ids and the cancellation status name the store reports.
+Excluded tasks receive no queued projection and are never reopened by that launch.
+
+**Proof.** `src/taskgraph.rs` tests the partition and refusal. `tests/e2e/withdrawn.rs`
+launches the real binary over a local-md project and checks exclusion, stored status, and
+dependency refusal. `tests/e2e/continuation.rs` parks through the engine's real projection,
+then proves both continuation of the parked task and exclusion after a person's close.
+
+## 138. Creating write-back copies lost a task's held images — OPEN
+
+**Proposal — implement the manager-approved image-carrying seam below; its addition
+to the verbatim contract remains with that contract's planner.**
+
+**Ruling:** The manager's decision for issue #805 adds one optional public `Node` field,
+`assets_from`, a qualified onetaskgraph task id (`<source>:<native-id>`). It is
+absent by default. An edit may state it on `add` and a `retry` replacement. A node
+loaded from a plan never states it: `onepipeline.assets_from` metadata is refused
+at load as not a node field, as `task_record` is. `requeue` cannot amend it.
+
+The edit compiler reads the named task's held images through onetaskgraph 0.10.0's
+public `Engine::task_assets` read (the otg-task-images release). An unreadable
+`assets_from` refuses the edit before it is journalled, naming the qualified id
+and the store's reason. Before a creating copy, write-back reads the held images
+through that public API and writes them beside the created document through the
+shadow local-md store's public write path. It never reads a source plugin's
+storage layout. A stored root supplies its own assets from the source its
+`task_record` names, with no field. The current head's stated authoring task supplies
+images too, taking precedence over the stored root under the same reference name.
+A reference neither those tasks nor the root holds still refuses
+`asset-not-held`. Nodes carrying no field retain their existing behavior.
+
+`assets_from` takes effect when write-back creates the lineage's item. A retry
+onto an existing item keeps what that item holds and adds nothing: the store's
+public update path has no asset input. The manager confirmed that limit
+(`c-33c7ad95cc704ad5948ee874f15a78ff`) and directed a follow-up for that missing
+update-path input, leaving the update/copy work to its separate owner.
+
+A stored root normally already has its board item: a retry updates that one item
+in place and retains its held images. There is no ordinary start/reply path that
+creates a lineage from an extant stored root. The manager ruled that the real
+start/retry journey proves that retention, and a test across the real local-md
+read/write/copy seam covers the otherwise unreachable creation branch. Live
+`add`, a retry replacement with `assets_from`, an image-free add without it, and
+the unreadable-source, missing-image and plan-metadata refusals are exercised
+through the compiled binary and its real channel in `tests/e2e/store.rs`.
+
+## 139. A claim's published `lease` described reads and a lapse no driver makes any more — OPEN
+
+**Proposal, for the planner who owns the contract: the events bundle's description of a
+claim's `lease` follows entry 128 as it now stands.** Entry 128 no longer has a running
+driver read its claim on a timer or end its dispatches when no read confirms it. The
+`ClaimLease` document in `schemas/events.json` still described its terms as "how often it
+reads its claim, and how long a dispatch its lease ends has to stop before it is killed".
+The manager ruled that the published description is a document a consumer reads, so it is
+reworded to what the two fields mean now. `interval_seconds` is the host's claim interval,
+which paces only a takeover's reads. `cancel_grace_seconds` is the host's cancel grace,
+which a run taking the project over waits out before it starts without an acknowledgement.
+
+The shape is unchanged: the same two required positive integers, and the same optional
+`lease` on `DriverClaim`. Only the descriptions differ, so the events bundle takes a patch
+release.
+
+```json
+{
+  "bundle_versions": {"events": "1.10.1"}
+}
+```

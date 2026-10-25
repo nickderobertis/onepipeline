@@ -210,7 +210,7 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// An unusable value falls back to the default rather than to zero: a `0` would
 /// make every launch time out before its graph could answer, which fails every
 /// run rather than the one the operator was configuring.
-fn startup_timeout() -> Duration {
+pub(crate) fn startup_timeout() -> Duration {
     let seconds = std::env::var(STARTUP_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -401,6 +401,35 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+/// Give a library observer's members time to cancel before its host is ended.
+/// A blocked command provider needs the graph's reaper, not just a signal to
+/// the hosting process. Executable overrides retain their process-tree teardown.
+pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Result<bool> {
+    if recorded.trim().is_empty() || std::env::var_os(BINARY_ENV).is_some() {
+        return Ok(false);
+    }
+    let id = recorded_graph_run(recorded, run)?;
+    let state = state_dir(&process_env());
+    // A missing record belongs to another host or to a run already swept.
+    // Never manufacture a graph directory from a stale launch record.
+    if oneagentgraph::history::show(&state, id.as_str()).is_err() || graph_run_ended(recorded, run)
+    {
+        return Ok(false);
+    }
+    oneagentgraph::run::cancel(
+        &state.join(&id),
+        &id,
+        &oneagentgraph::run::CancelScope::run(),
+        oneagentgraph::run::CancelMode::Stop,
+    )
+    .map_err(|error| sibling(format!("cancel observer {id}: {error}")))?;
+    let deadline = Instant::now() + patience;
+    while !graph_run_ended(recorded, run) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(true)
 }
 
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
@@ -1389,14 +1418,27 @@ impl ProcessGraphRun {
     /// graph that announced itself and then died started — the launch is what
     /// starts it, and a driver that dies afterwards is what `DRIVER DEAD` and
     /// `adopt` are for.
+    ///
+    /// Whether it has exited is asked *before* the log is read, never after. A
+    /// graph writes its announcement before it exits, so a log read after an
+    /// exit was seen holds every line the graph will ever write; read the other
+    /// way round, a graph that announced itself and exited between the two would
+    /// be taken as started with no run id to address it by.
     fn await_logged_line(&mut self) -> Result<()> {
         let deadline = Instant::now() + startup_timeout();
         loop {
+            // llmlint: ignore-block[changed_behavior_has_e2e] the two orders differ only for an
+            // announcement written inside one iteration, between these two statements, which no
+            // driver outside this process can schedule: a graph that announced and exited before
+            // the look reads the same either way. The journey that exposes the race is
+            // `driver::the_shipped_bound_is_eight_restarts_and_an_unreadable_one_falls_back_to_it`,
+            // which counts every observer's run id and failed intermittently with the read first.
+            let waited = held(&self.child).try_wait();
             if let Some(announcement) = self.logged_envelope() {
                 self.run_id = announced_run(&announcement);
                 return Ok(());
             }
-            let waited = held(&self.child).try_wait();
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             match waited {
                 Err(error) => {
                     return Err(sibling(format!(
@@ -2316,13 +2358,16 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
     }
 }
 
-/// Hand one note to the conversation a member is having, and answer what became
-/// of it.
+/// Offer one note to the conversation a member is having, and hand back the offer
+/// its sender waits on.
 ///
 /// The whole routing is `oneagentgraph`'s and `onejudge`'s: which side of a
-/// two-party member is live, what a live turn does with a note, and how the other
-/// party receives it with that party's response are all decided there. This
-/// composes [`oneagentgraph::control::note`] and hands back what it answered.
+/// two-party member is live, whether that turn is interrupted or reached at its
+/// end, and how the other party receives the note with that party's response are
+/// all decided there. This composes [`oneagentgraph::control::offer_note`]: what
+/// comes back is either the admitted note's [`NoteOffer`] — the note is then in
+/// the conversation's inbox, untaken — or the conversation's reason it never
+/// will be.
 ///
 /// It is a **library** entry point with no verb behind it, which is the one place
 /// [`BINARY_ENV`] cannot be honoured: the sibling publishes this seam as a call and
@@ -2330,13 +2375,15 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
 /// told that rather than being quietly served by a different mechanism. A note is
 /// never half-delivered on a fall-back nobody asked for.
 ///
+/// [`NoteOffer`]: oneagentgraph::note::NoteOffer
+///
 /// # Errors
 ///
 /// [`Undelivered`], in the conversation's own words, for a note it will never read.
-pub fn note(
+pub fn offer_note(
     address: &TurnAddress,
     note: &oneagentgraph::note::Note,
-) -> std::result::Result<oneagentgraph::note::Accepted, oneagentgraph::note::Undelivered> {
+) -> std::result::Result<oneagentgraph::note::NoteOffer, oneagentgraph::note::Undelivered> {
     if let Some(named) = std::env::var_os(BINARY_ENV) {
         return Err(oneagentgraph::note::Undelivered::NoConversation {
             reason: format!(
@@ -2366,15 +2413,15 @@ pub fn note(
             })
         }
     };
-    match oneagentgraph::control::note(
+    match oneagentgraph::control::offer_note(
         &state_dir(&env),
         &run_id,
         &member,
         note,
         &oneharness_bin(&env),
     ) {
-        Ok(oneagentgraph::control::NoteDelivery::Accepted(accepted)) => Ok(accepted),
-        Ok(oneagentgraph::control::NoteDelivery::Undelivered(undelivered)) => Err(undelivered),
+        Ok(oneagentgraph::note::NoteOffered::Admitted(offer)) => Ok(offer),
+        Ok(oneagentgraph::note::NoteOffered::Undelivered(undelivered)) => Err(undelivered),
         // A run the sibling cannot find, or a member it does not have. Not a
         // disposition of the conversation — there is none — so it is reported as
         // the channel nothing ever read, which is what it is.
@@ -2420,6 +2467,11 @@ fn published(
         input_bytes,
         reason,
         truncated: false,
+        // An interrupt offers no note, so there is no offer to name and no
+        // acceptance to report.
+        offer: None,
+        accepted: None,
+        party: None,
     };
     emitter.emit(
         oneagentgraph::event::EventKind::TurnInterrupted,
@@ -3296,6 +3348,7 @@ mod tests {
             overflow: None,
             labels: Default::default(),
             refuse_conflicts: false,
+            caller_merges_base: false,
         };
         let opened = crate::vcs::session_open(&request).expect("a session opens on the checkout");
 
@@ -3502,7 +3555,7 @@ mod tests {
 
         fn read(version: u32) -> std::result::Result<(), String> {
             let graph: oneagentgraph::config::GraphConfig =
-                serde_norway::from_str(&document(version)).map_err(|error| error.to_string())?;
+                crate::yaml::from_str(&document(version))?;
             oneagentgraph::config::validate(&graph).map_err(|refusal| refusal.to_string())
         }
 
@@ -3661,6 +3714,92 @@ mod tests {
             "a relayed envelope reached the journal in bytes its producer did not write"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A turn record carrying a `transcript` reference is journalled byte for
+    /// byte as its producer wrote it — whichever path relayed it, and however
+    /// long a text beside the reference is: the ingest re-bound is for records
+    /// still carrying a copy, and a reference record carries none.
+    #[test]
+    fn a_relayed_reference_record_is_journalled_byte_for_byte_as_received() {
+        let reference: oneagentgraph::event::ActivityTranscript =
+            serde_json::from_value(serde_json::json!({
+                "history_dir": "/state/oneharness/history",
+                "history_project": "home-operator-worktree",
+                "history_session": "node-scope-1-worker-skill-20261023T000000Z-1",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+                "index": 3,
+                "tool_call_id": "toolu_3",
+            }))
+            .expect("the sibling's reference shape");
+        let activity = oneagentgraph::event::TurnActivity {
+            transcript: Some(reference),
+            kind: "tool_call".into(),
+            // Past the payload bound: a copy record's text this long is cut at
+            // ingest, and a reference record's is not.
+            name: Some(format!(
+                "mcp__{}",
+                "x".repeat(crate::event::MAX_PAYLOAD_TEXT_BYTES)
+            )),
+            detail: None,
+            truncated: false,
+            output: None,
+            output_truncated: false,
+            tool_call_id: Some("toolu_3".into()),
+            index: 3,
+        };
+        let serde_json::Value::Object(payload) =
+            serde_json::to_value(&activity).expect("the sibling's payload serialises")
+        else {
+            panic!("a turn activity serialises as an object");
+        };
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-10-23T06:00:00.123Z".into(),
+            stream: "node-scope-1".into(),
+            seq: 12,
+            source: oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD),
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
+            labels: oneagentgraph::event::Labels {
+                run_id: Some("node-scope-1".into()),
+                member: Some("worker".into()),
+                ..oneagentgraph::event::Labels::default()
+            },
+            payload,
+            artifacts: Vec::new(),
+        };
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        assert!(line.contains(r#""transcript":{"history_dir""#), "{line}");
+
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-relayed-reference-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "relayed-reference");
+        paths.create().expect("a scratch run root");
+        let mut journal = crate::journal::Journal::open(&paths);
+        journal
+            .relay(&off_the_wire)
+            .expect("the journal appends the reference relayed as a line");
+        journal
+            .relay(&in_process)
+            .expect("the journal appends the reference relayed as a value");
+        let written = std::fs::read_to_string(paths.journal()).expect("the journal reads");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            written,
+            format!("{line}\n{line}\n"),
+            "a relayed reference record reached the journal in bytes its producer did not write"
+        );
     }
 
     /// `oneagentgraph` publishes its terminal event before its final process

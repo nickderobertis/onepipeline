@@ -154,20 +154,26 @@ fn dimensions_declares_exactly_the_dimensions() {
 /// integer label (`round`) is deliberately not matchable. The set is derived
 /// from the tables by kind, so a new text label is expected in `MatchFields`
 /// without anyone listing it here.
+///
+/// `significance` leads them: the producer's stamp, matched by its word, which
+/// travels among the labels' extras exactly as `onevcs` writes it rather than as
+/// a reserved label of this vocabulary — so a relayed envelope's labels keep
+/// their bytes — and sits first as it does in `onevcs::MatchFields`, so a
+/// matcher crosses to that producer and back unchanged.
 #[test]
 fn match_fields_names_the_dimensions_and_every_text_label() {
-    let matchable: Vec<Reserved> = DIMENSIONS
-        .iter()
+    let matchable: Vec<Reserved> = std::iter::once(Reserved::word("significance"))
+        .chain(DIMENSIONS.iter().copied())
         .chain(
             RESERVED_LABELS
                 .iter()
-                .filter(|reserved| reserved.admits == Admits::Text),
+                .filter(|reserved| reserved.admits == Admits::Text)
+                .copied(),
         )
-        .copied()
         .collect();
     assert_agrees::<MatchFields>(
         "MatchFields",
-        "DIMENSIONS plus RESERVED_LABELS' text keys",
+        "significance, DIMENSIONS and RESERVED_LABELS' text keys",
         &matchable,
     );
 }

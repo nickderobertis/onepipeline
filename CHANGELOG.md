@@ -7,6 +7,252 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.89.3](https://github.com/nickderobertis/onepipeline/compare/v0.89.2...v0.89.3) - 2026-10-24
+
+### Fixed
+
+- *(driver)* stop reading the project claim on a timer and never end work over a failed read ([#1116](https://github.com/nickderobertis/onepipeline/pull/1116))
+
+## [0.89.2](https://github.com/nickderobertis/onepipeline/compare/v0.89.1...v0.89.2) - 2026-10-24
+
+### Fixed
+
+- *(retirement)* leave a branch a node comes to name during a retirement pass ([#1117](https://github.com/nickderobertis/onepipeline/pull/1117))
+- *(stop)* end every process a node dispatch started, including turns started during the stop ([#1128](https://github.com/nickderobertis/onepipeline/pull/1128))
+
+## [0.89.1](https://github.com/nickderobertis/onepipeline/compare/v0.89.0...v0.89.1) - 2026-10-24
+
+### Performance
+
+- *(review)* start far fewer git processes in a busy review round ([#1133](https://github.com/nickderobertis/onepipeline/pull/1133))
+
+## [0.89.0](https://github.com/nickderobertis/onepipeline/compare/v0.88.1...v0.89.0) - 2026-10-24
+
+### Added
+
+- *(deps)* [**breaking**] link the agent graph whose turn records point at the transcript, and onevcs's check times ([#1120](https://github.com/nickderobertis/onepipeline/pull/1120))
+
+### Fixed
+
+- *(watch)* never return a cursor past a record the watch did not emit ([#1134](https://github.com/nickderobertis/onepipeline/pull/1134))
+- *(tests)* keep the three-manager landing and public-id claim journeys reliable ([#1132](https://github.com/nickderobertis/onepipeline/pull/1132))
+
+## [0.88.1](https://github.com/nickderobertis/onepipeline/compare/v0.88.0...v0.88.1) - 2026-10-24
+
+### Fixed
+
+- *(writeback)* never show a reader a torn shadow task document ([#1130](https://github.com/nickderobertis/onepipeline/pull/1130))
+- *(journal)* let another process append to a run's journal on Windows while a driver holds it ([#1129](https://github.com/nickderobertis/onepipeline/pull/1129))
+
+## [0.88.0](https://github.com/nickderobertis/onepipeline/compare/v0.87.1...v0.88.0) - 2026-10-23
+
+### Added
+
+- *(adopt)* let an adoption revise the run's per-item write-back budget ([#1122](https://github.com/nickderobertis/onepipeline/pull/1122))
+
+### Fixed
+
+- *(tests)* keep the observer-finished and refused-note tests reliable on Windows ([#1114](https://github.com/nickderobertis/onepipeline/pull/1114))
+- *(deps)* move tokio past RUSTSEC-2026-0386 ([#1127](https://github.com/nickderobertis/onepipeline/pull/1127))
+
+## [0.87.1](https://github.com/nickderobertis/onepipeline/compare/v0.87.0...v0.87.1) - 2026-10-23
+
+### Fixed
+
+- *(tests)* keep two of onepipeline's continuation tests reliable on Windows ([#1121](https://github.com/nickderobertis/onepipeline/pull/1121))
+
+## [0.87.0](https://github.com/nickderobertis/onepipeline/compare/v0.86.0...v0.87.0) - 2026-10-23
+
+### Performance
+
+- *(writeback)* [**breaking**] add a node to an existing board project without reading or rewriting it ([#1111](https://github.com/nickderobertis/onepipeline/pull/1111))
+
+## [0.86.0](https://github.com/nickderobertis/onepipeline/compare/v0.85.1...v0.86.0) - 2026-10-23
+
+### Performance
+
+- *(deps)* [**breaking**] link the plan store whose approval takes one request per call ([#1115](https://github.com/nickderobertis/onepipeline/pull/1115))
+
+## [0.85.1](https://github.com/nickderobertis/onepipeline/compare/v0.85.0...v0.85.1) - 2026-10-23
+
+### Fixed
+
+- *(driver)* end a run's observers for good when it is stopped ([#1112](https://github.com/nickderobertis/onepipeline/pull/1112))
+
+## [0.85.0](https://github.com/nickderobertis/onepipeline/compare/v0.84.1...v0.85.0) - 2026-10-22
+
+### Added
+
+- *(edits)* [**breaking**] carry a live-added task's image assets onto the board ([#1106](https://github.com/nickderobertis/onepipeline/pull/1106))
+- *(views)* refresh a run view from only what its journal appended ([#1105](https://github.com/nickderobertis/onepipeline/pull/1105))
+
+## [0.84.1](https://github.com/nickderobertis/onepipeline/compare/v0.84.0...v0.84.1) - 2026-10-22
+
+### Fixed
+
+- *(deps)* link the oneharness core that stops a pooled server after its last lease ([#1107](https://github.com/nickderobertis/onepipeline/pull/1107))
+- *(launch)* leave a board plan's withdrawn tasks out of the executable graph ([#1101](https://github.com/nickderobertis/onepipeline/pull/1101))
+
+## [0.84.0](https://github.com/nickderobertis/onepipeline/compare/v0.83.0...v0.84.0) - 2026-10-22
+
+### Added
+
+- [**breaking**] record run labels and the project each run belongs to, and let them be set later ([#1100](https://github.com/nickderobertis/onepipeline/pull/1100))
+
+## [0.83.0](https://github.com/nickderobertis/onepipeline/compare/v0.82.1...v0.83.0) - 2026-10-22
+
+### Fixed
+
+- *(channel)* [**breaking**] answer an envelope as soon as its notes are queued for their receivers ([#1094](https://github.com/nickderobertis/onepipeline/pull/1094))
+
+## [0.82.1](https://github.com/nickderobertis/onepipeline/compare/v0.82.0...v0.82.1) - 2026-10-21
+
+### Fixed
+
+- *(tests)* keep onepipeline's rework retitle journey reliable on a slower runner ([#1098](https://github.com/nickderobertis/onepipeline/pull/1098))
+
+## [0.82.0](https://github.com/nickderobertis/onepipeline/compare/v0.81.0...v0.82.0) - 2026-10-21
+
+### Added
+
+- *(deps)* [**breaking**] link the store that verifies Linear copies, and give each run a public id ([#1080](https://github.com/nickderobertis/onepipeline/pull/1080))
+
+## [0.81.0](https://github.com/nickderobertis/onepipeline/compare/v0.80.2...v0.81.0) - 2026-10-21
+
+### Performance
+
+- *(deps)* [**breaking**] link the plan store that copies without walking the board ([#1070](https://github.com/nickderobertis/onepipeline/pull/1070))
+
+## [0.80.2](https://github.com/nickderobertis/onepipeline/compare/v0.80.1...v0.80.2) - 2026-10-20
+
+### Added
+
+- withdraw a live manager note while its delivery is awaited ([#1054](https://github.com/nickderobertis/onepipeline/pull/1054))
+
+### Fixed
+
+- *(tests)* steady the writeback-cost journey and ask a follow its session only when the answer can matter ([#1065](https://github.com/nickderobertis/onepipeline/pull/1065))
+- *(release)* finish a re-run whose earlier attempt already published, and wait longer for npm ([#1067](https://github.com/nickderobertis/onepipeline/pull/1067))
+
+## [0.80.1](https://github.com/nickderobertis/onepipeline/compare/v0.80.0...v0.80.1) - 2026-10-20
+
+### Added
+
+- *(writeback)* mark a plan's home done when its run settles ([#1051](https://github.com/nickderobertis/onepipeline/pull/1051))
+
+## [0.80.0](https://github.com/nickderobertis/onepipeline/compare/v0.79.2...v0.80.0) - 2026-10-20
+
+### Added
+
+- *(release)* build, publish and verify linux-arm64 again as a sixth release job ([#1052](https://github.com/nickderobertis/onepipeline/pull/1052))
+- [**breaking**] interrupt live turns with manager notes and bound or withdraw their delivery ([#1048](https://github.com/nickderobertis/onepipeline/pull/1048))
+
+## [0.79.2](https://github.com/nickderobertis/onepipeline/compare/v0.79.1...v0.79.2) - 2026-10-20
+
+### Fixed
+
+- *(e2e)* keep the busy review round within its bound on Windows ([#1047](https://github.com/nickderobertis/onepipeline/pull/1047))
+
+## [0.79.1](https://github.com/nickderobertis/onepipeline/compare/v0.79.0...v0.79.1) - 2026-10-20
+
+### Fixed
+
+- *(deps)* link the onevcs and onetaskgraph releases carrying this plan's fixes ([#1027](https://github.com/nickderobertis/onepipeline/pull/1027))
+
+## [0.79.0](https://github.com/nickderobertis/onepipeline/compare/v0.78.0...v0.79.0) - 2026-10-19
+
+### Added
+
+- *(writeback)* [**breaking**] move the issues a landing closes to done ([#1036](https://github.com/nickderobertis/onepipeline/pull/1036))
+
+### Fixed
+
+- *(deps)* link the harness core that shares one Codex app-server across dispatches ([#1028](https://github.com/nickderobertis/onepipeline/pull/1028))
+- *(review)* bring the review-round quota budget and its Windows reporter test back to green ([#1031](https://github.com/nickderobertis/onepipeline/pull/1031))
+
+## [0.78.0](https://github.com/nickderobertis/onepipeline/compare/v0.77.0...v0.78.0) - 2026-10-19
+
+### Fixed
+
+- hold live notes per receiver and never hold findings behind them ([#1026](https://github.com/nickderobertis/onepipeline/pull/1026))
+- *(deps)* adopt the plan store that tolerates a source no layer defines ([#1030](https://github.com/nickderobertis/onepipeline/pull/1030))
+
+## [0.77.0](https://github.com/nickderobertis/onepipeline/compare/v0.76.0...v0.77.0) - 2026-10-19
+
+### Added
+
+- *(review)* reply on review comments and decline them by replying, from any host ([#935](https://github.com/nickderobertis/onepipeline/pull/935))
+
+### Fixed
+
+- *(deps)* link the harness core that launches Codex with plugins off ([#904](https://github.com/nickderobertis/onepipeline/pull/904))
+- *(driver)* report a detached adoption's refusal on every platform ([#1001](https://github.com/nickderobertis/onepipeline/pull/1001))
+- *(tests)* keep the debuginfo build check within its bound beside the rest of its tier ([#1021](https://github.com/nickderobertis/onepipeline/pull/1021))
+- *(e2e)* publish the GitHub loopback endpoint's URL atomically ([#986](https://github.com/nickderobertis/onepipeline/pull/986))
+- *(e2e)* settle a two-source run within its documented bound on every platform ([#1016](https://github.com/nickderobertis/onepipeline/pull/1016))
+- *(continuation)* never dispatch a node the displaced driver settled ([#1014](https://github.com/nickderobertis/onepipeline/pull/1014))
+- *(scratch)* record a retained dispatch's scratch path as the dispatch was given it on Windows ([#969](https://github.com/nickderobertis/onepipeline/pull/969))
+- *(e2e)* accept a cut-short sweep's record in the maintenance journey and hold the cut with failpoints ([#999](https://github.com/nickderobertis/onepipeline/pull/999))
+- *(readjust)* hold a deferred republication's outstanding check verdict until the views read it ([#1013](https://github.com/nickderobertis/onepipeline/pull/1013))
+
+## [0.76.0](https://github.com/nickderobertis/onepipeline/compare/v0.75.0...v0.76.0) - 2026-10-18
+
+### Fixed
+
+- *(smoke)* start the node above a settled stack within the continuation journey's bound ([#1000](https://github.com/nickderobertis/onepipeline/pull/1000))
+- *(e2e)* hold the observer-restart journey's node until its dispatch is past its script ([#994](https://github.com/nickderobertis/onepipeline/pull/994))
+- *(ci)* make flaky e2e journeys deterministic and fit the Windows leg ([#982](https://github.com/nickderobertis/onepipeline/pull/982))
+- *(driver)* stop a released driver rewriting the run's launch record ([#1003](https://github.com/nickderobertis/onepipeline/pull/1003))
+
+## [0.75.0](https://github.com/nickderobertis/onepipeline/compare/v0.74.1...v0.75.0) - 2026-10-17
+
+### Added
+
+- *(deps)* [**breaking**] read YAML with serde-saphyr and link the onetaskgraph and sibling releases that do ([#923](https://github.com/nickderobertis/onepipeline/pull/923))
+
+### Fixed
+
+- *(scratch)* name an added node's scratch directory the same way on Windows ([#977](https://github.com/nickderobertis/onepipeline/pull/977))
+- *(e2e)* close the multi-source stop race and the readjust placement flake ([#951](https://github.com/nickderobertis/onepipeline/pull/951))
+
+### Performance
+
+- *(driver)* read the driver claim on an interval and make an adopting driver wait for the one it displaces ([#965](https://github.com/nickderobertis/onepipeline/pull/965))
+
+## [0.74.1](https://github.com/nickderobertis/onepipeline/compare/v0.74.0...v0.74.1) - 2026-10-16
+
+### Added
+
+- run each repository's declared pool maintenance and report what it freed ([#911](https://github.com/nickderobertis/onepipeline/pull/911))
+
+### Fixed
+
+- *(deps)* adopt the plan store that copies a private source's documents ([#943](https://github.com/nickderobertis/onepipeline/pull/943))
+
+## [0.74.0](https://github.com/nickderobertis/onepipeline/compare/v0.73.1...v0.74.0) - 2026-10-16
+
+### Added
+
+- *(scratch)* [**breaking**] remove a successful run's dispatch scratch and report what other endings keep ([#910](https://github.com/nickderobertis/onepipeline/pull/910))
+
+## [0.73.1](https://github.com/nickderobertis/onepipeline/compare/v0.73.0...v0.73.1) - 2026-10-15
+
+### Fixed
+
+- *(test)* end every process a test spawns before the test returns ([#922](https://github.com/nickderobertis/onepipeline/pull/922))
+
+## [0.73.0](https://github.com/nickderobertis/onepipeline/compare/v0.72.0...v0.73.0) - 2026-10-15
+
+### Added
+
+- *(deps)* [**breaking**] link the versioned project and document cache ([#942](https://github.com/nickderobertis/onepipeline/pull/942))
+
+## [0.72.0](https://github.com/nickderobertis/onepipeline/compare/v0.71.1...v0.72.0) - 2026-10-14
+
+### Added
+
+- [**breaking**] supervise manager-started landings through flows ([#914](https://github.com/nickderobertis/onepipeline/pull/914))
+
 ## [0.71.1](https://github.com/nickderobertis/onepipeline/compare/v0.71.0...v0.71.1) - 2026-10-13
 
 ### Fixed

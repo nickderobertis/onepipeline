@@ -459,11 +459,29 @@ fn an_unusable_bound_is_refused_before_a_landing_pushes_or_writes_to_the_host() 
                 .env(bound, "soon")
                 .output()
                 .expect("onevcs runs");
-            // After the line this crate says before every landing it hands the
-            // verb, which names where the subject came from and nothing else.
-            let refused = stderr
-                .strip_prefix("publishing under 'feat: add the widget' (--title)\n")
-                .unwrap_or_else(|| panic!("{verb} {bound}: no subject line leads: {stderr}"));
+            // After the lines this crate says before every landing it hands the
+            // verb: the manager landing's registration, then the one naming where
+            // the subject came from, and nothing else — or nothing at all, where
+            // the bound is refused as the landing's subject is resolved, before
+            // anything is registered.
+            let refused = match stderr.strip_prefix("onevcs: ") {
+                Some(_) => {
+                    assert!(
+                        !world.runs.join(".flows").exists(),
+                        "{verb} {bound}: a refused subject registered work"
+                    );
+                    stderr.as_ref()
+                }
+                None => stderr
+                    .split_once("publishing under 'feat: add the widget' (--title)\n")
+                    .filter(|(registered, _)| {
+                        registered
+                            .lines()
+                            .all(|line| line.starts_with("flow ") || line.starts_with("landing "))
+                    })
+                    .map(|(_, refused)| refused)
+                    .unwrap_or_else(|| panic!("{verb} {bound}: no subject line leads: {stderr}")),
+            };
             assert_eq!(
                 (landed.status.code(), refused),
                 (
@@ -981,7 +999,7 @@ fn a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why() {
             "no-branch" => ("never-cut", "service"),
             _ => (BRANCH, "service"),
         };
-        let landed = world.run(&[
+        let args = [
             "publish-branch",
             branch,
             "--repo",
@@ -990,7 +1008,32 @@ fn a_draft_that_cannot_start_hands_the_landing_to_onevcs_and_says_why() {
             "feat: add the widget",
             "--pr-author-graph",
             &graph,
-        ]);
+        ];
+        if case == "unresolved" {
+            // A manager's landing resolves its subject before anything is
+            // drafted, so an identity `onevcs` cannot resolve is its refusal, in
+            // its words, with no drafting turn and nothing registered.
+            let owned = world.run(&args);
+            assert_ne!(owned.code, 0, "{}", owned.stderr);
+            owned
+                .err_has("onevcs: ")
+                .err_has("nowhere-registered")
+                .err_lacks("the change request's body was not drafted");
+            assert!(drafting_dispatches(&world).is_empty());
+            assert!(
+                !world.runs.join(".flows").exists(),
+                "a landing whose subject did not resolve registered work"
+            );
+        }
+        // Unowned, the drafter is still what finds out first.
+        let landed = match case {
+            "unresolved" => {
+                let mut unowned = world.cmd(&args);
+                unowned.env("ONEPIPELINE_LAUNCHER_SESSION", "");
+                world.run_on(unowned, &args.join(" "))
+            }
+            _ => world.run(&args),
+        };
 
         landed
             .err_has("the change request's body was not drafted: the drafting dispatch could not start: ")

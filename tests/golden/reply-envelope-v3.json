@@ -24,6 +24,14 @@
       "id": "announce",
       "outcome": "failed",
       "evidence": "the wait it was on can never clear, and nothing published"
+    },
+    {
+      "op": "add",
+      "node": {
+        "id": "drawn",
+        "task": "![flow](./diagram.png)",
+        "assets_from": "plans:authoring/task"
+      }
     }
   ]
 }

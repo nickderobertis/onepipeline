@@ -218,30 +218,63 @@ fn release_linux_targets() -> Vec<String> {
         .collect()
 }
 
+/// The Linux targets release.yml's Linux build jobs build, each on its own job's
+/// runner: `build-linux` on x86-64, and `build-linux-arm64` natively on arm64.
 fn release_linux_legs() -> Vec<(String, String)> {
-    let legs = matrix_legs(&job_block("release.yml", "build-wheels"));
-    assert!(
-        !legs.is_empty(),
-        "release.yml's build-wheels matrix has legs"
-    );
-    legs.into_iter()
-        .filter(|(_, os)| os.starts_with("ubuntu"))
-        .collect()
+    let mut legs = job_legs("build-linux", "linux");
+    legs.extend(job_legs("build-linux-arm64", "linux-arm64"));
+    legs
 }
 
+/// The targets one release.yml build job builds — its recipe's own plan — each
+/// on that job's runner.
+fn job_legs(job: &str, platform: &str) -> Vec<(String, String)> {
+    let block = job_block("release.yml", job);
+    let runner = block
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("runs-on: "))
+        .unwrap_or_else(|| panic!("{job} names its runner"))
+        .to_string();
+    let plan = Command::new("python3")
+        .args(["release/release.py", "plan", platform])
+        .current_dir(repo_root())
+        .output()
+        .expect("python3 runs release/release.py");
+    assert!(plan.status.success(), "the {platform} plan is readable");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    let legs: Vec<(String, String)> = plan["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|target| (target.as_str().unwrap().to_string(), runner.clone()))
+        .collect();
+    assert!(!legs.is_empty(), "release.yml's {job} builds a target");
+    legs
+}
+
+/// The maturin every release build uses: npm/project.json's `bootstrap`, which
+/// release.yml's macOS and Windows jobs run, and which the manylinux build pins too.
 fn release_maturin_version() -> String {
     let text = fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
         .expect("release.yml is readable");
-    let pins: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("maturin-version: v"))
-        .collect();
-    assert!(!pins.is_empty(), "release.yml pins a maturin version");
+    for job in ["build-macos", "build-windows"] {
+        assert!(
+            job_block("release.yml", job).contains("just nx run onepipeline-npm:bootstrap"),
+            "release.yml's {job} installs maturin through the npm project's bootstrap"
+        );
+    }
     assert!(
-        pins.iter().all(|pin| *pin == pins[0]),
-        "release.yml pins one maturin version, found {pins:?}"
+        !text.contains("maturin=="),
+        "release.yml pins no maturin of its own"
     );
-    pins[0].to_string()
+    let npm: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(repo_root().join("npm/project.json")).unwrap())
+            .unwrap();
+    let bootstrap = npm["targets"]["bootstrap"]["command"].as_str().unwrap();
+    bootstrap
+        .strip_prefix("uv tool install maturin==")
+        .expect("the npm project's bootstrap installs one pinned maturin")
+        .to_string()
 }
 
 #[test]
@@ -251,6 +284,14 @@ fn every_linux_target_the_release_builds_is_handed_to_its_own_manylinux_image() 
         targets,
         ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"],
         "release.yml's Linux wheel targets"
+    );
+    assert_eq!(
+        release_linux_legs()
+            .into_iter()
+            .map(|(_, runner)| runner)
+            .collect::<Vec<_>>(),
+        ["ubuntu-latest", "ubuntu-24.04-arm"],
+        "each Linux target builds natively on a runner of its own architecture"
     );
     let maturin = release_maturin_version();
     for target in &targets {
@@ -393,24 +434,43 @@ fn a_hand_back_that_fails_fails_a_build_that_compiled() {
 #[test]
 fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
     let block = job_block("ci.yml", "wheel");
+    // arm64 Linux is proved by its release job alone: pull requests get no arm64
+    // leg, so the proof covers exactly `build-linux`'s x86-64 target.
     assert_eq!(
         matrix_legs(&block),
-        release_linux_legs(),
-        "ci.yml's wheel legs build the release's Linux targets on the release's runners"
+        job_legs("build-linux", "linux"),
+        "ci.yml's wheel legs build the release's x86-64 Linux target on the release's runner"
     );
     assert!(
         block.contains("run: just wheel-linux \"$TARGET\""),
         "ci.yml's wheel builds through the recipe"
     );
     assert!(
-        block.contains("- check: wheel\n"),
-        "one ci.yml wheel leg keeps the bare `wheel` name branch protection requires"
+        block.contains(
+            "x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}"
+        ),
+        "ci.yml's wheel proof records the x86_64 leg's verdict"
     );
-    let release = job_block("release.yml", "build-wheels");
+    let carrier = job_block("ci.yml", "wheel-x86_64");
     assert!(
-        release.contains("run: just wheel-linux \"$TARGET\"")
-            && release.contains("if: runner.os == 'Linux'"),
-        "release.yml's Linux legs build through the recipe"
+        carrier.contains("name: wheel\n")
+            && carrier
+                .contains("LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}"),
+        "the bare `wheel` name branch protection requires reports the x86_64 leg"
+    );
+    for (job, recipe) in [
+        ("build-linux", "release-linux"),
+        ("build-linux-arm64", "release-linux-arm64"),
+    ] {
+        assert!(
+            job_block("release.yml", job).contains(&format!("run: just {recipe} build\n")),
+            "release.yml's {job} builds through its recipe"
+        );
+    }
+    let driver = fs::read_to_string(repo_root().join("release/release.py")).unwrap();
+    assert!(
+        driver.contains("'just', 'wheel-linux'"),
+        "the release's Linux recipe builds its wheel with the script `just wheel-linux` runs"
     );
 }
 

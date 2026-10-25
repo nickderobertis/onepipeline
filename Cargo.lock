@@ -41,6 +41,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "annotate-snippets"
+version = "0.12.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f211a51805bc641f3ad5b7664c77d2547af685cc33b4cd8d31964027a46f13f1"
+dependencies = [
+ "anstyle",
+ "memchr",
+ "unicode-width",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,6 +100,12 @@ dependencies = [
  "once_cell_polyfill",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
 
 [[package]]
 name = "async-trait"
@@ -292,6 +309,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -393,6 +416,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
+]
+
+[[package]]
+name = "encoding_rs_io"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fba3fe847045ecff794b9c138293a80db914678c453ad63fbf0c6a9eb6e00b22"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]
@@ -674,6 +720,16 @@ dependencies = [
  "log",
  "regex-automata",
  "regex-syntax",
+]
+
+[[package]]
+name = "granit-parser"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e20f99e46474f56bd905c56e817ebddcf377a611f94c53ac4649e4d3fa3c0cd0"
+dependencies = [
+ "arraydeque",
+ "smallvec",
 ]
 
 [[package]]
@@ -1282,6 +1338,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
+
+[[package]]
 name = "native-tls"
 version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1297,6 +1359,12 @@ dependencies = [
  "security-framework-sys",
  "tempfile",
 ]
+
+[[package]]
+name = "nohash-hasher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bf50223579dc7cdcfb3bfcacf7069ff68243f8c363f62ffa99cf000a6b9c451"
 
 [[package]]
 name = "num"
@@ -1396,9 +1464,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.5.6"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e15fa00cb8fd2b44f059cfe7752a2bea138b47b710075547914f46c4fec4471a"
+checksum = "1a37e1ca44d5ec11298bf8424144757b73155e7c38284e9e06f3e703ed80d295"
 dependencies = [
  "clap",
  "libc",
@@ -1407,8 +1475,8 @@ dependencies = [
  "onemessagebus",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "sha2",
  "thiserror 2.0.20",
  "toml_edit",
@@ -1418,9 +1486,9 @@ dependencies = [
 
 [[package]]
 name = "onebudgetspec-core"
-version = "0.1.1"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b0ae41ae36af42ef381de2f5f49e69b2a2015e7b91a1313fe3f9e69a53d0f2c"
+checksum = "936455bd6cc66eb72f3d373717f6ed01c09d2a9531adc8ac8d0d9c5883f3053d"
 dependencies = [
  "chrono",
  "ignore",
@@ -1428,17 +1496,32 @@ dependencies = [
  "regex",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "serde_path_to_error",
  "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "oneharness"
+version = "0.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8033f30ad69bf85fd47ebd6e72617f614a665e2dc0c3858516d335faf32cfbcd"
+dependencies = [
+ "clap",
+ "libc",
+ "oneharness-core",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
 name = "oneharness-core"
-version = "0.24.2"
+version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61ccf1b2d49f5b0d4cb7eec8766a16c395e7923444f51426273be9d0ca76a645"
+checksum = "dab297bd0e5ee942c14b0aa99050d1e95d3ae7e93f187db1c47c81698eb69823"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1457,9 +1540,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "866c10bcfcf8624e6feacedf352f349fa276b13ed83be0d767306e7ef602ddd0"
+checksum = "717b9ba667a3db18fbccb4ffa75c1a781795e722147c823f1eaffae4f09bbb9a"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1467,25 +1550,26 @@ dependencies = [
  "rustix",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_yaml_ng",
  "thiserror 2.0.20",
 ]
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.0"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186f676473f71543635304a5a316e2c43f0ed342ec8b267f9896232f43aecfa7"
+checksum = "1effacbb1c8759badd2a060053c4631bafef9a26dc910095f471fb0f429b5da5"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "sha2",
  "thiserror 2.0.20",
  "time",
@@ -1494,11 +1578,12 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.71.1"
+version = "0.89.3"
 dependencies = [
  "async-trait",
  "clap",
  "fs4",
+ "jsonschema 0.56.0",
  "libc",
  "minijinja",
  "oneagentgraph",
@@ -1508,13 +1593,14 @@ dependencies = [
  "onemessagebus",
  "onepipeline-testfakes",
  "onetaskgraph-core",
+ "onetaskgraph-local-md",
  "onetaskgraph-plugin-api",
  "onevcs",
  "onevcs-testing",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "serde_path_to_error",
  "sha2",
  "thiserror 2.0.20",
@@ -1529,6 +1615,7 @@ version = "0.0.0"
 dependencies = [
  "libc",
  "oneagentgraph",
+ "oneharness",
  "oneharness-core",
  "onejudge",
  "onemessagebus",
@@ -1538,17 +1625,18 @@ dependencies = [
  "onevcs",
  "onevcs-testing",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "sha2",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f8e591073da836bc7923f3596ca222449b0eb3e4e5318f100d32ff465aa23026"
+checksum = "70022827c78353e77651fda014a10bedf28010065cdabf188e2de4f4242fde3a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1562,8 +1650,8 @@ dependencies = [
  "schemars",
  "secrecy",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
  "serde_path_to_error",
  "sha2",
  "thiserror 2.0.20",
@@ -1572,9 +1660,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb61420d24736cae48d2730616dfe36dc54f35594f4049ff327ec500177a8608"
+checksum = "11506f32c53b2ec4cddc841ca9d77dd063f98fcedc8eb79b0743dc7f8d332595"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1590,9 +1678,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9a932266f98275293793d3f16faeb756e72379f1bb4666bc0aa7626870d5643"
+checksum = "af5b1468f26462254c22a1ad64fbb79a411fe877e48f9596633a5ea01b3888a8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1604,9 +1692,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c47c81105de231d6bd99e978692100c4ed59b904a4408371a1da0aefbb93503"
+checksum = "f667adaf9238fe4f1e058129abd77340e35f65395ff18bc6dc519f4597d8ff23"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1620,25 +1708,26 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed1f6ce4ab482cbd6c5e877e9666e879d4821e3dab5d8aa889cde3fa0a4f7fe4"
+checksum = "067292a2870e400c93d8fc1c4b9cf91efcd56a96afc995d382981f16ccf50ca2"
 dependencies = [
  "async-trait",
  "chrono",
  "onetaskgraph-plugin-api",
  "schemars",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_norway",
+ "serde_path_to_error",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.6.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c7c22e8c199b941eae89f5223fe99dd4207faa6c6659a55891495baa6213dc6"
+checksum = "47b806a3dcd45b450ab39541858041febbdc5423303ce540486524b781fa5402"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1655,9 +1744,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.50.1"
+version = "0.56.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1b68a08a6c75e05920244c65cce35921bf93e99533e018f5302ccb0e6b0d6d7"
+checksum = "35725c7b0f8d7469f7aed5fd39d97cd57aaef91d380a50506204f87944c2b009"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1674,8 +1763,8 @@ dependencies = [
  "schemars",
  "semver",
  "serde",
+ "serde-saphyr",
  "serde_json",
- "serde_yaml_ng",
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
@@ -1687,9 +1776,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.18.2"
+version = "0.19.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a404b67d8270ad13c7a2c12f9113118044a23c0828e4c325f1654fcb425f2399"
+checksum = "a0ccb16ca81565c17a5737b9e61c5831d59a39f4552ae2d61470447eb47fac19"
 dependencies = [
  "onevcs",
  "serde",
@@ -2035,9 +2124,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -2098,9 +2187,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2218,6 +2307,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-saphyr"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
+dependencies = [
+ "annotate-snippets",
+ "base64 0.22.1",
+ "encoding_rs_io",
+ "granit-parser",
+ "nohash-hasher",
+ "num-traits",
+ "serde_core",
+ "smallvec",
+ "zmij",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2263,19 +2369,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_norway"
-version = "0.9.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml-norway",
-]
-
-[[package]]
 name = "serde_path_to_error"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2305,19 +2398,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
 ]
 
 [[package]]
@@ -2557,9 +2637,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -2747,16 +2827,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d245f478577f809a851594d02313b640fb437e0bb33866753cff937863096954"
 
 [[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
+name = "unicode-width"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
-
-[[package]]
-name = "unsafe-libyaml-norway"
-version = "0.2.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
+checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
 
 [[package]]
 name = "untrusted"
@@ -2982,18 +3056,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

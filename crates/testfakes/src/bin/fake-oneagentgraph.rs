@@ -462,6 +462,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         }
     }
 
+    // Held before it either refuses or starts, until the journey writes
+    // `run.go`: what the launching process does next — the driver that started
+    // this graph claiming its run, or giving up on it — happens only once the
+    // journey has put whatever is waiting on that driver where it wants it.
+    if dir.join("run.hold").exists() {
+        fake::wait_for_any(&[dir.join("run.go")]);
+    }
+
     // A refusal a launcher cannot catch by glancing: the real CLI validates
     // before it announces itself, and how long that takes is the host's
     // business — a config fetched over the network, a loaded machine. Scripted
@@ -484,6 +492,12 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // a test failing on that rather than a stray one behind.
     if dir.join("run.hang").exists() {
         fake::wait_for(&dir.join("run.go"));
+    }
+    // The same hold, met: `run.rendezvous` stops a launch before it announces
+    // itself and tells the journey it has — which the invocation recorded above,
+    // written before this point, cannot. `fake::meet` says how.
+    if let Some(address) = fake::node_script(dir, "run", "rendezvous") {
+        fake::meet(&address);
     }
 
     // A graph that finishes before it announces anything: it did what it was
@@ -563,6 +577,39 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         (Some(step), _) => format!("{node}.{step}"),
         (None, _) => node.clone(),
     };
+
+    // A review comment's reply drafting is a drafter and nothing else: it runs in a
+    // scratch directory that is no worktree, so none of the node's own scripts —
+    // its work, its commits, its publication — are this dispatch's. Scripted under
+    // `review-reply.*` alone: `review-reply.wait` holds it until `review-reply.go`,
+    // `review-reply.fail` fails it with that exit code, and its answer is
+    // `review-reply.result` or one composed from its task (see [`fake::replied_answer`]),
+    // after `review-reply.refused-first` where scripted, or none at all under
+    // `review-reply.unanswered`.
+    if persona.as_deref() == Some("review-reply") {
+        if dir.join("review-reply.wait").exists() {
+            fake::wait_for(&dir.join("review-reply.go"));
+        }
+        if let Some(code) = fake::node_script(dir, "review-reply", "fail") {
+            let Ok(code) = code.parse::<u8>() else {
+                fake::fail(&format!(
+                    "review-reply.fail holds {code:?}, which is not an exit code"
+                ));
+            };
+            eprintln!("the reply drafter could not draft");
+            return ExitCode::from(code);
+        }
+        emit(
+            args,
+            dir,
+            &format!("{node}.review-reply"),
+            &node,
+            None,
+            &task,
+            None,
+        );
+        return ExitCode::SUCCESS;
+    }
 
     // The scratch directory the engine promised this dispatch, taken as the
     // dispatch itself takes it: out of its own environment, and before any
@@ -650,6 +697,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     // either side. `fake::meet` says how.
     if let Some(address) = fake::node_script(dir, &key, "rendezvous") {
         fake::meet(&address);
+    }
+    // `<key>.stops-its-run` has this dispatch stop the run it belongs to, from
+    // inside it, as an agent of the run running the engine's own `stop` would.
+    // Started and not waited for: the stop ends this dispatch. Its pid is in
+    // `<key>.stopper.pid` and what it said in `<key>.stopper.out`.
+    if dir.join(format!("{key}.stops-its-run")).exists() {
+        fake::stop_own_run(&dir.join(format!("{key}.stopper")));
     }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
@@ -2071,9 +2125,10 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     // `instruction_truncated` is that library's statement about its own field,
     // and this double publishes what it really did.
     match serde_json::to_value(oneagentgraph::event::TurnStarted {
+        transcript: None,
         turn: 1,
         role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-        instruction,
+        instruction: Some(instruction),
         instruction_truncated: false,
         started_at: fake::now(),
         // The first turn's instruction is the composed task, which is the one
@@ -2082,6 +2137,56 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
+    }
+}
+
+/// A tool call carrying a `transcript` reference, when
+/// `{key}.referenced-name-bytes` scripted a length for the tool's name — and
+/// nothing otherwise.
+///
+/// The name is published **whole and unflagged** past the payload bound, beside
+/// a reference of the sibling's own shape: whether a record that carries no
+/// content copy is cut on the way in is the relay's to decide, and a double that
+/// pre-cut it would answer that for the code under test.
+fn referenced(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
+    let bytes = fake::node_script(dir, key, "referenced-name-bytes")?;
+    let name = match bytes.trim().parse::<usize>() {
+        Ok(bytes) if bytes <= SAYABLE => format!("mcp__{}", "x".repeat(bytes)),
+        Ok(bytes) => fake::fail(&format!(
+            "{key}.referenced-name-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
+             anything a payload bound does not already"
+        )),
+        Err(error) => fake::fail(&format!(
+            "{key}.referenced-name-bytes is not a byte count: {error}"
+        )),
+    };
+    // Read through the sibling's own type, so the shape is the one it publishes.
+    let reference: oneagentgraph::event::ActivityTranscript =
+        match serde_json::from_value(serde_json::json!({
+            "history_dir": fake::script_dir().join("history").display().to_string(),
+            "history_project": "fake-project",
+            "history_session": format!("{key}-referenced"),
+            // Any canonical UUIDv7: the sibling's type refuses anything else.
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 2,
+            "tool_call_id": "toolu_referenced",
+        })) {
+            Ok(reference) => reference,
+            Err(error) => fake::fail(&format!("not the sibling's reference shape: {error}")),
+        };
+    match serde_json::to_value(oneagentgraph::event::TurnActivity {
+        transcript: Some(reference),
+        kind: "tool_call".into(),
+        name: Some(name),
+        detail: None,
+        truncated: false,
+        output: None,
+        output_truncated: false,
+        tool_call_id: Some("toolu_referenced".into()),
+        index: 2,
+    }) {
+        Ok(payload) => Some(payload),
+        Err(error) => fake::fail(&format!("a turn activity is not an object: {error}")),
     }
 }
 
@@ -2462,47 +2567,51 @@ fn emit(
     if let Some(opening) = asked(dir, key) {
         envelope(1, oneagentgraph::event::EventKind::TurnStarted, opening);
     }
-    envelope(
-        2,
-        oneagentgraph::event::EventKind::TurnActivity,
-        serde_json::json!({
-            "kind": "tool_call",
-            "name": "bash",
-            "detail": "echo the turn ran",
-            "message": "the dispatch ran",
-            // Echoed so a test can assert the task prose the node was given,
-            // including the rendered planner-context section.
-            "task": task,
-            "dir": fake::flag(args, "--dir"),
-            // The scratch directory this dispatch read out of its own
-            // environment, on the run's own record: a journey asserts the
-            // promise from the store rather than from this program's files.
-            "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
-            // The session whose worktree this dispatch runs in, and the runs
-            // root, each as this dispatch read them out of its own environment
-            // — absent where the engine handed none, for `scratch_dir`'s reason.
-            "session": std::env::var(SESSION_ENV).ok(),
-            "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
-            // And the flow, which a dispatch is never handed: reported so a
-            // journey can assert its absence from the run's own record.
-            "flow": std::env::var(FLOW_ENV).ok(),
-            // And who this dispatch asks its manager as, so a journey can assert
-            // from the store that a real dispatch is given one and that no two
-            // share it.
-            //
-            // llmlint: ignore[boundary_inputs_validated] reported rather than
-            // checked, deliberately: a double that refused a name it did not
-            // like could not show a journey an engine that handed out a bad one,
-            // which is what this value exists to be asserted against. Lossy for
-            // the same reason — dropping a value this host cannot read as text
-            // would report it as *nothing given*, a different failure from the
-            // one that happened — so absent here means no asker was given at all.
-            "asker": std::env::var_os(ASKER_ENV)
-                .map(|given| given.to_string_lossy().into_owned()),
-            // What this turn was told to do instead, while it was running.
-            "redirected": redirected,
-        }),
-    );
+    if let Some(activity) = referenced(dir, key) {
+        envelope(2, oneagentgraph::event::EventKind::TurnActivity, activity);
+    } else {
+        envelope(
+            2,
+            oneagentgraph::event::EventKind::TurnActivity,
+            serde_json::json!({
+                "kind": "tool_call",
+                "name": "bash",
+                "detail": "echo the turn ran",
+                "message": "the dispatch ran",
+                // Echoed so a test can assert the task prose the node was given,
+                // including the rendered planner-context section.
+                "task": task,
+                "dir": fake::flag(args, "--dir"),
+                // The scratch directory this dispatch read out of its own
+                // environment, on the run's own record: a journey asserts the
+                // promise from the store rather than from this program's files.
+                "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+                // The session whose worktree this dispatch runs in, and the runs
+                // root, each as this dispatch read them out of its own environment
+                // — absent where the engine handed none, for `scratch_dir`'s reason.
+                "session": std::env::var(SESSION_ENV).ok(),
+                "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
+                // And the flow, which a dispatch is never handed: reported so a
+                // journey can assert its absence from the run's own record.
+                "flow": std::env::var(FLOW_ENV).ok(),
+                // And who this dispatch asks its manager as, so a journey can assert
+                // from the store that a real dispatch is given one and that no two
+                // share it.
+                //
+                // llmlint: ignore[boundary_inputs_validated] reported rather than
+                // checked, deliberately: a double that refused a name it did not
+                // like could not show a journey an engine that handed out a bad one,
+                // which is what this value exists to be asserted against. Lossy for
+                // the same reason — dropping a value this host cannot read as text
+                // would report it as *nothing given*, a different failure from the
+                // one that happened — so absent here means no asker was given at all.
+                "asker": std::env::var_os(ASKER_ENV)
+                    .map(|given| given.to_string_lossy().into_owned()),
+                // What this turn was told to do instead, while it was running.
+                "redirected": redirected,
+            }),
+        );
+    }
     // A producer that stamps one `seq` on two records. Only a producer in error
     // does it, and the merge has nothing to be right about beyond being stable —
     // which is exactly why it needs saying: a store that shuffled these under a
@@ -2543,9 +2652,10 @@ fn emit(
         // and a double that pre-cut it would answer that question for the code
         // under test.
         match serde_json::to_value(oneagentgraph::event::TurnMessage {
+            transcript: None,
             turn: 1,
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-            text: said,
+            text: Some(said),
             truncated: false,
             // The agent's own words: none of the sibling's three origins names
             // them, so the sibling stamps nothing and so does this double.
@@ -3114,8 +3224,9 @@ fn drafting_schema(args: &[String]) -> oneharness_core::domain::structured::Sche
         std::fs::read_to_string(path)
             .unwrap_or_else(|error| fake::fail(&format!("cannot read {}: {error}", path.display())))
     };
-    let configured: oneagentgraph::config::GraphConfig = serde_norway::from_str(&read(graph))
-        .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
+    let configured: oneagentgraph::config::GraphConfig =
+        onepipeline_testfakes::yaml::from_str(&read(graph))
+            .unwrap_or_else(|error| fake::fail(&format!("the drafting graph is invalid: {error}")));
     let harness = configured
         .members
         .values()
@@ -3165,6 +3276,42 @@ fn report_of(
     verdicts: Vec<serde_json::Value>,
     judged: &[oneagentgraph::event::JudgeDecided],
 ) -> serde_json::Value {
+    if let Some(answer) = fake::replied_answer(task, &fake::script_dir()) {
+        // Validated against the reply graph's own schema, as the producer validates.
+        let schema = drafting_schema(args);
+        let dir = fake::script_dir();
+        let mut results = Vec::new();
+        // `review-reply.refused-first`: a first harness's answer, held to the same schema,
+        // ahead of the one composed — the result a reader must step past when it refuses.
+        if let Some(first) = fake::node_script(&dir, "review-reply", "refused-first") {
+            let first: serde_json::Value = serde_json::from_str(&first).unwrap_or_else(|error| {
+                fake::fail(&format!("review-reply.refused-first is not JSON: {error}"))
+            });
+            results.push(serde_json::json!({
+                "harness": "codex", "status": "ok", "text": "Drafted something else.",
+                "schema_valid": schema.validate(&first).is_ok(), "structured": first,
+            }));
+        }
+        // `review-reply.unanswered`: the turn ended without a structured answer at all.
+        results.push(
+            if fake::node_script(&dir, "review-reply", "unanswered").is_some() {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "I could not draft.",
+                    "structured": null, "schema_valid": null,
+                })
+            } else {
+                serde_json::json!({
+                    "harness": "claude-code", "status": "ok", "text": "Drafted the replies.",
+                    "schema_valid": schema.validate(&answer).is_ok(), "structured": answer,
+                })
+            },
+        );
+        return serde_json::json!({
+            "schema_version": "0.6",
+            "results": results,
+            "usage": {"input_tokens": 30, "output_tokens": 15, "cost_usd": 0.01},
+        });
+    }
     if let Some(answer) = drafted_answer(task, &fake::script_dir()) {
         // A candidate the identity chain stepped past: it ran nothing, so it
         // answered nothing, and a consumer that read the first entry rather than

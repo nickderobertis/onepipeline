@@ -123,9 +123,9 @@ pub const WRITEBACK_MEMBER_READ: &str = "task-show";
 /// The middle rung of the three spellings, exactly as `ONEPIPELINE_NODE_VALIDATOR`
 /// is for the per-node hook: `--writeback-item-budget` beats it, it beats the
 /// launch config's own `writeback_item_budget`, and beneath all three is
-/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. Read once, at the launch, and
-/// retained in the launch record — so an `adopt` replays what its launch resolved
-/// rather than whatever this variable happens to say later.
+/// [`DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`]. Read at launch and retained in
+/// the launch record. An `adopt` ignores this variable and keeps the recorded
+/// budget unless its own flag replaces it.
 pub const WRITEBACK_ITEM_BUDGET_ENV: &str = "ONEPIPELINE_WRITEBACK_ITEM_BUDGET";
 
 /// How long a run-end hook is awaited, in seconds, when a launch names no
@@ -167,6 +167,9 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
+    /// Manage dispatch scratch of ended runs.
+    #[command(subcommand)]
+    Scratch(ScratchCommand),
     /// Execute a plan: drive its DAG continuously to settlement.
     Start(StartArgs),
     /// Read a plan without launching it.
@@ -196,6 +199,8 @@ pub enum Command {
     Next(TargetArgs),
     /// Discover review comments on the run’s unlanded drafts.
     Review(ReviewArgs),
+    /// Readjust the run’s drafts onto what has landed on the host.
+    Readjust(ReadjustArgs),
     /// Reply to a surface, with a verdict, graph edits, or both.
     Reply(ReplyArgs),
     /// Raise a surface to the planner.
@@ -204,6 +209,8 @@ pub enum Command {
     Attest(AttestArgs),
     /// End a run and its whole dispatch tree.
     Stop(StopArgs),
+    /// Replace a run's label overlay.
+    Label(LabelArgs),
     /// End the running work on this host: ask every live dispatch to wrap up
     /// and commit, wait, stop what is left, and put every branch on its origin.
     Shutdown(ShutdownArgs),
@@ -244,6 +251,10 @@ pub enum Command {
     /// change request's body first.
     #[command(override_usage = LAND_USAGE_REPO_RECOVER)]
     RepoRecover(LandArgs),
+    /// Merge finished branches onto the base, in order, through the linked
+    /// onevcs `integrate`, supervised in the launching session's flow.
+    #[command(override_usage = LAND_USAGE_INTEGRATE)]
+    Integrate(IntegrateArgs),
     // llmlint: ignore-end[new_command_or_client_gets_its_own_project]
     /// Per-node outcomes, with each node's own evidence.
     Results(ResultsArgs),
@@ -469,6 +480,13 @@ pub struct PlanCheckArgs {
 /// `onepipeline start`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct StartArgs {
+    /// Opaque launch label, repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// Qualified project group (syntax only; never looked up).
+    #[arg(long)]
+    pub group: Option<String>,
+
     /// The qualified onetaskgraph project id the plan is read from,
     /// `<source>:<native>`.
     ///
@@ -498,6 +516,15 @@ pub struct StartArgs {
     /// or with none. Given here it overrides the launch config's own field.
     #[arg(long, value_name = "REF")]
     pub pr_author_graph: Option<String>,
+    /// The agent graph a review comment's reply is drafted by.
+    ///
+    /// Named, `onepipeline review` drafts and posts the reply every rework owes
+    /// the comments it answers, and a `decline` posts its own; its drafter runs
+    /// as the reserved persona `review-reply`. Naming none is the shipped
+    /// default: every rework's reply stays owed and surfaced, and a `decline` is
+    /// refused. Given here it overrides the launch config's `review_reply_graph`.
+    #[arg(long, value_name = "REF")]
+    pub review_reply_graph: Option<String>,
     /// The command every op that introduces or changes a node's task is offered
     /// to before it is applied.
     ///
@@ -744,6 +771,18 @@ pub struct AdoptArgs {
     /// Print the launch record and return, leaving the fresh driver unattended.
     #[arg(long)]
     pub detach: bool,
+    /// How long the settlement write-back allows its store per item it writes,
+    /// in seconds.
+    ///
+    /// A targeted update's deadline is the sixty-second floor every other store
+    /// command is bounded by plus this; the copy creating added items is allowed
+    /// the floor plus this multiplied by the number of items it creates, so the
+    /// backstop that cancels an unreachable store's write scales with what it
+    /// writes instead of being outgrown by it. A positive whole number:
+    /// zero is no budget at all and is refused. Given here it replaces the
+    /// recorded budget for this driver and every later one; naming none keeps it.
+    #[arg(long, value_name = "SECONDS")]
+    pub writeback_item_budget: Option<u64>,
 }
 
 /// The flag that tells a retained driver it is taking a run over rather than
@@ -788,18 +827,20 @@ pub struct ReadArgs {
     pub all: bool,
 }
 
-/// What `next` and `watch` read: one run, shaped through a profile as
-/// [`ReadArgs`] takes it, or one flow with `--flow` in its place.
+/// What `next`, `monitor` and `watch` read: one run, shaped through a profile
+/// as [`ReadArgs`] takes it, or one flow with `--flow` in its place.
 ///
-/// The two are mutually exclusive, and a flow has no event view to shape, so
-/// `--filter` and `--all` are a run's alone.
+/// The two are mutually exclusive. A flow's event view is its landings'
+/// journals, shaped through the shipped profiles — `planner` unless `--filter`
+/// names `detailed` or a spec — so `--all` is a run's alone.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(group = clap::ArgGroup::new("target").required(true).args(["run", "flow"]))]
 pub struct TargetArgs {
     /// The run id.
     pub run: Option<String>,
-    /// The flow to read instead of a run, by the id `flow run` printed.
-    #[arg(long, value_name = "ID", conflicts_with_all = ["filter", "all"])]
+    /// The flow to read instead of a run, by the id `flow run` or a landing
+    /// verb printed.
+    #[arg(long, value_name = "ID", conflicts_with = "all")]
     pub flow: Option<String>,
     /// The profile to read through: a name this run has, or a filter spec as a
     /// file path or inline JSON.
@@ -817,9 +858,10 @@ pub struct TargetArgs {
 /// those too and a cursor is not something `next` can resume from.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct MonitorArgs {
-    /// The run, and the profile its event view is shaped through.
+    /// The run, and the profile its event view is shaped through — or, with
+    /// `--flow`, one flow's landings.
     #[command(flatten)]
-    pub read: ReadArgs,
+    pub read: TargetArgs,
     /// Render only what was recorded after this cursor — one an earlier
     /// `monitor` or `watch` printed.
     #[arg(long, value_name = "CURSOR")]
@@ -984,12 +1026,13 @@ impl std::str::FromStr for WatchTimeout {
 /// a match. The README and the divergence record are reconciled against the
 /// spellings here too, so what a supervisor is told to type is what the parser
 /// reads.
-const CONDITIONS: [(&str, WatchUntil); 6] = [
+const CONDITIONS: [(&str, WatchUntil); 7] = [
     ("settled", WatchUntil::Settled),
     ("surface", WatchUntil::Surface),
     ("nothing-driving", WatchUntil::NothingDriving),
     ("node-settled", WatchUntil::NodeSettled),
     ("run-joined", WatchUntil::RunJoined),
+    ("landing-progress", WatchUntil::LandingProgress),
     // The one entry that is a **shape** rather than a word: what follows the
     // prefix is a node id the caller supplies, so the parser reads this row by
     // its prefix and builds the condition from the text after it. The value
@@ -1007,7 +1050,7 @@ const NODE_ID_PLACEHOLDER: &str = "<ID>";
 ///
 /// Derived from the one table above rather than restated, so a spelling this
 /// build reads is a spelling it names.
-pub fn watch_conditions() -> [&'static str; 6] {
+pub fn watch_conditions() -> [&'static str; 7] {
     CONDITIONS.map(|(spelling, _)| spelling)
 }
 
@@ -1064,6 +1107,11 @@ pub enum WatchUntil {
     /// armed, or past its cursor. A flow watch's alone — `watch --flow` — and
     /// refused on a run's.
     RunJoined,
+    /// Return when one of the watched flow's manager landings records a
+    /// transition, or relays an `onevcs` operation event, that the watch's
+    /// profile admits — under the shipped `planner` profile a milestone or a
+    /// blocker, never progress. A flow watch's alone, and refused on a run's.
+    LandingProgress,
 }
 
 impl std::fmt::Display for WatchUntil {
@@ -1074,6 +1122,7 @@ impl std::fmt::Display for WatchUntil {
             Self::NothingDriving => out.write_str("nothing-driving"),
             Self::NodeSettled => out.write_str("node-settled"),
             Self::RunJoined => out.write_str("run-joined"),
+            Self::LandingProgress => out.write_str("landing-progress"),
             Self::Node(node) => write!(
                 out,
                 "{}{node}",
@@ -1387,6 +1436,29 @@ const LAND_USAGE_PUBLISH_BRANCH: &str = "onepipeline publish-branch <BRANCH> --r
 /// How `onepipeline repo-recover` is spelled.
 const LAND_USAGE_REPO_RECOVER: &str = "onepipeline repo-recover <BRANCH> --repo \
      <CHECKOUT|ALIAS> [--pr-author-graph <PATH>] [--no-draft] [ONEVCS-ARGS]...";
+
+/// How `onepipeline integrate` is spelled.
+const LAND_USAGE_INTEGRATE: &str = "onepipeline integrate <BRANCHES>... [--push] [ONEVCS-ARGS]...";
+
+/// `onepipeline integrate`.
+///
+/// Every argument is the linked `onevcs integrate`'s, forwarded unchanged in
+/// order and judged by its own parser — the ordered branches, `--push`, and the
+/// term-scope flags — and the identity is the registered repository the current
+/// directory is in, exactly as that verb answers.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct IntegrateArgs {
+    /// The branches in the order they should land, `--push`, and every other
+    /// argument `onevcs integrate` takes.
+    #[arg(
+        value_name = "ARGS",
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        num_args = 0..,
+        value_parser = clap::value_parser!(std::ffi::OsString)
+    )]
+    pub args: Vec<std::ffi::OsString>,
+}
 
 /// `onepipeline publish-branch` and `onepipeline repo-recover`.
 ///
@@ -1718,9 +1790,29 @@ pub struct TelemetryArgs {
     pub json: bool,
 }
 
+/// Manager actions on dispatch scratch.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum ScratchCommand {
+    /// Remove the scratch of one ended, undriven run.
+    Discard {
+        /// The run id under the runs root.
+        run: String,
+    },
+}
+
 /// Arguments for an explicit, non-interactive review discovery pass.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct ReviewArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Print the receipt as JSON.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for an explicit, non-interactive readjustment of a run's drafts.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ReadjustArgs {
     /// The recorded run.
     pub run: String,
     /// Print the receipt as JSON.
@@ -1736,4 +1828,26 @@ pub struct ResultsArgs {
     /// Print node outcomes and review state as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// Replace a run's labels overlay.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct LabelArgs {
+    /// The recorded run.
+    pub run: String,
+    /// Set an opaque label, repeatable.
+    #[arg(long = "label", value_name = "KEY=VALUE")]
+    pub labels: Vec<String>,
+    /// Remove a launch label, repeatable.
+    #[arg(long)]
+    pub unlabel: Vec<String>,
+    /// Override the run's project group.
+    #[arg(long, conflicts_with = "no_group")]
+    pub group: Option<String>,
+    /// Suppress all inferred grouping.
+    #[arg(long)]
+    pub no_group: bool,
+    /// Override another session's ownership.
+    #[arg(long)]
+    pub force: bool,
 }

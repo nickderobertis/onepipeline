@@ -294,6 +294,15 @@ pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
     }
 }
 
+/// Whether a graph standing at `statuses` has reached the success ending — the
+/// [`verdict`] a success hook fires on and a view prints `SETTLED` for — which is
+/// what marks the run's home `done` (`crate::home`).
+pub(crate) fn succeeded(statuses: &BTreeMap<String, NodeStatus>) -> bool {
+    let present = statuses.values().copied().collect();
+    // Success is decided before any decision is asked about, so none is.
+    verdict(&present, || false) == Verdict::Success
+}
+
 /// Every node not `done`, in plan order, as a hook is handed it — and as a
 /// view lists an ended run's.
 pub(crate) fn unsettled(
@@ -339,6 +348,7 @@ pub(crate) fn at_let_go(paths: &RunPaths, relay: Relay) {
 /// driver — the driver is what it ended — so it journals the way the stop itself
 /// did, from outside the lock.
 pub(crate) fn at_stop(paths: &RunPaths) {
+    crate::scratch::at_ending(paths);
     let Some(view) = judged_view(paths) else {
         return;
     };

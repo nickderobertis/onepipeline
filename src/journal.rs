@@ -173,6 +173,9 @@ impl Journal {
         // bytes back off the file and returned above, with no summary written
         // for them.
         self.summary.appended(envelope, bytes);
+        // And after it for the same reason: a stream read asked once this returns
+        // was asked of a store that holds the record.
+        crate::views::recorded(&self.paths.run, envelope);
         Ok(())
     }
 }
@@ -188,8 +191,15 @@ impl Journal {
 ///
 /// `truncated` is only ever set to `true`: a producer that said `false` and then
 /// handed over an over-long text was wrong about its own payload.
+///
+/// Only a record still carrying a copy is cut. A sibling's turn record carrying
+/// a `transcript` reference this build reads carries no content copy at all —
+/// the content is in the history file it names, read through
+/// [`crate::views::transcript`] — so it is kept exactly as its producer wrote
+/// it. A `transcript` key on anything else, or one that is not a reference, is
+/// no such record, and is bounded like any other.
 fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
-    if !envelope.payload.values().any(over_the_bound) {
+    if references_its_history(envelope) || !envelope.payload.values().any(over_the_bound) {
         return Cow::Borrowed(envelope);
     }
     let mut cut = envelope.clone();
@@ -200,6 +210,14 @@ fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
     }
     cut.payload.insert("truncated".to_string(), json!(true));
     Cow::Owned(cut)
+}
+
+/// Whether a relayed envelope is a sibling's turn record carrying a reference
+/// into its history that this build reads.
+fn references_its_history(envelope: &Envelope) -> bool {
+    envelope.source == crate::event::Source::Agentgraph
+        && crate::views::transcript::TranscriptRef::of(&envelope.kind.0, &envelope.payload)
+            .is_some_and(|reference| reference.is_ok_and(|reference| reference.is_reference()))
 }
 
 /// Whether one payload value is a text past the bound.
@@ -349,6 +367,23 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     (events, at)
 }
 
+/// Read a retained view's verified append range, without the boundary byte
+/// `Reader::open_at` otherwise checks in the consumed prefix.
+pub(crate) fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>, u64) {
+    let mut at = from;
+    let mut events = Vec::new();
+    for line in ledger::read_appended_envelope_lines(path, from, len) {
+        if !line.terminated {
+            break;
+        }
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
+            events.push(envelope);
+        }
+    }
+    (events, at)
+}
+
 /// [`finished_after`], stopping just past the first record `stop` answers
 /// `true` for — so a reader that reports one record at a time resumes from
 /// where it stopped rather than past everything it read.
@@ -425,6 +460,8 @@ enum Reading {
 /// line as JSON — and a line that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
 fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
+    #[cfg(test)]
+    crate::readprobe::parsed(path, line.offset);
     if let Some(envelope) = line.envelope {
         return Reading::Whole(envelope);
     }
@@ -955,6 +992,67 @@ mod tests {
             envelope.payload,
             "a payload nothing was over the bound in was rewritten anyway"
         );
+    }
+
+    /// Only a sibling's turn record carrying a reference this build reads is
+    /// kept past the bound: a `transcript` key that is no reference, or one on a
+    /// record of another source, buys no exemption.
+    #[test]
+    fn only_a_turn_record_that_really_references_its_history_escapes_the_bound() {
+        let long = "s".repeat(MAX_PAYLOAD_TEXT_BYTES + 1);
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+        });
+        let kept = relayed_with(payload(&[
+            ("transcript", reference.clone()),
+            ("turn", json!(1)),
+            ("role", json!(long.clone())),
+        ]));
+        assert_eq!(within_the_bound(&kept).payload, kept.payload);
+
+        for (what, envelope) in [
+            (
+                "a null reference",
+                relayed_with(payload(&[
+                    ("transcript", json!(null)),
+                    ("text", json!(long.clone())),
+                ])),
+            ),
+            (
+                "a reference of the wrong shape",
+                relayed_with(payload(&[
+                    ("transcript", json!({"history_dir": "/state"})),
+                    ("text", json!(long.clone())),
+                ])),
+            ),
+            ("a record of this crate's own", {
+                let mut own = relayed_with(payload(&[
+                    ("transcript", reference.clone()),
+                    ("text", json!(long.clone())),
+                ]));
+                own.source = Source::Pipeline;
+                own
+            }),
+            ("a kind that carries no turn content", {
+                let mut other = relayed_with(payload(&[
+                    ("transcript", reference.clone()),
+                    ("text", json!(long.clone())),
+                ]));
+                other.kind = EventKind("member-settled".into());
+                other
+            }),
+        ] {
+            let cut = within_the_bound(&envelope);
+            assert_eq!(
+                cut.payload["text"].as_str().map(str::len),
+                Some(MAX_PAYLOAD_TEXT_BYTES),
+                "{what} escaped the bound"
+            );
+            assert_eq!(cut.payload["truncated"], json!(true), "{what}");
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {

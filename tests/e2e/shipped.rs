@@ -42,7 +42,7 @@ fn unwrapped(relative: &str) -> String {
 }
 
 fn graph(relative: &str) -> GraphConfig {
-    serde_norway::from_str(&read(relative))
+    onepipeline_testfakes::yaml::from_str(&read(relative))
         .unwrap_or_else(|e| panic!("{relative} is not a valid oneagentgraph config: {e}"))
 }
 

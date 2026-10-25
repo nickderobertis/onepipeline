@@ -1,0 +1,19 @@
+schema_version: 1
+budgets:
+  - id: run-ending-scratch-seconds
+    measure: reported
+    command: [node, scratch-budget.mjs, ending]
+    unit: seconds
+    direction: max
+    threshold: 60
+    description: >-
+      The slower scratch handling of a failed ending that keeps 840000 entries
+      and its retry's successful ending removing that same generated tree.
+  - id: scratch-discard-seconds
+    measure: reported
+    command: [node, scratch-budget.mjs, discard]
+    unit: seconds
+    direction: max
+    threshold: 60
+    description: >-
+      Invocation to exit for scratch discard of a failed run holding 840000 entries.

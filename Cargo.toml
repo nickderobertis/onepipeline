@@ -3,7 +3,7 @@
 # the programs this stack spawns: `oneagentgraph`, and the `gh` behind `onevcs`.
 # Members are listed explicitly so a new one joins the graph deliberately rather
 # than by changing what `--workspace` means.
-# llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions` and `boundary` are verbs of the existing `onepipeline` CLI, not new binaries.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] `shutdown`, `supersessions`, `boundary` and `integrate` are verbs of the existing `onepipeline` CLI, not new binaries.
 members = [".", "crates/testfakes"]
 resolver = "2"
 
@@ -712,12 +712,53 @@ resolver = "2"
 # **requirement**, because `^0.48` admits no 0.49.x; `onevcs-testing` 0.18.0
 # requires exactly `=0.49.0`, so the pair moves as one.
 #
-# `onevcs` 0.50.1 is the floor because it publishes a workspace whose root
-# `Cargo.toml` is itself a member (onevcs boundary-root-members), the library this
-# crate's manager publication and worker closeout run; below it a valid root
-# workspace is refused at that boundary, 0.50.0 included. A **requirement**,
-# because `^0.50.0` still admits 0.50.0; `onevcs-testing` 0.18.2 requires exactly
-# `=0.50.1`, so the pair moves as one.
+# The floor may not fall below `onevcs` 0.50.0, the first release whose
+# `pool_maintain` runs a repository's own `onevcs.toml` declaration:
+# `src/maintenance.rs` matches `IdentityOutcome::MaintenanceUnreadable` and reads
+# `SlotOutcome::Ran`'s `disk`, neither of which an earlier release defines.
+#
+# `onevcs` 0.56.2 is the floor because every landing event it writes carries
+# `closes` — the GitHub issues the landing closes, as `owner/name#N` — on the
+# `merge-completed` and `change-merged` of a change request, a `local-direct`
+# squash and the integrate train alike, read here through
+# `onevcs::landing_closes` in `closures::Landing::of`. `src/closures.rs` hands
+# those issues to the store (entry 132 of `docs/contract-divergences.md`);
+# `tests/e2e/closures.rs` drives it. A **requirement**, because `^0.52` admits
+# no 0.56.x.
+#
+# `onevcs` 0.56.3 is the floor only because `onevcs-testing` 0.19.13 — the
+# release that carries every one of the test-support implementations this
+# crate's journeys double the host with — requires exactly `=0.56.3`, so the
+# pair moves as one.
+#
+# 0.56.1 below it is the release whose two new shapes this crate reads: a
+# publication held on `boundary::Unavailability::HostVisibility` settles as that
+# unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
+# `workspace-wait` (`src/pool.rs`). It asks visibility with `gh api --include`,
+# which `fake-gh` answers status line first.
+#
+# The floor may not fall below `onevcs` 0.52.0, the release the declared-maintenance
+# producer supplied for this crate's idle pool maintenance, the `onevcs.toml`
+# reading 0.50.0 brought. It also adds `SessionRequest::caller_merges_base`
+# (onevcs #434), which every request this crate builds sets `false`, so a
+# session open still runs onevcs's rules probe as before. 0.51.3 below it carried the same
+# declared-maintenance reading, released again with no change to the library's
+# source. 0.51.2 below that is the release the operation-progress producer
+# supplied for this crate's manager landings; it carries the
+# **operation handle** of 0.51.1 below, and narrows which package names its
+# workspace boundary takes for conventional test and tooling ones (onevcs #407).
+# 0.51.1 carries the **operation handle** a
+# manager landing is supervised through (onevcs #403): `OperationHandle`, the
+# `*_in_operation` entry points for publish-branch, recover and integrate,
+# `OperationEvents` over one invocation's stream, and the producer's
+# `Significance` stamp with its `MatchFields` field. `src/land.rs` prepares a
+# handle before each forwarded landing and relays its events; the
+# `tests/e2e/manager_landings.rs` journeys drive that over the linked release. It
+# also carries 0.50.1's workspace boundary that accepts a root `Cargo.toml` which
+# is itself a member (onevcs boundary-root-members), the library this crate's
+# manager publication and worker closeout run. It requires the bus at `^0.9.1`,
+# which the bus pin below admits. A **requirement**, because `^0.50` admits no
+# 0.51.x.
 #
 # `oneagentgraph` 0.5.4 is the floor because it relays a turn's `message` and
 # `reasoning` items as `turn-activity` under their own kind — the agent's words,
@@ -741,6 +782,30 @@ resolver = "2"
 # it. It requires `onejudge` 0.19.0, which `^0.17.1` admits no version of, so the
 # two requirements move as one.
 #
+# `oneagentgraph` 0.5.13 is the floor because it relinks onto the plugins-off
+# `oneharness-core` 0.28.1 (see that pin). It requires `^0.28.1` and `onejudge`
+# `^0.19.5`, so the three move as one.
+#
+# `oneagentgraph` 0.6.0 is the floor because it publishes the **note offer**:
+# `control::offer_note` admits a note and hands back a `NoteOffer` this crate
+# waits on, waits on until a deadline, or withdraws, and a `live` note interrupts
+# the addressed party's turn. `src/agentgraph.rs` and `tests/note/main.rs` hold
+# it. It also supersedes 0.5.14, the release that first linked the shared
+# app-server core (see the `oneharness-core` pin for where the pool lives). It
+# requires `onejudge ^0.20.0`, `onemessagebus ^0.9.3` and
+# `oneharness-core ^0.28.4`, so the four move as one.
+#
+# `oneagentgraph` 0.7.0 is the floor because it makes a note offer **withdrawable
+# while it is waited on**: `NoteOffer::withdrawer` hands back a `NoteWithdrawer`
+# another thread takes the note back with, and the wait in flight answers
+# `NoteDelivery::Withdrawn`. `src/engine.rs`'s `TakeBack` and a `cancel`'s
+# preemption withdraw a live note through it, and `tests/note`'s live-withdrawal
+# journeys hold it. It requires nothing this lock did not already resolve.
+#
+# `oneagentgraph` 0.7.1 ends a member's blocked command provider when the graph
+# stops. The attached observer stop journey in
+# `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -761,8 +826,8 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.5.6"
-onevcs = "0.50.1"
+oneagentgraph = "0.8.0"
+onevcs = "0.56.9"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -784,7 +849,12 @@ onevcs = "0.50.1"
 # the `open` profile alone; this crate now declares the stack vocabulary and
 # reads its recorded streams. A **requirement**, because `^0.8` admits no
 # 0.9.x, and the four siblings beside it require exactly it.
-onemessagebus = "0.9.0"
+#
+# 0.9.1 reads and writes its YAML through `serde-saphyr` rather than a libyaml
+# translation, as every sibling release linked beside it does.
+#
+# 0.9.3 is the release `oneagentgraph` 0.6.0 requires.
+onemessagebus = "0.9.3"
 # **Not a third sibling this crate composes** — nothing here launches, calls, or
 # spawns onejudge. It is one vocabulary: the verdicts a two-party member settles
 # on, which `oneagentgraph` copies onto the `member-settled` this crate relays.
@@ -875,7 +945,19 @@ onemessagebus = "0.9.0"
 # the prompt the harness double is handed under each. A **requirement** for the
 # same pre-1.0 reason as every raise above: `^0.17` admits no 0.19.x.
 # `oneagentgraph` 0.5.6 requires it.
-onejudge = "0.19.0"
+#
+# **0.19.5 reads and writes YAML through `serde-saphyr`**, so no libyaml
+# translation reaches this build through it; `oneagentgraph` 0.5.13 requires it.
+# It also relinks onto `oneharness-core` 0.28.x, so the spawned side of a
+# two-party member resolves the same plugins-off core.
+#
+# **0.20.0 delivers a note by interrupting the live turn**: `Note.delivery`
+# chooses `Interrupt` or `TurnEnd`, and `Accepted` answers `Interrupted` or
+# `AtTurnEnd`, which `src/note.rs` records as a note's `turn`. It still carries
+# the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
+# for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
+# requires it, so the lock resolves onejudge once.
+onejudge = "0.21.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -961,7 +1043,36 @@ onejudge = "0.19.0"
 # `status: completed | failed`, and `render_event` draws a `✗ <tool>  failed` line
 # (oneharness #1403), which the run views draw a turn's activity through. Inside
 # `^0.24.0`, so `oneagentgraph` and `onejudge` resolve this one copy with it.
-oneharness-core = "0.24.1"
+#
+# **0.26.0 starts Codex with plugins off** unless the resolved config opts in
+# (oneharness #1457), so a dispatch stops downloading Codex's remote plugin
+# catalog with no configuration of the host's own; `tests/e2e/dispatch.rs`'s
+# `plugins_off` journeys hold it. The pin is 0.28.2, the core the `oneharness`
+# 0.25.2 release carries: 0.27.0 keeps Codex apps and analytics off, and 0.28.0
+# starts one pooled `codex app-server` per configuration, under an environment
+# cleared to its base and `CODEX_*` variables — which is why
+# `crates/testfakes`'s `fake-codex` can read its world from beside itself. A
+# **requirement** for the same pre-1.0 reason as every raise above: no earlier
+# caret admits a 0.28.x. `oneagentgraph` 0.5.13 and `onejudge` 0.19.5 each
+# require `^0.28.1`, so the three move together or the lock resolves the core
+# twice. `oneagentgraph` 0.6.0 requires `^0.28.4`.
+#
+# **0.28.5 is the shared app-server release** a host adopts (oneharness #1488,
+# #1495): concurrent controlled Codex turns under one configuration share one
+# pooled `codex app-server`. The pool and its sweeper live in the `oneharness`
+# process a judged member's onejudge spawns; the `onepipeline` binary runs only
+# uncontrolled single-sided turns in process, so it leases no pooled server and
+# hosts no sweeper. `tests/e2e/dispatch.rs`'s
+# `two_concurrent_judged_codex_turns_share_one_app_server` holds both. A
+# **requirement**, so no build admitting 0.28.2 is one a host adopts for it;
+# `oneagentgraph` 0.6.0 and `onejudge` 0.20.0 admit this core, so the lock
+# resolves the core once.
+# 0.28.8 removes the dispatch's environment stamp from the pool sweeper
+# (oneharness #1520), so a member's final reap leaves it alive to stop the
+# server after its last lease and linger. The retirement journey in
+# `tests/e2e/dispatch.rs` holds this through the public in-process executor.
+# All linked consumers admit this 0.28.x core, so it resolves once.
+oneharness-core = "0.29.1"
 # The sibling's own test-support crate, from the **same** revision as the library
 # it implements — here by resolving both from the registry at the releases cut
 # from one commit, each release of this crate requiring the exact `onevcs` it was
@@ -972,7 +1083,7 @@ oneharness-core = "0.24.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.18.2"
+onevcs-testing = "0.19.19"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -993,18 +1104,92 @@ onevcs-testing = "0.18.2"
 # **0.6.0 carries comments across copies and adds per-source caches**. Engine
 # reads remain unpinned, including settlement write-back reads. The plugin API
 # adds public Task and Comment fields and CopyLink, making this a breaking link.
+#
+# **0.7.0 caches project and document reads**, adding version fields to the public
+# Project and Document and `forward_edges` to VersionCoverage: breaking again. Its GitHub
+# token moves from gh2 to gh3, which never orders a gh2 value, so a task version
+# recorded before this release costs one more read and is never served from cache; the
+# engine keeps versions opaque and translates nothing.
 # `justfile`'s `onetaskgraph-version` moves with this release.
-onetaskgraph-core = "=0.6.0"
-onetaskgraph-plugin-api = "=0.6.0"
-onetaskgraph-local-md = "=0.6.0"
+#
+# **No earlier release than 0.7.1**: a plan drafted in a private source reaches the
+# board with no origin recorded, and only 0.7.1's document copy still files its
+# documents under the board's plan. `tests/e2e/multi_source.rs` fails on 0.7.0.
+# 0.7.1 is also the release onetaskgraph's move onto `serde-saphyr` published; its
+# local-md source is what reads back and edits the run's write-back shadow documents
+# (`src/writeback.rs`).
+#
+# **0.8.0 is the floor.** It adds `Engine::complete_issues`, which moves to `done` the
+# items every configured source holds for the GitHub issues a landing closed, the
+# store choosing the sources (`src/closures.rs`, entry 132). It is breaking: a copy
+# takes `statuses` and may report an item `skipped`, a store failure gains
+# `statuses-not-tasks`, and a closed item's status name follows its closure.
+#
+# **0.9.0 is the floor now.** A `complete_issues` item carries `kind` — `task`, or `project`
+# for a project's own card — which the `landing-closures` record keeps verbatim, and the
+# store moves a project whose issue a landing closes. It adds `Engine::set_project_status`,
+# which marks a run's home `done` when the run settles (`src/writeback.rs`, entry 134).
+#
+# **A copy says when it may have left an item behind**: a create the destination
+# answered malformed is `EngineError::CopyDestinationUncertain`, naming the destination
+# and the plugin method, because the plugin may have stored the item under an id the
+# copy never learned. `src/writeback.rs` classes it by the malformed answer it wraps, as
+# the store does — refused, so no timer creates a second item — and carries the store's
+# words into the line and the surface; `tests/e2e/store.rs`'s
+# `a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue`
+# drives it. The variant arrived in 0.7.2, so a lower pin does not compile.
+#
+# **No earlier release than 0.7.3**: it leaves a source a layer refines but no layer defines
+# unconfigured rather than failing every load, so a host's user layer may route to
+# sources only one checkout defines; and it answers a dependency read a private source
+# cannot without failing it. `tests/e2e/store.rs` drives both.
+#
+# **0.9.2 links the faster plan copy**: a plan copy and a project listing on a
+# GitHub Projects board read only the plan, never the whole board, and a copied
+# item takes fewer requests. The test CLI is provisioned at this same release.
+#
+# **0.9.2 supplies the two changes a plan homed in Linear launches on.** A copy to
+# Linear sends each item's content in the form Linear stores it — the rewrite the linear
+# plugin declares in its "Ruling: what Linear does to Markdown on write, declared" — so the
+# `body_digest` its `onetaskgraph.template` provenance records is of what a read hands back,
+# and `--require-rendered true` accepts a Linear-copied task (`tests/e2e/linear_launch.rs`).
+# A write whose stored content no declared rule explains is
+# `EngineError::StoredContentDiverged`. And a routed plan copy homes the plan where its
+# repository-naming tasks route, refusing a split private home as
+# `EngineError::SplitPrivateHome`. Both are breaking; `src/writeback.rs` names each in the
+# store's own word.
+# **0.11.0 carries the copy chain** (`otg-member-copy`, `otg-preserve-status`,
+# `otg-target-task`): https://github.com/nickderobertis/onetaskgraph/releases/tag/v0.11.0
+# Created members use MembersOnly; settlement still writes the source status.
+# It also links cheaper approval: GitHub Projects approval lists members and writes
+# document metadata in one request each. The public held-task-image read (0.9.4)
+# carries authoring images through the shadow store. Hosts hold their plan-store CLI
+# to this linked release, adopting both improvements together.
+# **No earlier release than 0.11.1**: local-md writes every entry atomically, beside its file
+# and renamed into place, where 0.11.0 wrote an entry carrying no answers with `fs::write`.
+# The write-back's image step rewrites a created task's shadow document that way, so on
+# 0.11.0 a reader listing the shadow could open it empty or half-written
+# (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
+onetaskgraph-core = "=0.11.1"
+onetaskgraph-plugin-api = "=0.11.1"
+onetaskgraph-local-md = "=0.11.1"
+# Test-support only: the budget checker's own library, at exactly the release `justfile`'s
+# `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
+onebudgetspec-core = "=0.1.5"
 # Not engines: two crates both members use, pinned once so they build against one version.
 # `just engines-current` reads only the engines its script names.
 sha2 = "0.10"
 tokio = "1"
+# The YAML reader and writer, and the fleet's one: safe Rust, so no libyaml
+# translation reaches this build. `deny.toml`'s `[bans]` refuses every crate it
+# replaced.
+serde-saphyr = "1.3"
+# Windows only, and for the same reason: each member names the features it calls.
+windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.71.1"
+version = "0.89.3"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1101,9 +1286,9 @@ serde = { version = "1", features = ["derive"] }
 # read back as `0.12` without it.
 serde_json = { version = "1", features = ["preserve_order", "float_roundtrip"] }
 # Plan files are JSON; the executor-rules file and the agent-graph configs are
-# YAML. serde_norway is the maintained fork of the deprecated serde_yaml, and is
-# the same reader the sibling crates use.
-serde_norway = "0.9"
+# YAML, read and written through the reader the sibling crates use — see
+# `[workspace.dependencies]`.
+serde-saphyr = { workspace = true }
 # A plan is one project of a store, assembled out of reserved metadata keys, and
 # the refusal it earns has to name the key a person has to fix. `serde_json`'s
 # own error says the type it wanted and not where it wanted it, which for a
@@ -1149,6 +1334,8 @@ schemars = { version = "1", features = ["preserve_order"] }
 # llmlint: ignore[new_command_or_client_gets_its_own_project] plugins of the linked store library, not a command or client of this repository; required in this package so the bill of materials declares them.
 onetaskgraph-core = { workspace = true, features = ["github-projects", "linear"] }
 onetaskgraph-plugin-api = { workspace = true }
+# The shadow store writes assets through its public source API.
+onetaskgraph-local-md = { workspace = true }
 # The store's plugin traits are async, so each call into it runs on a runtime this crate
 # builds for that one logical command — a plan read, a write-back attempt — and drops
 # with it: a current-thread runtime, because what the store needs is several sources
@@ -1169,11 +1356,12 @@ async-trait = "0.1"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
   "Win32_System_Threading",
 ] }
 
@@ -1221,8 +1409,12 @@ onevcs-testing = { workspace = true }
 # TOML they are rather than scanned for a substring that might not be one.
 toml = "1"
 # `tests/budgets.rs` loads `budgets.yaml` and parses the result its command writes through the
-# checker's own library, at exactly the release `justfile`'s `onebudgetspec-version` installs.
-onebudgetspec-core = "=0.1.1"
+# checker's own library; the pin is in `[workspace.dependencies]`.
+onebudgetspec-core = { workspace = true }
+# `tests/e2e/public_id.rs` validates what `status --json` prints against
+# `schemas/run-reading.schema.json` itself; the release the lock already resolves for a
+# sibling, with no remote reference resolution.
+jsonschema = { version = "0.56", default-features = false }
 
 [[test]]
 name = "e2e"
@@ -1269,8 +1461,28 @@ path = "tests/release_channel/main.rs"
 name = "stop_verdict"
 path = "tests/stop_verdict/main.rs"
 
+# The pool-maintenance workload journey: one idle sweep over 25 real pooled slots
+# across 20 declaring identities, recorded for `pool-maintenance-engine-seconds`.
+# Its own binary and its own Nx project (`tests/pool_workload/project.json`), run
+# only by that project's `workload` target (`just workload`), so no per-change
+# selection runs it; its `check` lints it and stops there.
+[[test]]
+name = "pool_workload"
+path = "tests/pool_workload/main.rs"
+
+# Large scratch telemetry is a release workload, excluded from per-change tests.
+[[test]]
+name = "scratch_workload"
+path = "tests/scratch_workload/main.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true
 lto = "thin"
 codegen-units = 1
+
+# Wire-level refusal checks for the shared Codex app-server double, isolated
+# from the dispatch journeys so its backstops rerun only for their own inputs.
+[[test]]
+name = "codex_server"
+path = "tests/codex_server/main.rs"

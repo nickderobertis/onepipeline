@@ -6,7 +6,7 @@
 // `schema_version` is bumped with the goldens beside this file, in the same
 // change.
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -418,23 +418,21 @@ describe("the release outcome record", () => {
     );
   });
 
-  it("accepts every tag release.yml will hand it", async () => {
-    // The workflow checks the tag, strips its `v`, and passes the rest here, so
-    // two independently written grammars decide one thing. They need not be
-    // identical — this one may be the looser — but a tag the workflow lets
-    // through and this refuses would fail the outcome job on a release that had
+  it("accepts every tag the release will hand it", async () => {
+    // release/release.py checks the tag, strips its `v`, and passes the rest
+    // here, so two independently written grammars decide one thing. They need
+    // not be identical — this one may be the looser — but a tag the release lets
+    // through and this refuses would fail the outcome step on a release that had
     // otherwise succeeded. That implication is what is held.
-    const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
-    const patterns = [...workflow.matchAll(/\[\[ "\$GITHUB_REF_NAME" =~ (\^\S+\$) \]\]/g)].map(
-      (m) => m[1],
-    );
-    assert.ok(patterns.length > 0, "release.yml checks no release tag");
-    assert.equal(
-      new Set(patterns).size,
-      1,
-      `release.yml states the release-tag grammar more than one way: ${[...new Set(patterns)].join(" vs ")}`,
-    );
-
+    const releaseAccepts = (tag) =>
+      attempt("python3", [
+        "-c",
+        "import importlib.util,sys\n" +
+          "spec=importlib.util.spec_from_file_location('release','release/release.py')\n" +
+          "release=importlib.util.module_from_spec(spec); spec.loader.exec_module(release)\n" +
+          "try: release.tag_version(sys.argv[1])\nexcept release.Refused: sys.exit(1)",
+        tag,
+      ]);
     const tags = [
       "v1.2.3",
       "v0.0.0",
@@ -448,8 +446,8 @@ describe("the release outcome record", () => {
       "v1.2.3 ",
     ];
     for (const tag of tags) {
-      // The workflow's own check, run by the shell that runs it.
-      const checked = await attempt("bash", ["-c", `[[ "$1" =~ ${patterns[0]} ]]`, "check", tag]);
+      // The release's own check, run by the script that runs it.
+      const checked = await releaseAccepts(tag);
       if (checked.code !== 0) continue;
       const composed = await compose([
         "--version",
@@ -459,12 +457,12 @@ describe("the release outcome record", () => {
       assert.equal(
         composed.code,
         0,
-        `release.yml accepts the tag ${tag} and this refuses the version in it: ${composed.stderr}`,
+        `release/release.py accepts the tag ${tag} and this refuses the version in it: ${composed.stderr}`,
       );
     }
   });
 
-  it("names the targets release-targets.toml declares, and the ones release.yml passes", () => {
+  it("names the targets release-targets.toml declares, and the ones the release passes", () => {
     const declared = [
       ...readFileSync(join(REPO_ROOT, "release-targets.toml"), "utf8").matchAll(
         /^\[\[target\]\]\nid = "([^"]+)"/gm,
@@ -472,10 +470,19 @@ describe("the release outcome record", () => {
     ].map((m) => m[1]);
     assert.ok(declared.length > 0, "release-targets.toml declares no [[target]]");
 
-    const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "release.yml"), "utf8");
-    const start = workflow.indexOf("\n  outcome:\n");
-    assert.notEqual(start, -1, "no `outcome` job in release.yml");
-    const passed = [...workflow.slice(start).matchAll(/--target (\S+) /g)].map((m) => m[1]);
+    const passed = JSON.parse(
+      execFileSync(
+        "python3",
+        [
+          "-c",
+          "import importlib.util,json\n" +
+            "spec=importlib.util.spec_from_file_location('release','release/release.py')\n" +
+            "release=importlib.util.module_from_spec(spec); spec.loader.exec_module(release)\n" +
+            "print(json.dumps(release.OUTCOME_TARGETS))",
+        ],
+        { cwd: REPO_ROOT, encoding: "utf8" },
+      ),
+    );
     assert.deepEqual(
       [...passed].sort(),
       [...declared].sort(),

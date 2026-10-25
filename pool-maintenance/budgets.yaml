@@ -1,0 +1,18 @@
+# How long this repository's declared pool maintenance (`onevcs.toml`, `just pool-maintenance`)
+# holds one of its warm-pool slots out of service, checked by `just budgets-host` and never by
+# `check`: staging the pass builds this clone twice.
+schema_version: 1
+budgets:
+  - id: onepipeline-pool-maintenance-seconds
+    description: >-
+      Wall-clock seconds of one steady-state pool maintenance pass: after an untimed pass clears
+      any backlog, one ordinary run's worth of superseded builds is removed while each unit's
+      newest build stays. It protects how long a regular post-run pass holds a warm slot out of
+      service, which a host running several dispatches waits on.
+    labels: [host]
+    measure: reported
+    command: [./measure.sh]
+    unit: seconds
+    direction: max
+    threshold: 20
+    timeout_seconds: 3600

@@ -88,12 +88,12 @@ plain "$log" >"$work/step.log" \
 # and tests/nextest_runs.rs drives real nextest to each of them: a failure, a
 # retried failure, a timeout, and an abort (a signal name on Unix, ABORT on
 # Windows). The passing ones too: a pass, a leaky pass, and a retried pass
-# (`TRY 2 PASS`; the re-runs print no final `FLAKY` line). Leaks pass here (no
-# `leak-timeout` result is set), so LEAK-FAIL cannot occur.
+# (`TRY 2 PASS`; the re-runs print no final `FLAKY` line). A leak is a pass under
+# the default profile and `LEAK-FAIL` under `ci`, whose `leak-timeout` fails it.
 status_line() {
   echo "^[[:space:]]*(TRY [0-9]+ )?($1) \[[[:space:]]*[0-9.]+s\] (\([[:space:]]*[0-9]+/[[:space:]]*[0-9]+\) )?([^[:space:]]+) ([^[:space:]]+)[[:space:]]*\$"
 }
-failed_re="$(status_line 'FAIL|TIMEOUT|ABORT|SIG[A-Z0-9]+')"
+failed_re="$(status_line 'FAIL|LEAK-FAIL|TIMEOUT|ABORT|SIG[A-Z0-9]+')"
 passed_re="$(status_line 'PASS|LEAK')"
 tests_matching() { sed -nE "s#$1#\\4 \\5#p" "$2" | sort -u; }
 

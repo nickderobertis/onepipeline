@@ -282,6 +282,8 @@ fn write_channel(dir: &Path) {
                         CommandVerdict::Refused
                     },
                     reason: (!applied).then(|| "the node has settled".to_owned()),
+                    refusal: None,
+                    turn: None,
                 }],
             })
             .expect("answered");

@@ -121,6 +121,15 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
+    /// What the store did with the GitHub issues one landing closed: entry 132 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// One per landing commit, once the store's `complete_issues` call for it has
+    /// finished — projected, or failed for good — and never for a landing whose
+    /// `closes` is empty. Carries the landed `node` (null outside a run), the
+    /// `commit`, the `closes` it was handed, the `outcome`, the store's `items` and
+    /// `unsupported` sources verbatim, and the failure's `class` and `reason`.
+    LandingClosures,
     /// A dispatched node was handed back to the queue **without a settlement**.
     ///
     /// Written where a dispatch ended before any work began for a reason that
@@ -261,11 +270,13 @@ pub enum PipelineKind {
     /// One pool-maintenance sweep an idle driver ran did something.
     ///
     /// Written once per sweep, and only where some slot ran, some identity was
-    /// `claimed` by another run, or some identity failed — a sweep on which every
+    /// `claimed` by another run, some identity's `onevcs.toml` was
+    /// `maintenance-unreadable`, or some identity failed — a sweep on which every
     /// identity answered `no-maintain-command`, `no-slots` or `not-due` writes
     /// nothing. Carries `started_at` and, per identity it records, the `every` it
-    /// was maintained on and the sibling's own `outcome` — per slot, what ran and
-    /// how it ended — or the `error` that stood in for one.
+    /// was maintained on and the sibling's own `outcome` — per slot, what ran, how
+    /// it ended and its worktree's `disk` around it — or the `error` that stood in
+    /// for one.
     PoolMaintenance,
     /// One live dispatch a host shutdown acted on: what its interrupt was
     /// answered with, and how it ended.
@@ -329,22 +340,88 @@ pub enum PipelineKind {
     /// an agent was dispatched to conclude a conflict, and the publication's
     /// `outcome`. The node's ordinary `node-settled` follows.
     NodeRestacked,
+    /// A draft's change request was found merged into its root: `node`, `change_url`,
+    /// the `commit` it reached the root as, `detected_by` — `readjust`, or
+    /// `absorber-landed` with the absorbing node as `via` — and the `trigger` whose
+    /// readjustment found it. The node's landing is `landed` from it on.
+    NodeLanded,
+    /// A draft's change request was merged into another node's branch: `node`, the node
+    /// it merged `into`, `change_url` and `commit`. It lands only with that node.
+    NodeAbsorbed,
+    /// A draft the host closed under its landed parent's deleted branch was reopened on
+    /// that branch, restored: `node`, `change_url`, `restored_base`.
+    ChangeReopened,
+    /// A draft was brought onto its placement after a node it is connected to landed or
+    /// was absorbed: `node`, its placement `from` and `to`, the `cause`, its `head`,
+    /// whether an agent was dispatched, the `retarget` and its `content`. The node's
+    /// ordinary `node-settled` follows.
+    NodeReadjusted,
+    /// A draft merged into the root carrying unlanded ancestors' work: `node`, `carried`.
+    StackLandedOutOfOrder,
+    /// A draft's change request was closed without merging: `node`, `change_url`.
+    ChangeClosed,
+    /// A later read of a draft republished without a check watch: `node`, `head`,
+    /// `verdict`.
+    NodeChecksRead,
+    /// One repository's standings read failed: `repo`, `detail`. Its drafts stay as
+    /// they were.
+    ReadjustReadFailed,
+    /// A reply to one review comment was posted on the host: `node`, `comment`, its
+    /// `disposition` — `answered` by a rework's commits or `declined` — the reply's
+    /// `url`, and the `commits` its body links.
+    ReviewReplyPosted,
+    /// A drafting of a rework's replies posted nothing: `node`, the `comments` it
+    /// named, its `ending` — `unconfigured`, `failed` or `invalid` — and the `detail`.
+    /// The replies stay owed and are drafted again on the next `onepipeline review`.
+    ReviewReplyNotDrafted,
     /// A launch passed another driver's claim on its project with `--take-over`.
     ///
     /// Written by `start --take-over` beside its `run-started`, only where the
     /// project's `onepipeline.driver` named a claim; carries that claim whole as
     /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
-    /// names stops at its own next claim check. Entry 119 of
-    /// `docs/contract-divergences.md` records it.
+    /// names stops at its own next read of the claim — before a publication, or as it
+    /// lets go of the project. Entries 119 and 128 of
+    /// `docs/contract-divergences.md` record it.
     DriverTakenOver,
     /// A driver found its project claimed by another run, and stopped.
     ///
-    /// Written by the driver that read the claim, once, at the check that found
-    /// it — at launch or adoption, at the start of a pass that would dispatch or
-    /// publish, or on its idle check — carrying the claim it found as `by`. After
-    /// it the driver dispatches and publishes nothing, and ends once its
-    /// dispatches in flight have settled unpublished. Entry 119 records it.
+    /// Written by the driver that read the claim, once, at the read that found
+    /// it — at adoption, or at the read it makes immediately before a publication —
+    /// carrying the claim it found as `by`. After it the driver dispatches and
+    /// publishes nothing, and once its dispatches in flight have settled
+    /// unpublished it acknowledges that claim and ends. Entries 119 and 128
+    /// record it.
     DriverSuperseded,
+    /// A manager landing registered its ownership and subjects with its flow,
+    /// before it drafted, forwarded or touched anything. Kept in the landing's
+    /// own journal, and mirrored into every run it was associated with.
+    LandingRegistered,
+    /// A manager landing started drafting its change request's body.
+    LandingDrafting,
+    /// A manager landing started the linked `onevcs` verb it forwards.
+    LandingStarted,
+    /// A manager landing's forwarded verb ended with status `0`.
+    LandingFinished,
+    /// A manager landing's forwarded verb ended non-zero, or its progress could
+    /// not be relayed.
+    LandingRefused,
+    /// A manager landing's process was proved gone with no ending recorded,
+    /// written by the reader that proved it.
+    LandingDied,
+    /// Dispatch scratch was removed at success or on request.
+    ScratchRemoved,
+    /// Dispatch scratch was measured and kept at a non-success ending or pause.
+    ScratchRetained,
+    /// What the store answered when the run's home was marked `done`: entry 134 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// At most one per run, once the store's `set_project_status` call for the run's
+    /// home has finished — written, or failed for good — after the run reached the
+    /// success ending. Carries the home's qualified `project`, the `outcome`, the
+    /// `status` the store read back, and the failure's `class` and `reason`.
+    ///
+    /// Last, so adding it moves no earlier variant's place in the order.
+    HomeStatus,
 }
 
 impl PipelineKind {
@@ -357,6 +434,8 @@ impl PipelineKind {
             Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
+            Self::LandingClosures => "landing-closures",
+            Self::HomeStatus => "home-status",
             Self::NodeRequeued => "node-requeued",
             Self::EditCommitted => "edit-committed",
             Self::CommandAccepted => "command-accepted",
@@ -395,8 +474,26 @@ impl PipelineKind {
             Self::TitleUnverified => "title-unverified",
             Self::NodeRestackStarted => "node-restack-started",
             Self::NodeRestacked => "node-restacked",
+            Self::NodeLanded => "node-landed",
+            Self::NodeAbsorbed => "node-absorbed",
+            Self::ChangeReopened => "change-reopened",
+            Self::NodeReadjusted => "node-readjusted",
+            Self::StackLandedOutOfOrder => "stack-landed-out-of-order",
+            Self::ChangeClosed => "change-closed",
+            Self::NodeChecksRead => "node-checks-read",
+            Self::ReadjustReadFailed => "readjust-read-failed",
+            Self::ReviewReplyPosted => "review-reply-posted",
+            Self::ReviewReplyNotDrafted => "review-reply-not-drafted",
             Self::DriverTakenOver => "driver-taken-over",
             Self::DriverSuperseded => "driver-superseded",
+            Self::LandingRegistered => "landing-registered",
+            Self::LandingDrafting => "landing-drafting",
+            Self::LandingStarted => "landing-started",
+            Self::LandingFinished => "landing-finished",
+            Self::LandingRefused => "landing-refused",
+            Self::LandingDied => "landing-died",
+            Self::ScratchRemoved => "scratch-removed",
+            Self::ScratchRetained => "scratch-retained",
         }
     }
 
@@ -432,6 +529,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
+    PipelineKind::LandingClosures,
+    PipelineKind::HomeStatus,
     PipelineKind::NodeRequeued,
     PipelineKind::EditCommitted,
     PipelineKind::CommandAccepted,
@@ -470,8 +569,26 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::TitleUnverified,
     PipelineKind::NodeRestackStarted,
     PipelineKind::NodeRestacked,
+    PipelineKind::NodeLanded,
+    PipelineKind::NodeAbsorbed,
+    PipelineKind::ChangeReopened,
+    PipelineKind::NodeReadjusted,
+    PipelineKind::StackLandedOutOfOrder,
+    PipelineKind::ChangeClosed,
+    PipelineKind::NodeChecksRead,
+    PipelineKind::ReadjustReadFailed,
+    PipelineKind::ReviewReplyPosted,
+    PipelineKind::ReviewReplyNotDrafted,
     PipelineKind::DriverTakenOver,
     PipelineKind::DriverSuperseded,
+    PipelineKind::LandingRegistered,
+    PipelineKind::LandingDrafting,
+    PipelineKind::LandingStarted,
+    PipelineKind::LandingFinished,
+    PipelineKind::LandingRefused,
+    PipelineKind::LandingDied,
+    PipelineKind::ScratchRemoved,
+    PipelineKind::ScratchRetained,
 ];
 
 /// The id of a stored artifact.

@@ -804,7 +804,8 @@ fn the_pictured_workload_blocks_on_the_flow_wakes_on_its_run_and_reports_its_dea
     let joined = watch.returned();
     joined.ended_on(EXIT_RUN_JOINED, "run-joined");
     assert_eq!(joined.record["run_id"], json!("spikes"));
-    assert!(joined.cursor().starts_with("flow:1:plan:spikes@"));
+    // The cursor places each landing — this flow holds none — then each run.
+    assert!(joined.cursor().starts_with("flow:2:plan::spikes@"));
 
     flow.child.kill().expect("SIGKILL reaches the holder");
     let _ = flow.child.wait();
@@ -1074,7 +1075,9 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
         vec!["next"],
         vec!["next", "solo", "--flow", "live"],
         vec!["watch", "--flow", "live", "--all"],
-        vec!["watch", "--flow", "live", "--filter", "planner"],
+        vec!["next", "--flow", "live", "--all"],
+        vec!["monitor", "--flow", "live", "--all"],
+        vec!["watch", "--flow", "live", "--filter", "no-such-profile"],
         vec!["channel", "queue", "solo", "--flow", "live"],
         vec![
             "unwatched",
@@ -1168,6 +1171,10 @@ fn the_flow_flags_refuse_what_a_flow_cannot_be_asked() {
             "not a cursor this build reads for a flow",
         ),
         ("flow:1:live:member@0/member@0", "names run 'member' twice"),
+        // A cursor that places landings is held to them as one placing runs is.
+        ("flow:2:live:", "not a cursor this build reads for a flow"),
+        ("flow:2:live:landing-x@0:", "not a landing of flow 'live'"),
+        ("flow:2:live::solo@0", "not a run of flow 'live'"),
     ] {
         world
             .run(&[

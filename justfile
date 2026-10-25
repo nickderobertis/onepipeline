@@ -32,13 +32,18 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.6.0"
+onetaskgraph-version := "0.11.1"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
 # release into this clone's own build directory, never onto `PATH`, as `onetaskgraph` is above.
-onebudgetspec-version := "0.1.1"
+onebudgetspec-version := "0.1.5"
 onebudgetspec-root := justfile_directory() / "target" / "tools" / ("onebudgetspec-" + onebudgetspec-version)
+
+# The pruner `just pool-maintenance` runs, installed onto `PATH` by `bootstrap` (the
+# `pool-maintenance` project's) at this release and no other: onevcs runs that recipe in
+# an idle warm-pool slot (`onevcs.toml`), outside any build directory of this clone.
+prune-superseded-version := "0.1.1"
 
 # The renderer the visual-docs capture draws each scene with (`just screenshots`).
 # NOT part of `check`, `gate` or `bootstrap`: screenshots are informational, and
@@ -136,6 +141,13 @@ _ensure-onebudgetspec:
       || { echo "onebudgetspec {{onebudgetspec-version}} could not be installed into {{onebudgetspec-root}}; 'just budgets' refuses without it" >&2; exit 1; }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
+# The released `cargo-prune-superseded` `just pool-maintenance` runs, skipped when that
+# release is already the one on `PATH`. Network, so only `bootstrap` installs it.
+_ensure-prune-superseded:
+    @[ "$(cargo-prune-superseded --version 2>/dev/null)" = "cargo-prune-superseded {{prune-superseded-version}}" ] \
+      || cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}} --quiet \
+      || { echo "cargo-prune-superseded {{prune-superseded-version}} could not be installed; 'just pool-maintenance' refuses without it" >&2; exit 1; }
+
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
 # drift apart.
@@ -170,6 +182,13 @@ check-affected:
 # Deterministic quality gate for the cross-platform legs, without the coverage floor.
 check-cross: fmt-check lint test-quick
     @echo "check-cross: ok"
+
+# CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
+# this is what says the split drops and repeats nothing. Outside `check`, because
+# it lists the uninstrumented build the cross legs run, which `check` never builds.
+# Prove the Windows leg's shards run every `test-quick` test exactly once.
+cross-shards:
+    @node .github/cross-shards.mjs
 
 # The complete pre-push bar: the deterministic gate plus the LLM-judge tier
 # scoped to what this branch changed. `check` stays offline and credential-free;
@@ -244,7 +263,10 @@ _crate-lint:
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`.
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
+# are `pool_workload` and `scratch_workload`: each measures a whole host-shaped
+# workload, so its project (`onepipeline-pool-workload`,
+# `onepipeline-scratch-workload`) runs it only through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -260,7 +282,8 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict)"
+rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
+codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -395,8 +418,12 @@ test-quick:
 # fresh and the archive is the build the step tested; neither sets RUSTFLAGS, as
 # the single `test-quick` recipe they were split out of did not. Warnings are
 # denied by `just lint`, which `check-cross` runs before `test-quick`.
+#
+# `ONEPIPELINE_TEST_PARTITION` (`count:K/N`, which `scripts/test-partition.sh`
+# checks) runs the K-th of N shards of every tier, so N jobs share one leg and
+# each test runs in exactly one of them; unset, every test runs.
 _tier-test-quick filter:
-    @bash scripts/nextest-run.sh cargo nextest run --locked -E "$1"
+    @partition=$(bash scripts/test-partition.sh) && bash scripts/nextest-run.sh cargo nextest run --locked ${partition:+--partition "$partition"} -E "$1"
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 
@@ -499,6 +526,27 @@ _stop-verdict-run:
     @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
+# Outside `check` and `gate`: each runs a whole host-shaped workload journey to
+# measure it, which no per-change selection should pay for. Every project's
+# `workload` target is uncached and reached by no `check`, `test`, coverage or
+# `budgets` target; `release-sweep.yml` runs this after its quality gate.
+# Run every workload journey and check the budgets each one records.
+workload:
+    @bash scripts/nx.sh run-many -t workload
+
+# The `onepipeline-pool-workload` project's `workload` target: the journey writes
+# `target/budget-records/pool-maintenance.json`, which the project's own budgets
+# file reads. `harness::` is the shared harness's own self-tests, which the e2e
+# tier already runs.
+_pool-workload-run:
+    @just _ensure-node-modules
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(pool_workload) and not test(/^harness::/)' --no-tests=fail
+    @node_modules/.bin/onebudgetspec check tests/pool_workload/budgets.yaml
+
+_scratch-workload-run:
+    @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
+    @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
@@ -578,6 +626,28 @@ host-view-budget binary built_by="":
     @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
     @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
 
+# What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`). `target`
+# is every directory this clone's cargo builds write to: `.cargo/config.toml` sets it, and
+# the pruner finds the nested ones (`target/llvm-cov-target`, `target/wheel-*`) inside it.
+# Each unit's newest build, and every build modified within the window, is kept.
+# Remove this clone's superseded cargo builds older than 2 days.
+pool-maintenance:
+    @command -v cargo-prune-superseded >/dev/null 2>&1 \
+      || { echo "cargo-prune-superseded is not on PATH: run 'just bootstrap' (or 'just _ensure-prune-superseded'), then re-run" >&2; exit 1; }
+    @cargo-prune-superseded --keep-within 2d target
+
+# Outside `check` and `gate`: the one host budget, `pool-maintenance/budgets.yaml`'s, builds
+# this clone twice to stage what it times. `release-sweep.yml` runs it after its gate.
+# Measure every project's host-labelled budgets against their thresholds.
+budgets-host:
+    @bash scripts/nx.sh run-many -t budgets-host
+
+# The `pool-maintenance` project's `budgets-host` target.
+_pool-maintenance-budgets:
+    @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
+      || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
+    @"{{onebudgetspec-root}}/bin/onebudgetspec" check pool-maintenance/budgets.yaml --label host
+
 # Both are outside `check` for the reason `deps-check` is: they read the
 # crates.io index, and the deterministic gate stays offline. The split half of
 # this check needs no index and `tests/linked_engines.rs` reaches it there, so
@@ -590,13 +660,74 @@ engines-current:
 linked-engines:
     @bash scripts/linked-engines.sh --format notes
 
+# Offline, so release.yml's `publish` job can refuse a release on it before uploading anything.
+# Fail when Cargo.lock resolves a sibling engine at more than one version.
+engines-split:
+    @bash scripts/linked-engines.sh --format split
+
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
-# over the network and needs Docker. release.yml's Linux `build-wheels` legs and
-# ci.yml's `wheel` legs both call this, so there is one Linux wheel build.
+# over the network and needs Docker. release.yml's `build-linux` and
+# `build-linux-arm64` jobs (through `release-linux` and `release-linux-arm64`)
+# and ci.yml's `wheel` job all build with this script, so there is one Linux
+# wheel build.
 # Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
 wheel-linux target out="dist":
     @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
 # llmlint: ignore-end[comments_earn_their_place]
+
+# One recipe per release.yml build job, run there one phase per step: `build`
+# builds each target once, packages archive, wheel and npm package from that one
+# binary and test-installs them; `publish` uploads them; `verify` installs them
+# back from the registries and runs them. `plan` lists every file, package and
+# wheel tag without building; `dry-run` builds and test-installs, then lists what
+# it would publish and publishes nothing. Outside
+# `check` and `gate`: building needs Docker (Linux) or that platform's own
+# toolchain, and publishing needs the release's credentials.
+# Release the Linux (x86-64) artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
+release-linux phase="dry-run": (_release "linux" phase)
+
+# Release the Linux (arm64) artifacts, one PHASE at a time, on an arm64 Linux host.
+release-linux-arm64 phase="dry-run": (_release "linux-arm64" phase)
+
+# Release the macOS (Apple silicon) artifacts, one PHASE at a time.
+release-macos phase="dry-run": (_release "macos" phase)
+
+# Release the Windows artifacts, one PHASE at a time.
+release-windows phase="dry-run": (_release "windows" phase)
+
+# release.yml's `publish` job: refuse a split engine graph, confirm every
+# platform is out, then publish and install the crate and the npm launcher.
+# Publish the platform-independent artifacts (PHASE: plan, publish or dry-run).
+release-publish phase="dry-run":
+    @case "$1" in \
+      plan) just _release-python plan common ;; \
+      publish) just _release-python publish-common ;; \
+      dry-run) just _release-python publish-common --dry-run ;; \
+      *) echo "unknown phase '$1': choose plan, publish or dry-run" >&2; exit 2 ;; \
+    esac
+
+# Compose release-outcome.json from what every release job did and attach it to the Release.
+release-outcome:
+    @just _release-python outcome
+
+# Outside `check` and `gate`: the Linux journey builds in the manylinux image
+# (Docker, and a toolchain over the network) and compiles the release binary,
+# and the release-plz journey needs the `release-plz` binary. Each refuses,
+# naming what is missing, rather than skipping.
+# The release journeys: the Linux recipe and publish against local registries, and release-plz.yml's job over a scratch repository.
+release-journeys:
+    @ONEPIPELINE_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run onepipeline-release-journeys:release-journeys --outputStyle=stream-without-prefixes
+
+_release platform phase:
+    @case "$2" in \
+      plan | build | publish | verify | dry-run) just _release-python "$2" "$1" ;; \
+      *) echo "unknown phase '$2': choose plan, build, publish, verify or dry-run" >&2; exit 2 ;; \
+    esac
+
+# Windows runners carry `python`, not `python3`.
+_release-python *args:
+    @case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) py=python ;; *) py=python3 ;; esac; \
+      "$py" release/release.py "$@"
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
@@ -683,10 +814,30 @@ lint-llm-validate *args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     llmlint validate {{args}}
 
-# One verdict per tree, base commit, and judge configuration, rather than a fresh
-# roll of a non-deterministic judge every time. `scripts/llmlint-diff.sh` holds
-# that contract, including the one supported way to force a re-judge.
+# The cached `onepipeline:lint-llm-diff` target runs llmlint itself, keyed on the
+# tree, the resolved base commit and `llmlint fingerprint`, so an unchanged pass
+# replays and a failure is judged again; `--skip-nx-cache` forces a fresh judgement.
+# NX_RUN_COMMANDS_DIRECTLY=false: Nx 23.1 resolves a run-commands task on the
+# child's `exit` before reading its pipes, losing a fast-failing task's output
+# when its stdout is not a terminal (spike-nx-output-loss-report); remove it once
+# Nx collects run-commands output on `close`.
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
 # llmlint scoped to the files this branch changed since it forked from main.
-lint-llm-diff base="origin/main" *options:
-    @bash scripts/llmlint-diff.sh "$@"
+lint-llm-diff base="origin/main" *nx_args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="$1"
+    shift
+    sha="$(git rev-parse --verify --quiet "${base}^{commit}")" || {
+      echo "lint-llm-diff: '$base' does not resolve to a commit" >&2
+      exit 2
+    }
+    echo "lint-llm-diff: judging the diff against $base ($sha)"
+    LLMLINT_DIFF_BASE_SHA="$sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 NX_RUN_COMMANDS_DIRECTLY=false \
+      exec bash scripts/nx.sh run onepipeline:lint-llm-diff "$@"
+
+
+# The double's own protocol/backstop checks, with an independent cache edge.
+_codex-server-test: (_tier-test "codex_server" codex-server-tier)
+
+_codex-server-test-quick: (_tier-test-quick codex-server-tier)

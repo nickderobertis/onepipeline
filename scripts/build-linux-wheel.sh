@@ -2,10 +2,12 @@
 # Build the `onepipeline-cli` wheel for one Linux target inside the manylinux
 # image the release publishes it from.
 #
-# This is the one definition of a Linux wheel build: release.yml's Linux
-# `build-wheels` legs and ci.yml's `wheel` legs both run it through `just
-# wheel-linux`, so a pull request builds under the image, prerequisites and
-# maturin invocation a release does.
+# This is the one definition of a Linux wheel build: release.yml's `build-linux`
+# and `build-linux-arm64` jobs run it through release/release.py, and ci.yml's
+# `wheel` job through `just wheel-linux`, so a pull request builds under the
+# image, prerequisites and maturin invocation a release does. The release
+# packages each Linux archive and npm package from the binary inside its wheel,
+# so all three share that wheel's glibc floor.
 #
 # The prerequisites: `openssl-sys` is built with its vendored feature (the linked
 # onetaskgraph stores reach `reqwest` with `native-tls-vendored`), which compiles
@@ -14,8 +16,9 @@
 #
 # The build runs as root in the container, because installing those modules
 # does; what it writes into the checkout is handed back to the invoking user on
-# the way out, pass or fail. A target whose architecture is not the host's runs
-# under whatever emulation Docker has — the release's legs are native.
+# the way out, pass or fail. Each target builds in its own architecture's image;
+# the release's jobs are native, and a target whose architecture is not the
+# host's runs under whatever emulation Docker has.
 #
 # Usage:
 #   build-linux-wheel.sh --target TRIPLE [--out DIR]
@@ -52,11 +55,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The Linux targets release.yml's `build-wheels` matrix builds;
-# tests/linux_wheel.rs fails when the two sets differ.
-# Each carries the SHA-256 static.rust-lang.org publishes for rustup-init
-# $rustup_version on that architecture, so the installer the container runs is
-# the one pinned here and not whatever the download returned.
+# The Linux targets release/release.py's `linux` and `linux-arm64` platforms
+# build; tests/linux_wheel.rs fails when the two sets differ. Each carries the SHA-256 static.rust-lang.org publishes for
+# rustup-init $rustup_version on that architecture, so the installer the
+# container runs is the one pinned here and not whatever the download returned.
 rustup_version="1.29.1"
 case "$target" in
   x86_64-unknown-linux-gnu)

@@ -326,7 +326,7 @@ pub fn render_results_json(results: &Results) -> Result<String> {
     let comments = crate::review::read(&view.state)?;
     let statuses = view.state.statuses();
     to_json(&crate::review::ResultsDocument {
-        schema_version: 1,
+        schema_version: crate::review::RESULTS_SCHEMA_VERSION,
         run: &view.paths.run,
         nodes: view
             .state
@@ -943,6 +943,14 @@ pub struct Receipt {
     /// What the person who sent it should know beside the receipt, each a
     /// sentence of its own, in the order the binary says them.
     pub advice: Vec<String>,
+    /// Each node a `note` of the envelope named, with what the envelope's answer
+    /// says of that note: [`CommandVerdict::Queued`](crate::channel::CommandVerdict::Queued) while it waits in its
+    /// receiver's inbox for that receiver's turn — any one of several notes to
+    /// one node waiting is that node's word — and otherwise that note's own
+    /// verdict. Empty, and absent from the wire, where the envelope carried no
+    /// note or its commands are not answered yet. Entry 64 of
+    /// `docs/contract-divergences.md` states the key.
+    pub notes: std::collections::BTreeMap<String, crate::channel::CommandVerdict>,
 }
 
 impl Receipt {
@@ -1012,6 +1020,9 @@ impl serde::Serialize for Receipt {
         }
         if let Some(commands) = self.commands() {
             receipt.serialize_entry("commands", commands)?;
+        }
+        if !self.notes.is_empty() {
+            receipt.serialize_entry("notes", &self.notes)?;
         }
         receipt.end()
     }
@@ -1157,7 +1168,49 @@ fn submit(
             )),
         } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
-    Ok(Receipt { outcome, advice })
+    let notes = note_verdicts(paths, &envelope.commands, outcome);
+    Ok(Receipt {
+        outcome,
+        advice,
+        notes,
+    })
+}
+
+/// What a receipt says of each node a note of `commands` named — see
+/// [`Receipt::notes`]: read off the answer the run's reconciler gave the
+/// envelope, and `applied` for every note this process applied itself, which
+/// reached its node's conversation or was carried to its next dispatch before
+/// the receipt was written. Nothing for an envelope with no answer yet.
+fn note_verdicts(
+    paths: &RunPaths,
+    commands: &[Command],
+    outcome: ReplyOutcome,
+) -> std::collections::BTreeMap<String, crate::channel::CommandVerdict> {
+    use crate::channel::CommandVerdict;
+    let mut notes = std::collections::BTreeMap::new();
+    if !commands
+        .iter()
+        .any(|command| matches!(command, Command::Note { .. }))
+    {
+        return notes;
+    }
+    let verdicts: Vec<CommandVerdict> = match outcome {
+        ReplyOutcome::AppliedByRun { reply, .. } => crate::channel::ChannelState::new(paths)
+            .outcome_of(reply)
+            .map(|answer| answer.results.iter().map(|result| result.outcome).collect())
+            .unwrap_or_default(),
+        ReplyOutcome::AppliedHere { .. } => vec![CommandVerdict::Applied; commands.len()],
+        ReplyOutcome::Answered { .. } | ReplyOutcome::Queued { .. } => Vec::new(),
+    };
+    for (command, verdict) in commands.iter().zip(verdicts) {
+        if let Command::Note { id, .. } = command {
+            let word = notes.entry(id.clone()).or_insert(verdict);
+            if verdict == CommandVerdict::Queued {
+                *word = verdict;
+            }
+        }
+    }
+    notes
 }
 
 /// What `onepipeline surface` queued.
@@ -1478,14 +1531,35 @@ impl Adopted {
 /// Those refusals; a lock that cannot be taken; and, detached, a retained
 /// driver that did not claim the run, with what it said in its log.
 pub fn adopt(paths: &RunPaths, how: Adopt) -> Result<Adopted> {
+    adopt_with_writeback_item_budget(paths, how, None)
+}
+
+/// Adopt a run, optionally replacing its persisted per-item write-back budget.
+///
+/// Naming no budget keeps the recorded value. Zero is refused before any write.
+/// The environment is never consulted during adoption.
+///
+/// # Errors
+///
+/// The refusals of [`adopt`], and a zero budget.
+pub fn adopt_with_writeback_item_budget(
+    paths: &RunPaths,
+    how: Adopt,
+    budget: Option<u64>,
+) -> Result<Adopted> {
+    if budget == Some(0) {
+        return Err(Error::Refused(crate::writeback::refused_zero_budget(
+            "--writeback-item-budget",
+        )));
+    }
     Ok(match how {
         Adopt::Attached => Adopted::Attached {
             run: paths.run.clone(),
-            settlement: driver::adopt_attached(paths, &mut |_| {})?,
+            settlement: driver::adopt_attached(paths, budget, &mut |_| {})?,
         },
         Adopt::Detached(retain) => Adopted::Detached {
             run: paths.run.clone(),
-            pid: driver::adopt_detached(paths, &retain)?,
+            pid: driver::adopt_detached(paths, &retain, budget)?,
         },
     })
 }
@@ -1730,6 +1804,43 @@ fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
         .map_err(|error| Error::Invalid(format!("the answer does not serialise: {error}")))
 }
 
+/// The removal or conservative refusal of `onepipeline scratch discard RUN`.
+#[derive(Debug)]
+pub struct ScratchDiscard {
+    pub(crate) outcome: crate::scratch::DiscardOutcome,
+}
+
+impl ScratchDiscard {
+    /// Zero for removal (including no scratch), one for partial failure, two for refusal.
+    pub fn exit_code(&self) -> i32 {
+        self.outcome.exit_code()
+    }
+}
+
+/// Remove only the dispatch scratch of an ended, undriven run named under `root`.
+///
+/// Unknown or path-like names, non-ended runs, live drivers and a symlink scratch root
+/// are refused without deletion. Links within scratch are removed without following them.
+///
+/// # Errors
+///
+/// A run's store cannot be read, its handover cannot be held, or its removal cannot be journalled.
+pub fn scratch_discard(root: &Path, run: &str) -> Result<ScratchDiscard> {
+    Ok(ScratchDiscard {
+        outcome: crate::scratch::discard(root, run)?,
+    })
+}
+
+/// The removal report on stdout, empty for a refusal.
+pub fn render_scratch_discard(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stdout()
+}
+
+/// The refusal or each directory removal failure on stderr, empty for complete removal.
+pub fn render_scratch_discard_errors(discarded: &ScratchDiscard) -> String {
+    discarded.outcome.stderr()
+}
+
 /// Receipt for one explicitly requested review discovery pass.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
@@ -1739,6 +1850,9 @@ pub enum ReviewReceipt {
         /// A host read failed after successful reads were journalled.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// The drafts whose check verdict is still owed by a later trigger's read.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outstanding: Vec<String>,
     },
     /// The request is durable and the driver has not yet answered.
     Requested {
@@ -1747,7 +1861,24 @@ pub enum ReviewReceipt {
     },
 }
 
-/// Discover feedback without starting work or a driver.
+impl From<crate::trigger::Answered> for ReviewReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
+        match answered {
+            crate::trigger::Answered::Performed { error, outstanding } => {
+                Self::Performed { error, outstanding }
+            }
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
+        }
+    }
+}
+
+/// Readjust a run's drafts, then discover their feedback, starting no work from it.
+///
+/// Readjusts first: the run's drafts are read where they stand on the host, in one
+/// batched read per repository and root, and what that read found is recorded before
+/// discovery reads each draft's feedback out of the same read. Bringing the drafts a
+/// landing moved onto their placement follows: a run something drives does it in its
+/// loop, and on a run nothing drives this call drives the run until those settle.
 ///
 /// # Errors
 /// An unknown run, another session's undriven run, or a ledger/channel refusal.
@@ -1757,7 +1888,17 @@ pub fn review(
     session: &str,
     timeout: std::time::Duration,
 ) -> Result<ReviewReceipt> {
-    crate::review::requested(paths, session, timeout)
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Review)
+        .map(ReviewReceipt::from)
+}
+
+/// The drafts a receipt says still owe their verdict, as a clause of its line.
+fn outstanding_clause(outstanding: &[String]) -> String {
+    if outstanding.is_empty() {
+        String::new()
+    } else {
+        format!("; check verdict outstanding: {}", outstanding.join(", "))
+    }
 }
 
 /// Render the review receipt as one document or one terminal line.
@@ -1769,8 +1910,14 @@ pub fn render_review(receipt: &ReviewReceipt, json: bool) -> Result<String> {
         to_json(receipt)
     } else {
         Ok(match receipt {
-            ReviewReceipt::Performed { error: None } => "review performed".to_owned(),
-            ReviewReceipt::Performed { error: Some(error) } => format!("review failed: {error}"),
+            ReviewReceipt::Performed {
+                error: None,
+                outstanding,
+            } => format!("review performed{}", outstanding_clause(outstanding)),
+            ReviewReceipt::Performed {
+                error: Some(error),
+                outstanding,
+            } => format!("review failed: {error}{}", outstanding_clause(outstanding)),
             ReviewReceipt::Requested { request } => format!("review requested ({request})"),
         })
     }
@@ -1780,8 +1927,126 @@ impl ReviewReceipt {
     /// Success or a durable request exits 0; a performed pass with a host failure exits 1.
     pub const fn exit_code(&self) -> i32 {
         match self {
-            Self::Performed { error: Some(_) } => 1,
+            Self::Performed { error: Some(_), .. } => 1,
             _ => 0,
         }
     }
+}
+
+/// Receipt for one explicitly requested readjustment.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum ReadjustReceipt {
+    /// The single writer read the drafts and readjusted them.
+    Performed {
+        /// A repository's standings read failed; its drafts were left as they were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// The drafts whose check verdict is still owed by a later trigger's read.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        outstanding: Vec<String>,
+    },
+    /// The request is durable and the driver has not yet answered.
+    Requested {
+        /// Its durable command queue id.
+        request: u64,
+    },
+}
+
+impl From<crate::trigger::Answered> for ReadjustReceipt {
+    fn from(answered: crate::trigger::Answered) -> Self {
+        match answered {
+            crate::trigger::Answered::Performed { error, outstanding } => {
+                Self::Performed { error, outstanding }
+            }
+            crate::trigger::Answered::Requested(request) => Self::Requested { request },
+        }
+    }
+}
+
+/// Readjust a run's drafts onto what has landed on the host, surfacing no comment.
+///
+/// Every draft is read in one batched standings read per repository and root; each
+/// landing, absorption and close is recorded, every draft a landing moved is brought
+/// onto its placement and its change request moved after its push, and each deferred
+/// verdict is read. A run something drives is asked through its driver; one nothing
+/// drives is readjusted under its lock.
+///
+/// # Errors
+/// An unknown run, another session's undriven run, or a ledger/channel refusal.
+/// A host read failure is carried by the performed receipt.
+pub fn readjust(
+    paths: &RunPaths,
+    session: &str,
+    timeout: std::time::Duration,
+) -> Result<ReadjustReceipt> {
+    crate::trigger::requested(paths, session, timeout, crate::trigger::Asked::Readjust)
+        .map(ReadjustReceipt::from)
+}
+
+/// Render the readjust receipt as one document or one terminal line.
+///
+/// # Errors
+/// A receipt that could not be serialized.
+pub fn render_readjust(receipt: &ReadjustReceipt, json: bool) -> Result<String> {
+    if json {
+        to_json(receipt)
+    } else {
+        Ok(match receipt {
+            ReadjustReceipt::Performed {
+                error: None,
+                outstanding,
+            } => format!("readjust performed{}", outstanding_clause(outstanding)),
+            ReadjustReceipt::Performed {
+                error: Some(error),
+                outstanding,
+            } => format!(
+                "readjust failed: {error}{}",
+                outstanding_clause(outstanding)
+            ),
+            ReadjustReceipt::Requested { request } => format!("readjust requested ({request})"),
+        })
+    }
+}
+
+impl ReadjustReceipt {
+    /// Success or a durable request exits 0; a performed readjustment with a failed
+    /// host read exits 1.
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Performed { error: Some(_), .. } => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// Validated label keys, values and groups, and the typed overlay document.
+pub use crate::labels::{
+    LabelAuthor, LabelGroup, LabelKey, LabelOverlay, LabelTimestamp, LabelValue, RunGroup,
+};
+
+/// A whole replacement of the run's label overlay; launch metadata is immutable.
+pub struct LabelRequest<'a> {
+    /// Validated labels to overlay.
+    pub labels: &'a std::collections::BTreeMap<LabelKey, LabelValue>,
+    /// Launch keys to remove before overlaying labels.
+    pub unlabel: &'a [LabelKey],
+    /// Preserve, override, or suppress the resolved launch group.
+    pub group: LabelGroup,
+    /// Override another driving session's ownership.
+    pub force: bool,
+    /// The calling launcher.
+    pub launcher: &'a str,
+    /// The calling session.
+    pub session: &'a str,
+}
+
+/// Replace `labels.json` without rewriting the launch or journalling.
+pub fn label(paths: &RunPaths, request: LabelRequest<'_>) -> Result<LabelOverlay> {
+    crate::labels::replace(paths, request)
+}
+
+/// The complete replacement overlay, rendered as one JSON object.
+pub fn render_labelled(overlay: &LabelOverlay) -> String {
+    serde_json::to_string(overlay).expect("an overlay contains only JSON-compatible fields")
 }

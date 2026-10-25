@@ -221,7 +221,7 @@ impl ExecutorRules {
             path: path.to_path_buf(),
             source: e,
         })?;
-        let rules: Self = serde_norway::from_str(&text)
+        let rules: Self = crate::yaml::from_str(&text)
             .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
         rules.validate()?;
         Ok(rules)
@@ -612,7 +612,7 @@ mod tests {
         let yaml = "executors:\n  - {name: local, type: local}\nrules:\n  \
                     - when: {node_label: {persona: reviewer}}\n    use: local\n  \
                     - use: local\n";
-        let rules: ExecutorRules = serde_norway::from_str(yaml).expect("it parses");
+        let rules: ExecutorRules = crate::yaml::from_str(yaml).expect("it parses");
         rules.validate().expect("it validates");
         assert_eq!(
             rules.rules[0]
@@ -623,7 +623,7 @@ mod tests {
             BTreeMap::from([("persona".to_string(), "reviewer".to_string())])
         );
         let again: ExecutorRules =
-            serde_norway::from_str(&serde_norway::to_string(&rules).expect("serializes"))
+            crate::yaml::from_str(&crate::yaml::to_string(&rules).expect("serializes"))
                 .expect("re-parses");
         assert_eq!(again, rules);
     }

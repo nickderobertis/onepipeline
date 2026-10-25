@@ -742,3 +742,38 @@ fn an_outcome_record_that_does_not_read_is_refused_rather_than_passed_over() {
         "{refused}"
     );
 }
+
+/// An envelope answered twice — as one is when a later `withdraw-note` takes a note
+/// of it back — reads as its latest answer, on a channel directory on disk, and the
+/// first answer stays in the log beside it.
+#[test]
+fn an_envelope_answered_again_reads_as_its_latest_answer() {
+    let scratch = Scratch::new("answered-again");
+    let transport: Arc<dyn Transport> =
+        Arc::new(LocalTransport::open(scratch.path()).expect("opens"));
+    let channel = Channel::open(&transport).expect("the channel opens");
+    let answered = |applied: bool, reason: Option<&str>| CommandOutcome {
+        id: 4,
+        applied,
+        reason: reason.map(str::to_owned),
+        results: Vec::new(),
+    };
+    channel
+        .answer_commands(&answered(true, None))
+        .expect("answered");
+    assert_eq!(
+        channel.outcome_of(4).expect("a read"),
+        Some(answered(true, None))
+    );
+    let again = answered(
+        false,
+        Some("command 0 ('note') was withdrawn by envelope 5"),
+    );
+    channel.answer_commands(&again).expect("answered again");
+    assert_eq!(
+        channel.outcome_of(4).expect("a read"),
+        Some(again),
+        "the envelope did not read as its latest answer"
+    );
+    assert_eq!(channel.outcomes().unread_count().expect("a count"), 2);
+}

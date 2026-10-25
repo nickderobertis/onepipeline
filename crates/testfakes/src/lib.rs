@@ -20,7 +20,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod codex_app_server;
+pub mod containment;
 pub mod hosted;
+pub mod yaml;
 
 /// The environment variable naming the directory a double is scripted from.
 pub const SCRIPT_DIR_ENV: &str = "ONEPIPELINE_FAKE_DIR";
@@ -701,6 +705,46 @@ pub fn ask_manager(question: &str) {
     }
 }
 
+/// Start `onepipeline stop --force` on the run this process belongs to, with
+/// what it prints going to `<record>.out`, record its pid in `<record>.pid`,
+/// and do not wait for it.
+///
+/// The run is read out of this process's own environment, as [`ask_manager`]
+/// reads it. Not waited for, because the stop ends the process that started
+/// it; `--force` because the dispatch is not the session that launched the run.
+/// The pid is how a reader knows the stop has answered: once that process has
+/// ended, what it printed is all there is.
+pub fn stop_own_run(record: &Path) {
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to stop")),
+    };
+    let cli = match std::env::var(CLI_BIN_ENV) {
+        Ok(cli) if !cli.is_empty() => cli,
+        _ => fail(&format!(
+            "{CLI_BIN_ENV} is unset: no engine to stop it with"
+        )),
+    };
+    // The process that becomes the stop records its own pid first, and then
+    // becomes it: a pid written by this process after the spawn could come too
+    // late, because the stop ends this process.
+    let script = "printf '%s\\n' \"$$\" >\"$2.partial\" && mv \"$2.partial\" \"$2\" \
+        && exec \"$0\" stop \"$1\" --force >\"$3\" 2>&1";
+    let started = std::process::Command::new("sh")
+        .args(["-c", script])
+        .arg(&cli)
+        .arg(&run)
+        .arg(format!("{}.pid", record.display()))
+        .arg(format!("{}.out", record.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Err(error) = started {
+        fail(&format!("cannot run `{cli} stop {run}`: {error}"));
+    }
+}
+
 /// Act as the dag-scope graph's monitor member: observe, and change nothing.
 ///
 /// Exactly what the shipped `monitor` persona is for. It runs **no engine
@@ -748,6 +792,30 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
             dir.join("observer.go"),
             dir.join(format!("observer.go.{nth}")),
         ]);
+    }
+    // What a real monitor member reads once it is let go, where a journey asks
+    // (`observer.monitor`): the run's whole merged stream, through the very
+    // `onepipeline monitor RUN --filter detailed` it is told to read — the
+    // build under test, not a copy of its rendering — kept as it was printed.
+    if dir.join("observer.monitor").exists() {
+        let cli = std::env::var(CLI_BIN_ENV)
+            .unwrap_or_else(|_| fail(&format!("{CLI_BIN_ENV} is unset: no monitor to read")));
+        let read = std::process::Command::new(cli)
+            .args(["monitor", &run, "--filter", "detailed"])
+            .output()
+            .unwrap_or_else(|error| {
+                fail(&format!("the observer's monitor could not run: {error}"))
+            });
+        if !read.status.success() {
+            fail(&format!(
+                "the observer's monitor refused: {}",
+                String::from_utf8_lossy(&read.stderr)
+            ));
+        }
+        append(
+            &dir.join("observer-monitor.txt"),
+            &String::from_utf8_lossy(&read.stdout),
+        );
     }
     std::process::ExitCode::SUCCESS
 }
@@ -952,7 +1020,7 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
 
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
@@ -975,7 +1043,7 @@ pub fn scheduled_member(graph: &str) -> std::result::Result<String, String> {
 pub fn declared_members(graph: &str) -> std::result::Result<Vec<String>, String> {
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
@@ -1003,7 +1071,7 @@ fn declared_judge_command(graph: &str) -> std::result::Result<(String, Vec<Strin
 
     let text = std::fs::read_to_string(graph)
         .map_err(|error| format!("cannot read the graph {graph}: {error}"))?;
-    let config: oneagentgraph::config::GraphConfig = serde_norway::from_str(&text)
+    let config: oneagentgraph::config::GraphConfig = crate::yaml::from_str(&text)
         .map_err(|error| format!("{graph} is not an agent graph: {error}"))?;
     oneagentgraph::config::validate(&config)
         .map_err(|refusal| format!("{graph} is not a graph oneagentgraph would run: {refusal}"))?;
@@ -1044,4 +1112,53 @@ fn expand(part: &str) -> String {
 fn launch_record(run: &str) -> Option<PathBuf> {
     let root = std::env::var("ONEPIPELINE_RUNS_DIR").ok()?;
     (!root.is_empty() && !run.is_empty()).then(|| PathBuf::from(root).join(run).join("launch.json"))
+}
+
+/// The answer a `review-reply` dispatch gives: `review-reply.result`, a JSON value
+/// written verbatim, where a journey scripted one; otherwise one reply per comment the
+/// task's `## Comments` names — `answered`, linking the first commit `## Commits`
+/// lists, where it lists one, and `declined` with the reason's first line otherwise.
+/// `None` for any task that is not a reply drafting's. Shared by `fake-oneagentgraph`,
+/// which answers a drafting whole, and `fake-claude`, which answers the turn a real
+/// `oneagentgraph` runs for one, so both compose the same answer from the same task.
+pub fn replied_answer(task: &str, dir: &Path) -> Option<serde_json::Value> {
+    if !task.starts_with("Draft one terse reply to each review comment") {
+        return None;
+    }
+    if let Some(scripted) = node_script(dir, "review-reply", "result") {
+        return Some(
+            serde_json::from_str(&scripted)
+                .unwrap_or_else(|error| fail(&format!("review-reply.result is not JSON: {error}"))),
+        );
+    }
+    let section = |name: &str| -> String {
+        task.split(&format!("\n## {name}\n"))
+            .nth(1)
+            .map(|rest| rest.split("\n## ").next().unwrap_or_default().to_owned())
+            .unwrap_or_default()
+    };
+    let comments: Vec<String> = section("Comments")
+        .lines()
+        .filter_map(|line| line.strip_prefix("### ").map(str::to_owned))
+        .collect();
+    let commit = section("Commits")
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .find_map(|line| line.split_whitespace().last().map(str::to_owned));
+    let reason = section("Reason")
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("out of scope")
+        .chars()
+        .take(400)
+        .collect::<String>();
+    Some(
+        serde_json::json!({"replies": comments.iter().map(|comment| match &commit {
+        Some(url) => serde_json::json!({"comment": comment, "disposition": "answered",
+            "body": format!("Addressed in {url}.")}),
+        None => serde_json::json!({"comment": comment, "disposition": "declined",
+            "body": format!("Left as it is: {reason}")}),
+    }).collect::<Vec<_>>()}),
+    )
 }

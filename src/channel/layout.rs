@@ -384,7 +384,7 @@ impl Message for QueuedCommands {
     const SCHEMA: SchemaId = QUEUED_COMMANDS_SCHEMA;
 }
 
-/// The four things that can become of one command of an envelope.
+/// The five things that can become of one command of an envelope.
 ///
 /// One field rather than a boolean and a sentence, because "not applied" was two
 /// facts wearing one word: a command that was wrong and a command that was fine.
@@ -417,13 +417,21 @@ pub enum CommandVerdict {
     Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,
+    /// A live `note` handed to its receiver's inbox, waiting for that
+    /// receiver's turn to take it.
+    ///
+    /// The envelope is answered as its notes are handed off rather than once
+    /// each receiver's turn ends, which can be hours later. What the receiver's
+    /// turn later makes of the note — taken, carried or refused — is that note's
+    /// own record in the run's journal, and never rewrites this answer.
+    Queued,
 }
 
 /// What became of **one** command of an envelope.
 ///
 /// Every command is evaluated, whatever the ones before it said, so each entry is
 /// that command's **own** answer. The envelope is still atomic — a refusal
-/// anywhere in it applies none of it — and the four words of [`CommandVerdict`]
+/// anywhere in it applies none of it — and the words of [`CommandVerdict`]
 /// are what tells apart the facts a single boolean could not: which commands
 /// were wrong, which were fine and went down with them, and which of those had
 /// already been read by a conversation that cannot unread it. A manager reading
@@ -445,6 +453,19 @@ pub struct CommandResult {
     // llmlint: ignore[invalid_states_unrepresentable] the record `command-outcomes.jsonl` holds, in the shape 0.28.2 wrote and the recorded directories carry; folding `reason` into the verdict would change the bytes this layout must read and write exactly, and the reconciler that writes a result is where the pairing is enforced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The refusal by kind, where the reconciler refused this command for a
+    /// reason it names as one — `reason` is then its text. Omitted otherwise, so
+    /// every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the manager's ruling on this node fixes the wire shape: an optional `refusal` beside `reason`, `reason` its display text, every existing outcome reading unchanged — so it cannot fold into the verdict or replace `reason` without changing bytes this layout reads and writes; the reconciler sets both from one refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<crate::channel::Refusal>,
+    /// How the live turn that took a `note` took it: `interrupted`, or
+    /// `turn-end`. Present exactly where an applied note reached the worker or
+    /// the supervisor, as that note's `note-delivered` record says, and omitted
+    /// otherwise — so every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan node `op-interrupting-notes` fixes this wire shape: an optional `turn` beside `outcome`, omitted where absent so every outcome written before it reads unchanged, as `reason` and `refusal` beside it are. Folding it into the verdict would change the bytes `command-outcomes.jsonl` holds; the reconciler writes it only from an applied note's own `note-delivered` record (`engine::turn_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<crate::note::NoteTurn>,
 }
 
 /// The reconciler's answer to one submitted envelope, as
@@ -457,6 +478,16 @@ pub struct CommandResult {
 /// boolean could never say is *which* command decided it, which is what left a
 /// manager believing a node's bar had changed when the command that would have
 /// changed it was never compiled.
+//
+// One envelope is not all-or-nothing: one whose live notes a run's driver hands
+// to their receivers commits everything else as it is handed, and a receiver's
+// conversation can refuse its note afterwards. Its outcome is then `applied:
+// false` with a `reason` opening `applied in part:` that names the commands
+// that committed and those that refused, and each result says the same —
+// `applied` for a command that committed, `refused` for one that refused. Plain
+// comments rather than these types' docs, which are the published layout
+// document's text: `engine::partly_applied` writes it, and
+// `docs/contract-divergences.md` entry 108 states it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 // llmlint: ignore-block[invalid_states_unrepresentable] the record `command-outcomes.jsonl`
 // holds, in the shape 0.28.2 wrote and the recorded directories carry: `applied` and
@@ -490,6 +521,8 @@ impl Message for CommandOutcome {
 pub enum Op {
     /// Perform explicit review discovery.
     Review,
+    /// Readjust the run's drafts onto what has landed.
+    Readjust,
     /// Replace one node's graph overrides.
     SetNodeSets,
     /// Replace run-wide node graph overrides.
@@ -517,17 +550,21 @@ pub enum Op {
     Amend,
     /// Deliver a note into a node's dispatch.
     Note,
+    /// Take back a note no turn has read yet.
+    WithdrawNote,
     /// Settle a node from evidence.
     Settle,
     /// Rework a node settled as a review draft, on its own branch.
     Rework,
     /// Retitle a node's open change request.
     Retitle,
+    /// Decline review comments on a node's draft, posting a reply to each.
+    Decline,
 }
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 17] = [
+    pub const ALL: [Op; 20] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -541,10 +578,13 @@ impl Op {
         Op::Finding,
         Op::Amend,
         Op::Note,
+        Op::WithdrawNote,
         Op::Settle,
         Op::Rework,
         Op::Retitle,
         Op::Review,
+        Op::Readjust,
+        Op::Decline,
     ];
 
     /// The op's wire word.
@@ -564,10 +604,13 @@ impl Op {
             Op::Finding => "finding",
             Op::Amend => "amend",
             Op::Note => "note",
+            Op::WithdrawNote => "withdraw-note",
             Op::Settle => "settle",
             Op::Rework => "rework",
             Op::Retitle => "retitle",
             Op::Review => "review",
+            Op::Readjust => "readjust",
+            Op::Decline => "decline",
         }
     }
 
@@ -1173,6 +1216,7 @@ impl Channel {
     /// could be this envelope's answer, and "not answered yet" would then be a
     /// wrong answer rather than an unknown one.
     pub fn outcome_of(&self, id: u64) -> Result<Option<CommandOutcome>, QueueError> {
+        let mut answered = None;
         for (record, _) in self.outcomes.raw().log(None)? {
             let outcome = serde_json::from_value::<CommandOutcome>(record).map_err(|failure| {
                 QueueError::Shape {
@@ -1180,11 +1224,13 @@ impl Channel {
                     why: failure.to_string(),
                 }
             })?;
+            // The latest answer stands: an envelope a later `withdraw-note` took a
+            // note of is answered again.
             if outcome.id == id {
-                return Ok(Some(outcome));
+                answered = Some(outcome);
             }
         }
-        Ok(None)
+        Ok(answered)
     }
 }
 

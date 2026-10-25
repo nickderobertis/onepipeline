@@ -210,6 +210,37 @@ pub struct RunState {
     /// empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) titles_unverified: BTreeMap<String, crate::payload::TitleUnverified>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] node ids, branches and commits are
+    // the plain strings `bases`, `branches` and `heads` beside these carry them as — node ids
+    // the graph validated, a branch and a commit `vcs::usable` or `onevcs` checked where the
+    // record they fold from was written — and the payload types these hold are the published
+    // records' own; a newtype on these alone would disagree with every neighbouring map.
+    /// Each draft whose change request was merged into another node's branch, and that
+    /// node. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) absorbed: BTreeMap<String, String>,
+    /// Each draft whose change request was closed without merging, until it is reopened.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(crate) closed_changes: BTreeSet<String>,
+    /// Each draft a readjustment still owes, with the landed or absorbed nodes that made
+    /// it owed. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) readjust_owed: BTreeMap<String, BTreeSet<String>>,
+    /// How each node found landed by a readjustment was found. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) landed_how: BTreeMap<String, crate::payload::NodeLanded>,
+    /// The last readjustment of each draft. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) readjusted: BTreeMap<String, crate::payload::NodeReadjusted>,
+    /// The head each draft's check verdict was last read for. Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) checks_read: BTreeMap<String, String>,
+    /// Each reopened draft's restored base, until its retarget deletes it again.
+    /// Omitted when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) reopened: BTreeMap<String, String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The branch prefix `onevcs` reported putting in front of the branches it cut
     /// for this run's sessions — `""` once it cut one and reported none — which is
     /// what a stack base is named under. `None` until a session cut a branch.
@@ -538,7 +569,7 @@ pub struct NodeActivity {
     /// has recorded something without naming a tool is not a dispatch doing
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
-    pub doing: Option<String>,
+    pub doing: Option<Doing>,
     /// What this node's dispatch has done, once it has done anything.
     ///
     /// Named for progress rather than for events because a heartbeat is an event
@@ -551,6 +582,60 @@ pub struct NodeActivity {
     /// Held apart from [`progress`](Self::progress) because the two answer
     /// opposite questions, and their union answers neither.
     pub last_heartbeat_at: Option<u64>,
+}
+
+/// What a node's dispatch last said it was doing: words read off the record,
+/// or the reference whose description says it.
+///
+/// One value rather than a text beside an optional reference, because the two
+/// are never both the answer. Serialized as the text itself, or as the
+/// reference, so a checkpoint carries whichever the record did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Doing {
+    /// Words the record carried, or a step this crate named.
+    Said(String),
+    /// The last `turn-activity` this dispatch recorded, where it referenced its
+    /// history rather than carrying a copy: described when the readout is drawn
+    /// rather than when the record is folded — a fold reads no history file,
+    /// so a state resumed from a checkpoint never carries an answer the file
+    /// has since changed.
+    Referenced(ActivityReference),
+}
+
+/// A `turn-activity`'s reference into its history, and nothing else: a copy, or
+/// a reference of another kind, is not what a dispatch's last activity can be.
+///
+/// Serialized as `{"activity": …}`, the spelling the same reference has as a
+/// [`crate::views::transcript::TranscriptRef`], so a checkpoint reads the same
+/// either way — and one naming anything else is refused rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityReference {
+    activity: oneagentgraph::event::ActivityTranscript,
+}
+
+impl ActivityReference {
+    /// Wrap the reference a `turn-activity` carried.
+    pub fn new(activity: oneagentgraph::event::ActivityTranscript) -> Self {
+        Self { activity }
+    }
+
+    /// The reference, as the resolver reads one.
+    pub fn transcript(&self) -> crate::views::transcript::TranscriptRef {
+        crate::views::transcript::TranscriptRef::Activity(self.activity.clone())
+    }
+}
+
+impl Doing {
+    /// The words, where the record carried words.
+    #[must_use]
+    pub fn said(&self) -> Option<&str> {
+        match self {
+            Self::Said(said) => Some(said),
+            Self::Referenced(_) => None,
+        }
+    }
 }
 
 /// What one node's dispatch has done that this build can date: how many
@@ -905,6 +990,7 @@ impl RunState {
             change_urls: self.change_urls.clone(),
             superseded: self.superseded.clone(),
             restacking: self.restacking.keys().cloned().collect(),
+            absorbed: self.absorbed.clone(),
             export_edges: self
                 .plan
                 .as_ref()
@@ -1105,6 +1191,8 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    #[cfg(test)]
+    crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
     // edit, no claim — and not a write that keeps the run looking busy either,
     // so a run reads exactly as it would without it. Only `status` reads it, off
@@ -1416,6 +1504,118 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             }
             state.titles_unverified.remove(&retitled.node);
         }
+        Some(journal::PipelineKind::NodeLanded) => {
+            let Ok(landed) = serde_json::from_value::<crate::payload::NodeLanded>(Value::Object(
+                payload.clone(),
+            )) else {
+                return;
+            };
+            let node = landed.node.clone();
+            state.landings.insert(node.clone(), Landing::Landed);
+            state.closed_changes.remove(&node);
+            state.readjust_owed.remove(&node);
+            for draft in crate::readjust::connected(state, &node) {
+                state
+                    .readjust_owed
+                    .entry(draft)
+                    .or_default()
+                    .insert(node.clone());
+            }
+            state.landed_how.insert(node, landed);
+        }
+        Some(journal::PipelineKind::NodeAbsorbed) => {
+            let Ok(absorbed) = serde_json::from_value::<crate::payload::NodeAbsorbed>(
+                Value::Object(payload.clone()),
+            ) else {
+                return;
+            };
+            state.readjust_owed.remove(&absorbed.node);
+            state
+                .absorbed
+                .insert(absorbed.node.clone(), absorbed.into.clone());
+            for draft in crate::readjust::connected(state, &absorbed.node) {
+                state
+                    .readjust_owed
+                    .entry(draft)
+                    .or_default()
+                    .insert(absorbed.node.clone());
+            }
+        }
+        Some(journal::PipelineKind::ChangeClosed) => {
+            if let Ok(closed) = serde_json::from_value::<crate::payload::ChangeClosed>(
+                Value::Object(payload.clone()),
+            ) {
+                state.closed_changes.insert(closed.node);
+            }
+        }
+        Some(journal::PipelineKind::ChangeReopened) => {
+            if let Ok(reopened) = serde_json::from_value::<crate::payload::ChangeReopened>(
+                Value::Object(payload.clone()),
+            ) {
+                state.closed_changes.remove(&reopened.node);
+                state.reopened.insert(reopened.node, reopened.restored_base);
+            }
+        }
+        Some(journal::PipelineKind::NodeReadjusted) => {
+            if let Ok(readjusted) = serde_json::from_value::<crate::payload::NodeReadjusted>(
+                Value::Object(payload.clone()),
+            ) {
+                state.readjust_owed.remove(&readjusted.node);
+                // A rework's replacement readjusted answers for the node it replaced.
+                let replaced: Vec<String> = state
+                    .superseded
+                    .iter()
+                    .filter(|(_, by)| **by == readjusted.node)
+                    .map(|(predecessor, _)| predecessor.clone())
+                    .collect();
+                for predecessor in replaced {
+                    state.readjust_owed.remove(&predecessor);
+                    state.reopened.remove(&predecessor);
+                }
+                state.reopened.remove(&readjusted.node);
+                state.restacking.remove(&readjusted.node);
+                state.readjusted.insert(readjusted.node.clone(), readjusted);
+            }
+        }
+        // A green verdict read after a deferred republication is the verdict its watch
+        // would have given: the draft is the review draft it reads as from then on.
+        Some(journal::PipelineKind::NodeChecksRead) => {
+            if let Ok(read) = serde_json::from_value::<crate::payload::NodeChecksRead>(
+                Value::Object(payload.clone()),
+            ) {
+                use crate::payload::ChecksVerdictWord as V;
+                let outcome = state.outcomes.get(&read.node).map(String::as_str);
+                match read.verdict {
+                    V::Passed | V::PassedWithSkipped | V::NoneRequired => {
+                        state
+                            .checks_read
+                            .insert(read.node.clone(), read.head.clone());
+                        if outcome == Some(crate::vcs::REVIEW_DRAFTED_UNCHECKED) {
+                            state
+                                .outcomes
+                                .insert(read.node, crate::vcs::REVIEW_DRAFTED.to_owned());
+                        }
+                    }
+                    V::Failed => {
+                        state
+                            .checks_read
+                            .insert(read.node.clone(), read.head.clone());
+                    }
+                    // A head no verdict was reached on yet stays outstanding, and is read
+                    // again: a review draft whose head moved past the one recorded — a
+                    // cold host's — is owed its verdict from here on.
+                    V::Pending => {
+                        if outcome == Some(crate::vcs::REVIEW_DRAFTED)
+                            && state.heads.get(&read.node) != Some(&read.head)
+                        {
+                            state
+                                .outcomes
+                                .insert(read.node, crate::vcs::REVIEW_DRAFTED_UNCHECKED.to_owned());
+                        }
+                    }
+                }
+            }
+        }
         Some(journal::PipelineKind::TitleUnverified) => {
             let Ok(unverified) = serde_json::from_value::<crate::payload::TitleUnverified>(
                 Value::Object(payload.clone()),
@@ -1621,6 +1821,14 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         // The firing driver's own stream: it is the process that released the run,
         // and the only one this record can prove let go. See `RunState::let_go_by`.
+        Some(journal::PipelineKind::ScratchRetained) => {
+            state.let_go_by = DriverClaim::of_stream(&event.stream);
+        }
+        Some(journal::PipelineKind::ScratchRemoved)
+            if payload.get("trigger").and_then(Value::as_str) == Some("success") =>
+        {
+            state.let_go_by = DriverClaim::of_stream(&event.stream);
+        }
         Some(journal::PipelineKind::RunHookFired) => {
             state.let_go_by = DriverClaim::of_stream(&event.stream);
         }
@@ -2119,12 +2327,42 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::NoteDelivered {
                 node,
                 text,
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { .. },
                 ..
             } => {
-                state
-                    .pending_context
-                    .insert(node.clone(), text.as_str().to_string());
+                let carried = crate::note::with_carried(
+                    state.pending_context.get(node).map(String::as_str),
+                    text.as_str(),
+                );
+                state.pending_context.insert(node.clone(), carried);
+            }
+            // A carried note withdrawn before a dispatch took it is owed to
+            // nobody, and every other note carried beside it still is.
+            // A live one never was owed to a dispatch, so nothing comes off.
+            // llmlint: ignore[changed_behavior_has_e2e] a live note goes only to a node a
+            // dispatch already reached, for which `may_hold_a_note` answers from
+            // `dispatched_at` whatever this holds, so no journey can observe it; the graph's
+            // own fold beside it is driven by `tests/note`'s
+            // `a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch`,
+            // and this one by the projection tests' live withdrawal beside a carried twin.
+            Operation::NoteWithdrawn {
+                node,
+                text,
+                alike_after,
+                from: crate::note::WithdrawnFrom::Carried,
+                ..
+            } => {
+                let left = state.pending_context.get(node).and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
+                match left {
+                    Some(left) => {
+                        state.pending_context.insert(node.clone(), left);
+                    }
+                    None => {
+                        state.pending_context.remove(node);
+                    }
+                }
             }
             _ => {}
         }
@@ -2199,7 +2437,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // end to end by `tests/e2e/views.rs`.
         if !crate::vcs::is_session_opened(&event.kind) {
             if let Some(step) = crate::vcs::usable(&event.kind.0) {
-                activity.doing = Some(format!("publication {step}"));
+                activity.doing = Some(Doing::Said(format!("publication {step}")));
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         return;
@@ -2214,13 +2452,33 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
+    // A record referencing its history carries no copy to read, so what it is
+    // doing is the reference itself, described when the readout is drawn. A
+    // result answers the call already on the line, as below; a reference this
+    // build cannot read says so rather than leaving the last line standing.
+    if event.payload.contains_key("transcript") {
+        if text("kind") == crate::report::TOOL_RESULT {
+            return;
+        }
+        // An activity's `transcript` reads as an activity reference or not at
+        // all, so no other answer reaches the last arm.
+        match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
+            Some(Ok(crate::views::transcript::TranscriptRef::Activity(reference))) => {
+                activity.doing = Some(Doing::Referenced(ActivityReference::new(reference)));
+            }
+            // llmlint: ignore[changed_behavior_has_e2e] a `transcript` that is not a reference is a record no producer in this stack writes — the linked sibling serializes it from its own typed `ActivityTranscript` — so only a store something wearing a producer's clothes left behind reaches this, the ground `fold_refusal` suppresses its own `None` half on; the diagnostic it renders is the resolver's, held by `views::transcript`'s `unreadable_history_names_the_file_and_says_so`.
+            Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
+            Some(Ok(_)) | None => {}
+        }
+        return;
+    }
     // The agent's own words name no tool, and are what it is doing all the
     // same: its text or its reasoning, on the line oneharness draws it on, so a
     // node thinking between two calls reads as thinking rather than as still
     // running the last one.
     if let Some(voice) = crate::report::Voice::of(text("kind")) {
         if let Some(said) = voice.line(text("output")) {
-            activity.doing = Some(said);
+            activity.doing = Some(Doing::Said(said));
         }
         return;
     }
@@ -2239,7 +2497,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .collect::<Vec<_>>()
         .join(" ");
     if !summary.is_empty() {
-        activity.doing = Some(summary);
+        activity.doing = Some(Doing::Said(summary));
     }
 }
 
@@ -3022,12 +3280,16 @@ mod tests {
                         routed_to: Vec::new(),
                         reached,
                         envelope: None,
+                        index: None,
                     }]),
                 )],
             )
         };
 
-        let carried = fold(&[started.clone(), delivered(crate::note::Reached::Carried)]);
+        let carried = fold(&[
+            started.clone(),
+            delivered(crate::note::Reached::Carried { reason: None }),
+        ]);
         assert_eq!(carried.pending_context["build"], "the fixture moved");
         assert_eq!(
             carried
@@ -3040,12 +3302,127 @@ mod tests {
             "a note no turn took did not reach the node it is still owed to"
         );
 
-        let taken = fold(&[started, delivered(crate::note::Reached::Worker)]);
+        let taken = fold(&[
+            started,
+            delivered(crate::note::Reached::Worker { turn: None }),
+        ]);
         assert!(
             taken.pending_context.is_empty(),
             "a note a running turn read was also owed to the dispatch after it"
         );
         assert_eq!(taken.graph.get("build").expect("build").context, None);
+    }
+
+    /// Replay reaches the planner context the live driver composed: two notes
+    /// carried to one node are both owed to its next dispatch, and withdrawing
+    /// either — the first or the last — leaves exactly the other, in the graph
+    /// the dispatch renders and in what the run says is pending.
+    #[test]
+    fn a_withdrawn_carried_note_leaves_the_other_carried_note_owed_on_replay() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let carried = |seq: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: text.parse().expect("a usable note"),
+                        criterion: None,
+                        shown_to: Vec::new(),
+                        routed_to: Vec::new(),
+                        reached: crate::note::Reached::Carried { reason: None },
+                        envelope: Some(seq),
+                        index: Some(0),
+                    }]),
+                )],
+            )
+        };
+        let withdrawn_from = |envelope: u64, text: &str, from| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                3,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteWithdrawn {
+                        node: "build".into(),
+                        envelope,
+                        index: 0,
+                        reason: crate::note::WithdrawalReason::try_from(
+                            "the fixture moved back".to_string(),
+                        )
+                        .expect("a reason"),
+                        from,
+                        text: text.parse().expect("a usable note"),
+                        alike_after: 0,
+                    }]),
+                )],
+            )
+        };
+        let withdrawn = |envelope: u64, text: &str| {
+            withdrawn_from(envelope, text, crate::note::WithdrawnFrom::Carried)
+        };
+        let both = [
+            started.clone(),
+            carried(1, "the fixture moved"),
+            carried(2, "keep the loader"),
+        ];
+        let owed = fold(&both);
+        // A live note of the same text, withdrawn, was carried onto nothing, so
+        // both carried notes stay owed to the node's next dispatch.
+        let mut beside_live = both.to_vec();
+        beside_live.push(withdrawn_from(
+            4,
+            "the fixture moved",
+            crate::note::WithdrawnFrom::Live,
+        ));
+        let kept = fold(&beside_live);
+        assert_eq!(
+            kept.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        assert_eq!(
+            kept.graph.get("build").expect("build").context.as_deref(),
+            Some("the fixture moved\n\nkeep the loader")
+        );
+        assert_eq!(
+            owed.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        for (envelope, gone, left) in [
+            (1, "the fixture moved", "keep the loader"),
+            (2, "keep the loader", "the fixture moved"),
+        ] {
+            let mut journal = both.to_vec();
+            journal.push(withdrawn(envelope, gone));
+            let replayed = fold(&journal);
+            assert_eq!(replayed.pending_context["build"], left);
+            assert_eq!(
+                replayed
+                    .graph
+                    .get("build")
+                    .expect("build")
+                    .context
+                    .as_deref(),
+                Some(left),
+                "replay did not leave the other carried note in the planner context"
+            );
+        }
+        let mut alone = vec![started, carried(1, "the fixture moved")];
+        alone.push(withdrawn(1, "the fixture moved"));
+        let none = fold(&alone);
+        assert!(none.pending_context.is_empty());
+        assert_eq!(none.graph.get("build").expect("build").context, None);
     }
 
     /// An arrival note the running turn could not take is owed to the node's next
@@ -3758,6 +4135,44 @@ mod tests {
         );
     }
 
+    /// A dispatch's last activity is an activity reference or words, and a
+    /// checkpoint naming anything else — a copy, or a turn's instruction — is
+    /// refused rather than read back as a reference it cannot be.
+    #[test]
+    fn a_referenced_doing_holds_an_activity_reference_and_nothing_else() {
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 0,
+            "tool_call_id": "call-1",
+        });
+        let doing = Doing::Referenced(ActivityReference::new(
+            serde_json::from_value(reference.clone()).expect("a reference"),
+        ));
+        let written = serde_json::to_value(&doing).expect("a doing serializes");
+        assert_eq!(written, json!({"activity": reference}));
+        assert_eq!(
+            serde_json::from_value::<Doing>(written).expect("an activity reference reads"),
+            doing
+        );
+        for other in [
+            json!({"copy": {"text": {"message": "copied"}, "cut": false}}),
+            json!({"instruction": {
+                "history_dir": "/state/oneharness/history",
+                "history_project": "project",
+                "history_session": "session",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            }}),
+        ] {
+            assert!(
+                serde_json::from_value::<Doing>(other.clone()).is_err(),
+                "a checkpoint read {other} as what a dispatch was doing"
+            );
+        }
+    }
+
     /// The readout an operator decides between cancel, retry, and wait on. A
     /// node in flight for half an hour reads identically to a wedged one
     /// without it, and a healthy node has been reported dead on exactly that.
@@ -3788,7 +4203,10 @@ mod tests {
         ]);
 
         let seen = &state.activity["build"];
-        assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Read src/engine.rs")
+        );
         assert_eq!(
             seen.progress.expect("the activities counted").events(),
             2,
@@ -3936,7 +4354,7 @@ mod tests {
 
         let seen = &state.activity["build"];
         assert_eq!(
-            seen.doing.as_deref(),
+            seen.doing.as_ref().and_then(Doing::said),
             Some("publication push"),
             "a kind carrying a newline reached the line a supervisor reads"
         );
@@ -3996,7 +4414,10 @@ mod tests {
             step(3, closed),
         ]);
         assert_eq!(
-            after_closing.activity["build"].doing.as_deref(),
+            after_closing.activity["build"]
+                .doing
+                .as_ref()
+                .and_then(Doing::said),
             Some("publication session-closed"),
             "the last step of a publication was read as the bracket around it"
         );
@@ -4078,7 +4499,7 @@ mod tests {
 
         let state = fold(&[named, nameless]);
         assert_eq!(
-            state.activity["build"].doing.as_deref(),
+            state.activity["build"].doing.as_ref().and_then(Doing::said),
             Some("Bash just check")
         );
         assert_eq!(
@@ -4157,7 +4578,10 @@ mod tests {
         );
         // And it does not overwrite what the node was last seen doing: a turn
         // that is wedged is still wedged doing something.
-        assert_eq!(seen.doing.as_deref(), Some("Bash just check"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Bash just check")
+        );
     }
 
     /// A cancel of a *running* node leaves a dispatch behind it; a cancel of one

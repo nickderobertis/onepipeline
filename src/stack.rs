@@ -293,12 +293,22 @@ pub(crate) fn placement(
     };
     let mut candidates: Vec<&str> = Vec::new();
     for dep in &node.deps {
-        if candidates.contains(&dep.as_str()) {
-            continue;
+        // A dependency absorbed into another node's draft stands on that node's branch.
+        let mut dep = dep.as_str();
+        let mut seen = BTreeSet::new();
+        while let Some(into) = state.absorbed.get(dep) {
+            if !seen.insert(dep.to_owned()) {
+                break;
+            }
+            dep = into.as_str();
         }
         let Some(parent) = state.graph.get(dep) else {
             continue;
         };
+        let dep = parent.id.as_str();
+        if candidates.contains(&dep) {
+            continue;
+        }
         let Some(parent_repo) = parent.repo.as_deref() else {
             continue;
         };
@@ -434,9 +444,13 @@ pub(crate) fn restacks_owed(
     let mut owed = Vec::new();
     for node in state.graph.iter() {
         let id = node.id.as_str();
+        // A draft merged into another's branch, or closed, has no change request left
+        // to republish onto.
         if node.repo.is_none()
             || statuses.get(id) != Some(&NodeStatus::Done)
             || state.landings.get(id) != Some(&Landing::Unlanded)
+            || state.absorbed.contains_key(id)
+            || state.closed_changes.contains(id)
             || busy(id)
         {
             continue;
@@ -531,7 +545,7 @@ fn newest_of(state: &RunState, id: &str) -> String {
 
 /// The root a settled node's work stands on: its own `base_branch`, the root of
 /// the stack it was drafted on, or the base its session opened on.
-fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
+pub(crate) fn root_of(state: &RunState, id: &str, seen: &mut BTreeSet<String>) -> Option<String> {
     if !seen.insert(id.to_owned()) {
         return None;
     }

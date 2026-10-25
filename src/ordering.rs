@@ -38,6 +38,19 @@ fn exchange(address: SocketAddr) -> std::io::Result<()> {
     stream.read_exact(&mut released)
 }
 
+static EDITS_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once per driver, by the first pass whose edits moved the run, as soon as it has
+/// taken them up and before it goes on: a journey holds the loop there, with the edit
+/// applied and answered, to order another thread against everything the rest of that pass
+/// does.
+pub(crate) fn edits_taken() -> Result<()> {
+    if !EDITS_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        meet("ONEPIPELINE_TEST_EDITS_TAKEN_GATE")?;
+    }
+    Ok(())
+}
+
 static TIMER_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -66,6 +79,17 @@ pub(crate) fn settlement_started(node: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hold the loop on the target node's relayed push as it is received, before it drains
+/// what is queued behind it: released after that node's settlement has been queued, the
+/// push and the settlement are applied in one pass, so whatever the push makes owed is
+/// claimed only once the settlement is on the record. Answers whether it held.
+pub(crate) fn push_received(node: &str) -> Result<bool> {
+    if settlement_target(node) {
+        return meet("ONEPIPELINE_TEST_PUSH_RECEIVED_GATE");
+    }
+    Ok(false)
+}
+
 pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE")?;
@@ -76,6 +100,47 @@ pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
 pub(crate) fn settlement_queued(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE")?;
+    }
+    Ok(())
+}
+
+static SETTLEMENT_PROJECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, by the write-back, before it projects the first snapshot carrying the settlement
+/// of the node `ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE` names: a journey holds that
+/// settlement off the store there.
+pub(crate) fn settlement_projecting<'a>(
+    mut settled: impl Iterator<Item = &'a String>,
+) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_PROJECTION_SETTLED_NODE") else {
+        return Ok(());
+    };
+    if settled.any(|node| *node == target)
+        && !SETTLEMENT_PROJECTING.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_PROJECTION_SETTLED_GATE")?;
+    }
+    Ok(())
+}
+
+static JOURNAL_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, inside this process's first append to a run's journal of a record of the kind
+/// `ONEPIPELINE_TEST_JOURNAL_HELD_KIND` names, with the journal open and its appender lock
+/// held: a journey holds the appender there to write to the journal from another process.
+pub(crate) fn journal_held(path: &std::path::Path, line: &str) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_JOURNAL_HELD_KIND") else {
+        return Ok(());
+    };
+    let kind = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|record| record.get("kind")?.as_str().map(str::to_owned));
+    if path.file_name() == Some(std::ffi::OsStr::new("events.jsonl"))
+        && kind.as_deref() == Some(target.as_str())
+        && !JOURNAL_HELD.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_JOURNAL_HELD_GATE")?;
     }
     Ok(())
 }

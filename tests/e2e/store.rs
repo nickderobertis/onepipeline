@@ -317,7 +317,10 @@ fn the_store_is_discovered_from_the_launch_directory_by_the_read_and_by_every_wr
         world.until_store("the change after the repair to reach the board", |world| {
             world.store_tasks(&project).iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "later"
-                    && task["item"]["metadata"]["onepipeline.context"] == repaired.as_str()
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        repaired.as_str(),
+                    )
             })
         });
     }
@@ -429,6 +432,553 @@ fn a_sources_credential_is_read_from_the_engines_environment_or_its_secrets_file
         handed(&world, "from-the-environment") > 0,
         "the source was never handed the credential the engine's environment exports"
     );
+}
+
+/// A host's user layer refining a source no layer read here defines leaves that source
+/// unconfigured, and every plan of the sources that are configured still loads.
+///
+/// The shape a host keeps an organization's routing in: its user layer carries only the
+/// `routes` of a source whose `plugin` one checkout's tracked `onetaskgraph.yaml` declares.
+/// Anywhere else nothing declares it, and the store reads that entry as a refinement with
+/// nothing to refine — so `plan check` and `start` of a project in this world's own source
+/// go ahead, and only a project id naming the refined source is refused, saying it is not
+/// configured here.
+#[test]
+fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_plans_load() {
+    let world = World::new("store-refined-undefined");
+    let layer = world
+        .root
+        .join("xdg")
+        .join("onetaskgraph")
+        .join("config.yaml");
+    std::fs::create_dir_all(layer.parent().expect("a directory")).expect("the user layer's home");
+    std::fs::write(
+        &layer,
+        format!(
+            "sources:\n  partner:\n    routes:\n      - repositories: [\"github.com/example-org/*\"]\n        \
+             to: {}\n",
+            crate::harness::STORE_SOURCE
+        ),
+    )
+    .expect("a user layer refining a source it does not declare");
+    let name = "refined";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![agent("design", &[]), agent("build", &["design"])],
+        ),
+    );
+
+    world.run(&["plan", "check", &project]).exited(0);
+    world
+        .run(&["plan", "check", "partner:board"])
+        .exited(REFUSED)
+        .err_has("source \"partner\" is not configured here")
+        .err_has("no configuration layer declares its plugin");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(name, "result.json")["state"],
+        "complete",
+        "the plan read beside the refined source did not run to completion"
+    );
+}
+
+/// A plan whose tasks are all in a public source loads while a source declared private
+/// cannot be authenticated, and no node is dispatched as if that source held no prerequisite
+/// of it: each is held under `source`, naming the source and why it did not answer, until a
+/// read of its edges asks every source — and then the run goes on with no relaunch.
+///
+/// The private source is a real `scripted-source` serving an empty folder through the real
+/// `local-md` plugin, declared `visibility: private`, answering every task query with the
+/// authentication failure a hosted tracker answers a reader without its credential with.
+/// The store asks it what it records of each public task, so every node's read names it.
+///
+/// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
+/// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
+/// said on the driver's log and leaves every hold standing; and a driver stopped and adopted
+/// takes the holds up from the record rather than dispatching what the launch held.
+#[test]
+fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() {
+    let world = with_private_vault(World::new("store-private-unanswered"))
+        .with_env("ONEPIPELINE_RELEASE_SURFACE_SECONDS", "1");
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "unanswered";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("build", &["design"]),
+                agent("spare", &[]),
+            ],
+        ),
+    );
+
+    world
+        .run(&["plan", "check", &project])
+        .exited(0)
+        .err_has("source 'vault', declared private, could not be asked")
+        .err_has("VAULT_TOKEN is missing or empty")
+        .err_has("'build', 'design', 'spare'");
+
+    world
+        .run(&["start", &project, "--detach"])
+        .exited(0)
+        .err_has("source 'vault', declared private");
+    world.until("the held design node's wait to be surfaced", |world| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["kind"] == "source-wait"
+                    && event["labels"]["node"] == "design"
+                    && event["payload"]["message"]
+                        .as_str()
+                        .is_some_and(|said| said.contains("source 'vault'"))
+            })
+    });
+    // Read again on its pace, and held across every read while the source refuses.
+    let vault_asked = |world: &World| {
+        world
+            .invocations()
+            .iter()
+            .filter(|call| call["tool"] == "vault" && call["args"][0] == "query_tasks")
+            .count()
+    };
+    let asked = vault_asked(&world);
+    world.until("the held nodes' edges to be read again twice", |world| {
+        vault_asked(world) >= asked + 4
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while the private source could not be asked about it"
+    );
+    let held = world.events_of(name, "node-held");
+    assert!(
+        held.iter().any(|event| {
+            event["labels"]["node"] == "design"
+                && event["payload"]["reasons"]
+                    .as_array()
+                    .is_some_and(|reasons| {
+                        reasons.iter().any(|reason| {
+                            reason["kind"] == "source"
+                                && reason["unanswered"][0]["source"] == "vault"
+                        })
+                    })
+        }),
+        "design was not held naming the source: {held:?}"
+    );
+    world
+        .run(&["status", name])
+        .exited(0)
+        .out_has("design: held — source 'vault', declared private");
+
+    // An unchanged wait is said again on the release wait's cadence, once the planner has
+    // read the last one.
+    let waits = |world: &World, node: &str| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .into_iter()
+            .filter(|event| {
+                event["payload"]["kind"] == "source-wait" && event["labels"]["node"] == node
+            })
+            .count()
+    };
+    world.until("design's unchanged wait to be surfaced again", |world| {
+        world.run(&["next", name]);
+        waits(world, "design") >= 2
+    });
+
+    // A held node an edit drops holds nothing, and its wait is not said again.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the dropped node's hold to clear", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    let spare_waits = waits(&world, "spare");
+
+    // A read the store fails outright says so and changes no hold.
+    world.script(
+        refusal,
+        &json!({"kind": "refused", "message": "the vault refused this read"}).to_string(),
+    );
+    world.until("the failed re-read to be said", |world| {
+        std::fs::read_to_string(world.run_file(name, "driver.log")).is_ok_and(|log| {
+            log.contains("cannot read again the dependencies")
+                && log.contains("the vault refused this read")
+        })
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched on a read the store failed"
+    );
+
+    // A driver stopped and adopted holds what the record says is held.
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    world.run(&["stop", name]).exited(0);
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    let asked = vault_asked(&world);
+    world.until("the adopted driver to read the held edges again", |world| {
+        vault_asked(world) >= asked + 4
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "the adopted driver dispatched a node the launch held"
+    );
+    assert_eq!(
+        waits(&world, "spare"),
+        spare_waits,
+        "the dropped node's wait was said again"
+    );
+
+    // The credential arrives: the next read asks every source, the holds lift, and the run
+    // completes in the order its edges give.
+    world.unscript(refusal);
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    let result = world.run_json(name, "result.json");
+    assert_eq!(result["state"], "complete", "{result}");
+    let dispatched: Vec<String> = world
+        .events_of(name, "node-dispatched")
+        .into_iter()
+        .filter_map(|event| event["labels"]["node"].as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(dispatched, ["design", "build"]);
+    assert!(
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "design"),
+        "design's hold never cleared on the record"
+    );
+}
+
+/// A held node the private source, once it answers, records a prerequisite of that the run's
+/// graph does not give it stays held, naming that prerequisite — and is dispatched once an
+/// edit gives it the edge, after the prerequisite.
+///
+/// The private source's own task is a copy of the plan's `review` node — it carries that
+/// node id — and records `build` as depending on it, which is how a private task holds its
+/// edges into a public source. Nothing in the public source draws that edge, so a dispatch
+/// on the edges it holds would start `build` before `review`.
+#[test]
+fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_it() {
+    let world = with_private_vault(World::new("store-private-prerequisite"));
+    world.script("review.wait", "hold");
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "prerequisite";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("review", &[]),
+                agent("build", &["design"]),
+            ],
+        ),
+    );
+    let build = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "build")
+        .and_then(|task| task["id"].as_str().map(ToOwned::to_owned))
+        .expect("the build task's qualified id");
+    world.write_item(
+        &world
+            .root
+            .join("vault")
+            .join("tasks")
+            .join("copy-of-review.md"),
+        &[
+            ("title", json!("chore: review, kept privately")),
+            (
+                "metadata",
+                json!({
+                    "onepipeline.id": "review",
+                    "onetaskgraph.depended_on_by": {build.as_str(): {"id": build, "kind": "task"}},
+                }),
+            ),
+        ],
+        "",
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to be held", |world| {
+        held_for_source(world, name, "build").is_some()
+    });
+    // A watch that runs out says what holds each node, in the hold's own word.
+    let watched = world.run(&[
+        "watch",
+        name,
+        "--until",
+        "node=build",
+        "--timeout",
+        "3",
+        "--tick-interval",
+        "1",
+    ]);
+    watched
+        .exited(crate::harness::WATCH_ELAPSED)
+        .err_has("design on source")
+        .out_has("\"reason\":\"source\"");
+    // The source answers: what it records is read, and `build` is held for it while the
+    // nodes it does not hold anything of start.
+    world.unscript(refusal);
+    world.until(
+        "build to be held for the prerequisite the store records",
+        |world| {
+            held_for_source(world, name, "build")
+                .is_some_and(|reason| reason["missing"] == json!(["review"]))
+        },
+    );
+    world.until("design to settle", |world| {
+        world
+            .events_of(name, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "design")
+    });
+    assert!(
+        dispatched(&world, name).iter().all(|node| node != "build"),
+        "build was dispatched without the prerequisite the private source records"
+    );
+    world.until("build's wait to name the prerequisite", |world| {
+        world
+            .events_of(name, "planner-surface-queued")
+            .iter()
+            .any(|event| {
+                event["payload"]["kind"] == "source-wait"
+                    && event["labels"]["node"] == "build"
+                    && event["payload"]["message"]
+                        .as_str()
+                        .is_some_and(|said| said.contains("depending on 'review'"))
+            })
+    });
+
+    // The planner gives build the edge: the next read finds nothing missing, and build
+    // starts once review has settled.
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "reparent", "id": "build", "deps": ["design", "review"]}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    // Still held by `review` itself, which has not settled, and no longer by the source.
+    world.until("build's source hold to clear", |world| {
+        held_for_source(world, name, "build").is_none()
+    });
+    world.release("review.go");
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    let journal = world.journal(name);
+    let at = |kind: &str, node: &str| {
+        journal
+            .iter()
+            .position(|event| event["kind"] == kind && event["labels"]["node"] == node)
+    };
+    let (settled, started) = (at("node-settled", "review"), at("node-dispatched", "build"));
+    assert!(
+        settled.is_some() && started > settled,
+        "build did not wait for the prerequisite the private source records: review settled \
+         at {settled:?}, build dispatched at {started:?}"
+    );
+}
+
+/// A private source slow to answer a re-read holds nothing else up: the re-read runs off the
+/// driver's loop, so an edit the planner sends while it is held open is applied, and the
+/// held node dispatches once the read answers.
+#[test]
+fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
+    let world = with_private_vault(World::new("store-private-slow"));
+    let refusal = "vault.query_tasks.refuse";
+    world.script(
+        refusal,
+        &json!({"kind": "auth", "message": "VAULT_TOKEN is missing or empty"}).to_string(),
+    );
+    let name = "slow";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("both nodes to be held", |world| {
+        held_for_source(world, name, "design").is_some()
+            && held_for_source(world, name, "spare").is_some()
+    });
+
+    // The source answers, slowly: the next re-read is held inside its first task query.
+    let slow = world.rendezvous("vault.query_tasks");
+    world.unscript(refusal);
+    let inside = slow.arrived();
+    world.unscript("vault.query_tasks.rendezvous");
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({
+                "version": 2,
+                "commands": [{"op": "drop", "id": "spare", "dependents": "detach"}]
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"applied\"");
+    world.until("the drop to be taken up while the read is held", |world| {
+        world
+            .events_of(name, "node-unheld")
+            .iter()
+            .any(|event| event["labels"]["node"] == "spare")
+    });
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while its re-read was still under way"
+    );
+
+    inside.release();
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    assert_eq!(dispatched(&world, name), ["design"]);
+}
+
+/// A node whose dependency read walks several pages, while two sources declared private
+/// refuse it, is held naming each of them once, in name order rather than the order the
+/// store reported them in.
+///
+/// The store's page size is turned down to one, so the edges of `build` — two of them —
+/// really are read a page at a time.
+#[test]
+fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_name_order() {
+    let world = with_private_source(
+        with_private_source(World::new("store-private-paged"), "vault"),
+        "archive",
+    )
+    .with_env("ONETASKGRAPH_PAGE_SIZE", "1");
+    for source in ["vault", "archive"] {
+        world.script(
+            &format!("{source}.query_tasks.refuse"),
+            &json!({"kind": "auth", "message": format!("{source} credential is missing")})
+                .to_string(),
+        );
+    }
+    let name = "paged-unanswered";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("design", &[]),
+                agent("review", &[]),
+                agent("build", &["design", "review"]),
+            ],
+        ),
+    );
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("build to be held under its sources", |world| {
+        held_for_source(world, name, "build").is_some()
+    });
+    let held = held_for_source(&world, name, "build").expect("build is held");
+    let sources: Vec<&str> = held["unanswered"]
+        .as_array()
+        .expect("a source hold names what did not answer")
+        .iter()
+        .filter_map(|source| source["source"].as_str())
+        .collect();
+    assert_eq!(sources, ["archive", "vault"], "{held}");
+    assert!(
+        world.events_of(name, "node-dispatched").is_empty(),
+        "a node was dispatched while the private sources could not be asked about it"
+    );
+    world.run(&["stop", name]).exited(0);
+}
+
+/// This world, with a second source `vault`: a real `scripted-source` serving its own
+/// folder of Markdown through `local-md`, declared `visibility: private`, and every held
+/// node's edges read again each second.
+fn with_private_vault(world: World) -> World {
+    with_private_source(world, "vault").with_env("ONEPIPELINE_SOURCE_POLL_SECONDS", "1")
+}
+
+/// This world, with a source `name` declared `visibility: private`: a real
+/// `scripted-source` serving its own folder through `local-md`, scripted under `name`.
+fn with_private_source(world: World, name: &str) -> World {
+    let root = world.root.join(name);
+    std::fs::create_dir_all(&root).expect("the private source's folder");
+    let fakes = world.fakes.display().to_string();
+    let prefix = format!("ONETASKGRAPH_SOURCES__{}", name.to_uppercase());
+    world
+        .with_env(&format!("{prefix}__PLUGIN"), "subprocess")
+        .with_env(&format!("{prefix}__VISIBILITY"), "private")
+        .with_env(
+            &format!("{prefix}__CONFIG__COMMAND"),
+            &double("scripted-source").display().to_string(),
+        )
+        .with_env(
+            &format!("{prefix}__CONFIG__SETTINGS__ROOT"),
+            &root.display().to_string(),
+        )
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &fakes)
+        .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
+}
+
+/// The `source` reason `node` of `run` is held under now, on the run's own record.
+fn held_for_source(world: &World, run: &str, node: &str) -> Option<Value> {
+    let mut held = None;
+    for event in world
+        .journal(run)
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == node)
+    {
+        match event["kind"].as_str() {
+            Some("node-held") => {
+                held = event["payload"]["reasons"]
+                    .as_array()
+                    .and_then(|reasons| reasons.iter().find(|reason| reason["kind"] == "source"))
+                    .cloned();
+            }
+            Some("node-unheld" | "node-dispatched") => held = None,
+            _ => {}
+        }
+    }
+    held
 }
 
 /// Write-back owns exactly what the plan document declares, and preserves everything the
@@ -721,6 +1271,8 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
                     destination: onetaskgraph_plugin_api::SourceName::new("strict")
                         .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
                     match_by: None,
                     recreate: false,
                     create: false,
@@ -728,6 +1280,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     comments: false,
                     no_link: false,
                     expect: None,
+                    statuses: Vec::new(),
                 })
                 .await
         },
@@ -912,9 +1465,10 @@ fn amend(path: &std::path::Path, edit: impl FnOnce(&mut serde_json::Map<String, 
         .split_once("---\n")
         .expect("a store document closes its front matter");
     let mut parsed: serde_json::Map<String, Value> =
-        serde_norway::from_str(front).expect("the front matter is YAML");
+        onepipeline_testfakes::yaml::from_str(front).expect("the front matter is YAML");
     edit(&mut parsed);
-    let rendered = serde_norway::to_string(&parsed).expect("the front matter renders");
+    let rendered =
+        onepipeline_testfakes::yaml::to_string(&parsed).expect("the front matter renders");
     std::fs::write(path, format!("---\n{rendered}---\n{body}")).expect("the document is written");
 }
 
@@ -985,10 +1539,22 @@ fn an_unreachable_store_is_reported_and_attempted_again_on_the_next_change_while
     world.until("the next edit to reach the store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this now the store is back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this now the store is back",
+                )
         })
     });
+    // Both notes carried to `later`, together and in carry order: the one sent
+    // while the store was away is projected beside the one after it, not lost.
+    assert!(
+        world.store_tasks(&project).iter().any(|task| {
+            task["item"]["metadata"]["onepipeline.id"] == "later"
+                && task["item"]["metadata"]["onepipeline.context"]
+                    == "retry this projection\n\nproject this now the store is back"
+        }),
+        "the store does not carry both of later's carried notes in carry order"
+    );
 
     // Take it away again for terminal settlement. It remains unreachable until
     // the journal says the graph is complete and the terminal publication has
@@ -1151,13 +1717,6 @@ fn source_refused() -> Value {
     json!({"kind": "refused", "message": "status unknown is disabled for source plans"})
 }
 
-/// A source whose configuration it will not run on: what `local-md` answers for a root that
-/// has gone.
-fn source_misconfigured() -> Value {
-    json!({"kind": "config", "message": "source plans: cannot canonicalize root plan-store: \
-           No such file or directory (os error 2)"})
-}
-
 /// A source that rate-limited the request, in GitHub's own words, naming no wait: GitHub's
 /// secondary limiter is reported by nothing a caller can poll, so the schedule decides.
 fn rate_limited() -> Value {
@@ -1257,15 +1816,15 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
     }
 }
 
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these nine wait on
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these ten wait on
 // is the schedule and its absence — a refused projection not being asked again across a window
 // the old schedule retried in, a transient one being asked at intervals that grow, a rate
 // limit's own wait being served in full, and a run settling over refusals — which cannot be
 // observed in less time than the schedule takes. The edge they need is the crate under test:
 // they drive the compiled `onepipeline` binary against its own write-back worker and the real
-// store, eight of them through the store double, exactly as the six schedule journeys below do,
+// store, nine of them through the store double, exactly as the six schedule journeys below do,
 // so a project of their own would declare the same dependency and skip nothing. The reason
-// those six record for staying in this binary is these nine's too.
+// those six record for staying in this binary is these ten's too.
 /// A projection the store **refuses** is reported once and is not asked again on a timer: the
 /// store would refuse the same projection the same way, and against a hosted destination every
 /// attempt spends its allowance for nothing. It is attempted again when the run's graph next
@@ -1341,8 +1900,10 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
     assert_eq!(
@@ -1369,8 +1930,7 @@ fn a_projection_the_store_refuses_is_reported_once_and_attempted_again_when_the_
 
 /// An attempt is refused whichever of the calls it makes the store refuses: the targeted update
 /// of an item that exists — refused, or answered with nothing because the item is gone — and,
-/// for an attempt creating an added node, the copy, or the project read answered as a partial
-/// response every source of which refused. Each is reported once under the store's own kind,
+/// for an attempt creating an added node, the copy. Each is reported once under the store's own kind,
 /// and none is asked again on a timer. No projection reads a page of the project's tasks.
 #[test]
 fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
@@ -1396,13 +1956,6 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             "write_task",
             Some(source_refused()),
             "class: refused, kind: refused",
-            true,
-        ),
-        (
-            "partial",
-            "get_project",
-            Some(source_misconfigured()),
-            "class: refused, kind: config",
             true,
         ),
     ] {
@@ -1450,6 +2003,80 @@ fn a_refusal_of_any_call_an_attempt_makes_stops_the_retry_timer() {
             "{scenario}: the refusal changed what executed"
         );
     }
+}
+
+/// A create the destination stored and then answered malformed is reported as the copy
+/// failure it is: the destination may hold an item the copy never learned the id of. The
+/// line an operator reads and the surface the planner is told by name the destination, the
+/// plugin method whose answer was malformed and the residue to inspect for — the store's
+/// own words — under the class it refuses, so no timer asks again and lands a second item
+/// beside the one the destination kept.
+#[test]
+fn a_create_the_destination_stored_and_answered_malformed_names_the_destination_and_its_residue() {
+    let run = "writeback-uncertain-create";
+    let (world, project) =
+        a_run_whose_destination_can_start_refusing("store-writeback-uncertain-create", run);
+    world.script(
+        &format!("{}.write_task.malformed", crate::harness::SCRIPTED_KEY),
+        "",
+    );
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": agent("extra", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the uncertain create to be reported", |world| {
+        streaks_reported(world, run) >= 1
+    });
+
+    let destination = crate::harness::STORE_SOURCE;
+    let said = [
+        format!("{destination} may hold an item it could not take back"),
+        format!("{destination}'s answer to write_task was malformed"),
+        format!("inspect {destination} for an item this copy may have created"),
+        "class: refused, kind: malformed".to_owned(),
+    ];
+    let line = the_line_reported(&world, run);
+    for words in &said {
+        assert!(
+            line.contains(words.as_str()),
+            "the line does not say {words:?}: {line}"
+        );
+    }
+    asked_nothing_more(&world, run, REFUSAL_WINDOW / 2, || {});
+    let surfaces = surfaces_raised(&world, run);
+    assert_eq!(
+        surfaces.len(),
+        1,
+        "the planner was not told exactly once: {surfaces:?}"
+    );
+    for words in &said {
+        assert!(
+            surfaces[0].contains(words.as_str()),
+            "the surface does not say {words:?}: {}",
+            surfaces[0]
+        );
+    }
+    // The residue the failure warns of is real: the destination kept the one item it was
+    // asked to create, and nothing created a second.
+    let extra = world
+        .store_tasks(&project)
+        .into_iter()
+        .filter(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+        .count();
+    assert_eq!(
+        extra, 1,
+        "the destination does not hold exactly the one item it stored"
+    );
+    assert_eq!(
+        dispatched(&world, run),
+        ["work"],
+        "the failure changed what executed"
+    );
 }
 
 /// A failure the store does not refuse keeps today's schedule exactly: a rate limit, and a
@@ -2086,8 +2713,10 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
     world.until_store("the changed graph to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "project this onto the board that came back"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "project this onto the board that came back",
+                )
         })
     });
 
@@ -2103,16 +2732,728 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 
+/// A complete one-pixel PNG, including non-UTF-8 bytes, to prove binary transport.
+const DIAGRAM_PNG: &[u8] = b"\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x01\x00\x00\x00\x01\x08\x04\x00\x00\x00\xb5\x1c\x0c\x02\x00\x00\x00\x0b\x49\x44\x41\x54\x78\xda\x63\xfc\xff\x1f\x00\x03\x03\x02\x00\xef\xa3\x91\x99\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+
+/// Put an image on an authoring task in a second real local-md store through its write API.
+fn image_author(world: World) -> (World, String) {
+    let root = world.store_apart("images");
+    world.plan_in(
+        &root,
+        "author",
+        &plan_of("author", vec![agent("author", &[])]),
+    );
+    hold_diagram(&root, "author-board/000-author");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__IMAGES__PLUGIN", "local-md")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__ROOT",
+            &root.to_string_lossy(),
+        );
+    (world, "images:author-board/000-author".into())
+}
+
+fn hold_diagram(root: &std::path::Path, native: &str) {
+    hold_images(root, native, &[("diagram.png", DIAGRAM_PNG)]);
+}
+
+fn hold_images(root: &std::path::Path, native: &str, images: &[(&str, &[u8])]) {
+    use onetaskgraph_plugin_api::{AssetPayload, AssetWrite, ItemWrite, TaskSource};
+    let config = serde_json::from_value(json!({"root": root})).unwrap();
+    let source = onetaskgraph_local_md::LocalMdSource::new(config).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let target = native.into();
+            let mut item = source.get_task(&target).await.unwrap().unwrap();
+            item.content = Some(format!(
+                "{}\n\n{}",
+                item.content.unwrap_or_default(),
+                images
+                    .iter()
+                    .map(|(name, _)| format!("![flow](./{name})"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+            let edges = source
+                .task_dependencies(
+                    &target,
+                    onetaskgraph_plugin_api::Direction::DependsOn,
+                    &onetaskgraph_plugin_api::PageRequest {
+                        cursor: None,
+                        limit: 200,
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(
+                edges.next.is_none(),
+                "the fixture fits in one dependency page"
+            );
+            source
+                .write_task_with_assets(
+                    &ItemWrite {
+                        target: Some(target),
+                        item,
+                        depends_on: edges.items,
+                    },
+                    None,
+                    &AssetWrite {
+                        assets: images
+                            .iter()
+                            .map(|(name, bytes)| {
+                                AssetPayload::of(
+                                    onetaskgraph_plugin_api::AssetName::new(*name).unwrap(),
+                                    bytes.to_vec(),
+                                )
+                            })
+                            .collect(),
+                        recorded_assets: None,
+                    },
+                )
+                .await
+                .unwrap();
+        });
+}
+
+fn assert_diagram(world: &World, project: &str, node: &str) {
+    let tasks = world.store_tasks(project);
+    let task = tasks
+        .iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == node)
+        .unwrap();
+    let id: onetaskgraph_core::GlobalId = task["id"].as_str().unwrap().parse().unwrap();
+    let held = world.store_call(|engine| async move { engine.task_assets(&id).await.unwrap() });
+    assert!(task["item"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("![flow](./diagram.png)"));
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].name.as_str(), "diagram.png");
+    assert_eq!(held[0].bytes, DIAGRAM_PNG);
+    assert!(!task["item"]["metadata"]
+        .as_object()
+        .unwrap()
+        .contains_key("onepipeline.assets_from"));
+}
+
+/// Adding a member never reads or writes the destination project a person edited.
+#[test]
+fn a_live_add_leaves_the_edited_board_project_untouched() {
+    let run = "member-only";
+    let world = World::new(run).through_scripted_source();
+    world.script("work.wait", "hold");
+    let author = world.root.join("author");
+    world.plan_in(&author, run, &plan_of(run, vec![agent("work", &[])]));
+    std::fs::create_dir_all(world.store()).unwrap();
+    let root = author.to_string_lossy().into_owned();
+    let report = world.store_call_with(
+        &[
+            ("ONETASKGRAPH_SOURCES__AUTHOR__PLUGIN", "local-md"),
+            ("ONETASKGRAPH_SOURCES__AUTHOR__CONFIG__ROOT", &root),
+        ],
+        |engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    items: onetaskgraph_core::CopyItems::new(vec![crate::harness::global(
+                        &format!("author:{}", project_id(run)),
+                    )])
+                    .unwrap(),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new(
+                        crate::harness::STORE_SOURCE,
+                    )
+                    .unwrap(),
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .unwrap()
+        },
+    );
+    let project = report.items[0].action.destination().unwrap().to_string();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the running state to land", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["status"]["category"] == "in-progress")
+    });
+    world.until("the initial projection to complete", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
+    let path = world
+        .store()
+        .join("projects")
+        .join(format!("{}.md", crate::harness::global(&project).native));
+    amend(&path, |front| {
+        front.insert("title".into(), json!("A person's edited board"));
+        front.insert("labels".into(), json!(["reviewed"]));
+        front["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .insert("authored.note".into(), json!("keep me"));
+    });
+    let text = std::fs::read_to_string(&path).unwrap();
+    let (front, _) = text
+        .strip_prefix("---\n")
+        .unwrap()
+        .split_once("---\n")
+        .unwrap();
+    std::fs::write(&path, format!("---\n{front}---\nA person's edited body.\n")).unwrap();
+    let edited = std::fs::read(&path).unwrap();
+    let before = world.store_calls().len();
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [
+                {"op": "add", "node": agent("extra", &["work"])}
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until_store("the new member to land", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "extra")
+    });
+    world.until("the member copy to complete", |world| {
+        world
+            .store_calls()
+            .last()
+            .is_some_and(|call| call[0] == "end_command")
+    });
+    let calls = world.store_calls();
+    for call in &calls[before..] {
+        assert!(
+            ![
+                "get_project",
+                "write_project",
+                "update_project",
+                "set_project_metadata",
+                "set_project_status"
+            ]
+            .contains(&call[0].as_str()),
+            "member creation touched the project: {call:?}"
+        );
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), edited);
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// Live adds and retry replacements carry author images through the channel and shadow copy.
+#[test]
+fn live_added_and_retried_tasks_carry_their_authoring_images() {
+    for retry in [false, true] {
+        let run = if retry { "assets-retry" } else { "assets-add" };
+        let (world, author) = image_author(World::new(run));
+        world.script("work.wait", "hold");
+        let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        let mut drawn = agent("drawn", &["work"]);
+        drawn["task"] = json!(format!(
+            "{}\n\n![flow](./diagram.png)",
+            drawn["task"].as_str().unwrap()
+        ));
+        drawn["assets_from"] = json!(author);
+        let mut commands = vec![];
+        if retry {
+            commands.push(json!({"op": "add", "node": agent("first", &["work"])}));
+            commands.push(json!({"op": "settle", "id": "first", "outcome": "failed", "evidence": "The planner superseded this draft before dispatch."}));
+            commands.push(json!({"op": "retry", "id": "first", "node": drawn}));
+        } else {
+            commands.push(json!({"op": "add", "node": drawn}));
+        }
+        // An old-style add in the same envelope still creates normally.
+        commands.push(json!({"op": "add", "node": agent("plain", &["work"])}));
+        world
+            .run_with_stdin(
+                &["reply", run],
+                &json!({"version": 3, "commands": commands}).to_string(),
+            )
+            .exited(0);
+        let root = if retry { "first" } else { "drawn" };
+        world.until_store("both added tasks to reach the board", |world| {
+            let tasks = world.store_tasks(&project);
+            [root, "plain"].iter().all(|id| {
+                tasks
+                    .iter()
+                    .any(|t| t["item"]["metadata"]["onepipeline.id"] == *id)
+            })
+        });
+        assert_diagram(&world, &project, root);
+        let plain = world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "plain")
+            .unwrap();
+        assert_eq!(plain["item"]["content"], agent("plain", &["work"])["task"]);
+        let plain_id = plain["id"].as_str().unwrap().parse().unwrap();
+        assert!(world
+            .store_call(|engine| async move { engine.task_assets(&plain_id).await.unwrap() })
+            .is_empty());
+        world.release("work.go");
+        world.until("the run to finish", |world| {
+            world.run_file(run, "result.json").is_file()
+        });
+        assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+    }
+}
+
+/// A retry keeps the stored root's image on the lineage's one existing board item.
+#[test]
+fn a_stored_roots_retry_keeps_its_images_without_assets_from() {
+    let run = "assets-stored-retry";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let mut root = agent("drawn", &["work"]);
+    root["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), root]));
+    hold_diagram(&world.store(), &format!("{}/001-drawn", project_id(run)));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let before = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    let mut replacement = agent("replacement", &["work"]);
+    replacement["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)",
+        replacement["task"].as_str().unwrap()
+    ));
+    world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [{"op": "settle", "id": "drawn", "outcome": "failed", "evidence": "The planner superseded the parked draft."}, {"op": "retry", "id": "drawn", "node": replacement}]}).to_string()).exited(0);
+    world.until_store("the retry to reach the root item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|t| t["item"]["metadata"]["onepipeline.node"] == "replacement")
+    });
+    assert_diagram(&world, &project, "drawn");
+    let after = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    assert_eq!(before, after);
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// The documented existing-item limit: a stated author neither replaces a held image
+/// nor adds one. That retry still updates the same board item and its task text.
+#[test]
+fn a_retry_with_assets_from_keeps_an_existing_items_images_without_adding_any() {
+    let run = "assets-existing-retry";
+    let (world, author) = image_author(World::new(run));
+    let mut other_diagram = DIAGRAM_PNG.to_vec();
+    other_diagram.push(0);
+    hold_images(
+        &world.store_apart("images"),
+        "author-board/000-author",
+        &[
+            ("diagram.png", &other_diagram),
+            ("author-only.png", DIAGRAM_PNG),
+        ],
+    );
+    world.script("work.wait", "hold");
+    let mut root = agent("drawn", &["work"]);
+    root["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), root]));
+    hold_diagram(&world.store(), &format!("{}/001-drawn", project_id(run)));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let before = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap()["id"]
+        .clone();
+    let author_id = author.parse().unwrap();
+    let held_by_author =
+        world.store_call(|engine| async move { engine.task_assets(&author_id).await.unwrap() });
+    assert_eq!(held_by_author.len(), 2);
+    assert_ne!(
+        held_by_author
+            .iter()
+            .find(|asset| asset.name.as_str() == "diagram.png")
+            .unwrap()
+            .bytes,
+        DIAGRAM_PNG
+    );
+    let mut replacement = agent("replacement", &["work"]);
+    replacement["assets_from"] = json!(author);
+    replacement["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)\n![author](./author-only.png)",
+        replacement["task"].as_str().unwrap()
+    ));
+    world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [
+        {"op": "settle", "id": "drawn", "outcome": "failed", "evidence": "The planner replaced the parked draft."},
+        {"op": "retry", "id": "drawn", "node": replacement},
+    ]}).to_string()).exited(0);
+    world.until_store("the retry to update the existing item", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.node"] == "replacement")
+    });
+    assert_diagram(&world, &project, "drawn");
+    let after = world
+        .store_tasks(&project)
+        .into_iter()
+        .find(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+        .unwrap();
+    assert_eq!(after["id"], before);
+    assert!(after["item"]["content"]
+        .as_str()
+        .unwrap()
+        .contains("![author](./author-only.png)"));
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+#[test]
+fn an_unreadable_assets_from_is_refused_before_any_edit_is_journalled() {
+    let run = "assets-unreadable";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let mut drawn = agent("drawn", &["work"]);
+    drawn["assets_from"] = json!("plans:absent/task");
+    let refused = world.run_with_stdin(
+        &["reply", run],
+        &json!({"version": 3, "commands": [{"op": "add", "node": drawn}]}).to_string(),
+    );
+    refused.exited(REFUSED);
+    assert!(
+        refused.stderr.contains("plans:absent/task")
+            && refused
+                .stderr
+                .contains("no task with the id plans:absent/task"),
+        "{}",
+        refused.stderr
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    for record in world.journal(run) {
+        let wire = record.to_string();
+        assert!(
+            !wire.contains("plans:absent/task") && !wire.contains("\"drawn\""),
+            "the refused edit entered the journal: {record}"
+        );
+    }
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+#[test]
+fn a_requeue_cannot_introduce_assets_from() {
+    let run = "assets-requeue-refused";
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let mut held = agent("held", &["work"]);
+    held["parked"] = json!(true);
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[]), held]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let refused = world.run_with_stdin(&["reply", run], &json!({"version": 3, "commands": [{"op": "requeue", "id": "held", "amend": {"assets_from": "plans:author/task"}}]}).to_string());
+    refused.exited(REFUSED);
+    assert!(
+        refused.stderr.contains("cannot amend `assets_from`"),
+        "{}",
+        refused.stderr
+    );
+    assert!(world.events_of(run, "edit-committed").is_empty());
+    world.run(&["stop", run]).exited(0);
+}
+
+#[test]
+fn assets_from_in_plan_metadata_is_refused_as_not_a_node_field() {
+    let world = World::new("assets-plan-refused");
+    let mut task = agent("work", &[]);
+    task["assets_from"] = json!("plans:author/task");
+    let project = world.plan(
+        "assets-plan-refused",
+        &plan_of("assets-plan-refused", vec![task]),
+    );
+    let refused = world.run(&["plan", "check", &project]);
+    refused.exited(1);
+    assert!(
+        refused.stdout.contains("assets_from") && refused.stdout.contains("not a node field"),
+        "{}",
+        refused.stdout
+    );
+}
+
+#[test]
+fn an_assetless_destination_refuses_image_creation_and_reports_the_store_kind() {
+    let run = "assets-unsupported";
+    let (world, author) = image_author(World::new(run));
+    world.script("store.assets-unsupported", "");
+    let world = world.through_scripted_source();
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    let mut node = agent("drawn", &["work"]);
+    node["assets_from"] = json!(author);
+    node["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)",
+        node["task"].as_str().unwrap()
+    ));
+    world
+        .run_with_stdin(
+            &["reply", run],
+            &json!({"version": 3, "commands": [{"op": "add", "node": node}]}).to_string(),
+        )
+        .exited(0);
+    world.until("the unsupported assets refusal", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let said = the_line_reported(&world, run);
+    assert!(
+        said.contains("class: refused, kind: assets-unsupported"),
+        "{said}"
+    );
+    assert!(!world
+        .store_tasks(&project)
+        .iter()
+        .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn"));
+    world.until("the planner to be told", |world| {
+        !surfaces_raised(world, run).is_empty()
+    });
+    assert!(surfaces_raised(&world, run)
+        .iter()
+        .any(|surface| surface.contains("class: refused, kind: assets-unsupported")));
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(run, "result.json")["state"], "complete");
+}
+
+/// Hold the real creating write-back after edit compilation and before its author read.
+fn a_creation_paused_before_reading_its_author(
+    world: &World,
+    run: &str,
+    author: &str,
+    image: bool,
+    gate: &crate::harness::Rendezvous,
+) -> (crate::harness::Arrival, std::process::Child) {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut node = agent("drawn", &["work"]);
+    node["assets_from"] = json!(author);
+    if image {
+        node["task"] = json!(format!(
+            "{}\n\n![flow](./diagram.png)",
+            node["task"].as_str().unwrap()
+        ));
+    }
+    let mut reply = world
+        .cmd(&["reply", run])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    reply
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"version": 3, "commands": [{"op": "add", "node": node}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let held = gate.arrived();
+    assert_eq!(world.events_of(run, "edit-committed").len(), 1);
+    (held, reply)
+}
+
+#[test]
+fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() {
+    let run = "assets-author-repair";
+    let (world, author) = image_author(World::new(run));
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = world
+        .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address());
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the initial projection", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (held, reply) =
+        a_creation_paused_before_reading_its_author(&world, run, &author, true, &gate);
+    drop(gate);
+    let path = world
+        .store_apart("images")
+        .join("tasks/author-board/000-author.md");
+    let saved = world.root.join("paused-author.md");
+    std::fs::rename(&path, &saved).unwrap();
+    held.release();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until("the missing author refusal", |world| {
+        streaks_reported(world, run) >= 1
+    });
+    let said = the_line_reported(&world, run);
+    assert!(
+        said.contains(&author) && said.contains("class: refused, kind: no-such-item"),
+        "{said}"
+    );
+    assert!(!world
+        .store_tasks(&project)
+        .iter()
+        .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn"));
+    std::fs::rename(saved, path).unwrap();
+    noted(&world, run, "drawn", "the authoring task is readable again");
+    world.until_store("the repaired author image to reach the board", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+    });
+    assert_diagram(&world, &project, "drawn");
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this journey must outlast the public sixty-second store-read floor to prove cancellation and rebuilding of a real subprocess source. It exercises this crate's write-back worker, so its existing e2e project is the narrowest applicable edge.
+#[test]
+fn an_authoring_read_past_the_floor_is_cancelled_and_its_store_is_rebuilt() {
+    let run = "assets-read-timeout";
+    let world = World::new(run);
+    let images = world.store_apart("images");
+    world.plan_in(
+        &images,
+        "author",
+        &plan_of("author", vec![agent("author", &[])]),
+    );
+    let fakes = world.fakes.display().to_string();
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = world
+        .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address())
+        .with_env(RENDEZVOUS_SECONDS_ENV, "600")
+        .with_env("ONETASKGRAPH_SOURCES__IMAGES__PLUGIN", "subprocess")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__COMMAND",
+            &double("scripted-source").display().to_string(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__DEADLINE_MS",
+            "180000",
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__ROOT",
+            &images.display().to_string(),
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__SCRIPT",
+            &fakes,
+        )
+        .with_env(
+            "ONETASKGRAPH_SOURCES__IMAGES__CONFIG__SETTINGS__KEY",
+            "images",
+        );
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("the initial projection", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (held, reply) = a_creation_paused_before_reading_its_author(
+        &world,
+        run,
+        "images:author-board/000-author",
+        false,
+        &gate,
+    );
+    drop(gate);
+    let reading = world.rendezvous("images.get_task.first");
+    let began = Instant::now();
+    held.release();
+    let source = reading.arrived();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until_run_file_holds(
+        run,
+        "driver.log",
+        "reading assets_from images:author-board/000-author timed out",
+    );
+    let floor = Duration::from_secs(onepipeline::cli::WRITEBACK_COMMAND_FLOOR_SECONDS);
+    assert!(began.elapsed() >= floor);
+    assert!(
+        began.elapsed() < floor + floor / 2,
+        "the cancelled store waited for end_command too"
+    );
+    world.unscript("images.get_task.first.rendezvous");
+    // Keep the original process held: only a rebuilt store can now make progress.
+    world.until_store("a fresh store to create the task", |world| {
+        world
+            .store_tasks(&project)
+            .iter()
+            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+    });
+    source.release();
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// A node added live whose task references an image asset — `![…](./diagram.png)`, the
 /// store's convention for one a record holds — is refused by the real store when the
-/// write-back's copy creates it: the shadow store a creation is copied out of holds the task's
-/// Markdown and no asset, so the copy refuses it as `asset-not-held` rather than carrying a
-/// reference to nothing onto the board. The refusal is reported with the store's own class
+/// write-back's copy creates it: its author holds diagram.png, but not missing.png, so
+/// the copy refuses it as `asset-not-held`. The refusal is reported with the store's own class
 /// and kind, nothing is created on the board, and the run settles as it would have.
 #[test]
 fn a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_not_held() {
     let run = "writeback-asset-not-held";
-    let world = World::new("store-writeback-asset-not-held");
+    let (world, author) = image_author(World::new("store-writeback-asset-not-held"));
     world.script("work.wait", "hold");
     let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
     world.run(&["start", &project, "--detach"]).exited(0);
@@ -2128,6 +3469,11 @@ fn a_live_add_referencing_an_asset_its_task_does_not_hold_is_refused_as_asset_no
         "## What\nShip the flow below.\n\n![the flow](./diagram.png)\n\n\
          ## Why\nSo the run can settle.\n\n## Acceptance criteria\n- drawn is done."
     );
+    drawn["assets_from"] = json!(author);
+    drawn["task"] = json!(drawn["task"]
+        .as_str()
+        .unwrap()
+        .replace("diagram.png", "missing.png"));
     world
         .run_with_stdin(
             &["reply", run],
@@ -2446,9 +3792,13 @@ fn a_projection_that_keeps_failing_is_retried_further_and_further_apart() {
          operator watching the board would notice",
         waited[0]
     );
+    // Strictly longer rather than some multiple: every interval read here also carries one
+    // attempt's own runtime and the poll's lag, which on a loaded Windows runner came to about
+    // half a second and read the quarter-second first step as 703ms against a second of 899ms.
+    // How far the schedule grows is the next assertion's, read where that overhead is small.
     for pair in waited.windows(2) {
         assert!(
-            pair[1] >= pair[0] * 2,
+            pair[1] > pair[0],
             "the destination was asked again after {:?} and then after {:?}, which is not a \
              schedule that grows: {waited:?}",
             pair[0],
@@ -2515,7 +3865,10 @@ fn a_projection_that_recovered_is_retried_as_promptly_as_ever_when_it_next_fails
     world.until_store("the projection to catch the board up", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "the first outage"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "the first outage",
+                )
         })
     });
 
@@ -2759,7 +4112,10 @@ fn an_unwritable_shadow_store_is_reported_retried_and_recovered() {
     world.until_store("the committed edit to reach the recovered store", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "capture recovered"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "capture recovered",
+                )
         })
     });
 
@@ -3269,7 +4625,10 @@ fn derived_waiting_failed_and_parked_states_reach_the_board_under_their_own_word
                         .is_some_and(|body| body.contains("Keep this body."))
                     && task["item"]["metadata"]["onepipeline.persona"] == "engineer"
                     && task["item"]["metadata"]["onepipeline.max_turns"] == 7
-                    && task["item"]["metadata"]["onepipeline.context"] == "carry this note"
+                    && crate::harness::carries_latest(
+                        &task["item"]["metadata"]["onepipeline.context"],
+                        "carry this note",
+                    )
             })
             && tasks.iter().any(|task| {
                 task["item"]["metadata"]["onepipeline.id"] == "local"
@@ -4324,6 +5683,220 @@ fn author_project(store: &std::path::Path, identifier: &str, title: &str) {
     .expect("the fixture project is authored");
 }
 
+/// Two distinct carried notes that the planner context writes alike — one whose
+/// paragraphs a blank line divides, one whose paragraphs a line holding a space
+/// divides — with a third carried between them: withdrawing either takes out that
+/// note and leaves the other two where they were carried, on the board as the
+/// withdrawing driver projects it, on the board again once an adopting driver has
+/// replayed the journal, and in the next dispatch that adopter composes.
+#[test]
+fn a_withdrawn_note_written_alike_to_another_leaves_the_other_in_carry_order() {
+    let blank = "the fixture moved\n\nto fixtures/v6";
+    let spaced = "the fixture moved\n \nto fixtures/v6";
+    let between = "keep the loader as it is";
+    // Both read as this entry in a planner context.
+    let entry = "the fixture moved\n \nto fixtures/v6";
+    for (case, withdrawn, left) in [
+        ("blank", 0, [between, entry]),
+        ("spaced", 2, [entry, between]),
+    ] {
+        let world = World::new(&format!("store-withdraw-alike-{case}"));
+        world.script("work.wait", "hold");
+        let name = format!("withdrawalike{case}");
+        let project = world.plan(
+            &name,
+            &plan_of(
+                &name,
+                vec![
+                    crate::harness::agent("work", &[]),
+                    crate::harness::agent("later", &["work"]),
+                ],
+            ),
+        );
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until_store("work's running state to reach the store", |world| {
+            projected_words(world, &project)
+                .get("work")
+                .is_some_and(|word| word == "in progress")
+        });
+        for text in [blank, between, spaced] {
+            noted(&world, &name, "later", text);
+        }
+        let sent: Vec<u64> =
+            std::fs::read_to_string(world.run_file(&name, "channel/commands.jsonl"))
+                .expect("the command queue")
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|record| record["commands"][0]["op"] == "note")
+                .filter_map(|record| record["id"].as_u64())
+                .collect();
+        assert_eq!(sent.len(), 3, "{case}: {sent:?}");
+        world
+            .run_with_stdin(
+                &["reply", &name],
+                &json!({"version": 2, "commands": [{"op": "withdraw-note",
+                    "envelope": sent[withdrawn].to_string(), "index": 0,
+                    "reason": "the fixture moved back"}]})
+                .to_string(),
+            )
+            .exited(0);
+        let expected = left.join("\n\n");
+        let later_context = |world: &World| {
+            world
+                .store_tasks(&project)
+                .into_iter()
+                .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+                .map(|task| task["item"]["metadata"]["onepipeline.context"].clone())
+        };
+        world.until_store(
+            &format!("{case}: the withdrawal to reach the board"),
+            |world| later_context(world) == Some(json!(expected)),
+        );
+
+        crate::harness::end_driver(&world, &name);
+        let projected = |world: &World| {
+            std::fs::read_to_string(world.run_file(&name, "writeback-projections.jsonl"))
+                .map_or(0, |log| log.lines().count())
+        };
+        let before = projected(&world);
+        world.run(&["adopt", &name, "--detach"]).exited(0);
+        world.until_store("the adopted driver to project what it replayed", |world| {
+            projected(world) > before
+        });
+        assert_eq!(
+            later_context(&world),
+            Some(json!(expected)),
+            "{case}: the replayed run projected the notes left out of carry order"
+        );
+        world.release("work.go");
+        world.until("later to be dispatched by the adopted driver", |world| {
+            world.journal(&name).iter().any(|event| {
+                event["labels"]["node"] == "later"
+                    && event["kind"] == "turn-activity"
+                    && event["payload"]["task"].is_string()
+            })
+        });
+        let task = world
+            .journal(&name)
+            .into_iter()
+            .find(|event| event["labels"]["node"] == "later" && event["kind"] == "turn-activity")
+            .and_then(|event| event["payload"]["task"].as_str().map(str::to_owned))
+            .expect("later's task");
+        let notes = task
+            .split_once("## Planner context")
+            .and_then(|(_, context)| context.trim().split_once("\n\n"))
+            .map(|(_, notes)| notes.trim().to_owned())
+            .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+        assert_eq!(
+            notes, expected,
+            "{case}: the replayed run did not compose later with the notes left in carry order"
+        );
+    }
+}
+
+/// Three notes carried to one node — A, then B, then A again — and the first A
+/// withdrawn: the board's `onepipeline.context` reads B then A as the driver that
+/// applied the withdrawal projects it, and again once a driver that adopts the
+/// run has replayed its journal, and the node's next dispatch, composed by that
+/// adopter, is handed B then A as its planner context.
+#[test]
+fn a_withdrawn_carried_note_leaves_its_twin_after_the_note_between_live_and_after_replay() {
+    let world = World::new("store-withdraw-twin");
+    world.script("work.wait", "hold");
+    let name = "withdrawtwin";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                crate::harness::agent("work", &[]),
+                crate::harness::agent("later", &["work"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until_store("work's running state to reach the store", |world| {
+        projected_words(world, &project)
+            .get("work")
+            .is_some_and(|word| word == "in progress")
+    });
+    let (twin, between) = (
+        "the fixture moved to fixtures/v5",
+        "keep the loader as it is",
+    );
+    for text in [twin, between, twin] {
+        noted(&world, name, "later", text);
+    }
+    let first = std::fs::read_to_string(world.run_file(name, "channel/commands.jsonl"))
+        .expect("the command queue")
+        .lines()
+        .find(|line| line.contains(twin))
+        .and_then(|line| serde_json::from_str::<Value>(line).ok())
+        .and_then(|record| record["id"].as_u64())
+        .expect("the first note's envelope is queued");
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [{"op": "withdraw-note",
+                "envelope": first.to_string(), "index": 0,
+                "reason": "the fixture moved back"}]})
+            .to_string(),
+        )
+        .exited(0);
+    let expected = format!("{between}\n\n{twin}");
+    let later_context = |world: &World| {
+        world
+            .store_tasks(&project)
+            .into_iter()
+            .find(|task| task["item"]["metadata"]["onepipeline.id"] == "later")
+            .map(|task| task["item"]["metadata"]["onepipeline.context"].clone())
+    };
+    world.until_store("the withdrawal to reach the board", |world| {
+        later_context(world) == Some(json!(expected))
+    });
+
+    // Replayed: a driver taking the run over folds the journal, withdrawal and all,
+    // and projects what it folded.
+    crate::harness::end_driver(&world, name);
+    let projected = |world: &World| {
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .map_or(0, |log| log.lines().count())
+    };
+    let before = projected(&world);
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    world.until_store("the adopted driver to project what it replayed", |world| {
+        projected(world) > before
+    });
+    assert_eq!(
+        later_context(&world),
+        Some(json!(expected)),
+        "the replayed run projected a different planner context onto the board"
+    );
+    world.release("work.go");
+    world.until("later to be dispatched by the adopted driver", |world| {
+        world.journal(name).iter().any(|event| {
+            event["labels"]["node"] == "later"
+                && event["kind"] == "turn-activity"
+                && event["payload"]["task"].is_string()
+        })
+    });
+    let task = world
+        .journal(name)
+        .into_iter()
+        .find(|event| event["labels"]["node"] == "later" && event["kind"] == "turn-activity")
+        .and_then(|event| event["payload"]["task"].as_str().map(str::to_owned))
+        .expect("later's task");
+    let notes = task
+        .split_once("## Planner context")
+        .and_then(|(_, context)| context.trim().split_once("\n\n"))
+        .map(|(_, notes)| notes.trim().to_owned())
+        .unwrap_or_else(|| panic!("later's dispatch has no planner context:\n{task}"));
+    assert_eq!(
+        notes, expected,
+        "the replayed run did not compose later with B then A"
+    );
+}
+
 /// No assertion in these journeys is a bare presence assertion over metadata the writer
 /// added: a presence assertion passes whatever the projection wrote, so it cannot fail on
 /// a deletion.
@@ -4421,8 +5994,9 @@ fn assertions(source: &str) -> Vec<String> {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// Enabling the source cache changes neither unpinned plan reads nor settlement
-/// projections, including a failed settlement followed by recovery.
+/// Enabling the source cache changes neither unpinned plan reads — a project read by
+/// `plan check` and by the launch — nor settlement projections, including a failed
+/// settlement followed by recovery.
 #[test]
 fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
     use crate::linear_writeback::{
@@ -4451,6 +6025,38 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
             "sources:\n  board:\n    plugin: github-projects\n    cache:\n      enabled: {enabled}\n      dir: cache\n    config:\n      owner: generic\n      project_number: 1\n      token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}/graphql\n      status_mapping:\n        todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        done: Done\n        cancelled: Canceled\n",
             served.url
         )).expect("store configuration");
+        // One project read through the engine's own plan loader, twice: an unpinned read
+        // is never answered from the cache, so the second costs what the first did.
+        let project_reads: Vec<_> = (0..2)
+            .map(|_| {
+                let before = served.state()["requests"]
+                    .as_array()
+                    .expect("requests")
+                    .len();
+                let checked = from_the_launch_directory(
+                    &world,
+                    &launch,
+                    &["plan", "check", "board:plan", "--json"],
+                )
+                .output()
+                .expect("plan check runs");
+                assert_eq!(
+                    checked.status.code(),
+                    Some(0),
+                    "{}",
+                    String::from_utf8_lossy(&checked.stderr)
+                );
+                let report: Value =
+                    serde_json::from_slice(&checked.stdout).expect("plan check --json is JSON");
+                let state = served.state();
+                let requests = state["requests"].as_array().expect("requests")[before..]
+                    .iter()
+                    .map(|request| request["query"].clone())
+                    .collect::<Vec<_>>();
+                assert!(!requests.is_empty(), "the project read reached the board");
+                (report, requests)
+            })
+            .collect();
         let start =
             from_the_launch_directory(&world, &launch, &["start", "board:plan", "--detach"]);
         world.run_on(start, "start --detach").exited(0);
@@ -4563,6 +6169,7 @@ fn a_cache_enabled_github_store_reads_and_writes_like_an_uncached_store() {
         assert_eq!(result["state"], "complete", "{result}");
         let state = served.state();
         (
+            project_reads,
             state["issues"].clone(),
             state["requests"].as_array().expect("requests").len(),
             costs,
