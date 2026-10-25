@@ -1092,13 +1092,17 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     std::fs::remove_file(&checkpoint).expect("the checkpoint is deleted again");
     clear_journal_reads(&world);
     let length = journal_length(&world, run);
-    world.run(&["adopt", run, "--detach"]).exited(0);
-    world.release("last.go");
-    world.until("the last node to settle", |world| {
+    let dispatches_of_last = |world: &World| {
         world
-            .events_of(run, "node-settled")
+            .events_of(run, "node-dispatched")
             .iter()
-            .any(|event| event["labels"]["node"] == "last")
+            .filter(|event| event["labels"]["node"] == "last")
+            .count()
+    };
+    let dispatched_before = dispatches_of_last(&world);
+    world.run(&["adopt", run, "--detach"]).exited(0);
+    world.until("the driver to dispatch the last node again", |world| {
+        dispatches_of_last(world) > dispatched_before
     });
     assert_eq!(
         world.run_json(run, "checkpoint.json")["schema_version"],
@@ -1108,8 +1112,18 @@ fn a_run_rebuilds_its_checkpoint_where_it_must_and_reads_the_same() {
     // attached render — together read the history the rebuild folded once: one read
     // from the journal's first byte, and every other read resuming past it. What they
     // each take again is the trailing instant the rebuilt checkpoint holds back, which
-    // the next arrival can still sort in front of, and not history.
+    // the next arrival can still sort in front of, and not history. Read while the
+    // last node is still held, so the run cannot have ended: the scratch handling a
+    // driver does as it lets go of an ended run reads the whole journal once, and
+    // whether that lands before this read or after it is a race, not the rebuild.
     let reads = journal_reads(&world, run);
+    world.release("last.go");
+    world.until("the last node to settle", |world| {
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "last")
+    });
     let from_the_start: Vec<&JournalRead> = reads.iter().filter(|read| read.offset == 0).collect();
     assert_eq!(
         from_the_start.len(),
