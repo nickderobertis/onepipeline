@@ -8957,7 +8957,7 @@ fn start_restacks(
                 continue;
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
-        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the in-pass claimer's `admit`, through the same closure — whose refusal needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place (see `InPass::admit`).
+          // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the in-pass claimer's `admit`, through the same closure — whose refusal needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place (see `InPass::admit`).
         if !admit(&node.id) {
             break;
         }
