@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.90.0](https://github.com/nickderobertis/onepipeline/compare/v0.89.3...v0.90.0) - 2026-10-25
+
+### Added
+
+- [**breaking**] hold a node only on trackers its edges name, until the provider's reset ([#1153](https://github.com/nickderobertis/onepipeline/pull/1153))
+
+### Fixed
+
+- *(tests)* keep three of onepipeline's e2e journeys reliable on a loaded runner ([#1086](https://github.com/nickderobertis/onepipeline/pull/1086))
+
 ## [0.89.3](https://github.com/nickderobertis/onepipeline/compare/v0.89.2...v0.89.3) - 2026-10-24
 
 ### Fixed
