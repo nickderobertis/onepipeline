@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.91.1](https://github.com/nickderobertis/onepipeline/compare/v0.91.0...v0.91.1) - 2026-10-25
+
+### Fixed
+
+- *(observer)* end the monitor's judge command when its run ends ([#1186](https://github.com/nickderobertis/onepipeline/pull/1186))
+
 ## [0.91.0](https://github.com/nickderobertis/onepipeline/compare/v0.90.0...v0.91.0) - 2026-10-25
 
 ### Added
