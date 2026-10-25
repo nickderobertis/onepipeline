@@ -542,10 +542,13 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 ///
 /// Five a second rather than twenty: every beat a dispatch sends is a record the
 /// loop relays, and a host that relays fewer of them a second than it is sent
-/// never finishes a pass — each one drains a backlog that grew while it ran. A
-/// loaded Windows runner relayed under twenty a second, so the chatty loop ran
-/// eighteen passes in the window, and the premise below failed with every claim
-/// under it intact (run 36666603034).
+/// never finishes a pass — each one drains a backlog that grew while it ran.
+///
+/// How many passes a host fits in the window is no part of the verdict. A loaded
+/// Windows runner ran 189 where a quiet Linux host runs about 400 (run
+/// 40201000343), and a host whose every pass takes an interval or longer has
+/// every pass due, so a correct loop reads on each of them. What is asserted is
+/// whether any round of reads began before its interval was due.
 ///
 /// Measured over [`WINDOW`], the same minute every other bound here is stated
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
@@ -593,6 +596,17 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
         .map(|(nth, run)| counts(&world, run).since(before[nth]))
         .collect();
 
+    // Whether a round of reads came before its interval was due is timed where
+    // the reads are made, so it is the same answer at any pass rate: a loop
+    // reading on its own cadence begins one early whenever two passes fall
+    // inside an interval, and a correct one never does, however slow its passes.
+    for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
+        assert_eq!(
+            did[nth].early_upstream_reads, 0,
+            "{run} read the upstream before its interval was due: {did:?}"
+        );
+    }
+
     // Two reads answer one edge — has the node settled, and how far has that run
     // got — so twice a second is four reads a second and no more.
     let ceiling = 4 * WINDOW.as_secs() + 4;
@@ -602,20 +616,6 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
             "{run} read the upstream more often than the interval allows: {did:?}"
         );
     }
-    // A loop that read on every pass would have read the edge's two answers on
-    // each of them. Stated against the passes it actually ran rather than a
-    // number of them, because a host's load decides how many passes fit in the
-    // window; any host relaying five beats a second runs more passes than the
-    // two read rounds a second it is due.
-    assert!(
-        did[0].upstream_reads < 2 * did[0].passes,
-        "the chatty loop read the upstream on every pass it ran: {did:?}"
-    );
-    assert!(
-        did[0].upstream_reads <= 2 * did[1].upstream_reads + 4,
-        "reading the upstream tracked the loop's pass rate: {did:?}"
-    );
-
     for run in ["chatty", "quiet"] {
         world.release(&format!("{run}-hold.go"));
     }

@@ -263,6 +263,8 @@ pub struct Observer {
     baselines: BTreeMap<String, u64>,
     /// The `(dependency, consumer)` pairs already reported as moved.
     reported: BTreeSet<(String, String)>,
+    /// When the last [`resolve`](Self::resolve) began reading.
+    resolved_at: Option<Instant>,
 }
 
 impl Observer {
@@ -276,6 +278,7 @@ impl Observer {
             root: root.to_path_buf(),
             baselines,
             reported,
+            resolved_at: None,
         }
     }
 
@@ -331,6 +334,17 @@ impl Observer {
         paths: &RunPaths,
         journal: &mut Journal,
     ) -> Result<BTreeMap<String, NodeStatus>> {
+        // Timed here, where the reads happen, rather than where the loop decides
+        // to make them, so a read made before its interval was due is counted
+        // whatever decided to make it.
+        let now = Instant::now();
+        if self
+            .resolved_at
+            .is_some_and(|last| now.duration_since(last) < crate::engine::UPSTREAM_EVERY)
+        {
+            crate::loopstats::early_upstream_read();
+        }
+        self.resolved_at = Some(now);
         let mut resolved = BTreeMap::new();
         for (dependency, consumers) in edges(graph) {
             let Some(reference) = parse(&dependency) else {
@@ -391,6 +405,12 @@ impl Observer {
             }
         }
         Ok(resolved)
+    }
+
+    /// When the last [`resolve`](Self::resolve) began reading, which is what the
+    /// loop's next read is paced from.
+    pub(crate) fn resolved_at(&self) -> Option<Instant> {
+        self.resolved_at
     }
 }
 

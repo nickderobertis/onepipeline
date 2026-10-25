@@ -7642,6 +7642,9 @@ pub struct Counts {
     pub statuses: u64,
     pub publications: u64,
     pub upstream_reads: u64,
+    /// Rounds of upstream reads begun before the upstream interval since the
+    /// round before them had passed.
+    pub early_upstream_reads: u64,
     pub release_asks: u64,
     /// Pool-maintenance sweeps the driver started.
     pub maintenance_sweeps: u64,
@@ -7665,6 +7668,7 @@ impl Counts {
             statuses: self.statuses - before.statuses,
             publications: self.publications - before.publications,
             upstream_reads: self.upstream_reads - before.upstream_reads,
+            early_upstream_reads: self.early_upstream_reads - before.early_upstream_reads,
             release_asks: self.release_asks - before.release_asks,
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
@@ -7698,6 +7702,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         statuses: count("statuses"),
         publications: count("publications"),
         upstream_reads: count("upstream_reads"),
+        early_upstream_reads: count("early_upstream_reads"),
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
