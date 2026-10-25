@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.92.0](https://github.com/nickderobertis/onepipeline/compare/v0.91.1...v0.92.0) - 2026-10-25
+
+### Added
+
+- *(deps)* [**breaking**] link the onevcs whose private-term check honours a host's public phrases ([#1205](https://github.com/nickderobertis/onepipeline/pull/1205))
+
+### Fixed
+
+- *(test)* hold the loop-cost journey to when the loop reads, not how many passes a slow runner completes ([#1206](https://github.com/nickderobertis/onepipeline/pull/1206))
+
 ## [0.91.1](https://github.com/nickderobertis/onepipeline/compare/v0.91.0...v0.91.1) - 2026-10-25
 
 ### Fixed
