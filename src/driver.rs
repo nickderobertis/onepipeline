@@ -2344,7 +2344,7 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         })?
     };
     if let Some(run) = observer.as_mut() {
-        run.cancel();
+        observer_let_go(&paths.run, run);
     }
     // The run's end is judged by the driver that let go of it, with the lock
     // already released — a detached one exactly as an attached one.
@@ -2352,6 +2352,19 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         crate::hooks::at_let_go(&paths, crate::hooks::Relay::Quiet);
     }
     Ok(settled.state.exit_code())
+}
+
+/// End the observer of a run its driver is letting go of, and wait for it to
+/// have ended before the driver exits — said on the driver's own stderr where
+/// it has not within [`TEARDOWN_PATIENCE`].
+fn observer_let_go(run: &str, observer: &mut agentgraph::GraphRun) {
+    if !observer.stop(TEARDOWN_PATIENCE) {
+        eprintln!(
+            "onepipeline: the observer graph for '{run}' had not ended {} seconds after \
+             its run's driver let go of it",
+            TEARDOWN_PATIENCE.as_secs()
+        );
+    }
 }
 
 /// Keep the run watched, and reap the graph that stopped watching it.
@@ -3126,8 +3139,10 @@ fn attach(
             // loop's own verdict is unwrapped, because that verdict may be a
             // refusal, and a launch that returned one having left a graph
             // running would leave an agent working on a run nobody is driving.
+            // Waited for, because this process is about to exit and the graph's
+            // reaper is one of its threads: see [`agentgraph::GraphRun::stop`].
             if let Some(run) = watched.as_deref_mut() {
-                run.cancel();
+                observer_let_go(&paths.run, run);
             }
             // Whatever the loop reported is this launch's failure to report: a
             // lock it could not take, a ledger it could not read.

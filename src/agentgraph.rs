@@ -1979,6 +1979,28 @@ impl GraphRun {
             }
         }
     }
+
+    /// [Cancel](Self::cancel) the graph and wait, up to `patience`, for it to
+    /// have ended — answering whether it did.
+    ///
+    /// What a caller about to exit needs instead of a cancel alone. The library
+    /// backend's graph lives on this process's threads, and its reap of the
+    /// member processes it started — a command provider among them — runs after
+    /// the cancel is delivered, so a process that exits on the cancel ends the
+    /// reaper before it reaps and leaves those members running under init.
+    /// Ended is [`has_exited`](Self::has_exited): for the library backend, the
+    /// sibling's own `wait` has returned, which is after its members are reaped.
+    pub fn stop(&mut self, patience: Duration) -> bool {
+        self.cancel();
+        let deadline = Instant::now() + patience;
+        while !self.has_exited() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
 }
 
 /// Run a graph in **this** process, streaming its envelopes as NDJSON on stdout.
