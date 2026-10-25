@@ -746,6 +746,21 @@ resolver = "2"
 # answer a ref, repository or landing read it has already answered (onevcs #540),
 # which the busy round's git-start bound holds.
 #
+# `onevcs` 0.57.0 is the floor because it carries the **host public phrases**:
+# `$ONEVCS_HOME/public-phrases.yml`, read by `onevcs::public_phrases`, lists exact
+# phrases a host declares public though a private term occurs inside them, and the
+# one matcher exempts a hit lying wholly inside one. The engine screens its own
+# public writes — settlement write-backs, channel replies and notes — through the
+# onevcs it *links*, so below this floor it refused what the host's own commands
+# let through. A file it cannot read makes a check unavailable under the new
+# `Unavailability::PublicPhrases`, which this crate constructs nothing of and
+# matches nowhere. `boundary::fingerprint` digests the list, so a bus pass cache
+# rejudges a payload once a phrase changes; `tests/e2e/publication_boundary.rs`'s
+# `a_host_public_phrase_*`, `a_payload_passed_under_a_host_phrase_*` and
+# `a_malformed_host_phrase_file_*` journeys drive both. A **requirement**, because
+# `^0.56` admits no 0.57.x; `onevcs-testing` 0.19.22 requires exactly it, so the
+# two move as one.
+#
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
 # unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
@@ -842,7 +857,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 oneagentgraph = "0.8.0"
-onevcs = "0.56.11"
+onevcs = "0.57.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -1098,7 +1113,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.21"
+onevcs-testing = "0.19.22"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
