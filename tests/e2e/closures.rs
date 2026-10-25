@@ -218,6 +218,15 @@ fn a_landing_moves_exactly_the_cards_of_the_issues_it_closes_on_every_configured
     world.until("the landing's closures to be recorded", |world| {
         !closures_of(world, run).is_empty() && world.run_file(run, "result.json").is_file()
     });
+    assert_eq!(
+        world
+            .store_operations(run)
+            .iter()
+            .filter(|operation| operation["operation"] == "complete-issues")
+            .count(),
+        1,
+        "the closure was not counted as the one store operation it is"
+    );
 
     assert_eq!(
         card(&served, "1", "7"),

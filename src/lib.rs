@@ -118,6 +118,7 @@ mod review;
 mod shutdown;
 mod stack;
 mod stopguard;
+mod storeops;
 mod summary;
 mod supersession;
 mod sys;

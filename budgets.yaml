@@ -17,18 +17,58 @@ budgets:
       is doubled because the shared harness adds a dispatch in series before
       the concurrent area spikes. The value is read from the existing test run,
       never re-measured; the test uses a subprocess agent double, not paid model turns.
-  - id: linear-requests-per-writeback-settlement
-    description: >-
-      Measures the highest loopback Linear request count per settlement attempt after the first
-      across at least five consecutive write-backs through the real worker. It protects a
-      production Linear key which no check may reach.
-    labels: [linear]
+  - id: source-hold-store-operations-per-hour
     measure: reported
-    command: ["bash", "scripts/linear-writeback-budget.sh"]
-    unit: requests
+    command: [node, scripts/store-operations-budget.mjs]
+    unit: operations
     direction: max
-    threshold: 2
-    timeout_seconds: 1800
+    threshold: 5
+    description: >-
+      Store operations the engine's hold-and-re-read loop issues, over one hour after launch,
+      to every private source nodes are held on, counted at the store seam; detail reports
+      them per source and per held node, re-reads at a reset versus on backoff, the waits
+      chosen and the unchanged fixed-interval figure. Workload: one run of a 20-task plan in a
+      local Markdown source, 3 tasks each with one opaque edge to an item of a private source
+      and 17 with none; the source answers rate limited for the whole hour, with a reset 30
+      minutes out during the first half hour and none during the second; the hour is
+      compressed by ONEPIPELINE_SOURCE_POLL_SECONDS=1, so 60 poll intervals stand for 3,600 s.
+      Arithmetic: launch excluded, one re-read at the provider reset after 30 minutes, then
+      backoff re-reads 1, 3, 7 and 15 minutes later, each pass stopping at its first
+      rate-limited answer: 1 + 4 = 5; the next falls after the hour. Read from the held-hour
+      journey's telemetry; each backend's requests per operation are onetaskgraph's to bound
+      (its per-dependency-read budgets).
+  - id: store-operations-per-dispatch
+    measure: reported
+    command: [node, scripts/store-operations-budget.mjs]
+    unit: operations
+    direction: max
+    threshold: 1
+    description: >-
+      Store operations the engine issues to dispatch one node, from the node becoming ready to
+      its dispatched process starting, its write-back projection included, the largest over a
+      run's dispatches; detail reports them by kind, and each write-back attempt's shared
+      end-command as per-attempt overhead attributed to no dispatch, by the manager's ruling.
+      Workload: one run of a 20-task plan in a local Markdown source with no holds, each of its
+      20 dispatches counted. Design requirement from the user: one complete store operation
+      per dispatch, all projection fields batched and redundant reads served from held state.
+      Read from the 20-task journey's telemetry; each backend's requests per status write are
+      onetaskgraph's to bound.
+  - id: store-operations-per-settlement
+    measure: reported
+    command: [node, scripts/store-operations-budget.mjs]
+    unit: operations
+    direction: max
+    threshold: 1
+    description: >-
+      Store operations the engine issues to write back one settlement including the run's
+      first, the largest over the attempts; detail reports them by kind including the first
+      settlement's figure, and each write-back attempt's shared end-command as per-attempt
+      overhead attributed to no settlement, by the manager's ruling. Workload: five
+      consecutive settlement write-backs including the first through the real write-back
+      worker, in one run of a local Markdown plan. Design requirement from the user: one
+      complete store operation per settlement, the first included. Read from the 20-task
+      journey's telemetry; each backend's requests per settlement update are onetaskgraph's to
+      bound.
   - id: settlement-readability-latency
     measure: reported
     command: [bash, scripts/settlement-latency-budget.sh]

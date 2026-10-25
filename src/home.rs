@@ -54,6 +54,7 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
         Err(error) => return Answer::Transient(format!("the store cannot be called: {error}")),
         // llmlint: ignore-end[changed_behavior_has_e2e]
     };
+    crate::storeops::record(crate::storeops::Operation::ProjectStatusSet);
     let answered = runtime.block_on(async {
         tokio::time::timeout(
             within,

@@ -1,0 +1,18 @@
+{
+  "run_id": "source-hold-before-cause",
+  "project": "plans:source-hold-before-cause-board",
+  "dir": "/tmp/onepipeline-base-record.W2SERJ",
+  "node_graph": "/tmp/onepipeline-base-record.W2SERJ/graphs/node-scope.yaml",
+  "launcher": "e2e",
+  "session": "session-legacy-source-hold",
+  "pid": 3394810,
+  "host": "shulgin",
+  "started": "linux-proc-stat:87791100",
+  "started_at": "2026-10-24T16:02:04.601Z",
+  "heartbeat_interval": 1800,
+  "writeback_item_budget": 12,
+  "adoptions": 0,
+  "branch_template": "{% if task.key %}{{ task.key }}{% else %}{{ plan.name }}{% endif %}/{{ node.id }}",
+  "oneharness_sessions": "/tmp/op-3307786-0/runs/source-hold-before-cause/oneharness-sessions.jsonl",
+  "public_id": "source-hold-before-cause"
+}

@@ -791,10 +791,15 @@ pub fn compile(
             let built = crate::taskgraph::Store::at(&base.launch_dir)
                 .engine(&onetaskgraph_core::config::Layer::default())
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
-            crate::taskgraph::runtime()
-                .map_err(|why| refuse(format!("assets_from {id}: {why}")))?
-                .block_on(built.engine.task_assets(id))
+            let runtime = crate::taskgraph::runtime()
                 .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
+            crate::storeops::about(crate::storeops::Scope::Edit, || {
+                crate::storeops::record(crate::storeops::Operation::TaskAssets);
+                runtime
+                    .block_on(built.engine.task_assets(id))
+                    .map_err(|why| why.to_string())
+            })
+            .map_err(|why| refuse(format!("assets_from {id}: {why}")))?;
         }
     }
     let operations = compile_into(&mut candidate, frontier, author, &resolved)?;
