@@ -175,6 +175,117 @@ fn guidance(world: &World) -> String {
     guidance["summary"].as_str().expect("a summary").to_owned()
 }
 
+/// What the guidance never advises: switching screening off, or splitting the work into
+/// plans that do not depend on each other.
+const NEVER_ADVISED: [&str; 7] = [
+    "disable",
+    "turn off",
+    "skip screening",
+    "separate plan",
+    "disconnected",
+    "two plans",
+    "classification setting",
+];
+
+#[test]
+fn the_guidance_coordinates_one_private_plan_by_each_tasks_own_visibility() {
+    let world = World::new("boundary-guidance");
+    let printed = world.run(&["boundary", "guidance", "--json"]);
+    printed.exited(0);
+    let guidance: Value = serde_json::from_str(printed.stdout.trim()).expect("one JSON object");
+    assert_eq!(
+        guidance["schema_version"],
+        contract_block()["boundary_guidance_schema_version"]
+    );
+    let coordination: Vec<&str> = guidance["coordination"]
+        .as_array()
+        .expect("coordination lines")
+        .iter()
+        .map(|line| line.as_str().expect("a line"))
+        .collect();
+    let said = coordination.join("\n");
+    // Each task's own visibility, and nothing to set on the plan for it.
+    assert!(said.contains("Visibility belongs to each task"), "{said}");
+    assert!(said.contains("the plan sets no visibility"), "{said}");
+    assert!(said.contains("no setting or metadata key"), "{said}");
+    // One private canonical home keeping the whole graph, the export dependency included.
+    assert!(
+        said.contains("canonical board home stays private"),
+        "{said}"
+    );
+    assert!(said.contains("the export dependency"), "{said}");
+    // A neutral projection, with nothing private back.
+    assert!(said.contains("no private dependency, backlink"), "{said}");
+    assert!(said.contains("Screening stays on"), "{said}");
+
+    // The example: a private preserved producer and a public consumer, synthetic names only,
+    // joined by the project's `onepipeline.export_edges` entry with all four of its fields.
+    let example = &guidance["example"];
+    assert_eq!(
+        example["tasks"],
+        json!([
+            {"id": "generic-example-producer", "visibility": "private", "publish": "preserve"},
+            {"id": "generic-example-consumer", "visibility": "public"},
+        ])
+    );
+    let edge = example["export_edges"][0]
+        .as_object()
+        .expect("an export edge");
+    assert_eq!(
+        edge.keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["from", "source_directory", "target_directory", "to"].into()
+    );
+    assert_eq!(
+        example["projection"],
+        json!({
+            "task": "generic-example-consumer",
+            "visibility": "public",
+            "dependencies": [],
+            "backlinks": [],
+        })
+    );
+    let consume = guidance["steps"][3]["text"]
+        .as_str()
+        .expect("the consume step");
+    assert!(
+        consume.contains(
+            "`onepipeline.export_edges` — `{from, to, source_directory, target_directory}`"
+        ),
+        "{consume}"
+    );
+    assert!(
+        guidance["producer"][0].as_str().is_some_and(|line| line
+            .contains("outside the edge's `source_directory`")
+            && line.contains("refuses the export")),
+        "{guidance}"
+    );
+
+    // The prose says the same, as a person reads it.
+    let prose = world.run(&["boundary", "guidance"]);
+    prose
+        .exited(0)
+        .out_has(guidance["summary"].as_str().expect("a summary"))
+        .out_has("Coordination:")
+        .out_has("One private coordinating plan (synthetic names):")
+        .out_has("generic-example-producer   visibility: private   publish: \"preserve\"")
+        .out_has("generic-example-consumer   visibility: public")
+        .out_has("onepipeline.export_edges:")
+        .out_has("source_directory: examples/generic  target_directory: examples")
+        .out_has("dependencies: none, backlinks: none")
+        .out_has("a change anywhere else refuses the export")
+        .out_has("`<host prefix>export/<opaque id>`");
+    for text in [prose.stdout.to_lowercase(), printed.stdout.to_lowercase()] {
+        for never in NEVER_ADVISED {
+            assert!(
+                !text.contains(never),
+                "the guidance advises {never:?}:\n{text}"
+            );
+        }
+    }
+}
+
 #[test]
 fn an_ordinary_private_to_public_dependency_is_refused_at_load_carrying_the_hosts_guidance() {
     let (world, _, _) = mixed_world("boundary-load");
@@ -767,9 +878,106 @@ fn until_settled(world: &World, run: &str, node: &str) {
     });
 }
 
+/// Where a journey's plan is kept: a plans source not declared private, or the private
+/// canonical home of [`private_home_world`], which keeps the consumer's public projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Home {
+    Shared,
+    Private,
+}
+
+impl Home {
+    fn world(self, name: &str) -> (World, Repository, Repository) {
+        match self {
+            Self::Shared => mixed_world(name),
+            Self::Private => private_home_world(name),
+        }
+    }
+
+    /// A private producer, which in the private home names the private repository by its
+    /// origin and is classified private on its own task.
+    fn producer(self, id: &str, deps: &[&str]) -> Value {
+        let mut node = producer(id, deps);
+        if self == Self::Private {
+            node["repo"] = json!("github.com/owner/service");
+            node["classification"] = json!("private");
+        }
+        node
+    }
+
+    /// A public node, which in the private home names the public repository by its origin,
+    /// so the store routes its projection.
+    fn public(self, id: &str, deps: &[&str]) -> Value {
+        let mut node = public(id, deps);
+        if self == Self::Private {
+            node["repo"] = json!("github.com/owner/library");
+        }
+        node
+    }
+
+    fn exported_plan(self, name: &str) -> Value {
+        mixed_plan(
+            name,
+            vec![
+                self.producer("generalize", &[]),
+                self.public("examples", &["generalize"]),
+            ],
+            vec![edge("generalize", "examples")],
+        )
+    }
+
+    fn project(self, world: &World, name: &str, plan: &Value) -> String {
+        match self {
+            Self::Shared => world.plan(name, plan),
+            Self::Private => routed_into_private_home(world, name, plan),
+        }
+    }
+
+    /// In the private home: the consumer's projection is still one view, never a node of
+    /// the run, and holds the status its canonical task settled with.
+    fn kept_one_view(self, world: &World, run: &str, nodes: &[&str]) {
+        if self != Self::Private {
+            return;
+        }
+        let dispatched: std::collections::BTreeSet<String> = world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .filter_map(|event| event["labels"]["node"].as_str().map(str::to_owned))
+            .collect();
+        let expected: std::collections::BTreeSet<String> =
+            nodes.iter().map(|node| (*node).to_owned()).collect();
+        assert!(
+            dispatched.is_subset(&expected),
+            "{dispatched:?} is not within {expected:?}"
+        );
+        let views: Vec<(String, String)> = files_under(&world.root.join("views-store"))
+            .into_iter()
+            .filter(|(path, _)| path.starts_with("tasks"))
+            .collect();
+        assert_eq!(views.len(), 1, "{views:?}");
+        assert!(views[0].1.contains("status: done"), "{views:?}");
+        assert!(!views[0].1.contains("depends_on"), "{views:?}");
+    }
+}
+
 #[test]
 fn the_export_base_holds_through_supersession_retry_and_resume() {
-    let (world, _, library) = mixed_world("boundary-lineage");
+    export_base_holds(Home::Shared);
+}
+
+/// The same lineage over a private canonical home: every replacement, the requeue and the
+/// resumed session start from the one export, and the consumer's public projection is never
+/// read as a node however often the plan is read again.
+#[test]
+fn the_export_base_holds_through_supersession_retry_and_resume_in_a_private_home() {
+    export_base_holds(Home::Private);
+}
+
+fn export_base_holds(home: Home) {
+    let (world, _, library) = home.world(match home {
+        Home::Shared => "boundary-lineage",
+        Home::Private => "boundary-lineage-private",
+    });
     // The first producer fails its task; its replacement keeps the example.
     world.script("generalize.fail", "1");
     world.script("generalize-2.work-at", "examples/generic/sample.md");
@@ -782,25 +990,25 @@ fn the_export_base_holds_through_supersession_retry_and_resume() {
     // A node held open for the whole journey keeps the driver attending the run while
     // each failure waits for its retry.
     world.script("keep.wait", "hold");
-    let mut plan = exported_plan("lineage");
+    let mut plan = home.exported_plan("lineage");
     plan["tasks"]
         .as_array_mut()
         .expect("the plan's nodes")
         .push(crate::harness::agent("keep", &[]));
-    let project = world.plan("lineage", &plan);
+    let project = home.project(&world, "lineage", &plan);
     world.run(&["start", &project, "--detach"]).exited(0);
 
     until_settled(&world, "lineage", "generalize");
     reply(
         &world,
         "lineage",
-        json!([{"op": "retry", "id": "generalize", "node": producer("generalize-2", &[])}]),
+        json!([{"op": "retry", "id": "generalize", "node": home.producer("generalize-2", &[])}]),
     );
     until_settled(&world, "lineage", "examples");
     reply(
         &world,
         "lineage",
-        json!([{"op": "retry", "id": "examples", "node": public("examples-2", &[])}]),
+        json!([{"op": "retry", "id": "examples", "node": home.public("examples-2", &[])}]),
     );
     world.until("the replacement consumer to hold its session", |world| {
         world
@@ -908,6 +1116,17 @@ fn the_export_base_holds_through_supersession_retry_and_resume() {
             &["show", "origin/main:examples/sample.md"]
         ),
         "the replacement's generic example"
+    );
+    home.kept_one_view(
+        &world,
+        "lineage",
+        &[
+            "generalize",
+            "generalize-2",
+            "examples",
+            "examples-2",
+            "keep",
+        ],
     );
 }
 
@@ -1972,36 +2191,667 @@ fn a_live_edit_naming_b_puts_b_in_the_run_scope_for_the_validator_replies_and_st
     assert!(tasks_of(&world, "examples").is_empty());
 }
 
-#[test]
-fn every_task_of_a_private_project_is_private_whatever_it_says() {
-    let (world, _, _) = mixed_world("boundary-private-project");
-    // The plan that loads as a mixed one in a public project …
-    let public_project = world.plan("open-board", &exported_plan("open-board"));
-    world.run(&["plan", "check", &public_project]).exited(0);
-    // … has no public node in a private one: its consumer, in the public repository, is
-    // private by its project, which no export consumer may be.
-    let project = world.plan("closed-board", &exported_plan("closed-board"));
-    let identifier = project
+/// A world whose plans source is the **private canonical home**: `plans` declared
+/// `visibility: private` and routing a task of the public repository to `views`, a source
+/// declared public, where the store files that task's neutral public projection; `draft`, a
+/// private source a planner authors in; and the store's boundary screening on, through the
+/// linked `onevcs`'s own `boundary` commands.
+fn private_home_world(name: &str) -> (World, Repository, Repository) {
+    let (world, private, library) = mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let draft = world.root.join("draft-store");
+    let views = world.root.join("views-store");
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__VISIBILITY", "private")
+        .with_env("ONETASKGRAPH_SOURCES__PLANS__ROUTES__0__TO", "views")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__PLANS__ROUTES__0__REPOSITORIES",
+            "github.com/owner/library",
+        )
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__PLUGIN", "local-md")
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__VISIBILITY", "private")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__DRAFT__CONFIG__ROOT",
+            &draft.to_string_lossy(),
+        )
+        .with_env("ONETASKGRAPH_SOURCES__VIEWS__PLUGIN", "local-md")
+        .with_env("ONETASKGRAPH_SOURCES__VIEWS__VISIBILITY", "public")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__VIEWS__CONFIG__ROOT",
+            &views.to_string_lossy(),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    (world, private, library)
+}
+
+/// Run the standalone store's own command line under the world's environment.
+fn store_cli(world: &World, args: &[&str]) -> crate::harness::Run {
+    let mut command = store_cli_command(world);
+    command.args(args);
+    world.run_on(command, &format!("onetaskgraph {}", args.join(" ")))
+}
+
+/// The standalone store's own command line, under the world's environment.
+pub(crate) fn store_cli_command(world: &World) -> std::process::Command {
+    let template = world.cmd(&[]);
+    let mut command = std::process::Command::new(crate::harness::onetaskgraph_binary());
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    if let Some(dir) = template.get_current_dir() {
+        command.current_dir(dir);
+    }
+    command
+}
+
+/// Author `plan` in the private `draft` source, then have the store copy it into the private
+/// home the way a planner routes one, returning the home project the run launches from.
+fn routed_into_private_home(world: &World, name: &str, plan: &Value) -> String {
+    let drafted = world.plan_in(&world.root.join("draft-store"), name, plan);
+    let identifier = drafted
         .strip_prefix("plans:")
-        .expect("a plans project")
+        .expect("a project of the draft root");
+    for root in [world.store(), world.root.join("views-store")] {
+        std::fs::create_dir_all(root).expect("a source root");
+    }
+    let copied = store_cli(
+        world,
+        &[
+            "project",
+            "copy",
+            &format!("draft:{identifier}"),
+            "--to",
+            "plans",
+            "--no-link",
+        ],
+    );
+    copied.exited(0);
+    format!("plans:{identifier}")
+}
+
+/// Every file under `root`, by its path relative to it, with what it holds.
+fn files_under(root: &std::path::Path) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("under the root")
+                    .to_string_lossy()
+                    .into_owned();
+                found.push((relative, std::fs::read_to_string(&path).unwrap_or_default()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// What the drafter of `node` was handed, read off its launches.
+fn drafter_inputs(world: &World, node: &str) -> Vec<String> {
+    let named = format!("onepipeline.node={node}");
+    world
+        .invocations()
+        .into_iter()
+        .filter(|call| {
+            call["tool"] == "oneagentgraph"
+                && call["args"].as_array().is_some_and(|args| {
+                    args.iter()
+                        .any(|arg| arg == "onepipeline.persona=pr-author")
+                        && args.iter().any(|arg| arg == named.as_str())
+                })
+        })
+        .filter_map(|call| {
+            let args = call["args"].as_array()?.clone();
+            let at = args.iter().position(|arg| arg == "--task")?;
+            args.get(at + 1)?.as_str().map(str::to_owned)
+        })
+        .collect()
+}
+
+/// A private coordinating project holds a private preserved producer and a public consumer,
+/// each classified by its own task and nothing set on the plan: it checks, launches and
+/// settles, the consumer starting from one neutral export commit, and nothing public names
+/// the private side — while the store screens every write and keeps the consumer's public
+/// projection, which the run never reads as a node of its own.
+#[test]
+fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_export() {
+    let (world, private, library) = private_home_world("boundary-private-home");
+    declare_terms(&world, &private, &["zephyrine"]);
+    // Synthetic private names throughout: the plan, the producer's id and title, and the
+    // private repository, each carrying the private term.
+    let mut generalize = producer("zephyrine-producer", &[]);
+    generalize["title"] = json!("feat: the zephyrine generalizer");
+    generalize["repo"] = json!("github.com/owner/service");
+    generalize["classification"] = json!("private");
+    let mut consumer = public("examples", &["zephyrine-producer"]);
+    consumer["repo"] = json!("github.com/owner/library");
+    consumer["title"] = json!("feat: add examples");
+    world.script("zephyrine-producer.work-at", "examples/generic/sample.md");
+    world.script("zephyrine-producer.work", "a generic example\n");
+    world.script("examples.work-at", "consumer.md");
+    world.script("examples.work", "what the public task built on it\n");
+    let plan = mixed_plan(
+        "zephyrine-coordination",
+        vec![generalize, consumer],
+        vec![edge("zephyrine-producer", "examples")],
+    );
+    let project = routed_into_private_home(&world, "zephyrine-coordination", &plan);
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+
+    // The home is private and holds both tasks canonically; the consumer keeps its own
+    // public visibility, and the store made it a neutral projection in `views`.
+    let home = std::fs::read_to_string(
+        world
+            .store()
+            .join("projects")
+            .join(format!("{identifier}.md")),
+    )
+    .expect("the private home project");
+    assert!(home.contains("classification: private"), "{home}");
+    assert!(home.contains("onetaskgraph.public_projections"), "{home}");
+    // No classification setting, mode or required key on the plan: only the plan's own
+    // fields and what the store records of its copy.
+    for word in ["visibility", "mode", "onepipeline.classification"] {
+        assert!(
+            !home.contains(word),
+            "the plan carries a {word} setting:\n{home}"
+        );
+    }
+    let canonical = files_under(&world.store().join("tasks").join(identifier));
+    assert_eq!(canonical.len(), 2, "{canonical:?}");
+    let views = files_under(&world.root.join("views-store"));
+    let view_tasks: Vec<&(String, String)> = views
+        .iter()
+        .filter(|(path, _)| path.starts_with("tasks"))
+        .collect();
+    assert_eq!(view_tasks.len(), 1, "{views:?}");
+
+    // It checks as one plan of two nodes, and launches without any setting.
+    world.run(&["plan", "check", &project]).exited(0);
+    let graph = world.pr_author_graph();
+    world.script(
+        "pr-author.body",
+        "## What\nGeneric examples, and what built on them.\n",
+    );
+    world
+        .run(&["start", &project, "--pr-author-graph", &graph, "--attach"])
+        .settled();
+    let run = "zephyrine-coordination";
+
+    // The plan of record is the canonical graph: the two tasks the home holds, the
+    // projection never a third, each node classified by its own task.
+    let launched = world.run_json(run, "plan.json");
+    let nodes: Vec<(String, Value)> = launched["tasks"]
+        .as_array()
+        .expect("the launched nodes")
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().unwrap_or_default().to_owned(),
+                node["classification"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            ("zephyrine-producer".to_owned(), json!("private")),
+            ("examples".to_owned(), Value::Null),
+        ],
+        "{launched}"
+    );
+
+    let producer_node = settled(&world, run, "zephyrine-producer");
+    assert_eq!(
+        producer_node["outcome"],
+        "preserved",
+        "{producer_node}\n{}",
+        world.dump()
+    );
+    let consumer_node = settled(&world, run, "examples");
+    assert_eq!(
+        consumer_node["status"],
+        "done",
+        "{consumer_node}\n{}",
+        world.dump()
+    );
+
+    // The export is one neutral commit on the public base, which the consumer's work landed
+    // on top of: the public base now holds the exported example and the consumer's own file.
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    let recorded = world.run_json(run, "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    let export_commit = recorded[0]["exported_head"]
+        .as_str()
+        .expect("the export's head")
         .to_owned();
-    let file = world
+    let shown = git_out(
+        &world,
+        &library.checkout,
+        &[
+            "show",
+            "--no-patch",
+            "--format=%an <%ae>|%s",
+            &export_commit,
+        ],
+    );
+    assert_eq!(
+        shown,
+        "Example Export <export@example.invalid>|Add generic example fixtures"
+    );
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:examples/sample.md"]
+        ),
+        "a generic example"
+    );
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:consumer.md"]
+        ),
+        "what the public task built on it"
+    );
+
+    // Nothing public names the private side: its term, the private repository, the plan,
+    // the producer's id, branch and head, or where the private side lives on disk.
+    let private_names: Vec<String> = vec![
+        "zephyrine".to_owned(),
+        "owner/service".to_owned(),
+        "zephyrine-producer".to_owned(),
+        identifier.to_owned(),
+        "draft-store".to_owned(),
+        world.store().to_string_lossy().into_owned(),
+        private.checkout.to_string_lossy().into_owned(),
+        producer_node["branch"]
+            .as_str()
+            .expect("a kept branch")
+            .to_owned(),
+        producer_node["head"]
+            .as_str()
+            .expect("a kept head")
+            .to_owned(),
+    ];
+    let clean = |surface: &str, text: &str| {
+        for name in &private_names {
+            assert!(
+                !text.contains(name.as_str()),
+                "{surface} names {name}:\n{text}"
+            );
+        }
+    };
+    let tasks = tasks_of(&world, "examples");
+    assert!(!tasks.is_empty(), "{}", world.dump());
+    for task in &tasks {
+        clean("the consumer's task", task);
+    }
+    let drafts = drafter_inputs(&world, "examples");
+    assert!(!drafts.is_empty(), "the consumer was not drafted for");
+    for draft in &drafts {
+        clean("the consumer's drafter input", draft);
+        assert!(draft.contains("$ONEPIPELINE_RUN_ID"), "{draft}");
+    }
+    clean(
+        "the consumer's branch",
+        consumer_node["branch"].as_str().unwrap_or_default(),
+    );
+    clean(
+        "the public history and its change descriptions",
+        &git_out(
+            &world,
+            &library.checkout,
+            &["log", "--all", "--format=%an %ae %s%n%b"],
+        ),
+    );
+    // The projection is the consumer's own task and status only: no dependency, no link
+    // back, no name of the private plan — and the store mirrored its settled status there.
+    let views = files_under(&world.root.join("views-store"));
+    for (path, held) in &views {
+        clean(&format!("the public projection {path}"), held);
+        assert!(!held.contains("depends_on"), "{path}:\n{held}");
+        assert!(!held.contains("onetaskgraph.origin"), "{path}:\n{held}");
+    }
+    let (_, view) = views
+        .iter()
+        .find(|(path, _)| path.starts_with("tasks"))
+        .expect("the consumer's projection");
+    assert!(view.contains("title: 'feat: add examples'"), "{view}");
+    assert!(view.contains("status: done"), "{view}");
+}
+
+/// In a private canonical home, a public task stays subject to every refusal it always was:
+/// the store refuses to project one carrying a private term, the engine refuses it at load and
+/// at a live edit in neutral words, and an ordinary dependency or a private repository still
+/// keeps private work out of public output. A neutral public task is a live edit like any
+/// other, with nothing set on the plan.
+#[test]
+fn a_private_home_still_refuses_public_tasks_carrying_private_terms_and_private_context() {
+    let home = Home::Private;
+    let (world, private, _) = home.world("boundary-private-home-refusals");
+    declare_terms(&world, &private, &["zephyrine"]);
+    let named = |title: &str| {
+        let mut consumer = home.public("examples", &["generalize"]);
+        consumer["title"] = json!(title);
+        mixed_plan(
+            "named",
+            vec![home.producer("generalize", &[]), consumer],
+            vec![edge("generalize", "examples")],
+        )
+    };
+
+    // The store screens the projection a routed copy would write, and writes no view.
+    let drafted = world.plan_in(
+        &world.root.join("draft-store"),
+        "screened",
+        &named("feat: add zephyrine examples"),
+    );
+    for root in [world.store(), world.root.join("views-store")] {
+        std::fs::create_dir_all(root).expect("a source root");
+    }
+    let copied = store_cli(
+        &world,
+        &[
+            "project",
+            "copy",
+            &drafted.replacen("plans:", "draft:", 1),
+            "--to",
+            "plans",
+            "--no-link",
+        ],
+    );
+    assert_ne!(copied.code, 0, "{}", copied.stdout);
+    assert!(
+        copied
+            .stderr
+            .contains("carries a term of a private repository"),
+        "{}",
+        copied.stderr
+    );
+    assert!(
+        files_under(&world.root.join("views-store"))
+            .iter()
+            .all(|(_, held)| !held.contains("zephyrine")),
+        "a view carries the private term"
+    );
+
+    // Written straight into the private home, the engine refuses it at load, naming nothing.
+    let reason = refused_by_check(&world, "named", &named("feat: add zephyrine examples"));
+    assert!(reason.contains("must be neutral"), "{reason}");
+    names_none(&world, &reason, &["zephyrine"]);
+    // An ordinary dependency into the public task, and a consumer naming the private
+    // repository, are refused as they always were.
+    let reason = refused_by_check(
+        &world,
+        "ordinary",
+        &mixed_plan(
+            "ordinary",
+            vec![
+                home.producer("generalize", &[]),
+                home.public("examples", &["generalize"]),
+            ],
+            vec![],
+        ),
+    );
+    assert!(reason.contains("ordinary dependency"), "{reason}");
+    let mut leaking = home.public("examples", &["generalize"]);
+    leaking["repo"] = json!("github.com/owner/service");
+    let reason = refused_by_check(
+        &world,
+        "leaking",
+        &mixed_plan(
+            "leaking",
+            vec![home.producer("generalize", &[]), leaking],
+            vec![edge("generalize", "examples")],
+        ),
+    );
+    assert!(
+        reason.contains("an export consumer must be a public lifecycle node"),
+        "{reason}"
+    );
+
+    // A live edit: the mixed plan loads with nothing set on it, a public task carrying the
+    // term is refused before anything is committed, and a neutral one is taken.
+    world.script("keep.wait", "hold");
+    let mut plan = home.exported_plan("edited");
+    plan["tasks"][1]["parked"] = json!(true);
+    plan["tasks"]
+        .as_array_mut()
+        .expect("the plan's nodes")
+        .push(crate::harness::agent("keep", &[]));
+    let project = home.project(&world, "edited", &plan);
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        world
+            .events_of("edited", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "keep")
+    });
+    let mut termed = home.public("more-examples", &[]);
+    termed["title"] = json!("feat: more zephyrine examples");
+    termed["parked"] = json!(true);
+    let refused = world.run_with_stdin(
+        &["reply", "edited"],
+        &json!({"version": 3, "commands": [{"op": "add", "node": termed}]}).to_string(),
+    );
+    assert_eq!(refused.code, REFUSED, "{}", refused.stdout);
+    assert!(
+        refused
+            .stderr
+            .contains("the publication boundary refused `add` for a public node"),
+        "{}",
+        refused.stderr
+    );
+    assert!(!refused.stderr.contains("zephyrine"), "{}", refused.stderr);
+    assert!(
+        world.events_of("edited", "edit-committed").is_empty(),
+        "a refused edit was committed"
+    );
+    let mut neutral = home.public("more-examples", &[]);
+    neutral["parked"] = json!(true);
+    reply(&world, "edited", json!([{"op": "add", "node": neutral}]));
+    world.until("the neutral edit to commit", |world| {
+        !world.events_of("edited", "edit-committed").is_empty()
+    });
+    world.release("keep.go");
+}
+
+/// In a private home, every task the run writes is canonical there and the store owns each
+/// public view: a public task the run adds is created in the home with the neutral view the
+/// store makes of it, never in the public source itself. What the store refuses about a view
+/// reaches the run as a write-back failure in its own words and nothing else about the run
+/// changes — a view a person deleted leaves its canonical task's status set and the mirror
+/// refused, and an added task whose body links a local path is refused before anything is
+/// written.
+#[test]
+fn a_projection_the_store_refuses_is_a_write_back_failure_and_the_run_goes_on() {
+    let home = Home::Private;
+    let (world, _, _) = home.world("boundary-projection-refusals");
+    world.script("shown.work", "the public task's work\n");
+    world.script("keep.wait", "hold");
+    let mut shown = home.public("shown", &[]);
+    shown["title"] = json!("feat: show the examples");
+    // A parked private task of the private repository homes the plan privately.
+    let mut inner = home.producer("inner", &[]);
+    inner["parked"] = json!(true);
+    let plan = mixed_plan(
+        "projected",
+        vec![inner, shown, crate::harness::agent("keep", &[])],
+        vec![],
+    );
+    let project = home.project(&world, "projected", &plan);
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    // A person deletes the public view before the run starts.
+    let views = world.root.join("views-store");
+    let view = files_under(&views)
+        .into_iter()
+        .find(|(path, _)| path.starts_with("tasks"))
+        .expect("the public task's view")
+        .0;
+    std::fs::remove_file(views.join(&view)).expect("the view is deleted");
+
+    world.run(&["start", &project, "--detach"]).exited(0);
+    until_settled(&world, "projected", "shown");
+    world.until("the mirror's refusal to be recorded", |world| {
+        projections(world, "projected").contains("\"kind\":\"projection-not-mirrored\"")
+    });
+    // The canonical task takes its settled status; only the view the person deleted does not.
+    let canonical = world
+        .store()
+        .join("tasks")
+        .join(identifier)
+        .join("001-shown.md");
+    world.until("the canonical task to be done", |_| {
+        std::fs::read_to_string(&canonical).is_ok_and(|held| held.contains("status: done"))
+    });
+    assert!(
+        !views.join(&view).exists(),
+        "the store wrote the deleted view back"
+    );
+
+    // A public task the run adds is created canonically in the private home, and the store
+    // gives it its neutral view: nothing the run writes lands in the public source but that.
+    let canonical_tasks = world.store().join("tasks").join(identifier);
+    let mut added = home.public("added", &[]);
+    added["parked"] = json!(true);
+    reply(&world, "projected", json!([{"op": "add", "node": added}]));
+    world.until("the added task's canonical item and its view", |_| {
+        files_under(&canonical_tasks)
+            .iter()
+            .any(|(_, held)| held.contains("onepipeline.id: added"))
+            && files_under(&views)
+                .iter()
+                .any(|(_, held)| held.contains("title: 'feat: ship added'"))
+    });
+    // One whose body links a local path a view could never carry is refused before anything
+    // is written, in the store's words.
+    let mut linked = home.public("linked", &[]);
+    linked["parked"] = json!(true);
+    linked["task"] = json!(
+        "## What\nShip linked, as [the notes](./notes.md) say.\n\n## Acceptance criteria\n- linked is published."
+    );
+    reply(&world, "projected", json!([{"op": "add", "node": linked}]));
+    world.until("the local link's refusal to be recorded", |world| {
+        projections(world, "projected").contains("\"kind\":\"projection-reference\"")
+    });
+    assert!(
+        !files_under(&canonical_tasks)
+            .iter()
+            .any(|(_, held)| held.contains("onepipeline.id: linked")),
+        "the refused creation was written"
+    );
+    for line in projections(&world, "projected").lines() {
+        let record: Value = serde_json::from_str(line).expect("a projection record");
+        if record["outcome"] == "failed" {
+            assert_eq!(record["class"], "refused", "{record}");
+        }
+    }
+    // Every public item is a neutral view: no engine metadata, no origin, no name of the
+    // private plan, and no local path.
+    for (path, held) in files_under(&views) {
+        for private in [
+            "onepipeline.",
+            "onetaskgraph.origin",
+            identifier,
+            "notes.md",
+        ] {
+            assert!(!held.contains(private), "{path} carries {private}:\n{held}");
+        }
+    }
+    let dispatched: Vec<Value> = world
+        .events_of("projected", "node-dispatched")
+        .iter()
+        .map(|event| event["labels"]["node"].clone())
+        .collect();
+    assert!(
+        dispatched
+            .iter()
+            .all(|node| node == "shown" || node == "keep"),
+        "{dispatched:?}"
+    );
+    world.release("keep.go");
+    world.until("the run to settle", |world| {
+        world.run_file("projected", "result.json").is_file()
+    });
+    assert_eq!(
+        settled(&world, "projected", "shown")["status"],
+        "done",
+        "{}",
+        world.dump()
+    );
+}
+
+/// A projection map of a version the store does not read is refused before a creation the run
+/// asks for is written, rather than given a second, unmapped view.
+#[test]
+fn a_projection_map_of_an_unsupported_version_refuses_the_next_creation() {
+    let home = Home::Private;
+    let (world, _, _) = home.world("boundary-projection-map");
+    world.script("keep.wait", "hold");
+    let mut inner = home.producer("inner", &[]);
+    inner["parked"] = json!(true);
+    let mut shown = home.public("shown", &[]);
+    shown["parked"] = json!(true);
+    let plan = mixed_plan(
+        "mapped-home",
+        vec![inner, shown, crate::harness::agent("keep", &[])],
+        vec![],
+    );
+    let project = home.project(&world, "mapped-home", &plan);
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the keeper to be in flight", |world| {
+        world
+            .events_of("mapped-home", "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "keep")
+    });
+    let home_file = world
         .store()
         .join("projects")
         .join(format!("{identifier}.md"));
-    let held = std::fs::read_to_string(&file).expect("the project document");
-    let classified = held.replacen("---\n", "---\nclassification: private\n", 1);
-    assert_ne!(held, classified, "the project document has no front matter");
-    std::fs::write(&file, classified).expect("the project is classified private");
-    let checked = world.run(&["plan", "check", &project, "--json"]);
-    checked.exited(HAS_REFUSALS);
-    assert!(
-        checked
-            .stdout
-            .contains("an export consumer must be a public lifecycle node"),
-        "{}",
-        checked.stdout
+    let held = std::fs::read_to_string(&home_file).expect("the private home");
+    let broken = held.replacen("    schema_version: 1\n", "    schema_version: 9\n", 1);
+    assert_ne!(held, broken, "the home records no projection map:\n{held}");
+    std::fs::write(&home_file, broken).expect("the map is broken");
+    let mut mapped = home.public("mapped", &[]);
+    mapped["parked"] = json!(true);
+    reply(
+        &world,
+        "mapped-home",
+        json!([{"op": "add", "node": mapped}]),
     );
+    world.until("the broken map's refusal to be recorded", |world| {
+        projections(world, "mapped-home").contains("\"kind\":\"projections-malformed\"")
+    });
+    assert!(
+        !files_under(&world.root.join("views-store"))
+            .iter()
+            .any(|(_, held)| held.contains("feat: ship mapped")),
+        "a view was written under a map the store cannot read"
+    );
+    world.release("keep.go");
 }
 
 /// One task written through the standalone store's own command line — its configured
@@ -3360,12 +4210,26 @@ fn a_change_request_description_is_written_over_the_run_scope() {
 #[cfg(unix)]
 #[test]
 fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorded() {
-    let (world, _, library) = mixed_world("boundary-adopted");
+    adopted_from_the_recorded_export(Home::Shared);
+}
+
+/// The same takeover over a private canonical home: the adopter reads the canonical graph,
+/// never the consumer's projection, and resumes from the export the record holds.
+#[test]
+fn an_adopting_driver_resumes_a_consumer_from_the_recorded_export_in_a_private_home() {
+    adopted_from_the_recorded_export(Home::Private);
+}
+
+fn adopted_from_the_recorded_export(home: Home) {
+    let (world, _, library) = home.world(match home {
+        Home::Shared => "boundary-adopted",
+        Home::Private => "boundary-adopted-private",
+    });
     world.script("generalize.work-at", "examples/generic/sample.md");
     world.script("generalize.work", "a generic example\n");
     world.script("examples.work", "built on it\n");
     world.script("examples.wait", "hold");
-    let project = world.plan("adopted", &exported_plan("adopted"));
+    let project = home.project(&world, "adopted", &home.exported_plan("adopted"));
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("the consumer to hold its session", |world| {
         !branches_of(world, "adopted", "examples").is_empty()
@@ -3399,6 +4263,7 @@ fn an_adopting_driver_resumes_a_consumer_from_the_export_its_predecessor_recorde
         ),
         "a generic example"
     );
+    home.kept_one_view(&world, "adopted", &["generalize", "examples"]);
 }
 
 #[test]

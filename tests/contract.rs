@@ -7893,6 +7893,12 @@ const RULINGS: &[(&str, &str)] = &[
         "`public_id` is what the run is named by wherever the destination is not private",
     ),
     ("137.", "onepipeline.projected_status"),
+    // The store owns task visibility: a node's classification is its task's own, never its
+    // project's, and the guidance coordinates one private plan.
+    (
+        "140.",
+        "never its project's: a public task of a private coordinating project is public",
+    ),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10802,6 +10808,37 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
         .map(|step| step["step"].clone())
         .collect();
     assert_eq!(Value::Array(steps), block["boundary_guidance_steps"]);
+    // The version and the synthetic coordinating plan are the binary's own, field for field:
+    // a private preserved producer and a public consumer, each with its own visibility, the
+    // `onepipeline.export_edges` entry joining them, and a projection carrying nothing private.
+    assert_eq!(
+        guidance["schema_version"],
+        block["boundary_guidance_schema_version"]
+    );
+    assert_eq!(guidance["example"], block["boundary_guidance_example"]);
+    let example: Plan = serde_json::from_value(json!({
+        "schema_version": 3,
+        "name": "generic-example",
+        "tasks": block["boundary_guidance_example"]["tasks"]
+            .as_array()
+            .expect("the example's tasks")
+            .iter()
+            .map(|task| json!({"id": task["id"], "classification": task["visibility"]}))
+            .collect::<Vec<_>>(),
+        "export_edges": block["boundary_guidance_example"]["export_edges"],
+    }))
+    .expect("the example's tasks and edge are a plan of this schema");
+    assert_eq!(
+        example
+            .tasks
+            .iter()
+            .map(|node| node.classification)
+            .collect::<Vec<_>>(),
+        [
+            onetaskgraph_plugin_api::Classification::Private,
+            onetaskgraph_plugin_api::Classification::Public
+        ]
+    );
     assert_contract_names(
         "the publication boundary",
         &[
@@ -10810,6 +10847,8 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
             "onepipeline boundary guidance [--json]",
             "## Repository boundary",
             "<host prefix>public/<opaque id>/task-<ordinal>",
+            "never its project's: a public task of a private coordinating project is public",
+            "the `coordination` lines",
         ],
     );
 }

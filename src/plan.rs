@@ -1550,9 +1550,9 @@ pub struct Node {
     /// Stated only by live `add` and `retry` edits; absent on nodes read from a plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assets_from: Option<onetaskgraph_core::GlobalId>,
-    /// Whether the node's work is public or private, as its task — and the project it
-    /// was read out of — classify it: the stricter of the two, filled from the store's
-    /// own `classification` and never from metadata. Omitted when public, the default,
+    /// Whether the node's work is public or private, as its own task classifies it: the
+    /// store's `classification` of that task, never its project's and never metadata, so a
+    /// public task of a private coordinating project is public. Omitted when public, the default,
     /// so a plan written before the field existed round-trips unchanged.
     ///
     /// A node's **clearance** is the stricter of this and the effective visibility of

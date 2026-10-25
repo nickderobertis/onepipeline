@@ -496,8 +496,9 @@ fn a_user_layer_refining_a_source_no_layer_defines_leaves_it_unconfigured_and_pl
 /// The private source is a real `scripted-source` serving an empty folder through the real
 /// `local-md` plugin, declared `visibility: private`, answering every task query with the
 /// authentication failure a hosted tracker answers a reader without its credential with.
-/// Each public task is a copy that does not carry `onetaskgraph.edges_on_record`, so the store
-/// asks it what it records of each, and every node's read names it.
+/// Each public task is one an earlier release's copy landed — the only kind whose edges a
+/// private source may still keep — so the store asks it about each, and every node's read
+/// names it.
 ///
 /// While the holds stand: an unchanged wait is surfaced again on its cadence; a held node an
 /// edit drops holds nothing and is surfaced no more; a re-read the store fails outright is
@@ -518,12 +519,13 @@ fn a_private_source_that_cannot_authenticate_holds_each_node_until_it_answers() 
         &plan_of(
             name,
             vec![
-                copied(agent("design", &[])),
-                copied(agent("build", &["design"])),
-                copied(agent("spare", &[])),
+                agent("design", &[]),
+                agent("build", &["design"]),
+                agent("spare", &[]),
             ],
         ),
     );
+    landed_by_an_earlier_copy(&world, &project);
 
     world
         .run(&["plan", "check", &project])
@@ -703,12 +705,13 @@ fn a_prerequisite_the_private_source_records_holds_its_node_until_the_graph_has_
         &plan_of(
             name,
             vec![
-                copied(agent("design", &[])),
+                agent("design", &[]),
                 agent("review", &[]),
-                copied(agent("build", &["design"])),
+                agent("build", &["design"]),
             ],
         ),
     );
+    landed_by_an_earlier_copy(&world, &project);
     let build = world
         .store_tasks(&project)
         .into_iter()
@@ -836,11 +839,9 @@ fn a_reread_the_private_source_is_slow_to_answer_leaves_the_driver_answering() {
     let name = "slow";
     let project = world.plan(
         name,
-        &plan_of(
-            name,
-            vec![copied(agent("design", &[])), copied(agent("spare", &[]))],
-        ),
+        &plan_of(name, vec![agent("design", &[]), agent("spare", &[])]),
     );
+    landed_by_an_earlier_copy(&world, &project);
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("both nodes to be held", |world| {
         held_for_source(world, name, "design").is_some()
@@ -910,10 +911,11 @@ fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_
             vec![
                 agent("design", &[]),
                 agent("review", &[]),
-                copied(agent("build", &["design", "review"])),
+                agent("build", &["design", "review"]),
             ],
         ),
     );
+    landed_by_an_earlier_copy(&world, &project);
 
     world.run(&["start", &project, "--detach"]).exited(0);
     world.until("build to be held under its sources", |world| {
@@ -932,15 +934,6 @@ fn a_dependency_read_across_pages_names_each_unanswering_private_source_once_in_
         "a node was dispatched while the private sources could not be asked about it"
     );
     world.run(&["stop", name]).exited(0);
-}
-
-/// `node`, as a copy onto this public board records it: carrying the version the copy was
-/// made from and not `onetaskgraph.edges_on_record`, so the store asks each private source
-/// what it records of the task — the one read of a private source a task's own record does
-/// not name.
-fn copied(mut node: Value) -> Value {
-    node["onetaskgraph.copied_destination_version"] = json!("copied-v1");
-    node
 }
 
 /// This world, with a second source `vault`: a real `scripted-source` serving its own
@@ -970,6 +963,42 @@ fn with_private_source(world: World, name: &str) -> World {
         )
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__SCRIPT"), &fakes)
         .with_env(&format!("{prefix}__CONFIG__SETTINGS__KEY"), name)
+}
+
+/// Mark every task of `project` as one an earlier release's copy landed: it carries the
+/// store's [`COPIED_DESTINATION_VERSION_KEY`] and not its [`EDGES_ON_RECORD_KEY`], which is
+/// every task a copy landed before the store began marking the second. A dependency read asks
+/// a source declared private what it records of such a task, and of no other, because only a
+/// copy that did not mark it can have kept one of its edges on the private side.
+///
+/// [`COPIED_DESTINATION_VERSION_KEY`]: onetaskgraph_plugin_api::MetadataKey::COPIED_DESTINATION_VERSION_KEY
+/// [`EDGES_ON_RECORD_KEY`]: onetaskgraph_plugin_api::MetadataKey::EDGES_ON_RECORD_KEY
+fn landed_by_an_earlier_copy(world: &World, project: &str) {
+    use onetaskgraph_plugin_api::MetadataKey;
+    let identifier = project.strip_prefix("plans:").expect("a plans project");
+    let tasks = world.store().join("tasks").join(identifier);
+    for entry in std::fs::read_dir(&tasks)
+        .expect("the plan's tasks")
+        .flatten()
+    {
+        let held = std::fs::read_to_string(entry.path()).expect("a task");
+        // llmlint: ignore[tests_mirror_real_usage, contracts_have_one_source_or_a_drift_gate] the state is one no copy of the linked release can make: a 0.12 copy onto a source not declared private marks every task whose edges it kept with `edges_on_record`, and leaves it off only by withholding an edge to an item outside the plan, which would give each journey's node a prerequisite no edit could ever add. It is the state every board an earlier release copied is in, so it is written as that board holds it; the key is the store's own public constant rather than a restatement, and the store reads only whether it is there, never the digest.
+        let copied = held.replacen(
+            "\nmetadata:\n",
+            &format!(
+                "\nmetadata:\n  {}: sha256:{}\n",
+                MetadataKey::COPIED_DESTINATION_VERSION_KEY,
+                "0".repeat(64)
+            ),
+            1,
+        );
+        assert_ne!(held, copied, "the task carries no metadata: {held}");
+        assert!(
+            !copied.contains(MetadataKey::EDGES_ON_RECORD_KEY),
+            "{copied}"
+        );
+        std::fs::write(entry.path(), copied).expect("the task is marked copied");
+    }
 }
 
 /// The `source` reason `node` of `run` is held under now, on the run's own record.

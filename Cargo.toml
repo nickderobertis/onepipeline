@@ -1185,12 +1185,18 @@ onevcs-testing = "0.19.21"
 # The write-back's image step rewrites a created task's shadow document that way, so on
 # 0.11.0 a reader listing the shadow could open it empty or half-written
 # (`a_shadow_rewrite_stopped_part_way_leaves_the_shadow_whole_and_the_next_step_lands`).
-# **0.12.0 is the floor**: an earlier store asks every private source about every task, so a
-# run holds nodes whose records name no private item; this one asks only what a task's own
-# record names, and says why each source did not answer, which the hold records (entry 131).
-onetaskgraph-core = "=0.12.0"
-onetaskgraph-plugin-api = "=0.12.0"
-onetaskgraph-local-md = "=0.12.0"
+# **0.12.0 made the store ask only what a task's own record names**: an earlier store asks
+# every private source about every task, so a run holds nodes whose records name no private
+# item; from 0.12.0 it asks only what a task's own record names, and says why each source
+# did not answer, which the hold records (entry 131).
+# **0.12.1 is the floor: the store owns task visibility** — what that changes here is entry
+# 140 of `docs/contract-divergences.md`. It is breaking: 0.12.0 reads dependencies from a
+# task's own record, so a dependency read names a far end under a tracker the host does not
+# configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
+# words.
+onetaskgraph-core = "=0.12.1"
+onetaskgraph-plugin-api = "=0.12.1"
+onetaskgraph-local-md = "=0.12.1"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
