@@ -6839,6 +6839,288 @@ fn a_stop_ends_an_observer_restart_asked_after_its_signals_listing() {
     a_stop_ends_an_observer_restart_asked(RestartAsked::AfterTheSignalsListing);
 }
 
+/// A run whose observer's judge is a long-lived command, let settle `failing`
+/// or not with no stop, on a driver that is `detached` or attached: once that
+/// driver has exited, no judge any of its observers started is still running —
+/// and another run's observer judge, on the same host and still watching its own
+/// run, is left as it was.
+///
+/// The worker turn is held until both observers' judges are up, so the judge
+/// is running before the run it watches settles rather than started late or
+/// never. The gates are the double's own, released by the journey.
+#[cfg(unix)]
+fn a_settled_run_ends_its_observers_command_judge(failing: bool, detached: bool) {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge(&format!(
+        "observer-command-settles-{}-{}",
+        if failing { "failed" } else { "done" },
+        if detached { "detached" } else { "attached" }
+    ));
+    // The neighbour: a second run on the same host and the same graph store,
+    // its observer's judge as long-lived as the first's, and its own worker
+    // turn held on gates of its own so nothing this journey releases ends it.
+    world.script("turn.gates", "Do work. turn\nDo neighbour. neighbour");
+    if failing {
+        world.script("harness.fail", "1");
+    }
+    let neighbour_path = world.plan(
+        "neighbour",
+        &plan_of("neighbour", vec![agent("neighbour", &[])]),
+    );
+    let mut neighbour = world
+        .agentgraph_cmd(&[
+            "start",
+            &neighbour_path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the neighbour's attached engine starts");
+    world.until("the neighbour's observer judge to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let neighbours = judges_started(&judges);
+    let mode = if detached { "--detach" } else { "--attach" };
+    let mut start =
+        world.agentgraph_cmd(&["start", &path, mode, "--dag-graph", &world.dag_graph()]);
+    start
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut owner = start.spawn().expect("the engine starts");
+    let driver = if detached {
+        let announced = owner
+            .wait_with_output()
+            .expect("the detached launch announces its driver");
+        let announced: Value = serde_json::from_slice(&announced.stdout)
+            .expect("a detached launch announces its driver as JSON");
+        let pid = announced["pid"]
+            .as_u64()
+            .expect("the announcement names a pid");
+        u32::try_from(pid).expect("a pid fits")
+    } else {
+        let pid = owner.id();
+        std::thread::spawn(move || owner.wait());
+        pid
+    };
+    world.until("this run's observer judge to start", |_| {
+        judges_started(&judges).len() > neighbours.len()
+    });
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    world.until("this run's driver to settle the run and exit", |world| {
+        world.run_file("command-stop", "result.json").is_file() && process_ended(driver)
+    });
+    let ours: Vec<u32> = judges_started(&judges)
+        .into_iter()
+        .filter(|pid| !neighbours.contains(pid))
+        .collect();
+    let surviving: Vec<u32> = ours
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    let neighbour_left = neighbours.iter().all(|pid| !process_ended(*pid));
+    // Only what this journey's own runs started, and only by recorded pid: the
+    // survivors here, and the neighbour through its own stop.
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let reaped = std::thread::spawn(move || neighbour.wait());
+    let stopped = world.run_on_agentgraph(&["stop", "neighbour"]);
+    let neighbour_judges_left = end_judges_surviving_the_stop(&judges);
+    reaped
+        .join()
+        .expect("the neighbour's reaper finishes")
+        .expect("the neighbour's engine exits");
+    let state = if failing { "failed" } else { "done" };
+    assert_eq!(
+        world.run_json("command-stop", "result.json")["nodes"][0]["status"],
+        state,
+        "the run did not settle {state}:\n{}",
+        world.dump()
+    );
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {ours:?} outlived the driver of a run \
+         that settled {state}"
+    );
+    assert!(
+        neighbour_left,
+        "ending one run ended another run's observer judge {neighbours:?}"
+    );
+    stopped.exited(0);
+    assert!(
+        neighbour_judges_left.is_empty(),
+        "the neighbour's stop left its judge(s) {neighbour_judges_left:?} running"
+    );
+}
+
+/// Before a run's end waited for its observer graph to stop, a run that settled
+/// on its own left its observer's command judge running, re-parented to init.
+#[cfg(unix)]
+#[test]
+fn an_attached_run_that_settles_done_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_attached_run_that_settles_failed_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(true, false);
+}
+
+/// The same for a detached run's driver, whose observer is a process of its own.
+#[cfg(unix)]
+#[test]
+fn a_detached_run_that_settles_done_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(false, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_detached_run_that_settles_failed_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(true, true);
+}
+
+/// An attached run whose observer's own cancel is delayed past the teardown
+/// patience still has no judge of that observer running once its driver exits:
+/// the driver ends what the graph started rather than leaving on the patience.
+///
+/// The delay is the relay's, held at its private ordering gate between being
+/// asked to cancel and passing the ask on — the window a driver that exited on
+/// its cancel alone lost the judge in. It is never released.
+#[cfg(unix)]
+#[test]
+fn a_delayed_observer_teardown_still_ends_its_judge_before_the_driver_exits() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("settled-delayed-observer");
+    // llmlint: ignore-block[tests_mirror_real_usage] how late the relay passes
+    // the cancel on is the property, and no user-facing input can place it. The
+    // failpoint only orders the real binary's relay; the launch, the graph, the
+    // judge and every outcome asserted are the binary's own.
+    let relay = crate::harness::Rendezvous::failpoint();
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    start
+        .env("ONEPIPELINE_TEST_RELAYED_CANCEL_GATE", relay.address())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let owner = start.spawn().expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let settled = std::thread::scope(|scope| {
+        let exited = scope.spawn(|| owner.wait_with_output().expect("the attached engine exits"));
+        let _delayed = relay.arrived();
+        exited.join().expect("the engine's reaper finishes")
+    });
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert_eq!(
+        world.run_json("command-stop", "result.json")["state"],
+        "complete",
+        "{said}"
+    );
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {started:?} outlived a driver whose \
+         observer teardown was delayed:\n{said}"
+    );
+    assert!(
+        said.contains("the processes it started are ended"),
+        "the teardown was not delayed past the patience, so nothing here waited it out:\n{said}"
+    );
+}
+
+/// A settled run whose observer graph cannot be signalled — a file stands where
+/// its signal directory belongs, so neither the driver nor the graph's own relay
+/// can write its stop — still has no judge of that observer running once its
+/// driver exits, and the driver says the cancel failed.
+#[cfg(unix)]
+#[test]
+fn a_settled_runs_observer_that_cannot_be_signalled_still_has_its_judge_ended() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("settled-observer-unsignalled");
+    let owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let graph = world.run_json("command-stop", "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    // llmlint: ignore-block[tests_mirror_real_usage] an observer store the
+    // sibling cannot write its stop signal into is a host-filesystem failure no
+    // verb manufactures. A real file is put where the real directory was; the
+    // launch, the graph, the judge and the outcome are the binary's own.
+    std::fs::remove_dir_all(&signals).expect("the signal directory is removed");
+    std::fs::write(&signals, "not a directory").expect("the signal cannot be written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let settled = owner.wait_with_output().expect("the attached engine exits");
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {started:?} outlived the driver:\n{said}"
+    );
+    assert!(
+        said.contains("cancel observer") && said.contains("ending its processes"),
+        "the driver did not say its cancel failed:\n{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&signals).expect("the file is still there"),
+        "not a directory"
+    );
+}
+
 /// A missing observer record cannot create a replacement graph directory or
 /// prevent the engine's existing process-tree teardown.
 #[cfg(unix)]
