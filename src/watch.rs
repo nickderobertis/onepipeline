@@ -254,9 +254,11 @@ pub(crate) fn watch(
     let cursored = request.cursor.is_some();
     // A watch given no cursor starts where the run's checkpoint stops: the history
     // in front of it is folded, and reading it again to print it was a read of the
-    // whole run per watch.
+    // whole run per watch. One asked for every event in the store (`--all`) reads
+    // it from its first byte, as it always has.
     let mut cursor = match request.cursor.as_deref() {
         Some(token) => resolve_cursor(paths, token)?,
+        None if request.filter == EventFilter::everything() => Cursor::start(&paths.run),
         None => Cursor {
             run: paths.run.clone(),
             at: crate::checkpoint::resume_point(paths),

@@ -12852,7 +12852,9 @@ rules on it.
    once on a planner surface left unread before it armed, its heartbeat and ending lines
    count every unread surface off the channel's own state, it returns only on
    settlements after it armed, and its ending cursor resumes with nothing skipped or
-   repeated. A watch given a cursor is unchanged.
+   repeated. A watch given a cursor is unchanged, and so is one given `--all`: it asks
+   for every event in the store, so with no cursor it still reads from the journal's
+   first byte.
 
 ```json
 {"schema_version": 1,
