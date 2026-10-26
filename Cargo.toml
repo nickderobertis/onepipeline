@@ -1229,9 +1229,12 @@ onevcs-testing = "0.19.22"
 # **0.12.3 is the floor because the write-back worker writes through it**: every running
 # graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
 # and `justfile`'s CLI is held to it so the host reads the store release its driver links.
-# **0.12.4 takes what Linear stored off each write's own answer**, retiring
-# `TaskSource::stored_form`, and batches a copy's origin lookups into one read; the loopback
-# Linear in `tests/e2e/linear_loopback.rs` answers what it now sends.
+# **0.12.4 is the floor for what Linear stores: it is read off each write's own answer**
+# (`otg-linear-stored-content`). The store predicts no rewrite — `TaskSource::stored_form`
+# and the stdio `stored_form` method are retired — so a plan copied into Linear verifies
+# whatever Linear's serializer made of it, no read of an item follows a metadata write, and a
+# copy's origin lookups are batched into one read. It is breaking; `tests/e2e/linear_launch.rs`
+# drives it against a loopback that stores what spike `spike-linear-stored-content` measured.
 # **0.12.5 lets a public projection carry an anchor whose only attribute is `id` or `name`**,
 # so a private plan whose public task owns a schema-2 budget copies onto the board
 # (`tests/e2e/publication_boundary.rs`'s

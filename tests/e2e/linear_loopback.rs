@@ -37,10 +37,6 @@ pub const PROJECT: &str = "project-1";
 /// The operation one request named, by the root field of the document the plugin sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Operation {
-    /// `originIssues: issues originProjects: projects organization` beside
-    /// `teams{…states} projectStatuses`: every origin's counterpart a copy looks up, asked in one
-    /// request before its first write, with everything that write resolves riding on it.
-    CounterpartLookups,
     /// `teams{…states} projectStatuses`: everything a status write resolves, in one request.
     Resolution,
     /// `issue(id:)` beside `teams{…states} projectStatuses`: the issue an update naming a status
@@ -52,6 +48,10 @@ pub enum Operation {
     Issue,
     /// `issue(id:){relations inverseRelations}`: one issue's dependency edges.
     IssueRelations,
+    /// `originIssues: issues originProjects: projects organization` beside `teams{…states}
+    /// projectStatuses`: every candidate counterpart a copy looks up by origin, with everything a
+    /// status write resolves, in one request ahead of the copy's first write.
+    CounterpartLookups,
     /// `issues(first:,filter:)`: a page of issues.
     Issues,
     /// `projects(first:,filter:)`: a page of projects — the one this endpoint holds, if it holds
@@ -129,7 +129,10 @@ impl Operation {
 
     /// Whether this is one of the reads a status write resolves its names through.
     pub fn resolves(self) -> bool {
-        matches!(self, Self::Resolution | Self::IssueResolved)
+        matches!(
+            self,
+            Self::Resolution | Self::IssueResolved | Self::CounterpartLookups
+        )
     }
 }
 
@@ -225,7 +228,7 @@ impl Linear {
             states: named("state", states),
             statuses: named("status", statuses),
             project_name: name.to_owned(),
-            project_content: stored_form(description),
+            project_content: linear_stores(description),
             project_held: true,
             project_status: project_status.to_owned(),
             ..World::default()
@@ -263,7 +266,7 @@ impl Linear {
             .iter_mut()
             .find(|held| held.id == issue)
             .unwrap_or_else(|| panic!("no issue {issue}"));
-        held.description = stored_form(&edit(&held.description));
+        held.description = linear_stores(&edit(&held.description));
     }
 
     /// Every document this endpoint holds, by id, with its content as stored.
@@ -311,7 +314,7 @@ impl Linear {
             id: id.clone(),
             identifier: format!("{TEAM}-{n}"),
             title: title.to_owned(),
-            description: stored_form(description),
+            description: linear_stores(description),
             state,
             priority: 0,
         });
@@ -517,11 +520,16 @@ impl Linear {
             _ => "",
         };
         let data = match operation {
-            Operation::CounterpartLookups => {
-                // Every issue and the project, if it holds one, whatever the filters: the plugin
-                // confirms each row against each origin itself, as it does a listing's.
+            Operation::Resolution => world.resolution(),
+            Operation::IssueResolved => {
                 let mut data = world.resolution();
-                data["organization"] = json!({"id": "organization-1"});
+                data["issue"] = world.issue(id);
+                data
+            }
+            Operation::CounterpartLookups => {
+                // Every issue and the project, whatever the filters: the plugin confirms each
+                // row against the origin it looks up, as it does a listing's.
+                let mut data = world.resolution();
                 data["originIssues"] = json!({
                     "nodes": world.issues.iter().map(|held| world.render(held)).collect::<Vec<_>>(),
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
@@ -530,12 +538,7 @@ impl Linear {
                     "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
                 });
-                data
-            }
-            Operation::Resolution => world.resolution(),
-            Operation::IssueResolved => {
-                let mut data = world.resolution();
-                data["issue"] = world.issue(id);
+                data["organization"] = json!({"id": "organization-1"});
                 data
             }
             Operation::Issue => json!({"issue": world.issue(id)}),
@@ -584,7 +587,11 @@ impl Linear {
                     Err(why) => return refusal(&why),
                 }
             }
-            Operation::ProjectUpdate if variables["input"].get("statusId").is_some() => {
+            Operation::ProjectUpdate
+                if variables["input"]
+                    .as_object()
+                    .is_some_and(|input| input.len() == 1 && input.contains_key("statusId")) =>
+            {
                 // A status written alone, as `set_project_status` writes one: the input holds
                 // nothing else, and names a status the workspace has.
                 let status = variables["input"]
@@ -613,9 +620,37 @@ impl Linear {
                 if !world.holds(id) {
                     return refusal(&format!("no project {id}"));
                 }
-                world.project_content = stored_form(content);
-                // The content as stored, which the plugin selects in its answer and compares
-                // with what it sent, as Linear answers it.
+                // A rewrite sends the project whole: its name, its status and its labels beside
+                // its content, of which this endpoint holds none.
+                let input = &variables["input"];
+                if input
+                    .get("labelIds")
+                    .is_some_and(|labels| labels != &json!([]))
+                {
+                    return refusal("the loopback holds no labels");
+                }
+                let name = match input.get("name") {
+                    None => None,
+                    Some(Value::String(name)) => Some(name.clone()),
+                    Some(name) => return refusal(&format!("a project's name is a string: {name}")),
+                };
+                if let Some(status) = input.get("statusId") {
+                    let Some(status) = world
+                        .statuses
+                        .iter()
+                        .find(|named| status.as_str() == Some(named.id.as_str()))
+                        .cloned()
+                    else {
+                        return refusal(&format!("no project status {status}"));
+                    };
+                    world.project_status = status.name;
+                }
+                if let Some(name) = name {
+                    world.project_name = name;
+                }
+                world.project_content = linear_stores(content);
+                // The project as stored, which the plugin selects in its answer — the content
+                // Linear stored among it — as Linear answers it.
                 let mut project = world.project();
                 if query.contains("relations(") {
                     project["relations"] = empty_page();
@@ -703,9 +738,9 @@ impl World {
         };
         self.project_status = status.name.clone();
         self.project_name = name.to_owned();
-        self.project_content = stored_form(content);
+        self.project_content = linear_stores(content);
         self.project_held = true;
-        Ok(json!({"id": PROJECT, "content": self.project_content}))
+        Ok(self.project())
     }
 
     /// File one issue of the project, its description stored as Linear stores it.
@@ -729,11 +764,11 @@ impl World {
             id: format!("issue-{n}"),
             identifier: format!("{TEAM}-{n}"),
             title: title.to_owned(),
-            description: stored_form(description),
+            description: linear_stores(description),
             state: state.to_owned(),
             priority: input.get("priority").and_then(Value::as_u64).unwrap_or(0),
         };
-        let answer = json!({"id": issue.id, "description": issue.description});
+        let answer = self.render(&issue);
         self.issues.push(issue);
         Ok(answer)
     }
@@ -772,9 +807,10 @@ impl World {
             title.clone_into(&mut document.title);
         }
         if let Some(content) = text("content") {
-            document.content = stored_form(content);
+            document.content = linear_stores(content);
         }
-        Ok(json!({"id": document.id, "content": document.content}))
+        let document = document.clone();
+        Ok(self.render_document(&document))
     }
 
     fn render_document(&self, document: &Document) -> Value {
@@ -868,10 +904,10 @@ impl World {
         for (field, value) in input {
             let valid = match (field.as_str(), value) {
                 ("stateId" | "description" | "title", Value::String(_)) => true,
-                // The team holds no labels, so the one label set an update can name is none.
-                ("labelIds", Value::Array(labels)) => labels.is_empty(),
-                // A rewrite restates the project the issue is filed under: the one held here.
+                // A rewrite sends the issue whole: its project, which has to be the one held,
+                // and its labels, of which this endpoint holds none.
                 ("projectId", Value::String(project)) => self.holds(project),
+                ("labelIds", Value::Array(labels)) => labels.is_empty(),
                 // Linear's own scale: 0 for none, then 1 (urgent) to 4 (low).
                 ("priority", Value::Number(priority)) => {
                     priority.as_u64().is_some_and(|priority| priority <= 4)
@@ -890,7 +926,7 @@ impl World {
             issue.state = state;
         }
         if let Some(description) = text("description") {
-            issue.description = stored_form(&description);
+            issue.description = linear_stores(&description);
         }
         if let Some(title) = text("title") {
             issue.title = title;
@@ -899,7 +935,9 @@ impl World {
             issue.priority = priority.as_u64().expect("validated priority");
         }
         let issue = issue.clone();
-        Ok(self.render(&issue))
+        let mut answer = self.render(&issue);
+        answer["relations"] = empty_page();
+        Ok(answer)
     }
 }
 
@@ -987,215 +1025,335 @@ pub fn metadata_of(description: &str) -> Map<String, Value> {
 /// How long a journey waits for this endpoint before it calls a wait lost.
 pub const PATIENCE: Duration = Duration::from_secs(120);
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this models a remote service's behaviour, not a contract with a source to reconcile against: hosted Linear publishes no statement of what it stores, the spike's measured stored forms exist only in its report, and the one declaration a gate once compared this with — the Linear plugin's `stored_form` — is what onetaskgraph 0.12.4 retires, because a table of Linear's rewrites never converges. Nothing in the engine or the store reads this model: the launch journey needs only rewrites the store does not predict, stable on their own output, which `the_loopback_stores_every_rewrite_the_spike_measured` holds; drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
 /// What Linear stores when it is written Markdown, as this endpoint models it: every write of an
 /// issue's `description`, a project's `content` and a document's `content` is stored as this
-/// answers, and a read hands back what was stored.
+/// answers, a read hands back what was stored, and a write's own answer selects it too.
 ///
-/// The rules are the ones onetaskgraph-linear declared, up to 0.12.3, in the section of its
-/// crate documentation headed **"Ruling: what Linear does to Markdown on write, declared"**,
-/// with that ruling's own examples. From 0.12.4 the plugin predicts nothing: its ruling "what
-/// Linear stores is read off each write's own answer" takes the stored content from each
-/// write's answer and, where it differs from what was sent, sends one follow-up write of it. So
-/// this model no longer has to match a rewrite the plugin performs; it is what makes this
-/// endpoint rewrite as hosted Linear does, so a journey drives that follow-up write and the
-/// digests recorded over what was stored rather than over what was sent. Every rule holds
-/// outside a fenced block and outside an inline code span opened and closed on one line, which
-/// are kept byte for byte, and a Markdown link or image is kept as written. Each rule is listed
-/// in [`RULES`] with its example, and `the_loopback_stores_every_example_the_ruling_states`
-/// holds each.
-pub fn stored_form(content: &str) -> String {
-    let mut stored = String::with_capacity(content.len());
-    // The fence a block is open under: its character and how many of it opened it.
+/// It models what spike `spike-linear-stored-content` measured real Linear storing, which
+/// onetaskgraph-linear's ruling **"what Linear stores is read off each write's own answer"**
+/// records (`crates/onetaskgraph-linear/src/lib.rs`): Linear re-serializes the whole document,
+/// so the store predicts none of it and takes what each write's answer reports. Each rewrite here
+/// is one the spike measured — [`MEASURED`] lists them by probe — and five of them are ones no
+/// declared table of Linear's rules ever predicted: a blank line set before a list that follows a
+/// heading or a paragraph line, an ordered item on a list item's lazy continuation line escaped,
+/// an inline code span wrapped across two lines joined, `**bold**` spanning a line break split
+/// into one run a line, and an indented code block fenced. Content ending in a table row keeps
+/// that row's line break, so the one blank line a metadata slot is set off by is stored as one
+/// line break after it. A fenced block, a code span on one line and an HTML comment line — the
+/// metadata slot among them — are kept byte for byte, and storing what it stored changes nothing
+/// more, as the spike measured of every follow-up write.
+pub fn linear_stores(content: &str) -> String {
+    let lines = split_bold(&join_code_spans(content.split('\n').collect()));
+    let mut stored: Vec<String> = Vec::with_capacity(lines.len());
     let mut fence: Option<(char, usize)> = None;
-    // While the lines that follow a list item continue it, the column its text starts at.
+    // The column a list item's text starts at, while the lines after it continue it.
     let mut item: Option<usize> = None;
-    // The line before closed a fence or held an image alone, so the next line holding anything
-    // is set apart from it.
-    let mut set_apart = false;
-    // The line before was blank, or there was none.
-    let mut after_blank = true;
-    // The line before was blank, so a blank line now joins it.
-    let mut in_blank_run = false;
-    for line in content.split_inclusive('\n') {
-        let body = line.trim_end_matches(['\n', '\r']);
-        let ending = &line[body.len()..];
+    // Whether that item is a bullet, after whose text an ordered item cannot open a list.
+    let mut bullet = false;
+    let mut before = Before::Nothing;
+    let mut at = 0;
+    while at < lines.len() {
+        let line = &lines[at];
+        at += 1;
         if let Some((mark, opened)) = fence {
-            if fence_of(body).is_some_and(|(closing, run, rest)| {
+            if fence_of(line).is_some_and(|(closing, run, rest)| {
                 closing == mark && run >= opened && rest.trim().is_empty()
             }) {
                 fence = None;
-                set_apart = true;
+                before = Before::Fence;
             }
-            stored.push_str(line);
-            after_blank = false;
-            in_blank_run = false;
+            stored.push(line.clone());
             continue;
         }
-        if body.trim().is_empty() {
-            if !in_blank_run {
-                stored.push_str(line);
+        if line.trim().is_empty() {
+            if !matches!(before, Before::Nothing | Before::Blank) {
+                stored.push(String::new());
             }
+            before = Before::Blank;
+            continue;
+        }
+        if matches!(before, Before::Fence) {
+            // A closed fence is set apart from whatever follows it.
+            stored.push(String::new());
+            before = Before::Blank;
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let text = &line[indent..];
+        let continues = item.filter(|column| {
+            matches!(before, Before::Item) || (matches!(before, Before::Blank) && indent >= *column)
+        });
+        if continues.is_none() {
             item = None;
-            set_apart = false;
-            after_blank = true;
-            in_blank_run = true;
-            continue;
         }
-        in_blank_run = false;
-        let opens_fence = fence_of(body);
-        let image = image_alone(body);
-        if !after_blank && (set_apart || opens_fence.is_some() || image) {
-            stored.push('\n');
-        }
-        set_apart = image;
-        after_blank = false;
-        if let Some((mark, run, _)) = opens_fence {
+        let set_apart = |stored: &mut Vec<String>, before: Before| {
+            if !matches!(before, Before::Nothing | Before::Blank) {
+                stored.push(String::new());
+            }
+        };
+        if let Some((mark, run, _)) = fence_of(line) {
+            set_apart(&mut stored, before);
             fence = Some((mark, run));
             item = None;
-            stored.push_str(line);
-            continue;
-        }
-        let indent_len = body.len() - body.trim_start_matches([' ', '\t']).len();
-        let (indent, text) = body.split_at(indent_len);
-        let bullet = text.strip_prefix("- ").or_else(|| text.strip_prefix("* "));
-        let runs_on = item.filter(|_| bullet.is_none() && !image && !opens_own_block(text));
-        if let Some(column) = runs_on {
-            stored.push_str(indent);
-            stored.push_str(&" ".repeat(column.saturating_sub(indent.len())));
-        } else if let Some(row) = delimiter_row(body).filter(|_| !image) {
-            item = None;
-            stored.push_str(&row);
-            stored.push_str(ending);
-            continue;
-        } else {
-            stored.push_str(indent);
-        }
-        let text = if let Some(rest) = bullet {
-            stored.push_str("* ");
-            item = Some(indent.len() + 2);
-            rest
-        } else {
-            if runs_on.is_none() {
-                item = None;
+            stored.push(line.clone());
+            before = Before::Block;
+        } else if indent >= 4 && item.is_none() && matches!(before, Before::Nothing | Before::Blank)
+        {
+            // An indented code block, through its last indented line, is stored fenced.
+            let mut end = at;
+            while end < lines.len()
+                && (lines[end].starts_with("    ") || lines[end].trim().is_empty())
+            {
+                end += 1;
             }
-            text
-        };
-        if text.starts_with("-->") {
-            stored.push('\\');
-        }
-        stored.push_str(&prose(text));
-        stored.push_str(ending);
-    }
-    if fence.is_none() {
-        // Nothing after the last line holding anything is kept: no line break, and no line
-        // holding only whitespace.
-        loop {
-            if stored.ends_with('\n') {
-                stored.pop();
-                if stored.ends_with('\r') {
-                    stored.pop();
+            while end > at && lines[end - 1].trim().is_empty() {
+                end -= 1;
+            }
+            stored.push("```".to_owned());
+            for code in std::iter::once(line).chain(&lines[at..end]) {
+                stored.push(code.get(4..).unwrap_or_default().to_owned());
+            }
+            stored.push("```".to_owned());
+            at = end;
+            before = Before::Fence;
+        } else if let Some(rest) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+            if matches!(before, Before::Line | Before::Heading) {
+                stored.push(String::new());
+            }
+            stored.push(format!("{}* {rest}", " ".repeat(indent)));
+            item = Some(indent + 2);
+            bullet = true;
+            before = Before::Item;
+        } else if let Some((number, rest)) = ordered(text) {
+            if let Some(column) = continues.filter(|_| bullet && number != "1") {
+                // Not a list: an ordered item other than the first cannot interrupt the item's
+                // text, so the line runs on from it and its `.` is escaped.
+                stored.push(format!(
+                    "{}{number}\\. {rest}",
+                    " ".repeat(indent.max(column))
+                ));
+            } else {
+                if matches!(before, Before::Line | Before::Heading) {
+                    stored.push(String::new());
                 }
-                continue;
+                stored.push(line.clone());
+                item = Some(indent + number.len() + 2);
+                bullet = false;
             }
-            match stored.rfind('\n') {
-                Some(at) if stored[at + 1..].trim().is_empty() => stored.truncate(at + 1),
-                _ => break,
+            before = Before::Item;
+        } else if let Some(column) = continues.filter(|_| !text.starts_with(['#', '>', '<', '|'])) {
+            stored.push(format!("{}{text}", " ".repeat(indent.max(column))));
+            before = Before::Item;
+        } else if text.starts_with('#') {
+            item = None;
+            stored.push(line.clone());
+            before = Before::Heading;
+        } else if image_alone(text) {
+            item = None;
+            if matches!(before, Before::Image) {
+                stored.push(String::new());
             }
+            stored.push(line.clone());
+            before = Before::Image;
+        } else if let Some(row) = delimiter_row(text) {
+            item = None;
+            stored.push(row);
+            before = Before::Block;
+        } else if table_row(text) || text.starts_with('<') {
+            item = None;
+            stored.push(line.clone());
+            before = Before::Block;
+        } else {
+            item = None;
+            stored.push(line.clone());
+            before = Before::Line;
         }
-        let last = stored.rsplit('\n').next().unwrap_or_default().trim();
-        if item.is_none() && last.len() > 1 && last.starts_with('|') && last.ends_with('|') {
-            stored.push('\n');
-        }
+    }
+    while stored.last().is_some_and(|line| line.trim().is_empty()) {
+        stored.pop();
+    }
+    let ends_in_table = fence.is_none()
+        && item.is_none()
+        && stored.last().is_some_and(|line| table_row(line.trim()));
+    let mut stored = stored.join("\n");
+    if ends_in_table {
+        stored.push('\n');
     }
     stored
 }
 
-/// The top-level domains a bare domain-like token is linked under, as the ruling lists them.
-pub const AUTOLINKED: &[&str] = &[
-    "ai", "app", "co", "com", "dev", "edu", "gov", "info", "io", "live", "me", "net", "org",
-];
+/// What the line before the one being stored was, as [`linear_stores`] sets lines apart by it.
+#[derive(Clone, Copy)]
+enum Before {
+    Nothing,
+    Blank,
+    /// A paragraph's line.
+    Line,
+    Heading,
+    /// A list item's line, or a line running on from one.
+    Item,
+    Image,
+    /// A fence's closing line.
+    Fence,
+    /// A fence's opening line, a table row or an HTML line.
+    Block,
+}
 
-/// Each rule of the ruling, by its own words, with the example it gives: what is written and what
-/// Linear stores.
-pub const RULES: &[(&str, &str, &str)] = &[
+/// Every rewrite [`linear_stores`] models, by the spike probe that measured it: what was written
+/// and what Linear stored.
+pub const MEASURED: &[(&str, &str, &str)] = &[
     (
-        "a line opening `- ` is a `* ` bullet",
-        "- one\n  - two",
-        "* one\n  * two",
+        "bullet-list",
+        "- first item\n- second item\n  - nested item",
+        "* first item\n* second item\n  * nested item",
     ),
     (
-        "a line after a list item that opens no block of its own runs on from the item",
-        "- bullet\n| a | b |\n| --- | --- |",
-        "* bullet\n  | a | b |\n  | --- | --- |",
+        "pipe-table",
+        "| A | B |\n| --- |:---:|\n| one | two |",
+        "| A | B |\n| -- | :--: |\n| one | two |\n",
     ),
     (
-        "a table's delimiter row outside a list item is one `--` a cell",
-        "| --- |:---:|",
-        "| -- | :--: |\n",
+        "list-after-heading",
+        "## A heading\n- first item",
+        "## A heading\n\n* first item",
     ),
     (
-        "a URL is linked to itself, trailing punctuation outside the link",
-        "see https://example.com/a.",
-        "see [https://example.com/a](<https://example.com/a>).",
+        "list-after-paragraph",
+        "A paragraph line.\n- first item",
+        "A paragraph line.\n\n* first item",
     ),
     (
-        "a domain-like token is linked to `http://` and itself",
-        "example.com and \"caller.live\"",
-        "[example.com](<http://example.com>) and \"[caller.live](<http://caller.live>)\"",
+        "lazy-ordered-item",
+        "- a list item whose text wraps onto\n3. a lazy line\n- the next item",
+        "* a list item whose text wraps onto\n  3\\. a lazy line\n* the next item",
     ),
     (
-        "a `[` that opens no link, and every `]`, are escaped",
-        "[x] done",
-        "\\[x\\] done",
-    ),
-    ("a `~` is escaped", "~5 days", "\\~5 days"),
-    (
-        "a single-underscore emphasis is written with asterisks",
-        "_y_ and snake_case",
-        "*y* and snake_case",
+        "code-span-wrap",
+        "a `code span that\nwraps across a line break` in prose",
+        "a `code span that wraps across a line break` in prose",
     ),
     (
-        "the backslash of `\\\"` is dropped",
-        "say \\\"hi\\\"",
-        "say \"hi\"",
+        "bold-wrap",
+        "has **bold text that spans\na line break** in it",
+        "has **bold text that spans**\n**a line break** in it",
     ),
     (
-        "a backslash before a letter is doubled",
-        "a \\d b",
-        "a \\\\d b",
-    ),
-    ("a line opening `-->` is escaped", "-->", "\\-->"),
-    (
-        "a fenced block is kept byte for byte, and set apart by a blank line",
-        "see\n```\n- [x] _y_ example.com ~\n```\n- z",
-        "see\n\n```\n- [x] _y_ example.com ~\n```\n\n* z",
+        "indented-code",
+        "Before.\n\n    line one\n    line two\n\nAfter.",
+        "Before.\n\n```\nline one\nline two\n```\n\nAfter.",
     ),
     (
-        "an image alone on a line is set apart by a blank line",
+        "adjacent-images",
         "![a](https://uploads.linear.app/a)\n![b](https://uploads.linear.app/b)",
         "![a](https://uploads.linear.app/a)\n\n![b](https://uploads.linear.app/b)",
     ),
     (
-        "an inline code span is kept byte for byte",
-        "a `- [x] _y_ example.com ~` b",
-        "a `- [x] _y_ example.com ~` b",
+        "fenced-block",
+        "Before.\n```\n- **x\n```\nAfter.",
+        "Before.\n\n```\n- **x\n```\n\nAfter.",
     ),
     (
-        "a run of blank lines is one blank line",
-        "a\n\n\n\nb",
-        "a\n\nb",
-    ),
-    (
-        "the content ends at its last line holding anything",
-        "![a](https://uploads.linear.app/a)\n\n",
-        "![a](https://uploads.linear.app/a)",
-    ),
-    (
-        "a table ending the content is followed by its last row's line break",
-        "| a |\n| -- |\n\n",
-        "| a |\n| -- |\n",
+        "table-before-slot",
+        "| a |\n| -- |\n\n\n<!-- onetaskgraph.metadata `{\"k\":\"**\"}` -->",
+        "| a |\n| -- |\n\n<!-- onetaskgraph.metadata `{\"k\":\"**\"}` -->",
     ),
 ];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
+/// The content a description holding a metadata slot reports, as a read of it does: the text
+/// above the slot less the one blank line that sets it off — of which only a line break is left
+/// after a table row, which keeps its own.
+pub fn content_of(description: &str) -> &str {
+    let above = description
+        .rfind("<!-- onetaskgraph.metadata `")
+        .map_or(description, |slot| &description[..slot]);
+    match above.strip_suffix("\n\n") {
+        Some(visible) if table_row(visible.rsplit('\n').next().unwrap_or_default().trim()) => {
+            &above[..above.len() - 1]
+        }
+        Some(visible) => visible,
+        None => above.strip_suffix('\n').unwrap_or(above),
+    }
+}
+
+/// The lines of `lines`, each inline code span wrapped across a line break joined onto one line.
+fn join_code_spans(lines: Vec<&str>) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::with_capacity(lines.len());
+    let mut fence: Option<(char, usize)> = None;
+    let mut open = false;
+    for line in lines {
+        if open && !line.trim().is_empty() {
+            let last = joined.last_mut().expect("an open span follows a line");
+            last.push(' ');
+            last.push_str(line.trim_start());
+            open = last.matches('`').count() % 2 == 1;
+            continue;
+        }
+        open = false;
+        match fence {
+            Some((mark, opened)) => {
+                if fence_of(line).is_some_and(|(closing, run, rest)| {
+                    closing == mark && run >= opened && rest.trim().is_empty()
+                }) {
+                    fence = None;
+                }
+            }
+            None => match fence_of(line) {
+                Some((mark, run, _)) => fence = Some((mark, run)),
+                None => open = line.matches('`').count() % 2 == 1,
+            },
+        }
+        joined.push(line.to_owned());
+    }
+    joined
+}
+
+/// The lines of `lines`, each `**` run left open at a line's end closed there and opened again on
+/// the next line.
+fn split_bold(lines: &[String]) -> Vec<String> {
+    let mut split: Vec<String> = Vec::with_capacity(lines.len());
+    let mut fence: Option<(char, usize)> = None;
+    let mut open = false;
+    for line in lines {
+        let mut line = line.clone();
+        if let Some((mark, opened)) = fence {
+            if fence_of(&line).is_some_and(|(closing, run, rest)| {
+                closing == mark && run >= opened && rest.trim().is_empty()
+            }) {
+                fence = None;
+            }
+            split.push(line);
+            continue;
+        }
+        if let Some((mark, run, _)) = fence_of(&line) {
+            fence = Some((mark, run));
+            open = false;
+            split.push(line);
+            continue;
+        }
+        if line.trim().is_empty() {
+            open = false;
+            split.push(line);
+            continue;
+        }
+        if open {
+            let indent = line.len() - line.trim_start().len();
+            line.insert_str(indent, "**");
+            split
+                .last_mut()
+                .expect("an open run follows a line")
+                .push_str("**");
+        }
+        open = outside_code_spans(&line).matches("**").count() % 2 == 1;
+        split.push(line);
+    }
+    split
+}
+
+/// `line` with every inline code span taken out.
+fn outside_code_spans(line: &str) -> String {
+    line.split('`').step_by(2).collect()
+}
 
 /// The fence a line opens or closes — its character, how many, and what follows — where it is
 /// indented at most three spaces and opens with three or more backticks or tildes.
@@ -1209,33 +1367,44 @@ fn fence_of(line: &str) -> Option<(char, usize, &str)> {
     (run >= 3).then(|| (mark, run, &text[run..]))
 }
 
-/// Whether a line holds one image and nothing else.
-fn image_alone(line: &str) -> bool {
-    let text = line.trim();
-    text.starts_with("![") && link_at(text, 1) == Some(text.len())
+/// The number and the text of an ordered list item a line opens, where it opens one.
+fn ordered(text: &str) -> Option<(&str, &str)> {
+    let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let rest = text[digits..].strip_prefix(". ")?;
+    (digits > 0).then(|| (&text[..digits], rest))
 }
 
-/// Whether a line, unindented, opens a block a list item's text does not run on into: a heading,
-/// a quotation, an HTML block, a `+ ` bullet or an ordered list's first item.
-fn opens_own_block(text: &str) -> bool {
-    text.starts_with(['#', '>', '<'])
-        || ["+ ", "1. ", "1) "]
-            .iter()
-            .any(|opening| text.starts_with(opening))
+/// Whether a line, unindented, holds one image and nothing else.
+fn image_alone(text: &str) -> bool {
+    let Some((alt, target)) = text
+        .trim_end()
+        .strip_prefix("![")
+        .and_then(|rest| rest.split_once("]("))
+    else {
+        return false;
+    };
+    // The image's target closes the line: nothing follows its one closing parenthesis.
+    !alt.contains(']')
+        && target
+            .strip_suffix(')')
+            .is_some_and(|target| !target.contains(['(', ')']))
 }
 
-/// A table's delimiter row as Linear stores it, or `None` where the line is not one.
-fn delimiter_row(line: &str) -> Option<String> {
-    let inner = line.trim().strip_prefix('|')?.strip_suffix('|')?;
+/// Whether a line, trimmed, is a table row.
+fn table_row(text: &str) -> bool {
+    text.len() > 1 && text.starts_with('|') && text.ends_with('|')
+}
+
+/// A table's delimiter row as Linear stores it — one `--` a cell, its alignment kept — or `None`
+/// where the line is not one.
+fn delimiter_row(text: &str) -> Option<String> {
+    let inner = text.trim_end().strip_prefix('|')?.strip_suffix('|')?;
     let cells = inner
         .split('|')
         .map(|cell| {
             let cell = cell.trim();
             let dashes = cell.trim_matches(':');
-            let colons = cell.len() - dashes.len();
-            let is_delimiter =
-                !dashes.is_empty() && dashes.bytes().all(|b| b == b'-') && colons <= 2;
-            is_delimiter.then(|| {
+            (!dashes.is_empty() && dashes.bytes().all(|b| b == b'-')).then(|| {
                 let left = if cell.starts_with(':') { ":" } else { "" };
                 let right = if cell.len() > 1 && cell.ends_with(':') {
                     ":"
@@ -1246,204 +1415,7 @@ fn delimiter_row(line: &str) -> Option<String> {
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    let indent = &line[..line.len() - line.trim_start().len()];
-    Some(format!("{indent}| {} |", cells.join(" | ")))
-}
-
-/// One line's prose with every inline rule applied, its code spans and links kept.
-fn prose(text: &str) -> String {
-    let mut stored = String::with_capacity(text.len());
-    let mut before: Option<char> = None;
-    let mut at = 0;
-    while let Some(next) = text[at..].chars().next() {
-        let rest = &text[at..];
-        let taken = match next {
-            '`' => {
-                let run = rest.len() - rest.trim_start_matches('`').len();
-                let end = span_end(text, at, run).unwrap_or(at + run);
-                stored.push_str(&text[at..end]);
-                end - at
-            }
-            '\\' => match rest[1..].chars().next() {
-                Some('"') => {
-                    stored.push('"');
-                    2
-                }
-                Some(letter) if letter.is_ascii_alphabetic() => {
-                    stored.push_str("\\\\");
-                    stored.push(letter);
-                    2
-                }
-                other => {
-                    let width = 1 + other.map_or(0, char::len_utf8);
-                    stored.push_str(&rest[..width]);
-                    width
-                }
-            },
-            '!' if rest[1..].starts_with('[') && link_at(text, at + 1).is_some() => {
-                let end = link_at(text, at + 1).expect("just checked");
-                stored.push_str(&text[at..end]);
-                end - at
-            }
-            '[' => match link_at(text, at) {
-                Some(end) => {
-                    stored.push_str(&text[at..end]);
-                    end - at
-                }
-                None => {
-                    stored.push_str("\\[");
-                    1
-                }
-            },
-            ']' => {
-                stored.push_str("\\]");
-                1
-            }
-            '~' => {
-                stored.push_str("\\~");
-                1
-            }
-            '_' => match emphasis_end(text, at, before) {
-                Some(close) => {
-                    stored.push('*');
-                    stored.push_str(&text[at + 1..close]);
-                    stored.push('*');
-                    close + 1 - at
-                }
-                None => {
-                    stored.push('_');
-                    1
-                }
-            },
-            _ => match linked(rest, before) {
-                Some((token, target)) => {
-                    stored.push_str(&format!("[{token}](<{target}>)"));
-                    token.len()
-                }
-                None => {
-                    stored.push(next);
-                    next.len_utf8()
-                }
-            },
-        };
-        before = text[..at + taken].chars().next_back();
-        at += taken;
-    }
-    stored
-}
-
-/// Just past the run of exactly `run` backticks that closes the code span opened at `at`.
-fn span_end(text: &str, at: usize, run: usize) -> Option<usize> {
-    let mut from = at + run;
-    while let Some(found) = text[from..].find('`') {
-        let start = from + found;
-        let length = text[start..].len() - text[start..].trim_start_matches('`').len();
-        if length == run {
-            return Some(start + length);
-        }
-        from = start + length;
-    }
-    None
-}
-
-/// Just past the Markdown link `[text](target)` whose `[` is at `at`, its target bare or in
-/// angle brackets.
-fn link_at(text: &str, at: usize) -> Option<usize> {
-    let close = at + 1 + text[at + 1..].find(']')?;
-    if text[at + 1..close].contains(['[', '`', '\\']) {
-        return None;
-    }
-    let target = text[close + 1..].strip_prefix('(')?;
-    let length = if target.starts_with('<') {
-        target.find(">)")? + 2
-    } else {
-        let end = target.find(')')?;
-        if target[..end].contains(char::is_whitespace) {
-            return None;
-        }
-        end + 1
-    };
-    Some(close + 2 + length)
-}
-
-/// The `_` closing a single-underscore emphasis opened at `at`, where it is one: opened after no
-/// word character, closed before none, around text that neither starts nor ends with whitespace
-/// and holds nothing another rule rewrites.
-fn emphasis_end(text: &str, at: usize, before: Option<char>) -> Option<usize> {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    if before.is_some_and(word) {
-        return None;
-    }
-    let close = at + 1 + text[at + 1..].find('_')?;
-    let inner = &text[at + 1..close];
-    let clean = !inner.is_empty()
-        && !inner.contains(['`', '[', ']', '~', '*', '\\', '<', '>'])
-        && inner.trim() == inner;
-    (clean && !text[close + 1..].chars().next().is_some_and(word)).then_some(close)
-}
-
-/// The token Linear links at the start of `rest`, and the target it links it to: a URL, or a
-/// domain-like token under [`AUTOLINKED`], following nothing that continues a word, a path, an
-/// address or an escape.
-fn linked(rest: &str, before: Option<char>) -> Option<(&str, String)> {
-    if before.is_some_and(|c| c.is_alphanumeric() || "@/.-_:\\#=+%".contains(c)) {
-        return None;
-    }
-    let stops = |c: char| c.is_whitespace() || "<>`[]".contains(c);
-    let trailing: &[char] = &['.', ',', ':', ';', '!', '?', '\'', '"', ')', '*', '_', '~'];
-    let through_path = || {
-        let end = rest.find(stops).unwrap_or(rest.len());
-        rest[..end].trim_end_matches(trailing)
-    };
-    if let Some(scheme) = ["http://", "https://"]
-        .into_iter()
-        .find(|s| rest.starts_with(s))
-    {
-        let token = through_path();
-        return (token.len() > scheme.len()).then(|| (token, token.to_owned()));
-    }
-    let host_end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '.'))
-        .unwrap_or(rest.len());
-    let host = rest[..host_end].trim_end_matches(['.', '-']);
-    let labels: Vec<&str> = host.split('.').collect();
-    let top = labels.last()?.to_ascii_lowercase();
-    if labels.len() < 2
-        || labels.iter().any(|label| label.is_empty())
-        || !AUTOLINKED.contains(&top.as_str())
-    {
-        return None;
-    }
-    let after = rest[host.len()..].chars().next();
-    let token = if host.len() == host_end && after == Some('/') {
-        through_path()
-    } else if after.is_some_and(|c| c == '@' || c == '_') {
-        return None;
-    } else {
-        host
-    };
-    Some((token, format!("http://{token}")))
-}
-
-/// Every example the ruling gives is what this endpoint stores, and storing what it stored
-/// changes nothing more — what the ruling records of Linear rewriting its own output.
-#[test]
-fn the_loopback_stores_every_example_the_ruling_states() {
-    for (rule, written, kept) in RULES {
-        assert_eq!(stored_form(written), *kept, "{rule}: {written:?}");
-        assert_eq!(stored_form(kept), *kept, "{rule}, stored again: {kept:?}");
-    }
-    // What no rule names comes back as written: the plugin's own metadata slot among it.
-    for kept in [
-        "snake_case_name and file_name.md",
-        "caller.key, README.md, v0.8.0 and e.g. this",
-        "a@example.com",
-        "<!-- onetaskgraph.metadata `{\"k\":\"[x] ~ _y_\"}` -->",
-        "**bold**, 1. one, # heading, > quoted - dash",
-        "[named](https://example.com) and ![shot](./shot.png)",
-    ] {
-        assert_eq!(stored_form(kept), kept, "{kept:?}");
-    }
+    Some(format!("| {} |", cells.join(" | ")))
 }
 
 /// Refused HTTP frames and GraphQL envelopes never reach the endpoint's operation log;
@@ -1544,4 +1516,70 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
     let answer: Value = serde_json::from_str(body).expect("the GraphQL response");
     assert_eq!(answer["data"]["project"]["id"], PROJECT);
     assert_eq!(linear.log().len(), 3);
+    // A rewrite naming a project whose name is not a string is refused and changes nothing,
+    // its status among it.
+    let rename = json!({
+        "query":"mutation($id:ID!,$input:ProjectUpdateInput!){projectUpdate(id:$id,input:$input){success}}",
+        "variables":{"id":PROJECT,"input":{
+            "content":"rewritten", "name":7, "statusId":linear.status_id("Planned"),
+        }}
+    });
+    let refused = send("POST /graphql HTTP/1.1", &rename);
+    let refused: Value =
+        serde_json::from_str(refused.split_once("\r\n\r\n").expect("mutation response").1)
+            .expect("mutation JSON");
+    assert_eq!(
+        refused["errors"][0]["message"],
+        "a project's name is a string: 7"
+    );
+    let read = send(
+        "POST /graphql HTTP/1.1",
+        &json!({
+            "query":"query($id:ID!){project(id:$id){name content}}", "variables":{"id":PROJECT}
+        }),
+    );
+    let read: Value = serde_json::from_str(read.split_once("\r\n\r\n").expect("project read").1)
+        .expect("project JSON");
+    assert_eq!(read["data"]["project"]["content"], "");
+}
+
+/// Every rewrite the spike measured is what this endpoint stores, and storing what it stored
+/// changes nothing more — what the spike measured of every follow-up write's answer.
+#[test]
+fn the_loopback_stores_every_rewrite_the_spike_measured() {
+    for (probe, written, kept) in MEASURED {
+        assert_eq!(linear_stores(written), *kept, "{probe}: {written:?}");
+        assert_eq!(
+            linear_stores(kept),
+            *kept,
+            "{probe}, stored again: {kept:?}"
+        );
+    }
+    // What no measured rewrite names comes back as written: the plugin's own metadata slot, a
+    // code span on one line and a numbered list among it.
+    for kept in [
+        "snake_case_name and file_name.md",
+        "<!-- onetaskgraph.metadata `{\"k\":\"[x] ~ _y_ **\"}` -->",
+        "a `- [x] **b` c",
+        "1. one\n2. two",
+        "**bold**, # heading, > quoted - dash",
+        "* item\n\n<!-- onetaskgraph.metadata `{}` -->",
+        // An image with prose after it is not an image alone, so no blank line parts it from
+        // the image below.
+        "![a](https://uploads.linear.app/a) and (b)\n![b](https://uploads.linear.app/b)",
+    ] {
+        assert_eq!(linear_stores(kept), kept, "{kept:?}");
+    }
+    // A read's content is the text above the slot less its separator, and a table's own line
+    // break survives it.
+    for (stored, content) in [
+        ("* a\n\n<!-- onetaskgraph.metadata `{}` -->", "* a"),
+        (
+            "| a |\n| -- |\n\n<!-- onetaskgraph.metadata `{}` -->",
+            "| a |\n| -- |\n",
+        ),
+        ("no slot", "no slot"),
+    ] {
+        assert_eq!(content_of(stored), content, "{stored:?}");
+    }
 }

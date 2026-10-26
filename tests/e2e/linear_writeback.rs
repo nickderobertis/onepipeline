@@ -435,7 +435,7 @@ fn six_settlements(scenario: &Scenario, mut each: impl FnMut(usize, &Spent)) -> 
             written["description"]
                 .as_str()
                 .is_some_and(|description| description
-                    .starts_with(&crate::linear_loopback::stored_form(&task_text("work")))),
+                    .starts_with(&crate::linear_loopback::linear_stores(&task_text("work")))),
             "settlement {step}'s mutation did not keep the issue's content as Linear stores it: \
              {written}"
         );
@@ -487,8 +487,9 @@ fn every_mapped_state() -> Vec<(&'static str, &'static str)> {
 // `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
 /// Six consecutive settlements, each landing its own current values ([`six_settlements`]), on
 /// one store: each attempt sends one read of the issue — the description its metadata is merged
-/// into, which keeps whatever a person wrote there — and one `issueUpdate`, and no resolution
-/// read, because every name it writes was resolved by the run's first attempt. Its vocabulary
+/// into, which keeps whatever a person wrote there — and then one `issueUpdate`, no read after
+/// it, and no resolution read, because every name it writes was resolved by the run's first
+/// attempt. Its vocabulary
 /// is present before launch; the failure journey separately adds a state after the cache fills
 /// and proves that one refresh finds it.
 #[test]
@@ -512,6 +513,13 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
             spent.resolutions(),
             0,
             "a reused store resolved again: {sent:?}"
+        );
+        // The write's own answer is what Linear stores, so the read is the one the metadata is
+        // merged into, and nothing reads the issue after it is written.
+        assert_eq!(
+            sent,
+            [Operation::Issue, Operation::IssueUpdate],
+            "settlement {step} read the issue after writing its metadata: {sent:?}"
         );
     });
     scenario.finish();

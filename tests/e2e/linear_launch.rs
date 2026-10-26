@@ -2,12 +2,13 @@
 //! `plan-task` by the released `onetaskgraph`, copied into Linear by the store the binary links,
 //! and launched from there with `--require-rendered true`.
 //!
-//! Linear is `tests/e2e/linear_loopback.rs`, which stores every description and project content
-//! as onetaskgraph-linear's ruling says Linear stores Markdown — `- ` bullets come back `* `,
-//! domains come back linked, brackets and tildes come back escaped — so what the launch reads is
-//! not the bytes the template rendered. The check holds because the copy records the digest of
-//! what Linear stores; and it is no weaker for that, because an edit made in Linear after the
-//! copy is still refused.
+//! Linear is `tests/e2e/linear_loopback.rs`, which stores every description and project and
+//! document content as spike `spike-linear-stored-content` measured real Linear storing Markdown
+//! — `- ` bullets come back `* `, a code span wrapped across a line is joined, bold spanning a
+//! line break is split, a lazy ordered line is escaped, and more no store predicts — so what the
+//! launch reads is not the bytes the template rendered. The check holds because the copy records
+//! the digest of what each write's own answer said Linear stored; and it is no weaker for that,
+//! because an edit made in Linear after the copy is still refused.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
 // boundary and nothing inside the crate under test, which is driven as a real compiled binary.
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::harness::{global, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE};
-use crate::linear_loopback::{metadata_of, stored_form, Linear, PROJECT};
+use crate::linear_loopback::{content_of, metadata_of, Linear, Operation, PROJECT};
 use crate::linear_writeback::{
     configuration, from_the_launch_directory, KEY_ENV, SETTLEMENT, SOURCE, STATES, STATUSES,
 };
@@ -30,13 +31,28 @@ use onepipeline::templates::{BUILT_IN, RULE_BODY_CHANGED};
 const NAME: &str = "linear-launch";
 
 /// The two nodes, each with the criteria it is rendered with. The second one's criteria hold
-/// prose Linear rewrites beyond the bullet: a domain it links, a bracket and a tilde it escapes.
+/// Markdown Linear rewrites beyond the bullet, each a rewrite no store predicts: a code span
+/// wrapped across a line, bold spanning a line break, and a line that opens like an ordered item
+/// running on from its criterion.
 const NODES: &[(&str, &[&str])] = &[
     ("design", &["The design is written.", "It names its risks."]),
     (
         "build",
-        &["It builds.", "The docs at example.com list [x] ~2 steps."],
+        &[
+            "It builds.",
+            "The `onepipeline start` and `onepipeline\nstatus` verbs run.",
+            "**Both platforms build\nclean** on CI.",
+            "It wraps onto\n3. a lazy line.",
+        ],
     ),
+];
+
+/// What Linear stored of the `build` node's criteria, as the loopback stores them: the code span
+/// joined, the bold split into one run a line, and the lazy line's `.` escaped.
+const BUILD_STORED: &[&str] = &[
+    "* The `onepipeline start` and `onepipeline status` verbs run.",
+    "* **Both platforms build**\n  **clean** on CI.",
+    "* It wraps onto\n  3\\. a lazy line.",
 ];
 
 /// A world with a plan of `plan-task`-rendered tasks in its own `local-md` source, copied into
@@ -112,8 +128,12 @@ fn homed(name: &str) -> Homed {
         .map(|(_, content)| content)
         .unwrap_or_else(|| panic!("Linear holds no {document}"));
     assert!(
-        held.starts_with(&stored_form(DESIGN)) && !held.contains("\n- "),
+        content_of(&held) == DESIGN_STORED,
         "the design document is not held as Linear stores it:\n{held}"
+    );
+    assert!(
+        held.contains(&format!("{DESIGN_STORED}\n<!-- onetaskgraph.metadata `")),
+        "the slot after the design's closing table is not set off by one line break:\n{held}"
     );
 
     let issues = linear
@@ -140,9 +160,19 @@ fn homed(name: &str) -> Homed {
     }
 }
 
-/// The plan's design document: a list, and a table whose delimiter row Linear rewrites.
-const DESIGN: &str =
-    "## Design\n- Build on example.com.\n\n| part | owner |\n| --- | --- |\n| core | build |\n";
+/// The plan's design document: every construct spike `spike-linear-stored-content` measured
+/// Linear rewriting that no store predicts — a list after a heading and after a paragraph line, a
+/// lazy ordered line, a code span and bold wrapped across a line, an indented code block — ending
+/// in a table whose delimiter row Linear rewrites.
+const DESIGN: &str = "## Design\n- Build on the store.\n\nA paragraph line.\n- a decision \
+     that wraps onto\n3. a lazy line\n\nThe `code span that\nwraps` and **bold that\nspans** \
+     stay.\n\n    an indented code line\n\n| part | owner |\n| --- | --- |\n| core | build |\n";
+
+/// [`DESIGN`] as the loopback Linear stores it, and so as the copy reads it back.
+const DESIGN_STORED: &str = "## Design\n\n* Build on the store.\n\nA paragraph line.\n\n* a \
+     decision that wraps onto\n  3\\. a lazy line\n\nThe `code span that wraps` and **bold \
+     that**\n**spans** stay.\n\n```\nan indented code line\n```\n\n| part | owner |\n| -- | -- \
+     |\n| core | build |\n";
 
 /// Copy `item` into Linear with the linked store's copy over `scope`, and answer where it landed.
 fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::CopyScope) -> String {
@@ -282,23 +312,31 @@ impl Homed {
 fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_only_check() {
     let homed = homed("linear-launch");
 
-    // What Linear holds is not what was rendered: every criterion's bullet came back `* `, and
-    // the second node's prose came back linked and escaped.
+    // What Linear holds is not what was rendered: every criterion's bullet came back `* `, the
+    // second node's wrapped constructs came back joined, split and escaped, and each rendering's
+    // provenance records the digest of what Linear stored rather than of what was rendered.
     for (node, criteria) in NODES {
         let held = homed.linear.description_of(homed.issue_of(node));
-        for criterion in *criteria {
-            let stored = stored_form(&format!("- {criterion}"));
-            assert!(
-                stored.starts_with("* ") && held.contains(&stored),
-                "{node}'s criterion {criterion:?} is not held as Linear stores it:\n{held}"
-            );
-        }
         assert!(!held.contains("\n- "), "{node} kept a `- ` bullet:\n{held}");
+        assert!(
+            held.contains(&format!("* {}", criteria[0])),
+            "{node}'s first criterion is not held as a `* ` bullet:\n{held}"
+        );
+        let provenance = &metadata_of(&held)["onetaskgraph.template"];
+        assert_eq!(
+            provenance["body_digest"],
+            json!(onetaskgraph_plugin_api::body_digest(content_of(&held))),
+            "{node}'s rendering does not record the digest of what Linear stored:\n{held}"
+        );
     }
-    assert!(homed
-        .linear
-        .description_of(homed.issue_of("build"))
-        .contains("[example.com](<http://example.com>) list \\[x\\] \\~2 steps."));
+    let build = homed.linear.description_of(homed.issue_of("build"));
+    for stored in BUILD_STORED {
+        assert!(
+            build.contains(stored),
+            "build does not hold {stored:?} as Linear stores it:\n{build}"
+        );
+    }
+    let launched = homed.linear.log().len();
 
     // Loaded under the rendered-only check, with nothing refused, and run to its end.
     let started = homed.start();
@@ -351,6 +389,31 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
                     .is_some_and(|settlement| settlement["status"] == "done")
         })
     });
+    // A write-back's own answer is what Linear stores, so it reads its item only to merge into,
+    // before writing it: once the launch has written an issue, every read of it is followed
+    // straight away by a write of it, and the last request it is sent is a write — no read of it
+    // follows a write-back's metadata write.
+    let written_back = &homed.linear.log()[launched..];
+    for (node, _) in NODES {
+        let issue = homed.issue_of(node);
+        let sent: Vec<Operation> = written_back
+            .iter()
+            .filter(|request| request.variables["id"] == issue)
+            .map(|request| request.operation)
+            .collect();
+        let first_write = sent
+            .iter()
+            .position(|operation| *operation == Operation::IssueUpdate)
+            .unwrap_or_else(|| panic!("{node}'s settlement never wrote {issue}: {sent:?}"));
+        let reads_then_write = sent[first_write..].windows(2).all(|pair| {
+            !matches!(pair[0], Operation::Issue | Operation::IssueResolved)
+                || pair[1] == Operation::IssueUpdate
+        });
+        assert!(
+            reads_then_write && sent.last() == Some(&Operation::IssueUpdate),
+            "{node}'s write-back read {issue} after writing its metadata: {sent:?}"
+        );
+    }
 
     // Edited in Linear after the copy: the next launch is refused, naming that task, because
     // its body is no longer the one its provenance records.
