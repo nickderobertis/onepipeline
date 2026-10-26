@@ -2725,6 +2725,87 @@ fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_expor
     assert!(view.contains("status: done"), "{view}");
 }
 
+/// A private plan whose public task carries an anchor naming only itself — `<a id="…"></a>`,
+/// what a plan-task template writes before a schema-2 budget — and an in-page link to it is
+/// copied into the private home through the store this crate links, and the store's public
+/// view of that task carries the anchor and the link as written. The store this was written
+/// against refused any such tag as a local link, so no mixed plan with a budgeted public task
+/// could be copied onto the board.
+#[test]
+fn a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store() {
+    let (world, _, _) = private_home_world("boundary-id-anchor");
+    const ANCHOR: &str = "<a id=\"library-copy-seconds\"></a>";
+    const LINK: &str = "[the budget](#library-copy-seconds)";
+    // A parked private task of the private repository homes the plan privately.
+    let mut inner = producer("inner", &[]);
+    inner["repo"] = json!("github.com/owner/service");
+    inner["classification"] = json!("private");
+    inner["parked"] = json!(true);
+    let mut budgeted = public("budgeted", &[]);
+    budgeted["repo"] = json!("github.com/owner/library");
+    budgeted["task"] = json!(format!(
+        "## What\nShip budgeted, held to {LINK}.\n\n{ANCHOR}\n\n\
+         | Budget | Limit |\n|---|---|\n| library copy seconds | 30 |\n\n\
+         ## Acceptance criteria\n- budgeted is published."
+    ));
+    let plan = mixed_plan("anchored", vec![inner, budgeted], vec![]);
+    let drafted = world.plan_in(&world.root.join("draft-store"), "anchored", &plan);
+    let identifier = drafted
+        .strip_prefix("plans:")
+        .expect("a project of the draft root")
+        .to_owned();
+    for root in [world.store(), world.root.join("views-store")] {
+        std::fs::create_dir_all(root).expect("a source root");
+    }
+
+    let draft = crate::harness::global(&format!("draft:{identifier}"));
+    let report = world.on_onevcs(|| {
+        world.store_call(|engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new("plans")
+                        .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: true,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("the linked store copies the plan with its id anchor: {error}")
+                })
+        })
+    });
+    assert!(!report.items.is_empty(), "{report:?}");
+
+    // Both tasks are canonical in the private home, and the public one's view carries the
+    // anchor and the link whose fragment names it, byte for byte.
+    let canonical = files_under(&world.store().join("tasks").join(&identifier));
+    assert_eq!(canonical.len(), 2, "{canonical:?}");
+    let views: Vec<(String, String)> = files_under(&world.root.join("views-store"))
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("tasks"))
+        .collect();
+    assert_eq!(views.len(), 1, "{views:?}");
+    let view = &views[0].1;
+    assert!(
+        view.contains(ANCHOR) && view.contains(LINK),
+        "the view lost the anchor or its link:\n{view}"
+    );
+    assert!(
+        !view.contains(&identifier),
+        "the view names the private plan:\n{view}"
+    );
+}
+
 /// In a private canonical home, a public task stays subject to every refusal it always was:
 /// the store refuses to project one carrying a private term, the engine refuses it at load and
 /// at a live edit in neutral words, and an ordinary dependency or a private repository still

@@ -1229,9 +1229,16 @@ onevcs-testing = "0.19.22"
 # **0.12.3 is the floor because the write-back worker writes through it**: every running
 # graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
 # and `justfile`'s CLI is held to it so the host reads the store release its driver links.
-onetaskgraph-core = "=0.12.3"
-onetaskgraph-plugin-api = "=0.12.3"
-onetaskgraph-local-md = "=0.12.3"
+# **0.12.4 takes what Linear stored off each write's own answer**, retiring
+# `TaskSource::stored_form`, and batches a copy's origin lookups into one read; the loopback
+# Linear in `tests/e2e/linear_loopback.rs` answers what it now sends.
+# **0.12.5 lets a public projection carry an anchor whose only attribute is `id` or `name`**,
+# so a private plan whose public task owns a schema-2 budget copies onto the board
+# (`tests/e2e/publication_boundary.rs`'s
+# `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
+onetaskgraph-core = "=0.12.5"
+onetaskgraph-plugin-api = "=0.12.5"
+onetaskgraph-local-md = "=0.12.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
