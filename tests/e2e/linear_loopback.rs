@@ -86,7 +86,7 @@ pub enum Operation {
 impl Operation {
     fn of(query: &str) -> Self {
         let query = query.trim_start();
-        if query.contains("originIssues:") && query.contains("originProjects:") {
+        if query.contains("originIssues:") {
             Self::CounterpartLookups
         } else if query.contains("issue(id:") && query.contains("teams(") {
             Self::IssueResolved
@@ -576,7 +576,14 @@ impl Linear {
                     return refusal("an issueUpdate carries a non-empty `input` object");
                 };
                 match world.update(id, input) {
-                    Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
+                    Ok(mut issue) => {
+                        // A rewrite reads the issue's relations back in its own answer; this
+                        // endpoint relates nothing.
+                        if query.contains("relations(") {
+                            issue["relations"] = empty_page();
+                        }
+                        json!({"issueUpdate": {"success": true, "issue": issue}})
+                    }
                     Err(why) => return refusal(&why),
                 }
             }
@@ -640,7 +647,9 @@ impl Linear {
                 // The project as stored, which the plugin selects in its answer — the content
                 // Linear stored among it — as Linear answers it.
                 let mut project = world.project();
-                project["relations"] = empty_page();
+                if query.contains("relations(") {
+                    project["relations"] = empty_page();
+                }
                 json!({"projectUpdate": {"success": true, "project": project}})
             }
             Operation::IssueCreate => {

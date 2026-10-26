@@ -132,11 +132,14 @@ enum Takes {
 /// The flags the headless surface above is made of, and what follows each.
 // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the same gate as
 // `MODES` below, and for the same reason.
-const FLAGS: [(&str, Takes); 6] = [
+const FLAGS: [(&str, Takes); 7] = [
     ("-p", Takes::ThePromptIfItIsHere),
     ("--input-format", Takes::AValue),
     ("--permission-mode", Takes::AValue),
     ("--output-format", Takes::AValue),
+    // A two-party member's agent side: oneharness delivers onejudge's `--system`
+    // through Claude Code's native system flag.
+    ("--append-system-prompt", Takes::AValue),
     // What a structured-output run is: oneharness names the schema file the
     // member's own config declared, and prefers the answer validated against it
     // over anything it could extract from the turn's text.
