@@ -7295,3 +7295,133 @@ fn a_fast_local_direct_node_naming_no_target_is_held_for_its_producers_default_t
     );
     assert_eq!(host.pushes(), 1);
 }
+
+/// A held node survives its driver going, `stop`, and `shutdown`, each followed by
+/// `adopt` — and the adopted run lands it on its release exactly as an unbroken
+/// one does.
+///
+/// The hold is a status the journal records, not a dispatch: nothing is in flight
+/// for it, so a driver dying loses nothing, `shutdown` has nothing to kill and finds
+/// its branch already on its origin, and `stop` ends the run with the work owed
+/// rather than landed. A driver adopting the run folds the status back and rebuilds
+/// the release watch, and nothing is re-dispatched or landed until the release
+/// answers.
+#[test]
+fn a_held_node_survives_its_driver_stop_and_shutdown_and_lands_once_adopted() {
+    let host = HeldHost::new("adoption-held-adopted");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let commits_before = host.consumer.base_commits(world).len();
+    let (run, _) = start_held(&host, "adoption-held-adopted", Some("crate"));
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    let branch = branch_of(world, &run, "consumer");
+    let head = settlement_of(world, &run, "consumer")["payload"]["head"]
+        .as_str()
+        .expect("the held settlement names its commit")
+        .to_owned();
+
+    // Whatever the interruption, the node is still held, was not dispatched again,
+    // and nothing reached its base.
+    let still_held = |when: &str| {
+        let entry = reading_node(world, &run, "consumer");
+        assert_eq!(entry["status"], "complete-but-held", "{when}: {entry}");
+        assert_eq!(
+            entry["awaiting"],
+            json!([{"producer": "github.com/owner/engine", "target": "crate"}]),
+            "{when}: {entry}"
+        );
+        assert_eq!(tasks_of(world, "consumer").len(), 1, "{when}");
+        assert_eq!(
+            host.bases(),
+            (base_before.clone(), checkout_before.clone()),
+            "{when}"
+        );
+        assert_eq!(host.pushes(), 0, "{when}");
+        assert!(!dispatched(world, &run, "follower"), "{when}");
+    };
+    // An adopted driver is watching the release again: the probe it rebuilt the
+    // watch for is asked on its own interval.
+    let adopt = |when: &str| {
+        world.run(&["adopt", &run, "--detach"]).exited(0);
+        let asked = world.probe_runs("crate");
+        world.until(&format!("the release to be asked after {when}"), |world| {
+            world.probe_runs("crate") >= asked + 2
+        });
+        still_held(&format!("adopted after {when}"));
+    };
+
+    // (a) The driver goes.
+    crate::harness::end_driver(world, &run);
+    still_held("the driver went");
+    adopt("the driver went");
+
+    // (b) `stop`: the run ends with the node not done and its branch owed.
+    world.run(&["stop", &run]).exited(0);
+    still_held("the stop");
+    let reading = world.run(&["status", &run, "--json"]).json();
+    assert_eq!(reading["word"], "ENDED stopped", "{reading}");
+    assert!(
+        reading["ending"]["nodes"]
+            .as_array()
+            .expect("an ended run lists what is not done")
+            .iter()
+            .any(|node| node["id"] == "consumer" && node["status"] == "complete-but-held"),
+        "{reading}"
+    );
+    assert!(
+        host.unpublished().contains(&branch),
+        "{:?}",
+        host.unpublished()
+    );
+    adopt("the stop");
+
+    // (c) `shutdown`: nothing in flight to kill, and the held branch reported as
+    // already on its origin at its commit.
+    let shutdown = world.run(&["shutdown", &run, "--grace", "1"]);
+    let line = shutdown
+        .stdout
+        .lines()
+        .find(|line| line.contains(&format!("@{branch}:")))
+        .unwrap_or_else(|| {
+            panic!(
+                "the shutdown report names no {branch}:\n{}\n{}",
+                shutdown.stdout, shutdown.stderr
+            )
+        });
+    assert!(
+        line.contains("already on its origin at this commit; nothing was pushed"),
+        "{line}"
+    );
+    assert!(
+        !shutdown.stdout.contains("Still running"),
+        "the shutdown found something of the held node to kill:\n{}",
+        shutdown.stdout
+    );
+    assert_eq!(host.on_origin(&format!("refs/heads/{branch}")), Some(head));
+    still_held("the shutdown");
+    adopt("the shutdown");
+
+    // The release answers, and the adopted run lands the node exactly once.
+    world.script("consumer.work", &pin("\"0.2.0\""));
+    releases_at(&host.crate_answer, "0.2.0");
+    world.until("the consumer to land", |world| {
+        settled_status(world, &run, "consumer").as_deref() == Some("done")
+    });
+    assert_eq!(world.events_of(&run, "release-adopted").len(), 1);
+    assert_eq!(tasks_of(world, "consumer").len(), 2);
+    assert_eq!(branch_of(world, &run, "consumer"), branch);
+    assert_eq!(host.consumer.base_commits(world).len(), commits_before + 1);
+    let base_before = base_before.expect("the consumer's origin had a base");
+    assert_eq!(
+        host.origin_git(&["diff", "--name-status", &base_before, "main"])
+            .trim(),
+        "A\tpin.md"
+    );
+    assert_eq!(host.pushes(), 1);
+    world.until("the run to settle", |world| {
+        world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
+    });
+}
