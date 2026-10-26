@@ -12876,6 +12876,24 @@ a different document — its seal still over the covered bytes, with no tally �
 one to 15 (ruled by the manager, correlation `c-d02b1d64475c6b7ed6664d80d23372a6`), so a version-14 document is one this build refuses and rebuilds like any
 other it does not write, rather than one number naming two shapes.
 
+**The publication fence (entry 128) narrows only when it grows or empties.** Entry 128's
+driver writes `onepipeline.publishing` again without each node once its publication has
+settled and its settlement has landed. A driver of this build, still driving, writes it
+only when the nodes under way include one it does not name, or none at all: a fence naming
+every publication under way and some that have settled stands until then, and the next
+write names exactly what is under way. Such a fence is empty exactly when the exact one
+would be, so a takeover starts at the same moment as before. The takeover's waiting line
+no longer says the named publications are under way or gives a since-time: it says the
+displaced driver's publication fence still names them, set at the time it was written, and
+that the run starts once that fence clears or that driver acknowledges. A superseded
+driver, and the move to none (still lingering ten seconds first), are unchanged. Why: a
+driver whose passes are faster observes each overlapping publication start and settle
+separately, and wrote the fence once per settlement, so its store writes grew with how
+often it passed. The busy review round's quota budget went over its threshold on that
+alone, and is back under it: 157 quota units in each of three runs on this host, against
+171 and 171 on `main` at `2f569b5b` (ruled by the manager, correlation
+`c-77cf790d4e5ce3690a9c0a640758389c`).
+
 ## 142. The bus's derived counts and byte-offset cursors added four files to a run's channel directory — RESOLVED
 
 **Ruled by the planner on the plan node `op-journal-scaling`, and `docs/contract.md` edited to
