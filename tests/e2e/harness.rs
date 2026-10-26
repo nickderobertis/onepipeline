@@ -1814,8 +1814,20 @@ impl World {
     /// the release-targets document names it by — and the file its answer is
     /// written to.
     pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        self.probe_at(repository, name, probe_script().0)
+    }
+
+    /// The same, committed under a script name of its own — `<name>-probe.sh`, or
+    /// `.bat` — so one repository can carry a probe per release target, each
+    /// answering from its own file.
+    pub fn probe_for_target(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let script = format!("{name}-{}", probe_script().0);
+        self.probe_at(repository, name, &script)
+    }
+
+    fn probe_at(&self, repository: &Repository, name: &str, script: &str) -> (String, PathBuf) {
         let answer = self.root.join(format!("{name}.version"));
-        let (script, body) = probe_script();
+        let (_, body) = probe_script();
         let path = repository.checkout.join(script);
         onepipeline_testfakes::executable(
             &path,

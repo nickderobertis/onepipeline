@@ -178,7 +178,8 @@ fn a_repository_with_no_commit_msg_hook_refuses_no_title() {
 
 /// The release-targets document a `consumes` journey's host carries: the engine
 /// repository declaring the `crate` target its consumer names, and whichever
-/// adoption rungs the case states after it.
+/// adoption rungs the case states after it — the global one among them, which
+/// every such document states.
 fn engine_releases(rungs: &str) -> String {
     format!(
         "version: 1\n\
@@ -209,25 +210,58 @@ fn a_consumes_on_a_repository_that_opens_no_change_request_loads_under_either_ad
     world.write_graphs();
     two_repositories(&world, "local-direct");
 
-    // (case, the consumer's own adoption field, the rungs the host's document states)
-    let cases: &[(&str, Option<&str>, &str)] = &[
-        ("fast-by-the-floor", None, ""),
-        ("fast-by-its-own-field", Some("fast"), ""),
-        ("published-by-its-own-field", Some("published"), ""),
+    // (case, the consumer's own adoption field, the rungs the host's document
+    // states — `None` for a host with no release-targets document at all, which is
+    // the one with no rung, where every node falls to the `fast` floor)
+    let fast = "default:\n\x20 adoption: fast\n";
+    let cases: &[(&str, Option<&str>, Option<String>)] = &[
+        ("fast-by-the-floor", None, None),
+        ("fast-by-its-own-field", Some("fast"), Some(fast.to_owned())),
+        (
+            "published-by-its-own-field",
+            Some("published"),
+            Some(fast.to_owned()),
+        ),
         (
             "published-by-its-repository",
             None,
-            "\x20 - match: {host: github.com, owner: owner, name: service}\n\
-             \x20   adoption: published\n",
+            Some(format!(
+                "\x20 - match: {{host: github.com, owner: owner, name: service}}\n\
+                 \x20   adoption: published\n{fast}"
+            )),
         ),
         (
             "published-by-the-default",
             None,
-            "default:\n\x20 adoption: published\n",
+            Some("default:\n\x20 adoption: published\n".to_owned()),
         ),
     ];
+    let document = world.onevcs_home().join("releases.yml");
     for (case, adoption, rungs) in cases {
-        world.releases(&engine_releases(rungs));
+        match rungs {
+            Some(rungs) => world.releases(&engine_releases(rungs)),
+            None => {
+                let _ = std::fs::remove_file(&document);
+            }
+        }
+        // The case resolves the adoption it is named for: its own field where it
+        // states one, and otherwise the rungs `onevcs` answers for its repository.
+        let resolved = match adoption {
+            Some(stated) => (*stated).to_owned(),
+            None => {
+                let rung = world
+                    .on_onevcs(|| onevcs::adoption_for("service"))
+                    .unwrap_or_else(|error| panic!("{case}: the rungs did not resolve: {error}"));
+                serde_json::to_value(rung)
+                    .ok()
+                    .and_then(|word| word.as_str().map(str::to_owned))
+                    .expect("an adoption is a word")
+            }
+        };
+        assert!(
+            case.starts_with(&resolved),
+            "{case} resolves `{resolved}`, not the adoption it is named for"
+        );
         let project = world.plan(case, &plan_of(case, vec![engine(), consumer(*adoption)]));
 
         let checked = world.run(&["plan", "check", &project, "--json"]);
