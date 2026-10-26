@@ -19,7 +19,8 @@ const VERSION = readFileSync(join(REPO_ROOT, "Cargo.toml"), "utf8").match(
   /^\[package\][\s\S]*?^version = "([^"]+)"/m,
 )[1];
 
-/// Writes the wheel, the archive (with `mutation` applied) and its checksum.
+/// Writes the wheel, the archive (with `mutation` applied) and its checksum; the
+/// wheel carries `sbom` as maturin's SBOM, as the npm package does.
 const ASSEMBLE = String.raw`
 import hashlib, json, sys, zipfile
 from pathlib import Path
@@ -30,7 +31,7 @@ with zipfile.ZipFile(wheel, 'w') as w:
     w.writestr(f'{stem}.data/scripts/onepipeline.exe', payload)
     w.writestr(f'{stem}.dist-info/METADATA', f'Metadata-Version: 2.4\nName: onepipeline-cli\nVersion: {version}\n')
     w.writestr(f'{stem}.dist-info/WHEEL', 'Wheel-Version: 1.0\nTag: py3-none-win_amd64\n')
-    w.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', json.dumps({'bomFormat': 'CycloneDX'}))
+    w.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', Path(sys.argv[5]).read_bytes())
     w.writestr(f'{stem}.dist-info/RECORD', '')
 archive = out / f'onepipeline-v{version}-x86_64-pc-windows-msvc.zip'
 with zipfile.ZipFile(archive, 'w') as a:
@@ -57,11 +58,17 @@ describe("a Windows staged record's zip archive", () => {
   let work;
   let payload;
   let npmTgz;
+  let sbom;
 
   before(() => {
     work = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "staged-zip-"));
     payload = join(work, "onepipeline.exe");
     writeFileSync(payload, Buffer.from("MZ stand-in for a Windows executable\n"));
+    sbom = join(work, "onepipeline.cyclonedx.json");
+    writeFileSync(
+      sbom,
+      JSON.stringify({ bomFormat: "CycloneDX", metadata: { component: { name: "onepipeline" } } }),
+    );
     const pkg = execFileSync(
       "node",
       [
@@ -71,6 +78,8 @@ describe("a Windows staged record's zip archive", () => {
         TARGET,
         "--binary",
         payload,
+        "--sbom",
+        sbom,
         "--out",
         join(work, "npm"),
       ],
@@ -91,7 +100,7 @@ describe("a Windows staged record's zip archive", () => {
   function verify(mutation) {
     const out = mkdtempSync(join(work, `${mutation}-`));
     const built = JSON.parse(
-      execFileSync("python3", ["-c", ASSEMBLE, out, VERSION, payload, mutation], {
+      execFileSync("python3", ["-c", ASSEMBLE, out, VERSION, payload, mutation, sbom], {
         cwd: REPO_ROOT,
         encoding: "utf8",
       }),
@@ -120,7 +129,7 @@ describe("a Windows staged record's zip archive", () => {
   it("packages a win_amd64 wheel into the zip archive and npm package that carry its executable", () => {
     const out = mkdtempSync(join(work, "packaged-"));
     const built = JSON.parse(
-      execFileSync("python3", ["-c", ASSEMBLE, out, VERSION, payload, "none"], {
+      execFileSync("python3", ["-c", ASSEMBLE, out, VERSION, payload, "none", sbom], {
         cwd: REPO_ROOT,
         encoding: "utf8",
       }),

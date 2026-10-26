@@ -757,7 +757,7 @@ stem = f'onepipeline_cli-{version}'
 with zipfile.ZipFile(wheel, 'w') as bundle:
     bundle.writestr(f'{stem}.dist-info/METADATA', f'Metadata-Version: 2.1\nName: onepipeline-cli\nVersion: {version}\n')
     bundle.writestr(f'{stem}.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: release-checks\nRoot-Is-Purelib: false\nTag: py3-none-win_amd64\n')
-    bundle.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', '{"bomFormat": "CycloneDX"}')
+    bundle.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', '{"bomFormat": "CycloneDX", "metadata": {"component": {"name": "onepipeline"}}}')
     bundle.writestr(f'{stem}.data/scripts/onepipeline.exe', payload)
     bundle.writestr(f'{stem}.dist-info/RECORD', '')
 record = release.staged.package(target, wheel, out, version)

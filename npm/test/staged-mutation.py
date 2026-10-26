@@ -102,19 +102,24 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
         stem, version, rest = target.name.split('-', 2)
         target = target.rename(target.with_name(f'{stem}-0.0.0-{rest}'))
     record['wheel'] = str(target)
-elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version', 'npm-object', 'npm-directory', 'npm-name', 'npm-os', 'npm-cpu', 'archive-directory', 'npm-unsafe', 'npm-duplicate', 'npm-link', 'npm-executable', 'npm-unexpected', 'npm-missing', 'archive-doc-directory', 'archive-doc-symlink', 'archive-doc-hardlink', 'npm-mode', 'archive-mode']:
+elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version', 'npm-object', 'npm-directory', 'npm-name', 'npm-os', 'npm-cpu', 'archive-directory', 'npm-unsafe', 'npm-duplicate', 'npm-link', 'npm-executable', 'npm-unexpected', 'npm-missing', 'archive-doc-directory', 'archive-doc-symlink', 'archive-doc-hardlink', 'npm-mode', 'archive-mode', 'npm-no-sbom', 'npm-sbom-object', 'npm-sbom', 'npm-sbom-differs', 'npm-sbom-extra']:
     key = 'npm' if case.startswith('npm-') else 'archive'
     source = record[key]
     target = out / Path(source).name
     with tarfile.open(source) as original, tarfile.open(target, 'w:gz') as changed:
         for entry in original.getmembers():
             if case == 'npm-missing' and entry.name == 'package/README.md': continue
+            if case == 'npm-no-sbom' and entry.name.startswith('package/sboms'): continue
             if case == 'archive-layout' and entry.name == 'LICENSE': continue
             payload = original.extractfile(entry).read() if entry.isfile() else None
             if payload is not None:
                 if case == 'archive-payload' and entry.name in record['executables']: payload += b'corruption'
                 if case == 'npm-payload' and '/bin/' in entry.name: payload += b'corruption'
                 if case == 'npm-object' and entry.name == 'package/package.json': payload = b'[]'
+                if entry.name == 'package/sboms/onepipeline.cyclonedx.json':
+                    if case == 'npm-sbom-object': payload = b'[]'
+                    if case == 'npm-sbom': payload = b'{"bomFormat":"wrong"}'
+                    if case == 'npm-sbom-differs': payload = json.dumps({**json.loads(payload), 'components': []}).encode()
                 if case in ['npm-version', 'npm-name', 'npm-os', 'npm-cpu'] and entry.name == 'package/package.json':
                     manifest = json.loads(payload)
                     if case == 'npm-version': manifest['version'] = '0.0.0'
@@ -134,6 +139,8 @@ elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version',
             if case == 'archive-mode' and entry.name in record['executables']: entry.mode &= ~0o111
             changed.addfile(entry, io.BytesIO(payload) if payload is not None else None)
             if case == 'npm-duplicate' and entry.name == 'package/package.json': changed.addfile(entry, io.BytesIO(payload))
+            if case == 'npm-sbom-extra' and entry.name == 'package/sboms/onepipeline.cyclonedx.json':
+                entry.name = 'package/sboms/other.cyclonedx.json'; changed.addfile(entry, io.BytesIO(payload))
         if case in ['npm-unsafe', 'npm-link', 'npm-unexpected']:
             extra = tarfile.TarInfo('../escape' if case == 'npm-unsafe' else 'package/extra')
             if case == 'npm-link': extra.type = tarfile.SYMTYPE; extra.linkname = '../../escape'

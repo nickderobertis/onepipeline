@@ -10,6 +10,7 @@
 //       onepipeline-cli-linux-arm64
 //       onepipeline-cli-darwin-arm64
 //       onepipeline-cli-win32-x64   each carries the matching prebuilt binary
+//                                     and its CycloneDX SBOM, sboms/onepipeline.cyclonedx.json
 //
 // The platform packages are UNSCOPED on purpose: a `@scope/` name needs an npm
 // organization, which a publish token cannot create.
@@ -25,7 +26,7 @@
 //
 // Usage:
 //   node scripts/npm-build.mjs platform --target <triple> --binary <path> \
-//        [--version <v>] [--out <dir>]
+//        --sbom <path> [--version <v>] [--out <dir>]
 //   node scripts/npm-build.mjs launcher [--version <v>] [--out <dir>]
 //
 // Both modes print the created package directory on stdout.
@@ -57,6 +58,11 @@ const TARGETS = {
 };
 
 const REPOSITORY = "https://github.com/nickderobertis/onepipeline";
+
+// Where a platform package carries the binary's SBOM. A consumer that installs
+// the engine from npm reads which version of every linked crate it carries here,
+// so the path is an interface: ai-orchestrator and onepipeline-ui read it.
+const SBOM_PATH = "sboms/onepipeline.cyclonedx.json";
 
 // Every failure names what to do next: this runs inside a release job, where the
 // only diagnosis anyone gets is what it printed.
@@ -153,6 +159,40 @@ function writeJson(path, obj) {
   );
 }
 
+// The CycloneDX document maturin generated from this binary's own Cargo build,
+// as its wheel carries it under `.dist-info/sboms/`. Refused unless it is a
+// CycloneDX object describing the onepipeline crate, so a package never ships a
+// bill of materials for some other build.
+function readSbom(path) {
+  const text = attempt(
+    `platform: cannot read the SBOM ${path}`,
+    "pass --sbom the onepipeline.cyclonedx.json from the wheel's .dist-info/sboms/",
+    () => readFileSync(path, "utf8"),
+  );
+  let bom;
+  try {
+    bom = JSON.parse(text);
+  } catch (error) {
+    die(
+      `platform: the SBOM ${path} is not JSON: ${error.message}`,
+      "pass --sbom the CycloneDX JSON maturin wrote for this build",
+    );
+  }
+  if (
+    typeof bom !== "object" ||
+    bom === null ||
+    Array.isArray(bom) ||
+    bom.bomFormat !== "CycloneDX" ||
+    bom.metadata?.component?.name !== "onepipeline"
+  ) {
+    die(
+      `platform: the SBOM ${path} is not a CycloneDX document for the onepipeline crate`,
+      "pass --sbom the CycloneDX JSON maturin wrote for this build",
+    );
+  }
+  return text;
+}
+
 function buildPlatform(args) {
   const known = Object.keys(TARGETS).join(", ");
   const target =
@@ -163,6 +203,12 @@ function buildPlatform(args) {
     die(
       "platform: --binary <path> is required",
       "pass --binary the path to the built onepipeline for that target",
+    );
+  const sbom =
+    args.sbom ||
+    die(
+      "platform: --sbom <path> is required",
+      "pass --sbom the onepipeline.cyclonedx.json from the wheel's .dist-info/sboms/",
     );
   const facts =
     TARGETS[target] || die(`platform: unknown target ${target}`, `pass one of: ${known}`);
@@ -185,6 +231,7 @@ function buildPlatform(args) {
       `build it first: cargo build --release --locked --target ${target}`,
     );
   }
+  const bom = readSbom(resolve(sbom));
 
   attempt(
     `cannot assemble ${pkgName} under ${outRoot}`,
@@ -194,6 +241,8 @@ function buildPlatform(args) {
       mkdirSync(binDir, { recursive: true });
       copyFileSync(srcBin, join(binDir, binName));
       if (!facts.exe) chmodSync(join(binDir, binName), 0o755);
+      mkdirSync(join(pkgDir, dirname(SBOM_PATH)));
+      writeFileSync(join(pkgDir, SBOM_PATH), bom);
     },
   );
 
@@ -209,7 +258,7 @@ function buildPlatform(args) {
     // launcher's optionalDependency resolution picks exactly one.
     os: [facts.platform],
     cpu: [facts.arch],
-    files: [`bin/${binName}`],
+    files: [`bin/${binName}`, SBOM_PATH],
   });
 
   attempt(`cannot write the ${pkgName} README`, "check that --out is writable", () =>
@@ -262,12 +311,12 @@ function buildLauncher(args) {
 
 const [mode, ...rest] = process.argv.slice(2);
 if (mode === "platform") {
-  buildPlatform(parseArgs(rest, ["target", "binary", "version", "out"]));
+  buildPlatform(parseArgs(rest, ["target", "binary", "sbom", "version", "out"]));
 } else if (mode === "launcher") {
   buildLauncher(parseArgs(rest, ["version", "out"]));
 } else {
   die(
     `unknown mode ${mode === undefined ? "(none given)" : mode}`,
-    "run `npm-build.mjs platform --target <triple> --binary <path> [--version <v>] [--out <dir>]` or `npm-build.mjs launcher [--version <v>] [--out <dir>]`",
+    "run `npm-build.mjs platform --target <triple> --binary <path> --sbom <path> [--version <v>] [--out <dir>]` or `npm-build.mjs launcher [--version <v>] [--out <dir>]`",
   );
 }

@@ -168,9 +168,15 @@ async function npmPublish(s, dir) {
   assert.equal(result.code, 0, said(result));
 }
 
-/// An npm platform package for `target` carrying `binary`, as npm-build.mjs makes it.
+/// An npm platform package for `target` carrying `binary`, as npm-build.mjs makes
+/// it, with a stand-in for the SBOM a build would hand it.
 async function platformPackage(target, binary, version = VERSION) {
   const out = mkdtempSync(join(SCRATCH, "npm-platform-"));
+  const sbom = join(out, "onepipeline.cyclonedx.json");
+  writeFileSync(
+    sbom,
+    JSON.stringify({ bomFormat: "CycloneDX", metadata: { component: { name: "onepipeline" } } }),
+  );
   const result = await run("node", [
     "scripts/npm-build.mjs",
     "platform",
@@ -178,6 +184,8 @@ async function platformPackage(target, binary, version = VERSION) {
     target,
     "--binary",
     binary,
+    "--sbom",
+    sbom,
     "--version",
     version,
     "--out",
