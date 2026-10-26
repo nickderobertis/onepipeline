@@ -710,7 +710,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // that sent back exactly what the first write's answer said it stores was answered with
         // other content again. The item was written, so asking again writes the same text and
         // is refused the same way. `writeback::tests` holds the word.
-        // llmlint: ignore[changed_behavior_has_e2e] no backend a journey drives reaches it: the linked store (`onetaskgraph-core` 0.12.4, `engine/stored.rs`) raises it only when a destination rewrites the very content its own answer reported storing, which spike `spike-linear-stored-content` measured Linear never doing, and the loopback Linear stores every follow-up write as it was sent; this mapping is unchanged and `writeback::tests` holds the word.
+        // llmlint: ignore[changed_behavior_has_e2e] no backend a journey drives reaches it: the linked store (`onetaskgraph-core` 0.12.5, `engine/stored.rs`) raises it only when a destination rewrites the very content its own answer reported storing, which spike `spike-linear-stored-content` measured Linear never doing, and the loopback Linear stores every follow-up write as it was sent; this mapping is unchanged and `writeback::tests` holds the word.
         EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only a routed copy of a whole plan chooses a home, and a write-back copies into the one project the run was launched from; `writeback::tests` holds the word.
         EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
