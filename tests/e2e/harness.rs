@@ -7770,6 +7770,34 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
     })
 }
 
+/// Hold one node's every `node-settled` record and its `status <RUN> --json`
+/// entry to carrying **no** `awaiting`: the field is written only on a node held
+/// for a release it adopted early, and an older reader must never meet it on any
+/// other settlement.
+pub fn no_awaiting(world: &World, run: &str, node: &str) {
+    let settled = world.events_of(run, "node-settled");
+    let of_node: Vec<&Value> = settled
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    assert!(!of_node.is_empty(), "{node} never settled in {run}");
+    for event in of_node {
+        assert!(
+            event["payload"].get("awaiting").is_none(),
+            "{node}'s settlement carries `awaiting`: {event}"
+        );
+    }
+    let reading = world.run(&["status", run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .unwrap_or_else(|| panic!("`status {run} --json` does not list {node}: {reading}"));
+    assert!(
+        entry.get("awaiting").is_none(),
+        "{node}'s reading carries `awaiting`: {entry}"
+    );
+}
+
 /// A plan holding these nodes.
 pub fn plan_of(name: &str, nodes: Vec<Value>) -> Value {
     serde_json::json!({

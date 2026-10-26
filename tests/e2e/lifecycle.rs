@@ -6398,6 +6398,9 @@ fn a_dispatch_that_failed_after_opening_a_change_settles_carrying_that_change() 
         .find(|event| event["labels"]["node"] == "service")
         .unwrap_or_else(|| panic!("the node never settled\n{}", why(&world, &run)));
     assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    // A failed dispatch awaits nothing, so neither its record nor its reading
+    // carries `awaiting`.
+    crate::harness::no_awaiting(&world, &run, "service");
     assert_eq!(
         settled["payload"]["outcome"], "task-failed-change-open",
         "a failure with an open change request settled as a plain task failure: {settled}"

@@ -187,15 +187,15 @@ fn consumer(adoption: Option<&str>) -> Value {
     node
 }
 
-/// Give a node the release targets it consumes **and** the publication policy
-/// that carrying one obliges.
+/// Give a node the release targets it consumes, publishing through a change
+/// request.
 ///
-/// A `consumes` says this node's work is pinned to a release, and every mechanism
-/// that holds such a pin back — the draft `onevcs` opens, and the change request
-/// that draft is a state of — needs a change request to exist. So the plan loader
-/// refuses the pair on an identity that opens none, and these worlds publish
-/// `local-direct` by default: a node that consumes states the policy it publishes
-/// under, exactly as a planner writing one for such a repository has to.
+/// These worlds publish `local-direct` by default, where a `fast` node that
+/// finishes before its release is held unlanded on its origin as
+/// `complete-but-held` and lands on the release. The journeys that use this are
+/// about what a held draft change request does instead — its reason, its lift —
+/// so the node states a change-* policy of its own, as a planner writing one for
+/// such a repository may.
 fn consumes_publishing_a_change(node: &mut Value, targets: Value) {
     node["consumes"] = targets;
     node["merge_policy"] = json!("change-open");
@@ -1705,6 +1705,9 @@ fn a_plan_naming_neither_field_runs_exactly_as_it_did() {
         "a session this run followed did not close"
     );
     world.run(&["results", &run]).exited(0).out_has("merged");
+    // Both settled `done` on a local-direct landing, and neither carries `awaiting`.
+    crate::harness::no_awaiting(&world, &run, ENGINE);
+    crate::harness::no_awaiting(&world, &run, "consumer");
 }
 
 /// A fast-adoption node launches on its dependency's **branch** readiness, is
@@ -2008,11 +2011,9 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");
     world.write_graphs();
-    // The consumer opens a change request, because its node is a `fast` one
-    // carrying a `consumes`: the pin it is launched against is temporary, the
-    // draft that holds it is a state of a change request, and the loader refuses
-    // that pair on an identity that opens none rather than letting the whole
-    // dispatch be paid for and then thrown away at the publication. Which
+    // The consumer opens a change request, so the temporary pin it is launched
+    // against is held as a draft should it finish before the release; on an
+    // identity that opens none it would be held unlanded instead. Which
     // repository the journey's own subject — a cross-DAG pin read off the
     // upstream run's ledger — belongs to is untouched by that.
     let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
@@ -3996,8 +3997,9 @@ fn landing_commit(world: &World, run: &str, node: &str) -> String {
 /// to exist at all.
 ///
 /// A draft is a state of a change request, so `local-direct` — which reaches the
-/// base with git alone and opens none — has nothing to draft and `onevcs` refuses
-/// a reason under it by name. The consumer therefore publishes `change-auto`,
+/// base with git alone and opens none — has nothing to draft: a `fast` node there
+/// is held unlanded on its origin as `complete-but-held` instead, which the
+/// held-landing journeys below drive. The consumer therefore publishes `change-auto`,
 /// which is also the policy that would arm the host's own merge on the change if
 /// anything let it: "nothing merges a draft" is only worth asserting where
 /// something would have.
@@ -4124,6 +4126,20 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     );
     assert_eq!(settled["payload"]["outcome"], json!("change-draft"));
     assert_eq!(settled["payload"]["landing"], json!("unlanded"));
+    // What it awaits, as data: both releases still out, in the order its reference
+    // rows list them — on the record and on its `status --json` entry alike.
+    let awaited = json!([
+        {"producer": "github.com/owner/engine", "target": "crate"},
+        {"producer": "github.com/owner/tool", "target": "crate"},
+    ]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    let reading = world.run(&["status", &run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == "consumer"))
+        .unwrap_or_else(|| panic!("the reading does not list the consumer: {reading}"));
+    assert_eq!(entry["status"], "complete-but-draft", "{entry}");
+    assert_eq!(entry["awaiting"], awaited, "{entry}");
     let detail = settled["payload"]["detail"]
         .as_str()
         .expect("a draft settlement says why");
@@ -4341,6 +4357,13 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
         1,
         "the node was dispatched more than once before any release arrived"
     );
+    // The draft's settlement and its reading name what it awaits, as data.
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "crate"}]);
+    assert_eq!(
+        settlement_of(&world, &run, "consumer")["payload"]["awaiting"],
+        awaited
+    );
+    assert_eq!(reading_node(&world, &run, "consumer")["awaiting"], awaited);
 
     // The worker's second turn writes something the first did not, so the branch
     // it is put back on visibly moves: this is the pin being moved, which is the
@@ -4397,6 +4420,7 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
     let settled = settlement_of(&world, &run, "consumer");
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
     // And its detail says whose draft the publication lifted: the first
     // publication's, not the second worker's — that worker drafted nothing, and
     // a settlement that said it had would send a reader to a transcript for a
