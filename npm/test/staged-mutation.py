@@ -50,13 +50,15 @@ elif case in ['schema', 'tag', 'unknown', 'missing', 'field-type', 'target', 'in
     if case == 'inventory-type': record['executables'] = [42]
     if case == 'inventory-unsafe': record['executables'] = ['../escape']
     if case == 'inventory': record['executables'].append('missing-helper')
-elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags', 'wheel-traversal', 'wheel-symlink', 'wheel-dist-info', 'wheel-data-scheme', 'wheel-filename', 'wheel-repeat', 'wheel-filename-version', 'wheel-extra-tag']:
+elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', 'macho', 'wheel-duplicate', 'wheel-path', 'wheel-primary', 'no-metadata', 'no-wheel-tags', 'wheel-traversal', 'wheel-symlink', 'wheel-dist-info', 'wheel-data-scheme', 'wheel-filename', 'wheel-repeat', 'wheel-filename-version', 'wheel-extra-tag', 'wheel-sbom-extra', 'wheel-sbom-name']:
     source = record['wheel']
     target = out / Path(source).name
     with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, 'w') as changed:
         for entry in original.infolist():
             payload = original.read(entry)
             if case == 'no-sbom' and '/sboms/' in entry.filename: continue
+            if case == 'wheel-sbom-name' and '/sboms/' in entry.filename:
+                entry.filename = entry.filename.replace('onepipeline.cyclonedx', 'other.cyclonedx')
             if case == 'no-metadata' and entry.filename.endswith('.dist-info/METADATA'): continue
             if case == 'no-wheel-tags' and entry.filename.endswith('.dist-info/WHEEL'): continue
             if case == 'sbom-object' and '/sboms/' in entry.filename: payload = b'[]'
@@ -87,6 +89,8 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
                 link = zipfile.ZipInfo(entry.filename.split('/')[0] + '/link')
                 link.external_attr = (0o120777 << 16)
                 changed.writestr(link, b'/etc/passwd')
+            if case == 'wheel-sbom-extra' and '/sboms/' in entry.filename:
+                changed.writestr(entry.filename.replace('onepipeline.cyclonedx', 'other.cyclonedx'), payload)
             if case == 'wheel-repeat' and entry.filename.endswith('.dist-info/WHEEL'):
                 changed.writestr(entry.filename, payload)
             if case == 'wheel-data-scheme' and '.data/scripts/' in entry.filename:
@@ -102,7 +106,7 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
         stem, version, rest = target.name.split('-', 2)
         target = target.rename(target.with_name(f'{stem}-0.0.0-{rest}'))
     record['wheel'] = str(target)
-elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version', 'npm-object', 'npm-directory', 'npm-name', 'npm-os', 'npm-cpu', 'archive-directory', 'npm-unsafe', 'npm-duplicate', 'npm-link', 'npm-executable', 'npm-unexpected', 'npm-missing', 'archive-doc-directory', 'archive-doc-symlink', 'archive-doc-hardlink', 'npm-mode', 'archive-mode', 'npm-no-sbom', 'npm-sbom-object', 'npm-sbom', 'npm-sbom-differs', 'npm-sbom-extra']:
+elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version', 'npm-object', 'npm-directory', 'npm-name', 'npm-os', 'npm-cpu', 'archive-directory', 'npm-unsafe', 'npm-duplicate', 'npm-link', 'npm-executable', 'npm-unexpected', 'npm-missing', 'archive-doc-directory', 'archive-doc-symlink', 'archive-doc-hardlink', 'npm-mode', 'archive-mode', 'npm-no-sbom', 'npm-sbom-object', 'npm-sbom', 'npm-sbom-differs', 'npm-sbom-extra', 'npm-sbom-json', 'npm-sbom-link']:
     key = 'npm' if case.startswith('npm-') else 'archive'
     source = record[key]
     target = out / Path(source).name
@@ -119,6 +123,7 @@ elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version',
                 if entry.name == 'package/sboms/onepipeline.cyclonedx.json':
                     if case == 'npm-sbom-object': payload = b'[]'
                     if case == 'npm-sbom': payload = b'{"bomFormat":"wrong"}'
+                    if case == 'npm-sbom-json': payload = b'{not json'
                     if case == 'npm-sbom-differs': payload = json.dumps({**json.loads(payload), 'components': []}).encode()
                 if case in ['npm-version', 'npm-name', 'npm-os', 'npm-cpu'] and entry.name == 'package/package.json':
                     manifest = json.loads(payload)
@@ -135,6 +140,8 @@ elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version',
                 entry.type = {'archive-doc-directory': tarfile.DIRTYPE, 'archive-doc-symlink': tarfile.SYMTYPE, 'archive-doc-hardlink': tarfile.LNKTYPE}[case]
                 entry.linkname = '../../escape'; entry.size = 0; payload = None
             if case == 'npm-executable' and entry.name == 'package/README.md': entry.mode |= 0o111
+            if case == 'npm-sbom-link' and entry.name == 'package/sboms/onepipeline.cyclonedx.json':
+                entry.type = tarfile.SYMTYPE; entry.linkname = '../package.json'; entry.size = 0; payload = None
             if case == 'npm-mode' and entry.name.startswith('package/bin/'): entry.mode &= ~0o111
             if case == 'archive-mode' and entry.name in record['executables']: entry.mode &= ~0o111
             changed.addfile(entry, io.BytesIO(payload) if payload is not None else None)

@@ -929,7 +929,8 @@ describe("a re-run of a build job whose earlier attempt published part of it", (
   });
 });
 
-/// Rewrite a built npm package's SBOM — dropped, or replaced by `payload` — and
+/// Rewrite a built npm package's SBOM — dropped (`-`), replaced by `payload`, or
+/// the whole package overwritten with bytes that are not a tarball (`!`) — and
 /// re-record its hash in build.json, so only the SBOM check stands in the way.
 const REPLACE_NPM_SBOM = `
 import hashlib, io, json, sys, tarfile
@@ -938,6 +939,11 @@ out, payload = Path(sys.argv[1]), sys.argv[2]
 manifest = json.loads((out / 'build.json').read_text())
 artifact, = [a for a in manifest['artifacts'] if a['kind'] == 'npm']
 source = Path(artifact['path'])
+if payload == '!':
+    source.write_bytes(b'not a tarball')
+    artifact['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+    (out / 'build.json').write_text(json.dumps(manifest))
+    sys.exit()
 with tarfile.open(source) as original:
     members = [(m, original.extractfile(m).read() if m.isfile() else None) for m in original.getmembers()]
 with tarfile.open(source, 'w:gz') as changed:
@@ -1037,6 +1043,7 @@ describe("a platform package's SBOM with PyPI publication off", () => {
       '{"bomFormat": "SPDX"}',
       "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
     ],
+    ["is not a tarball at all", "!", "is not a readable tarball"],
   ]) {
     it(`refuses to publish a platform package that ${label}, naming it, before any upload`, async () => {
       const s = await services();
@@ -1053,7 +1060,8 @@ describe("a platform package's SBOM with PyPI publication off", () => {
         const refused = await run("just", ["release-windows", "publish"], { env: s.env(base) });
         assert.equal(refused.code, 1, said(refused));
         assert.ok(
-          refused.stderr.includes(`npm package ${PACKAGE} ${reason}, so nothing is published`),
+          refused.stderr.includes(`npm package ${PACKAGE} ${reason}`) &&
+            refused.stderr.includes("so nothing is published"),
           said(refused),
         );
         assert.deepEqual(s.github.writes(), [], "nothing was uploaded to the Release");

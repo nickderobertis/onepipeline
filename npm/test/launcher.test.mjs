@@ -327,11 +327,18 @@ describe("the npm distribution", () => {
         "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
       ],
       ["npm-sbom", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
+      ["npm-sbom-json", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
+      ["npm-sbom-link", "carries sboms/onepipeline.cyclonedx.json as something other than a file"],
     ].map(([mutation, reason]) => [
       mutation,
       `npm package onepipeline-cli-${process.platform}-${process.arch} ${reason}`,
     ]),
     ["npm-sbom-differs", "npm SBOM differs from the wheel's"],
+    [
+      "wheel-sbom-extra",
+      "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json",
+    ],
+    ["wheel-sbom-name", "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json"],
     ["npm-sbom-extra", "unexpected npm archive member"],
   ])
     it(`rejects real staged artifact corruption: ${mutation}`, () => {
