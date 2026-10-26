@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.94.0](https://github.com/nickderobertis/onepipeline/compare/v0.93.1...v0.94.0) - 2026-10-26
+
+### Added
+
+- *(release)* [**breaking**] hold a fast local-direct node's landing until the release it adopted early ([#1214](https://github.com/nickderobertis/onepipeline/pull/1214))
+
 ## [0.93.1](https://github.com/nickderobertis/onepipeline/compare/v0.93.0...v0.93.1) - 2026-10-26
 
 ### Fixed
