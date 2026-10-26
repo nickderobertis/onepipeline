@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.0](https://github.com/nickderobertis/onepipeline/compare/v0.94.0...v0.95.0) - 2026-10-26
+
+### Added
+
+- *(deps)* [**breaking**] link the plan store that records what Linear stores from each write ([#1212](https://github.com/nickderobertis/onepipeline/pull/1212))
+
+### Performance
+
+- *(driver)* keep a driver's cost flat however large its journal grows, with liveness out of it ([#1200](https://github.com/nickderobertis/onepipeline/pull/1200))
+
 ## [0.94.0](https://github.com/nickderobertis/onepipeline/compare/v0.93.1...v0.94.0) - 2026-10-26
 
 ### Added
