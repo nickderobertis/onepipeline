@@ -34,6 +34,7 @@ use crate::harness::{
     counts, human, lifecycle, plan_of, project_id, reporting, rows, until_parked, Counts,
     Repository, World, LOOP_STATS_ENV, REFUSED,
 };
+use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 use oneagentgraph::event::{session_label, SESSION_LABEL};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
@@ -6842,7 +6843,19 @@ struct HeldHost {
 
 impl HeldHost {
     fn new(name: &str) -> Self {
+        Self::on(watching(name))
+    }
+
+    /// The same host on a world that records every run-end hook firing, for a
+    /// launch naming [`hook`] as both of its hooks.
+    fn recording_hooks(name: &str) -> Self {
         let world = watching(name);
+        std::fs::create_dir_all(records(&world)).expect("a record directory");
+        let record = records(&world).to_string_lossy().into_owned();
+        Self::on(world.with_env(RECORD_ENV, &record))
+    }
+
+    fn on(world: World) -> Self {
         world.write_graphs();
         let pushes = world.root.join("consumer-pre-push.runs");
         let consumer = world.repository(
@@ -6958,18 +6971,28 @@ fn reading_node(world: &World, run: &str, node: &str) -> Value {
 /// producer has landed, then commits a pin file naming the producer's branch,
 /// and answer the run and the producer's branch once the consumer is held.
 fn start_held(host: &HeldHost, name: &str, consumes: Option<&str>) -> (String, String) {
+    let follower = crate::harness::agent("follower", &["consumer"]);
+    start_held_beside(host, name, consumes, vec![follower], &[])
+}
+
+/// The same, with `after` in place of the consumer's one dependent and `extra`
+/// appended to the launch.
+fn start_held_beside(
+    host: &HeldHost,
+    name: &str,
+    consumes: Option<&str>,
+    after: Vec<Value>,
+    extra: &[&str],
+) -> (String, String) {
     let world = &host.world;
     // The consumer's first dispatch waits to be told what to pin against, because
     // the reference it pins to is the producer's branch, which exists only once
     // that node has run. `consumer.go` released lets every later dispatch through.
     world.script("consumer.wait", "");
     world.script("consumer.work-file", "pin");
-    let follower = crate::harness::agent("follower", &["consumer"]);
-    let run = start(
-        world,
-        name,
-        vec![engine(), held_consumer(consumes), follower],
-    );
+    let mut nodes = vec![engine(), held_consumer(consumes)];
+    nodes.extend(after);
+    let run = start_with(world, name, nodes, extra);
     world.until("the consumer to be dispatched", |world| {
         dispatched(world, &run, "consumer")
     });
@@ -7373,6 +7396,167 @@ fn a_fast_local_direct_node_naming_no_target_is_held_for_its_producers_default_t
         Some(pin("\"bindings 0.3.0\"").as_str())
     );
     assert_eq!(host.pushes(), 1);
+}
+
+/// A run whose only unfinished work is a held node and what waits on it has **not
+/// ended** for anything that acts on an ending: no run-end hook fires and the
+/// scratch its dispatches were given is kept, however long the release takes —
+/// including when its driver is gone and an undriven `reply`, writing the run and
+/// letting go of it as a driver does, judges the ending itself. The consumer starts
+/// with no dependent, because a pending one would keep the run from ending on its
+/// own and hide whether the held node does. A `stop` is an ending of its own and
+/// records its retention once; an edit applied after it, to a graph whose held node
+/// already left it live, changes no ending and records none again. The landing is
+/// what ends the run, and only then does the success hook fire and the ending
+/// reclaim the scratch.
+#[test]
+fn a_held_run_has_not_ended_for_its_hooks_or_its_scratch_until_its_landing() {
+    let host = HeldHost::recording_hooks("adoption-held-unended");
+    let world = &host.world;
+    let hook = hook(world);
+    let (run, _) = start_held_beside(
+        &host,
+        "adoption-held-unended",
+        Some("crate"),
+        Vec::new(),
+        &[
+            "--success-hook",
+            &hook,
+            "--failure-hook",
+            &hook,
+            "--hook-timeout",
+            HOOK_TIMEOUT,
+        ],
+    );
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    let scratch = world.run_file(&run, "scratch");
+    let unended = |world: &World| {
+        assert!(
+            invocations(world, &run).is_empty(),
+            "a run-end hook fired on a held run: {:?}\n{}",
+            invocations(world, &run),
+            world.dump()
+        );
+        assert!(
+            std::fs::read_dir(&scratch).is_ok_and(|mut dirs| dirs.next().is_some()),
+            "the held run's scratch at {} was not kept\n{}",
+            scratch.display(),
+            world.dump()
+        );
+        assert!(world.events_of(&run, "scratch-removed").is_empty());
+        assert!(world.events_of(&run, "scratch-retained").is_empty());
+        let reading = world.run(&["status", &run, "--json"]).json();
+        assert_eq!(reading["ending"], Value::Null, "{reading}");
+        assert_ne!(reading["word"], "SETTLED", "{reading}");
+    };
+    unended(world);
+    // Passes of the driver go by with the node still held, each one a pass that
+    // could have judged the run ended.
+    let asked = world.probe_runs("crate");
+    world.until("the awaited target to be asked again", |world| {
+        world.probe_runs("crate") >= asked + 2
+    });
+    unended(world);
+
+    // The driver goes, and a planner's edit is applied by an undriven `reply`,
+    // which judges the run's ending as it lets go. The node it adds waits on the
+    // held one, so nothing it adds is ready to move the run on by itself.
+    crate::harness::end_driver(world, &run);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 3,
+                "commands": [{"op": "add", "node": agent("late", &["consumer"])}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the reply to let go of the run", |world| {
+        world.run(&["status", &run, "--json"]).json()["driven"] == false
+    });
+    assert_eq!(
+        reading_node(world, &run, "late")["status"],
+        "pending",
+        "the edit was not applied"
+    );
+    unended(world);
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    let asked = world.probe_runs("crate");
+    world.until("the adopted driver to ask the release again", |world| {
+        world.probe_runs("crate") >= asked + 2
+    });
+    unended(world);
+
+    // `stop` ends the run, firing the failure hook and recording the scratch it
+    // kept, once.
+    world.run(&["stop", &run]).exited(0);
+    world.until("the stop's retention record", |world| {
+        !world.events_of(&run, "scratch-retained").is_empty()
+    });
+    let retained = world.events_of(&run, "scratch-retained");
+    assert_eq!(retained.len(), 1, "{}", world.dump());
+    assert_eq!(retained[0]["payload"]["ending"], "stopped", "{retained:?}");
+    world.until("the stop's failure hook", |world| {
+        !invocations(world, &run).is_empty()
+    });
+    assert_eq!(invocations(world, &run), ["failure"], "{}", world.dump());
+    // An edit the stopped run takes, adding work that is ready at once, leaves the
+    // graph live as the held node already had it, so the ending the stop recorded
+    // still stands and nothing is recorded again.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 3, "commands": [{"op": "add", "node": agent("early", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.until("the reply to let go of the stopped run", |world| {
+        world.run(&["status", &run, "--json"]).json()["driven"] == false
+    });
+    assert!(
+        world
+            .events_of(&run, "edit-committed")
+            .iter()
+            .any(|edit| edit.to_string().contains("early")),
+        "the edit was not applied\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        world.events_of(&run, "scratch-retained").len(),
+        1,
+        "an edit that changed no ending recorded the stop's retention again\n{}",
+        world.dump()
+    );
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+
+    world.script("consumer.work", &pin("\"0.2.0\""));
+    releases_at(&host.crate_answer, "0.2.0");
+    world.until("the run to settle on the landing", |world| {
+        world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
+    });
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    assert!(dispatched(world, &run, "late"));
+    assert!(dispatched(world, &run, "early"));
+    world.until("the success hook to fire", |world| {
+        invocations(world, &run).len() == 2
+    });
+    assert_eq!(
+        invocations(world, &run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    world.until("the ending to reclaim the scratch", |world| {
+        !world.events_of(&run, "scratch-removed").is_empty()
+    });
+    assert!(!scratch.exists(), "the ending kept the scratch");
 }
 
 /// A held node survives its driver going, `stop`, and `shutdown`, each followed by

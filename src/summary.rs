@@ -207,6 +207,7 @@ pub struct NodeLanding {
     /// The serialized name predates the second case and is kept so a document
     /// already written reads the same; both cases answer
     /// `NodeStatus::awaits_release`.
+    ///
     /// Counted under neither of a listing's two headings: either is a change
     /// this run is deliberately holding and will lift itself, not one nobody
     /// merged, and it has a line of its own saying what it waits on.
