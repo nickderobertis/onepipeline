@@ -109,7 +109,21 @@ pub enum NodeStatus {
     /// git pin permanent in a base branch, so no dependent may start on it and no
     /// run holding one has settled. What clears it is the release arriving, which
     /// puts a new worker on the branch this node already has.
+    ///
+    /// Its twin is [`CompleteHeld`](Self::CompleteHeld), for a publication that
+    /// opens no change request to be a draft; [`awaits_release`](Self::awaits_release)
+    /// is the one predicate both answer, and everything that reads either reads it.
     CompleteDraft,
+    /// It executed and completed, and its publication opens no change request
+    /// (`local-direct`), so its finished branch is **held unlanded** on its
+    /// identity's origin because a release it adopted early has not happened yet.
+    ///
+    /// Exactly [`CompleteDraft`](Self::CompleteDraft) in every way the run reads
+    /// it — not settled, no dependent starts on it, and the release arriving puts a
+    /// new worker on the branch it holds — with nothing on the host to be a draft:
+    /// landing it now would squash the temporary pin onto the base, so it waits on
+    /// its origin and lands when the release exists.
+    CompleteHeld,
     /// It executed and failed.
     Failed,
     /// A failed dependency made execution unsafe.
@@ -129,6 +143,7 @@ impl NodeStatus {
             Self::Cancelled => "cancelled",
             Self::Done => "done",
             Self::CompleteDraft => "complete-but-draft",
+            Self::CompleteHeld => "complete-but-held",
             Self::Failed => "failed",
             Self::Skipped => "skipped",
         }
@@ -146,6 +161,7 @@ impl NodeStatus {
             "cancelled" => Self::Cancelled,
             "done" => Self::Done,
             "complete-but-draft" => Self::CompleteDraft,
+            "complete-but-held" => Self::CompleteHeld,
             "failed" => Self::Failed,
             "skipped" => Self::Skipped,
             _ => return None,
@@ -154,10 +170,10 @@ impl NodeStatus {
 
     /// Whether the loop is finished with the node.
     ///
-    /// [`CompleteDraft`](Self::CompleteDraft) is deliberately not one: the node
-    /// has finished its work and the run has not finished with it, because the
-    /// release it is waiting on lifts the draft and dispatches it once more. A
-    /// run whose nodes are all draft-complete is **waiting**, not settled.
+    /// Neither status [`awaits_release`](Self::awaits_release) answers for is one:
+    /// the node has finished its work and the run has not finished with it, because
+    /// the release it is waiting on dispatches it once more to land. A run whose
+    /// nodes are all draft- or held-complete is **waiting**, not settled.
     pub fn is_settled(self) -> bool {
         matches!(
             self,
@@ -171,10 +187,23 @@ impl NodeStatus {
         )
     }
 
+    /// Whether the node finished its work and is waiting on a release it adopted
+    /// early before it may land: held as a draft change request, or held unlanded
+    /// on its origin where its publication opens none.
+    ///
+    /// The one question every reader of either status asks, so the two cannot be
+    /// read two ways: neither is settled, no dependent starts on one, a run holding
+    /// only these is waiting, and the release arriving re-dispatches it on its own
+    /// branch.
+    pub fn awaits_release(self) -> bool {
+        matches!(self, Self::CompleteDraft | Self::CompleteHeld)
+    }
+
     /// Whether a later pass may still dispatch the node.
     ///
     /// A `done` node is never rescheduled; a parked one waits for a `requeue`. A
-    /// draft-complete one is dispatched again by the release it awaits arriving.
+    /// draft- or held-complete one is dispatched again by the release it awaits
+    /// arriving.
     pub fn is_dispatchable(self) -> bool {
         !matches!(self, Self::Done | Self::Parked)
     }
@@ -1756,7 +1785,8 @@ mod tests {
                 NodeStatus::Parked => Some(NodeStatus::Cancelled),
                 NodeStatus::Cancelled => Some(NodeStatus::Done),
                 NodeStatus::Done => Some(NodeStatus::CompleteDraft),
-                NodeStatus::CompleteDraft => Some(NodeStatus::Failed),
+                NodeStatus::CompleteDraft => Some(NodeStatus::CompleteHeld),
+                NodeStatus::CompleteHeld => Some(NodeStatus::Failed),
                 NodeStatus::Failed => Some(NodeStatus::Skipped),
                 NodeStatus::Skipped => None,
             }
@@ -1797,6 +1827,17 @@ mod tests {
             .map(|status| status.as_str().to_string())
             .collect();
         assert_eq!(named, every);
+
+        // And every node the reading lists, `done` among them, by the same walk.
+        let listed: Vec<String> = serde_json::from_value(
+            schema["$defs"]["ReadingNode"]["properties"]["status"]["enum"].clone(),
+        )
+        .expect("the schema names the statuses a reading's node may have");
+        let all: Vec<String> = every_status()
+            .into_iter()
+            .map(|status| status.as_str().to_string())
+            .collect();
+        assert_eq!(listed, all);
     }
 
     /// The draft settlement vocabulary this build carries is exactly what the

@@ -1814,8 +1814,20 @@ impl World {
     /// the release-targets document names it by — and the file its answer is
     /// written to.
     pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        self.probe_at(repository, name, probe_script().0)
+    }
+
+    /// The same, committed under a script name of its own — `<name>-probe.sh`, or
+    /// `.bat` — so one repository can carry a probe per release target, each
+    /// answering from its own file.
+    pub fn probe_for_target(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let script = format!("{name}-{}", probe_script().0);
+        self.probe_at(repository, name, &script)
+    }
+
+    fn probe_at(&self, repository: &Repository, name: &str, script: &str) -> (String, PathBuf) {
         let answer = self.root.join(format!("{name}.version"));
-        let (script, body) = probe_script();
+        let (_, body) = probe_script();
         let path = repository.checkout.join(script);
         onepipeline_testfakes::executable(
             &path,
@@ -7756,6 +7768,34 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
         "task": format!("## What\nShip {id}.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- {id} is published."),
         "deps": deps,
     })
+}
+
+/// Hold one node's every `node-settled` record and its `status <RUN> --json`
+/// entry to carrying **no** `awaiting`: the field is written only on a node held
+/// for a release it adopted early, and an older reader must never meet it on any
+/// other settlement.
+pub fn no_awaiting(world: &World, run: &str, node: &str) {
+    let settled = world.events_of(run, "node-settled");
+    let of_node: Vec<&Value> = settled
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    assert!(!of_node.is_empty(), "{node} never settled in {run}");
+    for event in of_node {
+        assert!(
+            event["payload"].get("awaiting").is_none(),
+            "{node}'s settlement carries `awaiting`: {event}"
+        );
+    }
+    let reading = world.run(&["status", run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .unwrap_or_else(|| panic!("`status {run} --json` does not list {node}: {reading}"));
+    assert!(
+        entry.get("awaiting").is_none(),
+        "{node}'s reading carries `awaiting`: {entry}"
+    );
 }
 
 /// A plan holding these nodes.

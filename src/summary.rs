@@ -199,9 +199,16 @@ pub struct NodeLanding {
     /// after its branch would search every identity this host knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo: Option<String>,
-    /// Whether the run is holding this change back as a **draft**.
+    /// Whether the run is holding this change back on a release: as a **draft**
+    /// change request (`complete-but-draft`), or, where its publication opens
+    /// none, as a finished branch held unlanded on its origin
+    /// (`complete-but-held`).
     ///
-    /// Counted under neither of a listing's two headings: a draft is a change
+    /// The serialized name predates the second case and is kept so a document
+    /// already written reads the same; both cases answer
+    /// `NodeStatus::awaits_release`.
+    ///
+    /// Counted under neither of a listing's two headings: either is a change
     /// this run is deliberately holding and will lift itself, not one nobody
     /// merged, and it has a line of its own saying what it waits on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -740,7 +747,9 @@ impl RunSummary {
                             landing: landing.as_str().to_string(),
                             branch: state.branches.get(node).cloned(),
                             repo: state.graph.get(node).and_then(|node| node.repo.clone()),
-                            drafted: statuses.get(node) == Some(&graph::NodeStatus::CompleteDraft),
+                            drafted: statuses
+                                .get(node)
+                                .is_some_and(|status| status.awaits_release()),
                         },
                     )
                 })

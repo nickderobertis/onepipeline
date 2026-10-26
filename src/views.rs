@@ -200,7 +200,7 @@ pub struct EndedNode {
     /// The node's status word.
     #[schemars(extend("enum" = [
         "pending", "ready", "running", "waiting", "blocked", "parked", "cancelled",
-        "complete-but-draft", "failed", "skipped"
+        "complete-but-draft", "complete-but-held", "failed", "skipped"
     ]))]
     pub status: &'static str,
     // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -241,7 +241,7 @@ pub struct Paused {
 const PAUSED_WORD: &str = "PAUSED";
 
 /// The version of the document `status <RUN> --json` prints.
-const RUN_READING_SCHEMA_VERSION: u32 = 2;
+const RUN_READING_SCHEMA_VERSION: u32 = 3;
 
 /// Whether a run is driven or ended, as one document a script reads:
 /// `onepipeline status <RUN> --json`.
@@ -272,7 +272,7 @@ pub struct RunReading {
     // llmlint: ignore[invalid_states_unrepresentable] this is the contract's nullable string view field, matching RunSummary and LaunchRecord; explicit groups and origins are validated with RunGroup at launch and deserialization, and overlays carry RunGroup. The reader only projects those checked records; a new public field type would change the shared view contract.
     pub group: Option<String>,
     /// The version of this document.
-    #[schemars(extend("const" = 2))]
+    #[schemars(extend("const" = 3))]
     pub schema_version: u32,
     /// The run.
     pub run_id: String,
@@ -309,6 +309,8 @@ pub struct RunReading {
     /// The decision the run is paused on, or `null` for a run that is not.
     pub paused: Option<Paused>,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// Every node of the run's graph, in plan order, with where it has got to.
+    pub nodes: Vec<ReadingNode>,
     /// Every command envelope claimed off the run's queue and not answered yet,
     /// in claim order — omitted when there is none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -318,6 +320,50 @@ pub struct RunReading {
     /// omitted when there is none, and when no driver is live.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbox: Vec<InboxNote>,
+}
+
+/// One node of a run, as `status <RUN> --json` reads it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
+pub struct ReadingNode {
+    /// The node's id.
+    pub id: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a word rather than a type for
+    // `EndedNode::status`'s reason: the type it would be, `graph::NodeStatus`, is
+    // engine-private, and `reading` is the only constructor, writing `NodeStatus::as_str`.
+    // `graph::tests::the_run_readings_schema_names_every_status_but_done` holds the words
+    // below to that enum.
+    /// The node's status word.
+    #[schemars(extend("enum" = [
+        "pending", "ready", "running", "waiting", "blocked", "parked", "cancelled", "done",
+        "complete-but-draft", "complete-but-held", "failed", "skipped"
+    ]))]
+    pub status: &'static str,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The outcome its settlement recorded, or `null` for a node that recorded none.
+    pub outcome: Option<String>,
+    /// The detail its standing settlement recorded, or `null` for a node with none —
+    /// one not yet settled, or settled without one.
+    pub detail: Option<String>,
+    /// The releases a node held for them still awaits, one per release in the order
+    /// its reference rows list them: present exactly on a `complete-but-held` or
+    /// `complete-but-draft` node whose settlement names them, and omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub awaiting: Option<Vec<AwaitedRelease>>,
+}
+
+/// One release a held node awaits.
+#[derive(
+    Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+pub struct AwaitedRelease {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a repository identity and a
+    // release-target name are strings on every surface `onevcs` publishes them on, and
+    // these are copied off the `node-settled` record that already carries them so.
+    /// The producer's repository identity, its normalized origin.
+    pub producer: String,
+    /// The release target of it awaited.
+    pub target: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One envelope's live note waiting in a receiver's inbox, as `status <RUN>
@@ -478,9 +524,59 @@ pub fn reading(view: &RunView) -> RunReading {
         driven: !liveness.is_undriven(),
         ending,
         paused,
+        nodes: reading_nodes(view, &statuses),
         unanswered: unanswered_of(view, liveness),
         inbox: inbox_of(view, liveness),
     }
+}
+
+/// Every node of the graph, in plan order, as the reading lists it.
+///
+/// A node's detail and what it awaits are read off its **standing** settlement —
+/// its latest `node-settled`, for a node whose status is one a settlement put it
+/// in — so a node re-dispatched since is not reported with the words of the
+/// settlement it has left. `awaiting` is read as data off that record, never off
+/// the detail sentence, and only for a node that is still awaiting a release.
+fn reading_nodes(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec<ReadingNode> {
+    let mut settled: BTreeMap<&str, &serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
+    for event in &view.events {
+        if event.kind.0 == PipelineKind::NodeSettled.as_str() {
+            if let Some(node) = event.labels.node.as_deref() {
+                settled.insert(node, &event.payload);
+            }
+        }
+    }
+    view.state
+        .graph
+        .iter()
+        .map(|node| {
+            let status = statuses
+                .get(&node.id)
+                .copied()
+                .unwrap_or(NodeStatus::Pending);
+            let standing = (!matches!(
+                status,
+                NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Running
+            ))
+            .then(|| settled.get(node.id.as_str()))
+            .flatten();
+            ReadingNode {
+                id: node.id.clone(),
+                status: status.as_str(),
+                outcome: view.state.outcomes.get(&node.id).cloned(),
+                detail: standing
+                    .and_then(|payload| payload.get("detail"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                awaiting: standing
+                    .filter(|_| status.awaits_release())
+                    .and_then(|payload| payload.get(crate::journal::SETTLED_AWAITING))
+                    .and_then(|awaiting| {
+                        serde_json::from_value::<Vec<AwaitedRelease>>(awaiting.clone()).ok()
+                    }),
+            }
+        })
+        .collect()
 }
 
 /// Ordered by id, as the summary document records them, so a fold and a listing
@@ -527,10 +623,7 @@ impl Reached {
         }
         let verdict = crate::hooks::verdict(present, decision_outstanding);
         let movable = present.iter().any(|status| {
-            matches!(
-                status,
-                NodeStatus::Ready | NodeStatus::Running | NodeStatus::CompleteDraft
-            )
+            matches!(status, NodeStatus::Ready | NodeStatus::Running) || status.awaits_release()
         });
         match verdict {
             crate::hooks::Verdict::Success => Self::Ended(EndingKind::Complete),
@@ -3464,19 +3557,32 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
         // Said on this view because it is the one somebody reads when a run has
         // gone quiet and they are deciding whether it is stuck; nothing else here
         // tells waiting-on-a-release from stalled.
-        let drafted = drafted_nodes(view);
-        if !drafted.is_empty() {
+        let awaiting_release = awaiting_release_nodes(view);
+        for (held, header) in [
+            (NodeStatus::CompleteDraft, "complete and held as a draft"),
+            (
+                NodeStatus::CompleteHeld,
+                "complete and held unlanded on its origin",
+            ),
+        ] {
+            let nodes: Vec<_> = awaiting_release
+                .iter()
+                .filter(|(_, status, _)| *status == held)
+                .collect();
+            if nodes.is_empty() {
+                continue;
+            }
             out.push_str(&format!(
-                "  {} node(s) complete and held as a draft: the run is waiting on the \
-                 release(s) each names, and is neither stalled nor finished\n",
-                drafted.len()
+                "  {} node(s) {header}: the run is waiting on the release(s) each names, and \
+                 is neither stalled nor finished\n",
+                nodes.len()
             ));
-            for (id, awaiting) in &drafted {
+            for (id, status, awaiting) in nodes {
                 let says = awaiting
                     .as_deref()
                     .map(|detail| format!(" — {detail}"))
                     .unwrap_or_default();
-                out.push_str(&format!("  {id}: complete-but-draft{says}\n"));
+                out.push_str(&format!("  {id}: {}{says}\n", status.as_str()));
             }
         }
         // The nodes that kept their branch rather than landing it. Nothing here
@@ -4096,27 +4202,32 @@ fn summarised(view: &RunView) -> Vec<&String> {
         // sitting open that nobody merged — and a draft is a change this run is
         // deliberately holding and will lift itself. It has a line of its own,
         // which says what it is waiting on.
-        .filter(|node| statuses.get(*node) != Some(&NodeStatus::CompleteDraft))
+        .filter(|node| {
+            !statuses
+                .get(*node)
+                .is_some_and(|status| status.awaits_release())
+        })
         // A reworked node's change is its replacement's now — the same branch and
         // the same change request — so it is counted once, under the replacement.
         .filter(|node| !view.state.reworks.contains_key(*node))
         .collect()
 }
 
-/// The nodes whose work is complete and whose change is held back as a draft,
-/// with what each is waiting on.
+/// The nodes whose work is complete and whose change is held back for a release
+/// — as a draft, or unlanded on its origin — with each one's status and what it is
+/// waiting on.
 ///
 /// The reason is the settlement's own detail, which is the same sentence `results`
 /// prints — so a reader meeting this line and a reader opening `results` are told
 /// the same thing rather than two accounts of one node.
-fn drafted_nodes(view: &RunView) -> Vec<(String, Option<String>)> {
+fn awaiting_release_nodes(view: &RunView) -> Vec<(String, NodeStatus, Option<String>)> {
     view.state
         .statuses()
         .into_iter()
-        .filter(|(_, status)| *status == NodeStatus::CompleteDraft)
-        .map(|(node, _)| {
+        .filter(|(_, status)| status.awaits_release())
+        .map(|(node, status)| {
             let awaiting = settled_detail(view, &node).map(|detail| one_line(&detail));
-            (node, awaiting)
+            (node, status, awaiting)
         })
         .collect()
 }
@@ -9339,7 +9450,8 @@ mod tests {
     /// `tests/e2e/run_ending.rs` drives each of those through the binary but two,
     /// which no run reaches there and are held here instead: a stop over a graph
     /// with no nodes, because a launch refuses a plan with none before any run
-    /// exists; and a `complete-but-draft` node as the movable work, because a
+    /// exists; and a `complete-but-draft` or `complete-but-held` node as the
+    /// movable work, because a
     /// draft is only ever held by a live driver awaiting a release — the run
     /// whose driver dies with one is the `ready` arm the journey drives.
     #[test]
@@ -9356,7 +9468,8 @@ mod tests {
             Reached::of(false, &holding(statuses), stopped, || decision, decided)
         };
         use NodeStatus::{
-            Blocked, CompleteDraft, Done, Failed, Parked, Ready, Running, Skipped, Waiting,
+            Blocked, CompleteDraft, CompleteHeld, Done, Failed, Parked, Ready, Running, Skipped,
+            Waiting,
         };
 
         assert_eq!(
@@ -9372,7 +9485,7 @@ mod tests {
             undriven(&[], true, false),
             Reached::Ended(EndingKind::Stopped)
         );
-        for movable in [Ready, Running, CompleteDraft] {
+        for movable in [Ready, Running, CompleteDraft, CompleteHeld] {
             assert_eq!(undriven(&[Failed, movable], false, true), Reached::Neither);
         }
         assert_eq!(

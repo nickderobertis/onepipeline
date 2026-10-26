@@ -472,6 +472,7 @@ fn graph_ending(state: &crate::projection::RunState) -> GraphEnding {
                 | crate::graph::NodeStatus::Running
                 | crate::graph::NodeStatus::Waiting
                 | crate::graph::NodeStatus::CompleteDraft
+                | crate::graph::NodeStatus::CompleteHeld
         )
     }) {
         GraphEnding::Live

@@ -9,10 +9,9 @@
 //!
 //! * a `title` the destination repository's own `commit-msg` hook turns down, so
 //!   the publication is refused after the work is finished and passed; and
-//! * a non-empty [`consumes`](crate::plan::Node::consumes) on an identity that
-//!   publishes without opening a change request, where the draft that holds such
-//!   a node to its release has no change request to be a state of — which
-//!   `onevcs` refuses outright at the last step of the node.
+//! * a `draft: true` on an identity that publishes without opening a change
+//!   request, where there is no change request for the draft to be a state of —
+//!   which `onevcs` refuses outright at the last step of the node.
 //!
 //! **The rules are the repository's, read where it states them.** The subject
 //! policy is that repository's own hook file, run the way git runs it, rather
@@ -91,10 +90,10 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
             continue;
         };
         // Nothing to ask about is not a node that went unchecked: a node stating
-        // no title, consuming nothing and asking for no draft has none of the
-        // three properties these rules are about, so a repository that does not
-        // resolve leaves it exactly as checked as it ever was.
-        if node.title.is_none() && node.consumes.is_empty() && !node.draft {
+        // no title and asking for no draft has neither of the two properties these
+        // rules are about, so a repository that does not resolve leaves it exactly
+        // as checked as it ever was.
+        if node.title.is_none() && !node.draft {
             continue;
         }
         let destination = resolved
@@ -109,15 +108,11 @@ pub(crate) fn check(plan: &Plan) -> std::result::Result<(), Refusal> {
         };
         // Each rule in turn, and no further once one has refused: the title rule
         // runs the repository's own hook as a subprocess, and a node already being
-        // refused for its `consumes` has no use for a verdict on a title it will
-        // not publish under. A rule that could not be *asked* is not an answer, so
+        // refused for its `draft` has no use for a verdict on a title it will not
+        // publish under. A rule that could not be *asked* is not an answer, so
         // that one is reported and the next is still put.
         type Rule = fn(&Node, &Destination) -> std::result::Result<Option<Refusal>, String>;
-        for ask in [
-            consumes_refusal as Rule,
-            draft_refusal as Rule,
-            title_refusal as Rule,
-        ] {
+        for ask in [draft_refusal as Rule, title_refusal as Rule] {
             match ask(node, destination) {
                 Ok(Some(refusal)) => return Err(refusal),
                 Ok(None) => {}
@@ -299,73 +294,21 @@ fn publication(repo: &str, reported: &str) -> Result<MergePolicy, String> {
     })
 }
 
-/// The refusal a node earns for consuming releases on an identity that can never
-/// hold them.
-///
-/// One condition, and it is about the repository rather than about the node: it
-/// has to publish without opening a change request. A `consumes` says this node's
-/// work is pinned to a release, and every mechanism that holds such a pin back —
-/// the draft `onevcs` opens, and the change request that draft is a *state of* —
-/// requires a change request to exist. Where none is opened there is nothing to
-/// hold, whatever the node's adoption says about *when* it starts, so the pair is
-/// refused outright rather than at a publication that has already been paid for.
-fn consumes_refusal(
-    node: &Node,
-    destination: &Destination,
-) -> std::result::Result<Option<Refusal>, String> {
-    // A node consuming nothing has nothing to hold, whatever its repository
-    // publishes with — so it is answered without the resolved policy, and is never
-    // reported as a node this build could not check for want of one.
-    if node.consumes.is_empty() {
-        return Ok(None);
-    }
-    // The policy this node publishes under: the one it states, where it states
-    // one, and its repository's otherwise. Its own decides *whichever way it
-    // points* — a node that names `local-direct` on a repository that opens change
-    // requests has said it opens none, and reading its repository's answer over
-    // its own would let exactly that node through. Where what it states is a
-    // widening its repository forbids, `onevcs` refuses it at its own boundary,
-    // which is a second refusal about a different thing rather than this one.
-    let publication = match node.merge_policy {
-        Some(stated) => stated,
-        None => destination.publication.clone()?,
-    };
-    if opens_a_change_request(publication) {
-        return Ok(None);
-    }
-    let consumed = node
-        .consumes
-        .iter()
-        .map(|(dependency, target)| format!("{dependency}={target}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Ok(Some(
-        Refusal::node(
-            &node.id,
-            format!(
-                "it consumes the release targets {consumed}, and its repository {identity} \
-                 publishes with {publication}, which opens no change \
-                 request at all — so there is nothing for the draft that holds this node to a \
-                 release to be a state of, and `onevcs` refuses the publication outright at \
-                 the last step of the node. Publish it under a change-* policy, on this node \
-                 or in that repository's own rules, or drop `consumes`",
-                identity = destination.resolved.identity,
-                publication = spell(publication),
-            ),
-        )
-        .field("consumes"),
-    ))
-}
-
 /// The refusal a node earns for asking that its change request be left as a
 /// draft on an identity that opens none.
 ///
-/// The same condition [`consumes_refusal`] applies, for the same reason: a draft
-/// is a state of a change request, and a publication that opens none — which is
-/// `local-direct`, the one policy that lands with git alone — has nothing for it
+/// One condition, and it is about the repository rather than about the node: a
+/// draft is a state of a change request, and a publication that opens none — which
+/// is `local-direct`, the one policy that lands with git alone — has nothing for it
 /// to be a state of. `onevcs` would refuse the publication outright at the last
 /// step of the node; this refuses it where the plan is read, before anything is
-/// dispatched, in the shape `consumes` is refused in.
+/// dispatched.
+///
+/// A `consumes` is deliberately **not** refused there. A `fast` node awaiting a
+/// release on such an identity is held unlanded on its origin as
+/// `complete-but-held` and landed once the release arrives — see
+/// `lifecycle::hold_for_release` — so the pin it carries never lands while it is
+/// still temporary, and no draft is asked of `onevcs` for it.
 fn draft_refusal(
     node: &Node,
     destination: &Destination,
@@ -759,7 +702,7 @@ mod tests {
         assert_eq!(spell(onevcs::Adoption::Fast), "fast");
     }
 
-    /// A destination this journey states, so the two refusal rules can be asked
+    /// A destination this journey states, so the draft rule can be asked
     /// about a repository without one being resolved.
     fn destination(publication: MergePolicy) -> Destination {
         Destination {
@@ -776,134 +719,9 @@ mod tests {
         }
     }
 
-    fn consuming(adoption: Option<onevcs::Adoption>) -> Node {
-        let mut node = Node {
-            id: "consumer".to_owned(),
-            repo: Some("service".to_owned()),
-            deps: vec!["engine".to_owned()],
-            adoption,
-            ..Node::default()
-        };
-        node.consumes
-            .insert("engine".to_owned(), "crate".parse().expect("a target name"));
-        node
-    }
-
-    /// The rule the `consumes` refusal actually applies, in each of its arms.
-    ///
-    /// It turns on the **repository** and on nothing else: where no change request
-    /// is opened there is nothing for a draft to be a state of, so every `consumes`
-    /// on such an identity is refused whatever its adoption says about when the
-    /// node starts. What loads is a node with nothing to consume, and one whose
-    /// publication opens a change request — its repository's, or its own.
-    #[test]
-    fn a_consumes_is_refused_wherever_its_publication_opens_no_change_request() {
-        let refusal = consumes_refusal(&consuming(None), &destination(MergePolicy::LocalDirect))
-            .expect("the policy is known, so the rule is answerable")
-            .expect("a fast node consuming on a local-direct repository is refused");
-        assert_eq!(refusal.node.as_deref(), Some("consumer"));
-        assert_eq!(refusal.field.as_deref(), Some("consumes"));
-        for named in [
-            "node 'consumer'",
-            "engine=crate",
-            "github.com/owner/service",
-            "local-direct",
-        ] {
-            assert!(
-                refusal.message.contains(named),
-                "the refusal does not name {named}: {}",
-                refusal.message
-            );
-        }
-
-        let loads = |why: &str, node: &Node, destination: &Destination| {
-            assert!(
-                consumes_refusal(node, destination)
-                    .expect("the rule is answerable")
-                    .is_none(),
-                "{why}"
-            );
-        };
-        // Adoption decides when a node starts, not whether its publication opens a
-        // change request — so it does not enter this rule at all.
-        for adoption in [onevcs::Adoption::Fast, onevcs::Adoption::Published] {
-            assert!(
-                consumes_refusal(
-                    &consuming(Some(adoption)),
-                    &destination(MergePolicy::LocalDirect)
-                )
-                .expect("the rule is answerable")
-                .is_some(),
-                "a `{}` node consuming on a local-direct repository was not refused",
-                spell(adoption)
-            );
-        }
-        loads(
-            "a repository that opens a change request has something to draft",
-            &consuming(None),
-            &destination(MergePolicy::ChangeAuto),
-        );
-        let mut bare = consuming(None);
-        bare.consumes.clear();
-        loads(
-            "a node consuming nothing holds no pin",
-            &bare,
-            &destination(MergePolicy::LocalDirect),
-        );
-
-        // A node states the policy it publishes under, and it decides whichever
-        // way it points.
-        let mut narrowed = consuming(None);
-        narrowed.merge_policy = Some(MergePolicy::ChangeOpen);
-        loads(
-            "a node that named a change-* policy opens a change request to draft",
-            &narrowed,
-            &destination(MergePolicy::LocalDirect),
-        );
-        let mut stated = consuming(None);
-        stated.merge_policy = Some(MergePolicy::LocalDirect);
-        assert!(
-            consumes_refusal(&stated, &destination(MergePolicy::ChangeAuto))
-                .expect("the rule is answerable")
-                .is_some(),
-            "a node that named `local-direct` itself was let through on its repository's answer"
-        );
-    }
-
-    /// A policy this build could not read is a node it could not check — and only
-    /// for the rule that needed the policy.
-    ///
-    /// The two rules are asked separately on purpose. A `rules check` that could
-    /// not be read says nothing about a repository's subject policy, so a title is
-    /// still put to that repository's own hook; and a node with nothing to consume,
-    /// or one that has narrowed to a change-* policy, is answered without the
-    /// policy at all rather than reported as unchecked for want of it.
-    #[test]
-    fn a_policy_this_build_could_not_read_is_reported_only_where_the_rule_needed_it() {
-        let unreadable = Destination {
-            resolved: resolved(),
-            publication: Err(
-                "`onevcs rules check service` states no `publication:` line".to_owned()
-            ),
-        };
-        let why = consumes_refusal(&consuming(None), &unreadable)
-            .expect_err("a rule that needs the policy cannot be answered without it");
-        assert!(why.contains("states no `publication:` line"), "{why}");
-
-        let mut bare = consuming(None);
-        bare.consumes.clear();
-        assert!(consumes_refusal(&bare, &unreadable)
-            .expect("a node consuming nothing needs no policy")
-            .is_none());
-        let mut narrowed = consuming(None);
-        narrowed.merge_policy = Some(MergePolicy::ChangeAuto);
-        assert!(consumes_refusal(&narrowed, &unreadable)
-            .expect("a node that named its own change-* policy needs no resolved one")
-            .is_none());
-    }
-
-    /// A `draft` is refused exactly where a `consumes` is: on a publication that
-    /// opens no change request, whichever of the node and its repository says so.
+    /// A `draft` is refused on a publication that opens no change request,
+    /// whichever of the node and its repository says so — and a `consumes` there
+    /// is not, because a release it awaits is held for unlanded rather than drafted.
     ///
     /// The end-to-end half is
     /// `destination::a_draft_on_a_repository_that_opens_no_change_request_is_refused_before_any_dispatch`;
