@@ -378,6 +378,12 @@ pub struct RunState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the settlement's own prose, quoted and never parsed.
     pub(crate) settled_details: BTreeMap<String, String>,
+    /// The releases each node's newest `node-settled` said it still awaits, where it
+    /// named any this build can read: what `status --json` lists for a node held
+    /// for a release, read off the fold rather than the run's history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `settled_details` beside it is.
+    pub(crate) settled_awaiting: BTreeMap<String, Vec<crate::views::AwaitedRelease>>,
     /// The first record of each node's latest session `onevcs` opened: what the
     /// write-back pins a dispatch in flight to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -2176,6 +2182,18 @@ fn fold_recall(state: &mut RunState, event: &Envelope) {
                     }
                     None => {
                         state.settled_details.remove(node);
+                    }
+                }
+                match event
+                    .payload
+                    .get(journal::SETTLED_AWAITING)
+                    .and_then(|awaiting| serde_json::from_value(awaiting.clone()).ok())
+                {
+                    Some(awaiting) => {
+                        state.settled_awaiting.insert(node.clone(), awaiting);
+                    }
+                    None => {
+                        state.settled_awaiting.remove(node);
                     }
                 }
             }

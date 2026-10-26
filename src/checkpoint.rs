@@ -1960,6 +1960,13 @@ mod tests {
                 "build".to_string(),
                 "awaiting the engine's release".to_string(),
             )]),
+            settled_awaiting: BTreeMap::from([(
+                "build".to_string(),
+                vec![crate::views::AwaitedRelease {
+                    producer: "github.com/owner/engine".to_string(),
+                    target: "crate".to_string(),
+                }],
+            )]),
             sessions_opened: BTreeMap::from([(
                 "build".to_string(),
                 crate::projection::SessionOpened {

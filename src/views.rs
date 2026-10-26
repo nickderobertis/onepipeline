@@ -538,17 +538,12 @@ pub fn reading(view: &RunView) -> RunReading {
 /// A node's detail and what it awaits are read off its **standing** settlement —
 /// its latest `node-settled`, for a node whose status is one a settlement put it
 /// in — so a node re-dispatched since is not reported with the words of the
-/// settlement it has left. `awaiting` is read as data off that record, never off
-/// the detail sentence, and only for a node that is still awaiting a release.
+/// settlement it has left. Both are the fold's, [`RunState::settled_details`] and
+/// [`RunState::settled_awaiting`], so a reading resumed from the run's checkpoint
+/// quotes a settlement the checkpoint covers. `awaiting` is read as data off that
+/// record, never off the detail sentence, and only for a node that is still
+/// awaiting a release.
 fn reading_nodes(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec<ReadingNode> {
-    let mut settled: BTreeMap<&str, &serde_json::Map<String, serde_json::Value>> = BTreeMap::new();
-    for event in &view.events {
-        if event.kind.0 == PipelineKind::NodeSettled.as_str() {
-            if let Some(node) = event.labels.node.as_deref() {
-                settled.insert(node, &event.payload);
-            }
-        }
-    }
     view.state
         .graph
         .iter()
@@ -557,26 +552,18 @@ fn reading_nodes(view: &RunView, statuses: &BTreeMap<String, NodeStatus>) -> Vec
                 .get(&node.id)
                 .copied()
                 .unwrap_or(NodeStatus::Pending);
-            let standing = (!matches!(
+            let standing = !matches!(
                 status,
                 NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Running
-            ))
-            .then(|| settled.get(node.id.as_str()))
-            .flatten();
+            );
             ReadingNode {
                 id: node.id.clone(),
                 status: status.as_str(),
                 outcome: view.state.outcomes.get(&node.id).cloned(),
-                detail: standing
-                    .and_then(|payload| payload.get("detail"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                awaiting: standing
-                    .filter(|_| status.awaits_release())
-                    .and_then(|payload| payload.get(crate::journal::SETTLED_AWAITING))
-                    .and_then(|awaiting| {
-                        serde_json::from_value::<Vec<AwaitedRelease>>(awaiting.clone()).ok()
-                    }),
+                detail: standing.then(|| settled_detail(view, &node.id)).flatten(),
+                awaiting: (standing && status.awaits_release())
+                    .then(|| view.state.settled_awaiting.get(&node.id).cloned())
+                    .flatten(),
             }
         })
         .collect()

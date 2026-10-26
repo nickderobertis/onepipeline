@@ -11,7 +11,7 @@
     "streams": {
       "golden-host-1": 41
     },
-    "digest": "54e890f578a62b059736a9b029786257"
+    "digest": "4d3bb56a8c742939f07e895ea8ec038a"
   },
   "state": {
     "graph": {
@@ -75,6 +75,14 @@
     ],
     "settled_details": {
       "build": "awaiting the engine's release"
+    },
+    "settled_awaiting": {
+      "build": [
+        {
+          "producer": "github.com/owner/engine",
+          "target": "crate"
+        }
+      ]
     },
     "sessions_opened": {
       "build": {
