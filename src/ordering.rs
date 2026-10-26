@@ -130,9 +130,7 @@ static DISPATCH_PROJECTING: std::sync::atomic::AtomicBool =
 /// Met once, by the write-back, before it projects the first snapshot in which the node
 /// `ONEPIPELINE_TEST_PROJECTION_DISPATCHED_NODE` names is running and not yet settled: a
 /// journey holds that dispatch's projection off the store there until the node has settled.
-pub(crate) fn dispatch_projecting<'a>(
-    mut running: impl Iterator<Item = &'a String>,
-) -> Result<()> {
+pub(crate) fn dispatch_projecting<'a>(mut running: impl Iterator<Item = &'a String>) -> Result<()> {
     let Ok(target) = std::env::var("ONEPIPELINE_TEST_PROJECTION_DISPATCHED_NODE") else {
         return Ok(());
     };

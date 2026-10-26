@@ -1978,6 +1978,12 @@ struct WriteBackOf<'a> {
 /// Each of `node`'s write-back operations, read off the run's `store-operations.jsonl`, sorted
 /// into the moment of the run it served — which is what the per-dispatch and per-settlement
 /// budgets count.
+///
+/// The settlement's are the operations whose attempt projected a snapshot carrying it, as each
+/// line says, and never those that merely reached the store after the journal recorded it: an
+/// attempt that took the dispatch's snapshot is still writing it when the node settles, and its
+/// update lands after the settlement. The run's first projection is the launch's, which the
+/// loop waits on before it dispatches anything.
 fn write_back_of<'a>(
     world: &World,
     run: &str,
@@ -1993,19 +1999,20 @@ fn write_back_of<'a>(
         millis(event["ts"].as_str().expect("an event's stamp"))
     };
     let (dispatched, settled) = (stamp("node-dispatched"), stamp("node-settled"));
-    let item_ops = |from: u64, to: u64| -> Vec<&'a Value> {
+    let item_ops = |settlement: bool, from: u64, to: u64| -> Vec<&'a Value> {
         operations
             .iter()
             .filter(|op| op["phase"] == "write-back" && op["item"] == node)
+            .filter(|op| (op["settled"] == true) == settlement)
             .filter(|op| (from..to).contains(&op["at_ms"].as_u64().unwrap_or(0)))
             .collect()
     };
     WriteBackOf {
         dispatched,
         settled,
-        launch_claim: item_ops(0, dispatched),
-        dispatch: item_ops(dispatched, settled),
-        settlement: item_ops(settled, u64::MAX),
+        launch_claim: item_ops(false, 0, dispatched),
+        dispatch: item_ops(false, dispatched, u64::MAX),
+        settlement: item_ops(true, 0, u64::MAX),
     }
 }
 
