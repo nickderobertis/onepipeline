@@ -629,6 +629,11 @@ impl Linear {
                 {
                     return refusal("the loopback holds no labels");
                 }
+                let name = match input.get("name") {
+                    None => None,
+                    Some(Value::String(name)) => Some(name.clone()),
+                    Some(name) => return refusal(&format!("a project's name is a string: {name}")),
+                };
                 if let Some(status) = input.get("statusId") {
                     let Some(status) = world
                         .statuses
@@ -640,8 +645,8 @@ impl Linear {
                     };
                     world.project_status = status.name;
                 }
-                if let Some(name) = input.get("name").and_then(Value::as_str) {
-                    name.clone_into(&mut world.project_name);
+                if let Some(name) = name {
+                    world.project_name = name;
                 }
                 world.project_content = linear_stores(content);
                 // The project as stored, which the plugin selects in its answer — the content
@@ -1371,8 +1376,18 @@ fn ordered(text: &str) -> Option<(&str, &str)> {
 
 /// Whether a line, unindented, holds one image and nothing else.
 fn image_alone(text: &str) -> bool {
-    let text = text.trim_end();
-    text.starts_with("![") && text.ends_with(')') && text.matches("](").count() == 1
+    let Some((alt, target)) = text
+        .trim_end()
+        .strip_prefix("![")
+        .and_then(|rest| rest.split_once("]("))
+    else {
+        return false;
+    };
+    // The image's target closes the line: nothing follows its one closing parenthesis.
+    !alt.contains(']')
+        && target
+            .strip_suffix(')')
+            .is_some_and(|target| !target.contains(['(', ')']))
 }
 
 /// Whether a line, trimmed, is a table row.
@@ -1501,6 +1516,31 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
     let answer: Value = serde_json::from_str(body).expect("the GraphQL response");
     assert_eq!(answer["data"]["project"]["id"], PROJECT);
     assert_eq!(linear.log().len(), 3);
+    // A rewrite naming a project whose name is not a string is refused and changes nothing,
+    // its status among it.
+    let rename = json!({
+        "query":"mutation($id:ID!,$input:ProjectUpdateInput!){projectUpdate(id:$id,input:$input){success}}",
+        "variables":{"id":PROJECT,"input":{
+            "content":"rewritten", "name":7, "statusId":linear.status_id("Planned"),
+        }}
+    });
+    let refused = send("POST /graphql HTTP/1.1", &rename);
+    let refused: Value =
+        serde_json::from_str(refused.split_once("\r\n\r\n").expect("mutation response").1)
+            .expect("mutation JSON");
+    assert_eq!(
+        refused["errors"][0]["message"],
+        "a project's name is a string: 7"
+    );
+    let read = send(
+        "POST /graphql HTTP/1.1",
+        &json!({
+            "query":"query($id:ID!){project(id:$id){name content}}", "variables":{"id":PROJECT}
+        }),
+    );
+    let read: Value = serde_json::from_str(read.split_once("\r\n\r\n").expect("project read").1)
+        .expect("project JSON");
+    assert_eq!(read["data"]["project"]["content"], "");
 }
 
 /// Every rewrite the spike measured is what this endpoint stores, and storing what it stored
@@ -1524,6 +1564,9 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
         "1. one\n2. two",
         "**bold**, # heading, > quoted - dash",
         "* item\n\n<!-- onetaskgraph.metadata `{}` -->",
+        // An image with prose after it is not an image alone, so no blank line parts it from
+        // the image below.
+        "![a](https://uploads.linear.app/a) and (b)\n![b](https://uploads.linear.app/b)",
     ] {
         assert_eq!(linear_stores(kept), kept, "{kept:?}");
     }
