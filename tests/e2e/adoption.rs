@@ -7208,3 +7208,90 @@ fn a_fast_local_direct_dispatch_its_judge_refuses_is_never_held() {
     assert_eq!(host.pushes(), 0);
     assert!(!dispatched(world, &run, "follower"));
 }
+
+/// With **no `consumes`**, the release a held node awaits is its producer's
+/// default target — and only that target's release lands it.
+///
+/// The same world as the held-landing journey, whose engine releases `crate` and
+/// `bindings` and names `bindings` its default: a node that names neither awaits
+/// `bindings`, so `crate` releasing is a release of something it does not wait for.
+#[test]
+fn a_fast_local_direct_node_naming_no_target_is_held_for_its_producers_default_target() {
+    let host = HeldHost::new("adoption-held-default");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let commits_before = host.consumer.base_commits(world).len();
+
+    let (run, _) = start_held(&host, "adoption-held-default", None);
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "bindings"}]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    let branch = branch_of(world, &run, "consumer");
+    let head = settled["payload"]["head"]
+        .as_str()
+        .expect("the held settlement names its commit")
+        .to_owned();
+    assert_eq!(
+        host.on_origin(&format!("refs/heads/{branch}")).as_deref(),
+        Some(head.as_str())
+    );
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before.clone()));
+    assert_eq!(reading_node(world, &run, "consumer")["awaiting"], awaited);
+
+    // `crate` releasing is not the release this node awaits.
+    releases_at(&host.crate_answer, "0.2.0");
+    let asked = world.probe_runs("bindings");
+    world.until("the default target to be asked again", |world| {
+        world.probe_runs("bindings") >= asked + 2
+    });
+    assert!(world.events_of(&run, "release-adopted").is_empty());
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    assert_eq!(tasks_of(world, "consumer").len(), 1);
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before));
+    // What it waits on is still the default target, read as data off its
+    // settlement and its reading — and no arrival was recorded for it, because the
+    // release that came out is of a target it never asked about.
+    assert_eq!(reading_node(world, &run, "consumer")["awaiting"], awaited);
+    assert!(
+        world.events_of(&run, "release-arrived").is_empty(),
+        "a release of a target the node does not await was recorded as its arrival: {:?}",
+        world.events_of(&run, "release-arrived")
+    );
+
+    // The default target releases, and the node lands on it.
+    world.script("consumer.work", &pin("\"bindings 0.3.0\""));
+    releases_at(&host.bindings_answer, "0.3.0");
+    world.until("the consumer to land", |world| {
+        settled_status(world, &run, "consumer").as_deref() == Some("done")
+    });
+    assert_eq!(world.events_of(&run, "release-adopted").len(), 1);
+    let tasks = tasks_of(world, "consumer");
+    assert_eq!(tasks.len(), 2, "{tasks:?}");
+    assert!(
+        tasks[1].contains("github.com/owner/engine — bindings 0.3.0"),
+        "the re-dispatch was not told which release arrived:\n{}",
+        tasks[1]
+    );
+    assert_eq!(branch_of(world, &run, "consumer"), branch);
+    let commits = host.consumer.base_commits(world);
+    assert_eq!(commits.len(), commits_before + 1, "{commits:?}");
+    let base_before = base_before.expect("the consumer's origin had a base");
+    assert_eq!(
+        host.origin_git(&["diff", "--name-status", &base_before, "main"])
+            .trim(),
+        "A\tpin.md"
+    );
+    assert_eq!(
+        host.consumer.base_file("pin.md").as_deref().map(str::trim),
+        Some(pin("\"bindings 0.3.0\"").as_str())
+    );
+    assert_eq!(host.pushes(), 1);
+}
