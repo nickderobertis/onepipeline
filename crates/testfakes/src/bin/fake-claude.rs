@@ -473,7 +473,33 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
                 fake::wait_for(&dir.join("turn.traced"));
             }
         }
-        fake::wait_for(&dir.join("turn.go"));
+        // `turn.activity` holds a number of milliseconds: a held turn that keeps
+        // working, one reasoning block on that clock until it is released, each
+        // naming its own emission instant so a measurement can time how long the
+        // line took to reach the run's journal (`tests/journal_workload`), and each
+        // recorded as emitted, so one that never reached it is counted too.
+        match fake::node_script(dir, "turn", "activity") {
+            Some(every) if streaming => {
+                let every = match every.trim().parse::<u64>() {
+                    Ok(millis) if millis > 0 => std::time::Duration::from_millis(millis),
+                    _ => fake::fail(&format!(
+                        "turn.activity holds {every:?}, which is not a positive number of milliseconds"
+                    )),
+                };
+                let mut nth = 0u64;
+                fake::wait_for_any_ticking(&[dir.join("turn.go")], every, &mut || {
+                    nth += 1;
+                    let emitted = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_millis());
+                    let mark = format!("{nth} {emitted} {}", std::process::id());
+                    activity(&format!("{ACTIVITY_MARK} {mark}"));
+                    // Every block emitted, whether or not it ever reaches the journal.
+                    fake::append(&dir.join("activity-emitted.txt"), &mark);
+                });
+            }
+            _ => fake::wait_for(&dir.join("turn.go")),
+        }
         // `turn.late-child` names a task, and that task's released turn starts a
         // process of its own and records its pid in `turn.late-child.pid`: a
         // process the dispatch started at a moment the journey chose, such as
@@ -719,6 +745,23 @@ fn thinking() {
         serde_json::json!({
             "type": "assistant",
             "message": {"content": [{"type": "thinking", "thinking": REASONED}]},
+        })
+    );
+}
+
+/// What a `turn.activity` block opens with, followed by its ordinal, the millisecond
+/// it was emitted at and the emitting turn's pid — the same three words this double
+/// appends to `activity-emitted.txt` for every block it emits.
+const ACTIVITY_MARK: &str = "journal-workload activity";
+
+/// One reasoning block saying `text`, which `oneharness_core` normalizes to one
+/// `turn-activity` record.
+fn activity(text: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": text}]},
         })
     );
 }

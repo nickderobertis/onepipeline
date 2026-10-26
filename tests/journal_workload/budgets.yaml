@@ -1,0 +1,56 @@
+# The budgets the `onepipeline-journal-workload` project holds the driver to, checked by
+# `onebudgetspec check budgets.yaml` from this directory in that project's `workload`
+# target, after the journey that writes the recording each one reads. Every figure is
+# the largest of its per-size figures over synthesized runs of 1, 20, 80, 160 and 800 MB.
+schema_version: 1
+budgets:
+  - id: driver-event-journal-delay
+    measure: reported
+    command: [node, journal-budget.mjs, event-delay]
+    unit: milliseconds
+    direction: max
+    threshold: 1000
+    description: >-
+      The 95th-percentile delay from a working member emitting a turn-activity record to
+      its line being in events.jsonl. It holds the driver journalling a run's activity
+      as it happens however long the run's journal has grown.
+  - id: driver-envelope-outcome-latency
+    measure: reported
+    command: [node, journal-budget.mjs, envelope-latency]
+    unit: milliseconds
+    direction: max
+    threshold: 2000
+    description: >-
+      The 95th-percentile time from a reply envelope amending a running node being
+      submitted through its own `onepipeline reply` to that reply's answer. It holds a
+      manager's reply answered promptly whatever the size of the run it is sent to.
+  - id: driver-idle-cpu-share
+    measure: reported
+    command: [node, journal-budget.mjs, idle-cpu]
+    unit: cores
+    direction: max
+    threshold: 0.05
+    description: >-
+      The driver's CPU seconds over wall seconds across a minute with no dispatch
+      running. It holds a waiting driver cheap on its host however much history its run
+      carries.
+  - id: driver-peak-rss
+    measure: reported
+    command: [node, journal-budget.mjs, peak-rss]
+    unit: megabytes
+    direction: max
+    threshold: 200
+    description: >-
+      The driver process's peak resident set size over the whole measurement, from the
+      kernel's high-water mark. It holds the driver's memory to its live state rather
+      than to the run's history.
+  - id: liveness-journal-bytes-per-member-hour
+    measure: reported
+    command: [node, journal-budget.mjs, liveness-bytes]
+    unit: bytes
+    direction: max
+    threshold: 0
+    description: >-
+      The bytes liveness records add to events.jsonl per member-hour while four workers
+      run, every other kind excluded. It holds members' heartbeats out of the journal,
+      kept in liveness.json instead.

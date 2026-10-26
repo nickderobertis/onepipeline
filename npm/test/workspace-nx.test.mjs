@@ -135,7 +135,8 @@ const declaresUniform = (declared, target) =>
   (!declared.tags?.includes("tier:live") && !declared.tags?.includes("tier:workload"));
 
 // The workload tiers (`tier:workload`: `onepipeline-pool-workload`,
-// `onepipeline-scratch-workload`) measure a whole host-shaped workload against
+// `onepipeline-scratch-workload`, `onepipeline-journal-workload`) measure a whole
+// host-shaped workload against
 // their own budgets file. Like the live tiers they declare no `test`: their journey
 // and its budget check are one uncached `workload` target, fanned out by `just
 // workload` and reached by no `check`, `test`, coverage or `budgets` target, so no
@@ -255,6 +256,7 @@ describe("the live and network tiers", () => {
 describe("the workload tiers", () => {
   it("are the projects whose journey only `just workload` runs", () => {
     assert.deepEqual(WORKLOAD.map((declared) => declared.name).sort(), [
+      "onepipeline-journal-workload",
       "onepipeline-pool-workload",
       "onepipeline-scratch-workload",
     ]);
@@ -371,6 +373,7 @@ describe("the offline tier split", () => {
       "stop_verdict",
       "pool_workload",
       "scratch_workload",
+      "journal_workload",
     ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),

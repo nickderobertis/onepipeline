@@ -264,9 +264,10 @@ _crate-lint:
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
 # (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
-# are `pool_workload` and `scratch_workload`: each measures a whole host-shaped
-# workload, so its project (`onepipeline-pool-workload`,
-# `onepipeline-scratch-workload`) runs it only through `just workload`.
+# are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
+# whole host-shaped workload, so its project (`onepipeline-pool-workload`,
+# `onepipeline-scratch-workload`, `onepipeline-journal-workload`) runs it only
+# through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -282,7 +283,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
+rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
@@ -546,6 +547,20 @@ _pool-workload-run:
 _scratch-workload-run:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
     @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
+# The `onepipeline-journal-workload` project's `workload` target: the release-built
+# driver adopts a synthesized run at each journal size of 1, 20, 80, 160 and 800 MB,
+# the journey writes `target/budget-records/journal-workload.json`, and the project's
+# own budgets file reads it. One size at a time, under one 24 GiB address-space bound
+# shared by everything the journey starts, so a driver that regrew its memory with
+# its journal fails its allocation rather than pressing a shared host into swap.
+# Through libtest rather than nextest, whose per-test bound (360 s, for the offline
+# tiers) is far under one journey of five sizes; the journey bounds each of its own
+# phases instead.
+_journal-workload-run:
+    @cargo build --release --locked --bin onepipeline --quiet
+    @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
+    @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
