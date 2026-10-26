@@ -123,10 +123,21 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
             "liveness",
             "driven",
             "ending",
-            "paused"
+            "paused",
+            "nodes"
         ]
     );
-    assert_eq!(reading["schema_version"], 2);
+    assert_eq!(reading["schema_version"], 3);
+    // Every node of the graph is listed, each with its status word.
+    assert!(
+        reading["nodes"]
+            .as_array()
+            .is_some_and(|nodes| !nodes.is_empty()
+                && nodes
+                    .iter()
+                    .all(|node| node["id"].is_string() && node["status"].is_string())),
+        "the reading lists no nodes: {reading}"
+    );
     assert_eq!(reading["labels"], json!({}));
     assert_eq!(
         reading["group"],

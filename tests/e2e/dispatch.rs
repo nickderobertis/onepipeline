@@ -6438,6 +6438,282 @@ fn an_adoption_relaunches_the_observer_under_the_launchs_own_filter() {
     );
 }
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] measured at about 11
+// seconds on the wall, and what it holds is this crate's lock: the engine's launch and
+// adoption driving the `oneagentgraph` and `onejudge` it links over the `oneharness` CLI that
+// lock builds, so a `Cargo.lock` bump or any change to `driver`, `engine` or `agentgraph`
+// must schedule it. The narrowest edge it can honestly sit behind is the crate itself, which
+// is this target's — the ground the two observer journeys above it run under.
+/// An observer's two-party monitor takes its first turn under **its own** worker
+/// config, in a launch directory whose `oneharness.toml` it could not run under —
+/// at launch, and again when the run is adopted.
+///
+/// The incident: a run started from a checkout whose root carried an operator's
+/// `oneharness.toml` selecting a variant whose `env_from` names a variable the
+/// launcher's environment does not set — the same identity the monitor's own
+/// config selects. The monitor's worker side layered the config the graph stamped
+/// for it over that discovered file rather than running under its own alone, so
+/// the variant gained the indirection, the real `oneharness` refused it, and the
+/// member died on its first turn: the run executed with nothing watching it, at
+/// launch and after every adoption alike.
+///
+/// Through the real engine, the linked `oneagentgraph` and `onejudge`, and the
+/// **released** `oneharness` CLI shell at `ONEAGENTGRAPH_ONEHARNESS_BIN`: the
+/// refusal this journey must be able to meet is oneharness's own, so oneharness is
+/// not doubled. Only the paid harness is, by `fake-claude` at
+/// `ONEHARNESS_BIN_CLAUDE_CODE`. The monitor's judge side is a command that waits
+/// once asked about a turn the worker took, so a monitor whose agent turn
+/// completed is one still watching when the views are read.
+#[cfg(unix)]
+#[test]
+fn an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy() {
+    const UNSET: &str = "ONEPIPELINE_E2E_MONITOR_IDENTITY_UNSET";
+    // The identity both files name: the host's, which the monitor's own config
+    // spells for itself and the checkout's spells through an indirection.
+    const IDENTITY: &str = "host";
+    let world = World::new("real-monitor-own-config");
+    world.write_graphs();
+
+    let launch = world.root.join("launch");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(
+        launch.join("oneharness.toml"),
+        format!(
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code:{IDENTITY}\"]\n\n\
+             [harness.claude-code.variant.{IDENTITY}]\n\
+             env_from = {{ CLAUDE_CONFIG_DIR = \"{UNSET}\" }}\n"
+        ),
+    )
+    .expect("the launch directory's own oneharness config is written");
+    // The monitor's own config: the same identity, defined without the
+    // indirection. Its paid harness is the doubled one at
+    // `ONEHARNESS_BIN_CLAUDE_CODE`, which oneharness reads for every
+    // `claude-code` variant after the variant's own key.
+    let monitor_config = world.graphs().join("oneharness.monitor.toml");
+    std::fs::write(
+        &monitor_config,
+        format!(
+            "run_mode = \"fallback\"\nharnesses = [\"claude-code:{IDENTITY}\"]\n\n\
+             [harness.claude-code.variant.{IDENTITY}]\n\
+             env = {{ ONEPIPELINE_E2E_MONITOR_IDENTITY = \"{IDENTITY}\" }}\n"
+        ),
+    )
+    .expect("the monitor's own oneharness config is written");
+
+    let cli = crate::harness::double("oneharness-cli");
+    // The fixture is only the incident if the real CLI refuses it: the
+    // monitor's config layered over the launch directory's — the order a
+    // discovered project file and an appended `--config` reach oneharness in —
+    // is the refusal the monitor died on.
+    let refused = std::process::Command::new(&cli)
+        .args(["run", "--prompt", "Observe this run.", "--config"])
+        .arg(launch.join("oneharness.toml"))
+        .arg("--config")
+        .arg(&monitor_config)
+        .current_dir(&launch)
+        .env_remove(UNSET)
+        .env(
+            "ONEHARNESS_BIN_CLAUDE_CODE",
+            crate::harness::double("fake-claude"),
+        )
+        .output()
+        .expect("the oneharness CLI runs");
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        !refused.status.success() && refusal.contains(&format!("indirection `{UNSET}`")),
+        "the real CLI does not refuse the monitor's config layered over the launch \
+         directory's, so this journey proves nothing about it: {refusal}"
+    );
+
+    // The observer graph: a two-party monitor whose agent side is that config,
+    // and whose judge side is onejudge's command protocol, one process per
+    // request. A supervisor asked about a turn the worker **took** waits —
+    // bounded, so nothing outlives a failure — which keeps a monitor whose turn
+    // completed watching while the views are read; any other request is
+    // refused, so a turn the worker lost ends the member instead of hiding its
+    // death behind a judge that never answers.
+    std::fs::write(
+        world.graphs().join("onejudge.base.yaml"),
+        "system_prompt: Watch the run.\nuser:\n  persona: Review it.\n  \
+         done_when: the run is complete\n  max_turns: 12\n",
+    )
+    .expect("the onejudge base config is written");
+    let judge = world.root.join("judge.sh");
+    std::fs::write(
+        &judge,
+        "IFS= read -r request\ncase \"$request\" in\n  \
+         *'\"op\":\"supervisor\"'*'\"outcome\":\"taken\"'*) ;;\n  *) exit 1 ;;\nesac\n\
+         i=0\nwhile [ \"$i\" -lt 1500 ]; do sleep 0.2; i=$((i+1)); done\n",
+    )
+    .expect("the monitor's judge command is written");
+    std::fs::write(
+        world.graphs().join("dag-scope.yaml"),
+        format!(
+            "version: 1\nname: dag-scope\nmembers:\n  monitor:\n    task: {}\n    \
+             kind: onejudge\n    base_config: ./onejudge.base.yaml\n    agent:\n      \
+             oneharness_config: ./oneharness.monitor.toml\n    judge:\n      \
+             command: [sh, '{}']\n    mode: bypass\nenv:\n  ONEPIPELINE_RUN_ID: ${{ONEPIPELINE_RUN_ID}}\n  \
+             ONEPIPELINE_RUNS_DIR: ${{ONEPIPELINE_RUNS_DIR}}\n",
+            serde_json::to_string(crate::harness::MONITOR_TASK).expect("the task is quoted"),
+            judge.display()
+        ),
+    )
+    .expect("the observer graph is written");
+
+    // Work held on both sides of a human gate: the first launch's driver is
+    // driving while its monitor is read, and exits at the gate; the adoption's
+    // is driving the second half while its relaunched monitor is read.
+    world.script("turn.hold", "hold");
+    let run = "own-config";
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("build", &[]),
+                human("approve", &["build"]),
+                agent("ship", &["approve"]),
+            ],
+        ),
+    );
+    let host = |args: &[&str]| {
+        let mut command = world.agentgraph_cmd(args);
+        command
+            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", &cli)
+            .env_remove(UNSET)
+            .env_remove("ONEHARNESS_CONFIG")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        command
+    };
+
+    // llmlint: ignore-block[tests_mirror_real_usage] which graph run a turn belongs to
+    // is the claim, and no view renders it: the merged store is the contract's own
+    // per-run artifact, and the observer's records are the ones with no `node` label.
+    let observer_events = || -> Vec<Value> {
+        world
+            .journal(run)
+            .into_iter()
+            .filter(|event| event["source"] == "agentgraph" && event["labels"]["node"].is_null())
+            .collect()
+    };
+    let monitor_turns_completed = || -> Vec<Value> {
+        observer_events()
+            .into_iter()
+            .filter(|event| {
+                event["kind"] == "turn-completed" && event["payload"]["role"] == "assistant"
+            })
+            .collect()
+    };
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let refused_deaths = || -> Vec<Value> {
+        observer_events()
+            .into_iter()
+            .filter(|event| {
+                event["kind"] == "member-died" && event.to_string().contains("indirection")
+            })
+            .collect()
+    };
+    let watched = || {
+        for view in [vec!["runs"], vec!["status"]] {
+            let rendered = world.run_on_agentgraph(&view);
+            rendered.exited(0);
+            let line = rows(&rendered.stdout)
+                .into_iter()
+                .find(|line| line.contains(run))
+                .unwrap_or_else(|| panic!("no line for the run in:\n{}", rendered.stdout))
+                .to_string();
+            assert!(
+                line.contains("ACTIVE") && !line.contains("OBSERVER"),
+                "a run whose monitor took its turn is not reported watched: {line}\n\
+                 the observer recorded: {:#?}",
+                observer_events()
+                    .into_iter()
+                    .filter(|event| event["kind"] != "member-heartbeat")
+                    .map(|event| json!([event["kind"], event["payload"]]))
+                    .collect::<Vec<_>>()
+            );
+        }
+    };
+
+    let mut start = host(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    start.current_dir(&launch);
+    let mut driver = start.spawn().expect("the attached launch starts");
+    world.until("the monitor's first turn to complete", |_| {
+        !monitor_turns_completed().is_empty() || !refused_deaths().is_empty()
+    });
+    assert!(
+        refused_deaths().is_empty(),
+        "the monitor died on the launch directory's config: {:#?}",
+        refused_deaths()
+    );
+    // The graph run that took it, as the run's own launch record names its
+    // observer: so the turn read here is the launch's monitor and not a node's.
+    let launched_by = monitor_turns_completed()[0]["labels"]["run_id"].clone();
+    assert_eq!(
+        world.run_json(run, "launch.json")["graph_run"],
+        launched_by,
+        "the completed turn is not the launch's own observer's"
+    );
+    watched();
+
+    world.release("turn.go");
+    world.release("turn.settle");
+    assert!(
+        driver.wait().expect("the launch is waited on").success(),
+        "the launch did not exit cleanly at the gate: {}",
+        world.dump()
+    );
+    world.unscript("turn.go");
+    world.unscript("turn.settle");
+    world.run(&["attest", run, "approve"]).exited(0);
+
+    // Adopted from elsewhere: the recorded launch directory is what the
+    // relaunched monitor works in, so it meets the same config.
+    let mut adopter = host(&["adopt", run]).spawn().expect("the adoption starts");
+    world.until("the relaunched monitor's first turn to complete", |_| {
+        monitor_turns_completed()
+            .iter()
+            .any(|event| event["labels"]["run_id"] != launched_by)
+            || !refused_deaths().is_empty()
+    });
+    assert!(
+        refused_deaths().is_empty(),
+        "the relaunched monitor died on the launch directory's config: {:#?}",
+        refused_deaths()
+    );
+    let relaunched = world.run_json(run, "launch.json");
+    assert!(
+        relaunched["graph_run"] != launched_by
+            && monitor_turns_completed()
+                .iter()
+                .any(|event| event["labels"]["run_id"] == relaunched["graph_run"]),
+        "the turn that completed is not the adoption's own observer's: {relaunched}"
+    );
+    watched();
+
+    world.release("turn.go");
+    world.release("turn.settle");
+    assert!(
+        adopter.wait().expect("the adoption is waited on").success(),
+        "the adoption did not drive the run to its end: {}",
+        world.dump()
+    );
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the run did not settle: {}",
+        world.dump()
+    );
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
 /// The retained driver reads its own `--event-filter`, and refuses one it could
 /// not honour.
 ///
@@ -6837,6 +7113,288 @@ fn a_stop_ends_an_observer_restart_asked_between_its_cancel_and_its_signal() {
 #[test]
 fn a_stop_ends_an_observer_restart_asked_after_its_signals_listing() {
     a_stop_ends_an_observer_restart_asked(RestartAsked::AfterTheSignalsListing);
+}
+
+/// A run whose observer's judge is a long-lived command, let settle `failing`
+/// or not with no stop, on a driver that is `detached` or attached: once that
+/// driver has exited, no judge any of its observers started is still running —
+/// and another run's observer judge, on the same host and still watching its own
+/// run, is left as it was.
+///
+/// The worker turn is held until both observers' judges are up, so the judge
+/// is running before the run it watches settles rather than started late or
+/// never. The gates are the double's own, released by the journey.
+#[cfg(unix)]
+fn a_settled_run_ends_its_observers_command_judge(failing: bool, detached: bool) {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge(&format!(
+        "observer-command-settles-{}-{}",
+        if failing { "failed" } else { "done" },
+        if detached { "detached" } else { "attached" }
+    ));
+    // The neighbour: a second run on the same host and the same graph store,
+    // its observer's judge as long-lived as the first's, and its own worker
+    // turn held on gates of its own so nothing this journey releases ends it.
+    world.script("turn.gates", "Do work. turn\nDo neighbour. neighbour");
+    if failing {
+        world.script("harness.fail", "1");
+    }
+    let neighbour_path = world.plan(
+        "neighbour",
+        &plan_of("neighbour", vec![agent("neighbour", &[])]),
+    );
+    let mut neighbour = world
+        .agentgraph_cmd(&[
+            "start",
+            &neighbour_path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the neighbour's attached engine starts");
+    world.until("the neighbour's observer judge to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let neighbours = judges_started(&judges);
+    let mode = if detached { "--detach" } else { "--attach" };
+    let mut start =
+        world.agentgraph_cmd(&["start", &path, mode, "--dag-graph", &world.dag_graph()]);
+    start
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut owner = start.spawn().expect("the engine starts");
+    let driver = if detached {
+        let announced = owner
+            .wait_with_output()
+            .expect("the detached launch announces its driver");
+        let announced: Value = serde_json::from_slice(&announced.stdout)
+            .expect("a detached launch announces its driver as JSON");
+        let pid = announced["pid"]
+            .as_u64()
+            .expect("the announcement names a pid");
+        u32::try_from(pid).expect("a pid fits")
+    } else {
+        let pid = owner.id();
+        std::thread::spawn(move || owner.wait());
+        pid
+    };
+    world.until("this run's observer judge to start", |_| {
+        judges_started(&judges).len() > neighbours.len()
+    });
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    world.until("this run's driver to settle the run and exit", |world| {
+        world.run_file("command-stop", "result.json").is_file() && process_ended(driver)
+    });
+    let ours: Vec<u32> = judges_started(&judges)
+        .into_iter()
+        .filter(|pid| !neighbours.contains(pid))
+        .collect();
+    let surviving: Vec<u32> = ours
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    let neighbour_left = neighbours.iter().all(|pid| !process_ended(*pid));
+    // Only what this journey's own runs started, and only by recorded pid: the
+    // survivors here, and the neighbour through its own stop.
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let reaped = std::thread::spawn(move || neighbour.wait());
+    let stopped = world.run_on_agentgraph(&["stop", "neighbour"]);
+    let neighbour_judges_left = end_judges_surviving_the_stop(&judges);
+    reaped
+        .join()
+        .expect("the neighbour's reaper finishes")
+        .expect("the neighbour's engine exits");
+    let state = if failing { "failed" } else { "done" };
+    assert_eq!(
+        world.run_json("command-stop", "result.json")["nodes"][0]["status"],
+        state,
+        "the run did not settle {state}:\n{}",
+        world.dump()
+    );
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {ours:?} outlived the driver of a run \
+         that settled {state}"
+    );
+    assert!(
+        neighbour_left,
+        "ending one run ended another run's observer judge {neighbours:?}"
+    );
+    stopped.exited(0);
+    assert!(
+        neighbour_judges_left.is_empty(),
+        "the neighbour's stop left its judge(s) {neighbour_judges_left:?} running"
+    );
+}
+
+/// Before a run's end waited for its observer graph to stop, a run that settled
+/// on its own left its observer's command judge running, re-parented to init.
+#[cfg(unix)]
+#[test]
+fn an_attached_run_that_settles_done_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(false, false);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_attached_run_that_settles_failed_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(true, false);
+}
+
+/// The same for a detached run's driver, whose observer is a process of its own.
+#[cfg(unix)]
+#[test]
+fn a_detached_run_that_settles_done_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(false, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_detached_run_that_settles_failed_ends_its_observers_command_judge() {
+    a_settled_run_ends_its_observers_command_judge(true, true);
+}
+
+/// An attached run whose observer's own cancel is delayed past the teardown
+/// patience still has no judge of that observer running once its driver exits:
+/// the driver ends what the graph started rather than leaving on the patience.
+///
+/// The delay is the relay's, held at its private ordering gate between being
+/// asked to cancel and passing the ask on — the window a driver that exited on
+/// its cancel alone lost the judge in. It is never released.
+#[cfg(unix)]
+#[test]
+fn a_delayed_observer_teardown_still_ends_its_judge_before_the_driver_exits() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("settled-delayed-observer");
+    // llmlint: ignore-block[tests_mirror_real_usage] how late the relay passes
+    // the cancel on is the property, and no user-facing input can place it. The
+    // failpoint only orders the real binary's relay; the launch, the graph, the
+    // judge and every outcome asserted are the binary's own.
+    let relay = crate::harness::Rendezvous::failpoint();
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    start
+        .env("ONEPIPELINE_TEST_RELAYED_CANCEL_GATE", relay.address())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let owner = start.spawn().expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let settled = std::thread::scope(|scope| {
+        let exited = scope.spawn(|| owner.wait_with_output().expect("the attached engine exits"));
+        let _delayed = relay.arrived();
+        exited.join().expect("the engine's reaper finishes")
+    });
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert_eq!(
+        world.run_json("command-stop", "result.json")["state"],
+        "complete",
+        "{said}"
+    );
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {started:?} outlived a driver whose \
+         observer teardown was delayed:\n{said}"
+    );
+    assert!(
+        said.contains("the processes it started are ended"),
+        "the teardown was not delayed past the patience, so nothing here waited it out:\n{said}"
+    );
+}
+
+/// A settled run whose observer graph cannot be signalled — a file stands where
+/// its signal directory belongs, so neither the driver nor the graph's own relay
+/// can write its stop — still has no judge of that observer running once its
+/// driver exits, and the driver says the cancel failed.
+#[cfg(unix)]
+#[test]
+fn a_settled_runs_observer_that_cannot_be_signalled_still_has_its_judge_ended() {
+    use crate::harness::process_ended;
+
+    let (world, path, judges) = observed_by_a_command_judge("settled-observer-unsignalled");
+    let owner = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the attached engine starts");
+    world.until("the observer command provider to start", |_| {
+        !judges_started(&judges).is_empty()
+    });
+    let graph = world.run_json("command-stop", "launch.json")["graph_run"]
+        .as_str()
+        .expect("the observer has an ID")
+        .to_owned();
+    let root = world.graph_state().join(graph);
+    let signals = root.join(oneagentgraph::run::SIGNAL_DIR);
+    // llmlint: ignore-block[tests_mirror_real_usage] an observer store the
+    // sibling cannot write its stop signal into is a host-filesystem failure no
+    // verb manufactures. A real file is put where the real directory was; the
+    // launch, the graph, the judge and the outcome are the binary's own.
+    std::fs::remove_dir_all(&signals).expect("the signal directory is removed");
+    std::fs::write(&signals, "not a directory").expect("the signal cannot be written");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    for gate in ["turn.go", "turn.settle"] {
+        world.script(gate, "");
+    }
+    let settled = owner.wait_with_output().expect("the attached engine exits");
+    let started = judges_started(&judges);
+    let surviving: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    for pid in &surviving {
+        end_process(*pid);
+    }
+    let said = String::from_utf8_lossy(&settled.stderr);
+    assert!(
+        surviving.is_empty(),
+        "observer command judge(s) {surviving:?} of {started:?} outlived the driver:\n{said}"
+    );
+    assert!(
+        said.contains("cancel observer") && said.contains("ending its processes"),
+        "the driver did not say its cancel failed:\n{said}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&signals).expect("the file is still there"),
+        "not a directory"
+    );
 }
 
 /// A missing observer record cannot create a replacement graph directory or

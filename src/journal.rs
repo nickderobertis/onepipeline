@@ -1006,6 +1006,12 @@ pub const SETTLED_BASE: &str = "base";
 /// node had stack parents.
 pub const SETTLED_STACK: &str = "stack";
 
+/// The `node-settled` payload field naming the releases a node held for them still
+/// awaits — `[{producer, target}]`, in the order its reference rows list them —
+/// present exactly on a `complete-but-held` settlement and on an awaiting-release
+/// `complete-but-draft` one.
+pub const SETTLED_AWAITING: &str = "awaiting";
+
 /// The `node-settled` payload field saying what putting a kept branch on its
 /// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,
 /// in `onevcs::Preservation`'s own words.

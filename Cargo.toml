@@ -746,6 +746,21 @@ resolver = "2"
 # answer a ref, repository or landing read it has already answered (onevcs #540),
 # which the busy round's git-start bound holds.
 #
+# `onevcs` 0.57.0 is the floor because it carries the **host public phrases**:
+# `$ONEVCS_HOME/public-phrases.yml`, read by `onevcs::public_phrases`, lists exact
+# phrases a host declares public though a private term occurs inside them, and the
+# one matcher exempts a hit lying wholly inside one. The engine screens its own
+# public writes — settlement write-backs, channel replies and notes — through the
+# onevcs it *links*, so below this floor it refused what the host's own commands
+# let through. A file it cannot read makes a check unavailable under the new
+# `Unavailability::PublicPhrases`, which this crate constructs nothing of and
+# matches nowhere. `boundary::fingerprint` digests the list, so a bus pass cache
+# rejudges a payload once a phrase changes; `tests/e2e/publication_boundary.rs`'s
+# `a_host_public_phrase_*`, `a_payload_passed_under_a_host_phrase_*` and
+# `a_malformed_host_phrase_file_*` journeys drive both. A **requirement**, because
+# `^0.56` admits no 0.57.x; `onevcs-testing` 0.19.22 requires exactly it, so the
+# two move as one.
+#
 # 0.56.1 below it is the release whose two new shapes this crate reads: a
 # publication held on `boundary::Unavailability::HostVisibility` settles as that
 # unavailable check, and `WorkspaceCapacity::ineligible` is named in a held node's
@@ -821,6 +836,15 @@ resolver = "2"
 # stops. The attached observer stop journey in
 # `tests/e2e/dispatch.rs` exercises it through this engine's start and stop verbs.
 #
+# `oneagentgraph` 0.9.0 is the floor because it runs a two-party member's worker
+# side under its own stamped config alone, never over an `oneharness.toml`
+# discovered in its worktree — below it the observer's monitor died on its first
+# turn in a launch directory carrying one it could not satisfy. `tests/e2e/
+# dispatch.rs`'s
+# `an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy`
+# holds it. It requires `onejudge ^0.22.0`, which `^0.21` admits no version of,
+# so the two requirements move as one.
+#
 # `just engines-current` fails when a resolution lags its requirement *or* when
 # the lock carries one engine twice, and `tests/linked_engines.rs` reaches the
 # second with no registry at all. A newer release one of these pins **holds back**
@@ -841,8 +865,8 @@ resolver = "2"
 rust-version = "1.97"
 
 [workspace.dependencies]
-oneagentgraph = "0.8.0"
-onevcs = "0.56.11"
+oneagentgraph = "0.9.0"
+onevcs = "0.57.0"
 # The wire core, and the only bus package in this graph. The agent stack's
 # vocabulary — the envelope, its labels, the three sources, the four phases, the
 # filter grammar, the reader, the merge and the event schema families — is
@@ -972,7 +996,15 @@ onemessagebus = "0.9.3"
 # the shared app-server sweeper 0.19.5 introduced (onejudge #177). A requirement
 # for the same pre-1.0 reason: `^0.19` admits no 0.20.x. `oneagentgraph` 0.6.0
 # requires it, so the lock resolves onejudge once.
-onejudge = "0.21.0"
+#
+# **0.22.0 pins the worker side to one config**: the oneharness provider's
+# `worker_config` names the file a worker turn layers under onejudge's history
+# default and nothing else, where 0.21.0 layered the files discovered from the
+# worktree there too. It is what `oneagentgraph` 0.9.0 composes, and that release
+# requires it. A requirement for the same pre-1.0 reason: `^0.21` admits no
+# 0.22.x. `src/note.rs` re-exports its `note` shapes through `oneagentgraph::note`
+# unchanged.
+onejudge = "0.22.0"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
@@ -1098,7 +1130,7 @@ oneharness-core = "0.29.1"
 # pair to the newest each requirement permits and refuses a lock carrying either
 # twice, so the versions stay on the line below and in the lock rather than being
 # restated here.
-onevcs-testing = "0.19.21"
+onevcs-testing = "0.19.22"
 # The store, linked: `src/taskgraph.rs` says how the engine calls it. `-plugin-api` is
 # named for the values the store answers with, and `-local-md` for the plugin
 # `crates/testfakes` hosts in process.
@@ -1194,9 +1226,19 @@ onevcs-testing = "0.19.21"
 # task's own record, so a dependency read names a far end under a tracker the host does not
 # configure in `unanswered`, and adds five refusals `src/writeback.rs` names in the store's
 # words.
-onetaskgraph-core = "=0.12.1"
-onetaskgraph-plugin-api = "=0.12.1"
-onetaskgraph-local-md = "=0.12.1"
+# **0.12.3 is the floor because the write-back worker writes through it**: every running
+# graph's protected writes in `src/writeback.rs` take its cheaper store startup and copy,
+# and `justfile`'s CLI is held to it so the host reads the store release its driver links.
+# **0.12.4 takes what Linear stored off each write's own answer**, retiring
+# `TaskSource::stored_form`, and batches a copy's origin lookups into one read; the loopback
+# Linear in `tests/e2e/linear_loopback.rs` answers what it now sends.
+# **0.12.5 lets a public projection carry an anchor whose only attribute is `id` or `name`**,
+# so a private plan whose public task owns a schema-2 budget copies onto the board
+# (`tests/e2e/publication_boundary.rs`'s
+# `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
+onetaskgraph-core = "=0.12.5"
+onetaskgraph-plugin-api = "=0.12.5"
+onetaskgraph-local-md = "=0.12.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1213,7 +1255,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.91.0"
+version = "0.93.1"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."

@@ -268,7 +268,7 @@ pub(crate) fn verdict(
     if decision_outstanding() {
         return Verdict::Paused;
     }
-    if present.contains(&NodeStatus::CompleteDraft) {
+    if present.iter().any(|status| status.awaits_release()) {
         return Verdict::NotEnded;
     }
     if present.contains(&NodeStatus::Failed) || present.contains(&NodeStatus::Skipped) {
@@ -767,7 +767,7 @@ fn edit_named(edit: &Envelope) -> String {
 ///   carries the liveness has already answered `true`; a dependency that is
 ///   parked, waiting or failed makes its dependents `blocked` or `skipped`
 ///   instead, so a `pending` node with no such ancestor cannot be derived.
-/// * `complete-but-draft` is **unreachable from here**, which is why no journey
+/// * `complete-but-draft` and `complete-but-held` are **unreachable from here**, which is why no journey
 ///   drives it: [`judge`] answers `NotEnded` for a graph holding one, so a run
 ///   that has ever held such a node has never fired and has no marker to retire.
 ///   It is answered rather than swept into the `false` arm because the day a
@@ -779,7 +779,7 @@ fn edit_named(edit: &Envelope) -> String {
 fn live(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| match status {
         NodeStatus::Ready | NodeStatus::Running => true,
-        NodeStatus::Waiting | NodeStatus::CompleteDraft => true,
+        NodeStatus::Waiting | NodeStatus::CompleteDraft | NodeStatus::CompleteHeld => true,
         NodeStatus::Pending
         | NodeStatus::Blocked
         | NodeStatus::Parked
@@ -1309,16 +1309,16 @@ mod tests {
     fn a_draft_waiting_on_a_release_has_not_ended_and_an_empty_graph_has_not_begun() {
         let root = scratch("not-ended");
         let paths = RunPaths::under(&root, "demo");
-        for beside in [NodeStatus::Done, NodeStatus::Failed, NodeStatus::Parked] {
-            assert_eq!(
-                judge(
-                    &holding(&[("build", beside), ("lift", NodeStatus::CompleteDraft)]),
-                    &paths
-                ),
-                Judged::NotEnded,
-                "a draft beside a {} node was judged an ending",
-                beside.as_str()
-            );
+        for awaiting in [NodeStatus::CompleteDraft, NodeStatus::CompleteHeld] {
+            for beside in [NodeStatus::Done, NodeStatus::Failed, NodeStatus::Parked] {
+                assert_eq!(
+                    judge(&holding(&[("build", beside), ("lift", awaiting)]), &paths),
+                    Judged::NotEnded,
+                    "a {} node beside a {} node was judged an ending",
+                    awaiting.as_str(),
+                    beside.as_str()
+                );
+            }
         }
         assert_eq!(judge(&RunState::default(), &paths), Judged::NotEnded);
         // And the draft landing is what ends it.

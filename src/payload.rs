@@ -62,6 +62,9 @@ pub(crate) enum Status {
     /// `complete-but-draft`.
     #[serde(rename = "complete-but-draft")]
     CompleteDraft,
+    /// `complete-but-held`.
+    #[serde(rename = "complete-but-held")]
+    CompleteHeld,
     /// `failed`.
     Failed,
     /// `skipped`.
@@ -81,6 +84,7 @@ impl From<crate::graph::NodeStatus> for Status {
             S::Cancelled => Self::Cancelled,
             S::Done => Self::Done,
             S::CompleteDraft => Self::CompleteDraft,
+            S::CompleteHeld => Self::CompleteHeld,
             S::Failed => Self::Failed,
             S::Skipped => Self::Skipped,
         }
@@ -549,7 +553,28 @@ pub(crate) struct NodeSettled {
     /// rather than dispatched. Entry 119 of `docs/contract-divergences.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) continued: Option<Continued>,
+    /// The releases a node held for them still awaits, one per release in the
+    /// order its reference rows list them: present exactly on a `complete-but-held`
+    /// settlement and on a `complete-but-draft` one awaiting a release, and absent
+    /// from every other. What a view reads the wait off, rather than the detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaiting: Option<Vec<Awaited>>,
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] a wire document: a repository
+// identity is a `String` on every surface `onevcs` publishes and on the reference row it is
+// copied from, and a target name is written as the word `onevcs::TargetName` already
+// checked when the row was read; nothing reads either back to decide anything.
+/// One release a held node still awaits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Awaited {
+    /// The producer's repository identity, its normalized origin.
+    pub(crate) producer: String,
+    /// The release target of it awaited: the one the node's `consumes` names, else
+    /// the producer's `default_target`.
+    pub(crate) target: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A settlement a launch continued from its project's store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2916,6 +2941,7 @@ mod tests {
             S::Cancelled,
             S::Done,
             S::CompleteDraft,
+            S::CompleteHeld,
             S::Failed,
             S::Skipped,
         ] {

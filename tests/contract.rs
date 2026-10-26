@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("139.")["bundle_versions"]["events"],
+        divergence_block("141.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -7900,7 +7900,7 @@ const RULINGS: &[(&str, &str)] = &[
         "never its project's: a public task of a private coordinating project is public",
     ),
     // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
-    ("142.", "`replies-cursor.json.offset`"),
+    ("143.", "`replies-cursor.json.offset`"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -10430,7 +10430,9 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
 /// held to the type's fields and to the schema's words.
 #[test]
 fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
-    use onepipeline::views::{EndedNode, Ending, EndingKind, Paused, RunReading, RunView};
+    use onepipeline::views::{
+        AwaitedRelease, EndedNode, Ending, EndingKind, Paused, ReadingNode, RunReading, RunView,
+    };
 
     // For serialization: the document is what the type writes, so a field it
     // always writes is required, and an `Option` is written as `null`.
@@ -10459,7 +10461,7 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let reading = RunReading {
         labels: Default::default(),
         group: None,
-        schema_version: 2,
+        schema_version: 3,
         run_id: "demo-1".into(),
         public_id: "demo-1".into(),
         word: "ENDED failed",
@@ -10474,6 +10476,22 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             }],
         }),
         paused: None,
+        nodes: vec![
+            ReadingNode {
+                id: "build".into(),
+                status: "done",
+                outcome: Some("merged".into()),
+                detail: None,
+                awaiting: None,
+            },
+            ReadingNode {
+                id: "sign-off".into(),
+                status: "failed",
+                outcome: Some("settled-from-evidence".into()),
+                detail: Some("the release notes were never signed".into()),
+                awaiting: None,
+            },
+        ],
         unanswered: Vec::new(),
         inbox: Vec::new(),
     };
@@ -10481,6 +10499,30 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
         example,
         serde_json::to_value(&reading).expect("a reading serialises"),
         "the contract's example is not what the type writes"
+    );
+    // A node held for its releases carries what it awaits, as the contract's
+    // second example spells it; every other node omits the key.
+    let held: Value = serde_json::from_str(&fenced_block_naming("json", "\"awaiting\": [{"))
+        .expect("the contract's held node example is JSON");
+    assert_eq!(
+        held,
+        serde_json::to_value(ReadingNode {
+            id: "consumer".into(),
+            status: "complete-but-held",
+            outcome: Some("held-for-release".into()),
+            detail: Some(
+                "complete, and held unlanded: awaiting the crate release of \
+                 github.com/owner/engine, kept on feat/consumer at 4f2c9e1 (pushed); it lands \
+                 when that release arrives"
+                    .into()
+            ),
+            awaiting: Some(vec![AwaitedRelease {
+                producer: "github.com/owner/engine".into(),
+                target: "crate".into(),
+            }]),
+        })
+        .expect("a node serialises"),
+        "the contract's held node example is not what the type writes"
     );
     let paused = serde_json::to_value(Paused {
         human_actions: vec!["approve".into()],
@@ -10535,6 +10577,8 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             "`EndingKind { Complete, Failed, Unfinished, Stopped }`",
             "`Ending { kind, nodes: Vec<EndedNode> }`",
             "`EndedNode { id, status, outcome }`",
+            "`ReadingNode { id, status, outcome, detail, awaiting }`",
+            "`AwaitedRelease { producer, target }`",
             "`Paused { human_actions: Vec<String>, blocking_surface: bool }`",
             "`reading(&RunView) -> RunReading`",
             "`standing_word_of(&RunSummary) -> &'static str`",

@@ -507,6 +507,10 @@ pub struct Settlement {
     /// What a readjusted draft's retarget after its push answered, on the settlement
     /// that ends one: the word its `node-readjusted` records, or why it was not moved.
     pub(crate) readjusted: Option<std::result::Result<crate::payload::RetargetWord, String>>,
+    /// The releases a node held for them still awaits, on a `complete-but-held`
+    /// settlement and an awaiting-release `complete-but-draft` one, and empty on
+    /// every other — which is what keeps `node-settled`'s `awaiting` off them.
+    pub(crate) awaiting: Vec<crate::payload::Awaited>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -538,6 +542,7 @@ impl Settlement {
             stack: None,
             restacked: None,
             readjusted: None,
+            awaiting: Vec::new(),
         }
     }
 }
@@ -1756,8 +1761,10 @@ fn converge(
         // consumer recorded is noticed.
         let has_upstreams = !crate::crossdag::edges(&state.graph).is_empty();
         if has_upstreams && due(read_upstreams, UPSTREAM_EVERY) {
-            read_upstreams = Some(Instant::now());
             let resolved = upstreams.resolve(&state.graph, paths, journal)?;
+            // The instant the reads began, so the next one is paced from the same
+            // clock reading that counts it early or not.
+            read_upstreams = upstreams.resolved_at();
             if resolved != state.cross_dag {
                 state.cross_dag = resolved;
                 derived = None;
@@ -1787,6 +1794,7 @@ fn converge(
                             | NodeStatus::Ready
                             | NodeStatus::Blocked
                             | NodeStatus::CompleteDraft
+                            | NodeStatus::CompleteHeld
                     )
                 })
         });
@@ -3589,6 +3597,7 @@ fn holds_now(
                 | NodeStatus::Ready
                 | NodeStatus::Blocked
                 | NodeStatus::CompleteDraft
+                | NodeStatus::CompleteHeld
         ) {
             continue;
         }
@@ -3958,16 +3967,14 @@ fn addressed_by(envelope: &Envelope) -> Option<TurnAddress> {
 
 /// Whether any node could still change state without an edit or an attestation.
 ///
-/// `ready` and `running` are the obvious two. A **draft-complete** node is the
-/// third: this loop is what watches for the release that lifts its draft, so
-/// breaking here would settle the run with the temporary pin still in the change.
-/// Everything else is settled or gated by something only the channel delivers.
+/// `ready` and `running` are the obvious two. A node that
+/// [awaits a release](NodeStatus::awaits_release) — draft- or held-complete — is
+/// the third: this loop is what watches for the release that lands it, so breaking
+/// here would settle the run with the temporary pin still unlanded. Everything else
+/// is settled or gated by something only the channel delivers.
 fn any_node_can_still_move(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| {
-        matches!(
-            status,
-            NodeStatus::Ready | NodeStatus::Running | NodeStatus::CompleteDraft
-        )
+        matches!(status, NodeStatus::Ready | NodeStatus::Running) || status.awaits_release()
     })
 }
 
@@ -8336,8 +8343,9 @@ fn adopt_releases(
     in_flight: &BTreeMap<String, Dispatch>,
 ) -> Result<bool> {
     // Every node an arrival is owed to: the dispatches in flight, and the nodes
-    // this run stopped short of merging. A node in neither has either not been
-    // told anything to correct or has already settled on what it was told.
+    // this run stopped short of merging — held as a draft, or held unlanded on
+    // their origin. A node in neither has either not been told anything to
+    // correct or has already settled on what it was told.
     let told: Vec<Node> = in_flight
         .values()
         .map(|dispatch| dispatch.node.clone())
@@ -8345,7 +8353,11 @@ fn adopt_releases(
             state
                 .graph
                 .iter()
-                .filter(|node| statuses.get(&node.id) == Some(&NodeStatus::CompleteDraft))
+                .filter(|node| {
+                    statuses
+                        .get(&node.id)
+                        .is_some_and(|status| status.awaits_release())
+                })
                 .cloned(),
         )
         .collect();
@@ -9847,7 +9859,7 @@ fn spawn(
                 )
             };
             let settlement = match ending {
-                Ending::Settled(settlement) => settlement,
+                Ending::Settled(settlement) => *settlement,
                 // No settlement to record and nothing kept: the refusal came
                 // before any dispatch started, so there is no registry entry to
                 // hold until the record catches up. The loop takes the node out
@@ -9915,10 +9927,10 @@ fn execute_direct(
     let controls = match crate::controls::NodeControls::of_node(node) {
         Ok(controls) => controls,
         Err(why) => {
-            return Ending::Settled(Settlement {
+            return Ending::Settled(Box::new(Settlement {
                 detail: Some(why),
                 ..Settlement::plain(&node.id, NodeStatus::Failed, Some(INVALID_NODE))
-            })
+            }))
         }
     }; // llmlint: ignore-end[changed_behavior_has_e2e]
     let request = |attempt| DispatchRequest {
@@ -9933,7 +9945,7 @@ fn execute_direct(
     // A direct node's first dispatch is its first attempt: the record the loop
     // wrote for it says `1`, and only a boundary re-ask moves it.
     match attempt(executor, node, cancel, tx, &request, ended, NonZeroU32::MIN) {
-        Attempted::Drained(drained) => Ending::Settled(drained.settlement),
+        Attempted::Drained(drained) => Ending::Settled(Box::new(drained.settlement)),
         // A direct node opens no session, so nothing can refuse it one; the
         // arm is spelled because the seam is one seam.
         Attempted::Exhausted(refusal) => Ending::Exhausted(refusal),
@@ -9948,8 +9960,9 @@ fn execute_direct(
 /// a reader of the run's record sees a `node-requeued` where a `node-settled`
 /// would have been.
 pub(crate) enum Ending {
-    /// The node settled, and this is how.
-    Settled(Settlement),
+    /// The node settled, and this is how. Boxed, because it is much the larger
+    /// of the two.
+    Settled(Box<Settlement>),
     /// The identity admitted no session, so the node goes back to the queue:
     /// no settlement, and the loop holds it under `workspace` — on any attempt,
     /// a re-dispatch keeping where it stood for the dispatch that resumes it.
@@ -11929,6 +11942,9 @@ fn settle(paths: &RunPaths, journal: &mut Journal, settlement: &Settlement) -> R
     }
     if let Some(stack) = &settlement.stack {
         payload.insert(journal::SETTLED_STACK.into(), json!(stack));
+    }
+    if !settlement.awaiting.is_empty() {
+        payload.insert(journal::SETTLED_AWAITING.into(), json!(settlement.awaiting));
     }
     journal.emit(
         journal::PipelineKind::NodeSettled,

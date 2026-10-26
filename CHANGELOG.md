@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.93.1](https://github.com/nickderobertis/onepipeline/compare/v0.93.0...v0.93.1) - 2026-10-26
+
+### Fixed
+
+- *(deps)* link the plan store that carries an id-only anchor into a public projection ([#1213](https://github.com/nickderobertis/onepipeline/pull/1213))
+
+## [0.93.0](https://github.com/nickderobertis/onepipeline/compare/v0.92.0...v0.93.0) - 2026-10-25
+
+### Fixed
+
+- *(deps)* [**breaking**] link the oneagentgraph and onejudge that keep a member's worker side on its own config ([#1207](https://github.com/nickderobertis/onepipeline/pull/1207))
+
+### Performance
+
+- *(deps)* link the protected fast-copy store ([#1209](https://github.com/nickderobertis/onepipeline/pull/1209))
+
+## [0.92.0](https://github.com/nickderobertis/onepipeline/compare/v0.91.1...v0.92.0) - 2026-10-25
+
+### Added
+
+- *(deps)* [**breaking**] link the onevcs whose private-term check honours a host's public phrases ([#1205](https://github.com/nickderobertis/onepipeline/pull/1205))
+
+### Fixed
+
+- *(test)* hold the loop-cost journey to when the loop reads, not how many passes a slow runner completes ([#1206](https://github.com/nickderobertis/onepipeline/pull/1206))
+
+## [0.91.1](https://github.com/nickderobertis/onepipeline/compare/v0.91.0...v0.91.1) - 2026-10-25
+
+### Fixed
+
+- *(observer)* end the monitor's judge command when its run ends ([#1186](https://github.com/nickderobertis/onepipeline/pull/1186))
+
 ## [0.91.0](https://github.com/nickderobertis/onepipeline/compare/v0.90.0...v0.91.0) - 2026-10-25
 
 ### Added

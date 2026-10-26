@@ -1531,13 +1531,10 @@ fn the_compiled_validator_judges_targeted_and_untargeted_content_and_refuses_wha
     world.release("generalize.go");
 }
 
-#[test]
-fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_cached() {
-    let (world, private, _) = mixed_world("boundary-revalidated");
-    declare_terms(&world, &private, &["zephyrine"]);
-    world.script("generalize.wait", "hold");
-    // The bus this run launched under runs the compiled validator on its reply queue,
-    // keeping passes in a cache keyed by the validator's own fingerprint.
+/// Start `run` over the mixed plan with a `held` node beside it, under a bus whose
+/// reply queue runs the compiled validator and keeps its passes in a cache keyed by the
+/// validator's own fingerprint; answer that cache's directory once `held` is in flight.
+fn bussed_run(world: &World, run: &str) -> std::path::PathBuf {
     let validator = crate::harness::binary().to_string_lossy().into_owned();
     let cache = world.root.join("validator-passes");
     let config = world.root.join("onemessagebus.yaml");
@@ -1546,16 +1543,16 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
         format!(
             "version: 1\ntransport: {{kind: local}}\nvalidators:\n  - on: replies\n    kind: \
              command\n    command: [{validator:?}, boundary, validate-envelope, --run, \
-             bussed]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
-             boundary, validate-envelope, --run, bussed, --fingerprint]\n"
+             {run}]\n    cache:\n      dir: {cache:?}\n      bar_fingerprint: [{validator:?}, \
+             boundary, validate-envelope, --run, {run}, --fingerprint]\n"
         ),
     )
     .expect("the bus configuration is written");
     world.script("held.wait", "hold");
     let project = world.plan(
-        "bussed",
+        run,
         &mixed_plan(
-            "bussed",
+            run,
             vec![
                 crate::harness::agent("held", &[]),
                 producer("generalize", &[]),
@@ -1575,10 +1572,36 @@ fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_c
         .exited(0);
     world.until("the held node to be in flight", |world| {
         world
-            .events_of("bussed", "node-dispatched")
+            .events_of(run, "node-dispatched")
             .iter()
             .any(|event| event["labels"]["node"] == "held")
     });
+    cache
+}
+
+/// `validate-envelope --fingerprint` for `run`: the key a bus pass cache keys by.
+fn fingerprint_of(world: &World, run: &str) -> String {
+    world
+        .run(&[
+            "boundary",
+            "validate-envelope",
+            "--run",
+            run,
+            "--fingerprint",
+        ])
+        .stdout
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn a_payload_once_passed_is_judged_again_after_the_terms_change_whatever_a_bus_cached() {
+    let (world, private, _) = mixed_world("boundary-revalidated");
+    declare_terms(&world, &private, &["zephyrine"]);
+    world.script("generalize.wait", "hold");
+    // The bus this run launched under runs the compiled validator on its reply queue,
+    // keeping passes in a cache keyed by the validator's own fingerprint.
+    let cache = bussed_run(&world, "bussed");
 
     let payload =
         json!({"version": 3, "commands": [note("examples", "reuse the quillwort fixtures")]});
@@ -1737,6 +1760,167 @@ fn a_direct_reply_and_note_meet_the_same_check_without_any_bus() {
         "{}",
         replied.stderr
     );
+    world.release("generalize.go");
+}
+
+/// Commit a root `package.json` naming `package` in `repository`, so the boundary derives
+/// that package name as one of its terms.
+fn declare_package(world: &World, repository: &Repository, package: &str) {
+    std::fs::write(
+        repository.checkout.join("package.json"),
+        json!({"name": package, "version": "0.0.0"}).to_string(),
+    )
+    .expect("the manifest is written");
+    crate::harness::git(world, &repository.checkout, &["add", "-A"]);
+    crate::harness::git(
+        world,
+        &repository.checkout,
+        &["commit", "-m", "chore: declare a package"],
+    );
+    crate::harness::git(world, &repository.checkout, &["push", "origin", "main"]);
+}
+
+fn declare_phrases(world: &World, document: &str) {
+    std::fs::write(world.onevcs_home().join("public-phrases.yml"), document)
+        .expect("the public phrase file is written");
+}
+
+/// A synthetic host public phrase: the private package name `qorv` after a hyphen.
+const PHRASES: &str = "version: 1\nphrases:\n  - relay-qorv\n";
+
+fn replied(world: &World, run: &str, envelope: &Value) {
+    let replied = world.run_with_stdin(&["reply", run], &envelope.to_string());
+    assert!(
+        [0, onepipeline::error::EXIT_QUEUED].contains(&replied.code),
+        "{}",
+        replied.stderr
+    );
+}
+
+#[test]
+fn a_host_public_phrase_passes_a_direct_note_and_the_bare_term_beside_it_is_refused() {
+    let (world, private) = held_mixed_run("phrased", &[]);
+    declare_package(&world, &private, "qorv");
+    let phrased = json!({"version": 3, "commands": [note("examples", "restart relay-qorv")]});
+    // Without the phrase file the package name inside the phrase is a hit like any other.
+    refused_reply(&world, "phrased", &phrased.to_string()).err_has("for a public node");
+
+    declare_phrases(&world, PHRASES);
+    replied(&world, "phrased", &phrased);
+    validated(&world, "phrased", &phrased).exited(exit_for("pass"));
+    // The phrase exempts only the occurrence inside it: the bare term beside it is refused,
+    // in words that do not repeat it.
+    let beside = json!({"version": 3, "commands": [
+        note("examples", "restart relay-qorv, then qorv itself")
+    ]});
+    let refused = refused_reply(&world, "phrased", &beside.to_string());
+    refused.err_has("for a public node");
+    assert!(!refused.stderr.contains("qorv"), "{}", refused.stderr);
+    validated(&world, "phrased", &beside).exited(exit_for("refuse"));
+    let notes: Vec<String> = world
+        .events_of("phrased", "edit-committed")
+        .iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .map(|event| event["payload"]["command"]["text"].to_string())
+        .collect();
+    assert!(
+        notes.iter().all(|text| !text.contains("itself")),
+        "the refused note was committed: {notes:?}"
+    );
+    world.release("generalize.go");
+}
+
+#[test]
+fn a_payload_passed_under_a_host_phrase_is_judged_again_once_the_phrase_is_removed() {
+    let (world, private, _) = mixed_world("boundary-rephrased");
+    declare_terms(&world, &private, &[]);
+    declare_package(&world, &private, "qorv");
+    declare_phrases(&world, PHRASES);
+    world.script("generalize.wait", "hold");
+    let cache = bussed_run(&world, "rephrased");
+
+    let payload = json!({"version": 3, "commands": [note("examples", "restart relay-qorv")]});
+    let before = fingerprint_of(&world, "rephrased");
+    replied(&world, "rephrased", &payload);
+    let cached = std::fs::read_dir(&cache)
+        .map(|dir| dir.count())
+        .unwrap_or(0);
+    assert!(
+        cached > 0,
+        "the bus kept no pass, so it never ran the validator"
+    );
+
+    // Adding a phrase, changing one, and a file that cannot be read are each a new key.
+    declare_phrases(
+        &world,
+        "version: 1\nphrases:\n  - relay-qorv\n  - dock-qorv\n",
+    );
+    let added = fingerprint_of(&world, "rephrased");
+    assert_ne!(
+        before, added,
+        "the fingerprint did not move with an added phrase"
+    );
+    declare_phrases(&world, "version: 1\nphrases:\n  - dock-qorv\n");
+    let changed = fingerprint_of(&world, "rephrased");
+    assert_ne!(
+        before, changed,
+        "the fingerprint did not move with a changed phrase"
+    );
+    assert_ne!(added, changed);
+    declare_phrases(&world, "version: 1\nphrases: [relay-qorv\n");
+    let unreadable = fingerprint_of(&world, "rephrased");
+    assert_ne!(
+        before, unreadable,
+        "the fingerprint did not move with an unreadable phrase file"
+    );
+
+    // The phrase the payload rested on is removed: the same bytes are judged again,
+    // through the bus and directly, and refused.
+    declare_phrases(&world, "version: 1\nphrases: []\n");
+    assert_ne!(before, fingerprint_of(&world, "rephrased"));
+    refused_reply(&world, "rephrased", &payload.to_string()).err_has("for a public node");
+    validated(&world, "rephrased", &payload).exited(exit_for("refuse"));
+    let notes = world
+        .events_of("rephrased", "edit-committed")
+        .iter()
+        .filter(|event| event["payload"]["command"]["op"] == "note")
+        .count();
+    assert!(notes <= 1, "the refused note was committed again");
+    world.release("held.go");
+    world.release("generalize.go");
+}
+
+#[test]
+fn a_malformed_host_phrase_file_leaves_a_screened_note_unavailable_never_passed() {
+    let (world, private) = held_mixed_run("misphrased", &[]);
+    declare_package(&world, &private, "qorv");
+    declare_phrases(
+        &world,
+        "version: 1\nphrases:\n  - relay-qorv\nextra: true\n",
+    );
+    let phrased = json!({"version": 3, "commands": [note("examples", "restart relay-qorv")]});
+    validated(&world, "misphrased", &phrased)
+        .exited(exit_for("unavailable"))
+        .err_has("could not judge");
+    let replied = world.run_with_stdin(&["reply", "misphrased"], &phrased.to_string());
+    // It is refused as unjudgeable, naming onevcs's own reason, and quotes no phrase.
+    replied.exited(REFUSED).err_has("could not judge");
+    assert!(
+        replied.stderr.contains("public-phrases"),
+        "the refusal does not name the public-phrases reason: {}",
+        replied.stderr
+    );
+    assert!(!replied.stderr.contains("relay-qorv"), "{}", replied.stderr);
+    assert!(
+        world
+            .events_of("misphrased", "edit-committed")
+            .iter()
+            .all(|event| event["payload"]["command"]["op"] != "note"),
+        "a note the boundary could not judge was committed"
+    );
+    // Repaired, the same note passes.
+    declare_phrases(&world, PHRASES);
+    validated(&world, "misphrased", &phrased).exited(exit_for("pass"));
     world.release("generalize.go");
 }
 
@@ -2539,6 +2723,87 @@ fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_expor
         .expect("the consumer's projection");
     assert!(view.contains("title: 'feat: add examples'"), "{view}");
     assert!(view.contains("status: done"), "{view}");
+}
+
+/// A private plan whose public task carries an anchor naming only itself — `<a id="…"></a>`,
+/// what a plan-task template writes before a schema-2 budget — and an in-page link to it is
+/// copied into the private home through the store this crate links, and the store's public
+/// view of that task carries the anchor and the link as written. The store this was written
+/// against refused any such tag as a local link, so no mixed plan with a budgeted public task
+/// could be copied onto the board.
+#[test]
+fn a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store() {
+    let (world, _, _) = private_home_world("boundary-id-anchor");
+    const ANCHOR: &str = "<a id=\"library-copy-seconds\"></a>";
+    const LINK: &str = "[the budget](#library-copy-seconds)";
+    // A parked private task of the private repository homes the plan privately.
+    let mut inner = producer("inner", &[]);
+    inner["repo"] = json!("github.com/owner/service");
+    inner["classification"] = json!("private");
+    inner["parked"] = json!(true);
+    let mut budgeted = public("budgeted", &[]);
+    budgeted["repo"] = json!("github.com/owner/library");
+    budgeted["task"] = json!(format!(
+        "## What\nShip budgeted, held to {LINK}.\n\n{ANCHOR}\n\n\
+         | Budget | Limit |\n|---|---|\n| library copy seconds | 30 |\n\n\
+         ## Acceptance criteria\n- budgeted is published."
+    ));
+    let plan = mixed_plan("anchored", vec![inner, budgeted], vec![]);
+    let drafted = world.plan_in(&world.root.join("draft-store"), "anchored", &plan);
+    let identifier = drafted
+        .strip_prefix("plans:")
+        .expect("a project of the draft root")
+        .to_owned();
+    for root in [world.store(), world.root.join("views-store")] {
+        std::fs::create_dir_all(root).expect("a source root");
+    }
+
+    let draft = crate::harness::global(&format!("draft:{identifier}"));
+    let report = world.on_onevcs(|| {
+        world.store_call(|engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![draft]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new("plans")
+                        .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: true,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("the linked store copies the plan with its id anchor: {error}")
+                })
+        })
+    });
+    assert!(!report.items.is_empty(), "{report:?}");
+
+    // Both tasks are canonical in the private home, and the public one's view carries the
+    // anchor and the link whose fragment names it, byte for byte.
+    let canonical = files_under(&world.store().join("tasks").join(&identifier));
+    assert_eq!(canonical.len(), 2, "{canonical:?}");
+    let views: Vec<(String, String)> = files_under(&world.root.join("views-store"))
+        .into_iter()
+        .filter(|(path, _)| path.starts_with("tasks"))
+        .collect();
+    assert_eq!(views.len(), 1, "{views:?}");
+    let view = &views[0].1;
+    assert!(
+        view.contains(ANCHOR) && view.contains(LINK),
+        "the view lost the anchor or its link:\n{view}"
+    );
+    assert!(
+        !view.contains(&identifier),
+        "the view names the private plan:\n{view}"
+    );
 }
 
 /// In a private canonical home, a public task stays subject to every refusal it always was:

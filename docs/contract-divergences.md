@@ -1602,7 +1602,12 @@ and appended by the same rendering that appends `## Planner context`, so the
 worker pins against git rather than against a version that does not exist yet.
 When those releases arrive the still-running node is sent one `context` note at
 `deliver: auto` naming the versions, framed as observed state and adding no
-acceptance criteria.
+acceptance criteria. A node that finishes first is held until they do: as a
+`complete-but-draft` change request where its publication opens one (entry 51),
+and, where it opens none (`local-direct`), as a `complete-but-held` branch kept
+unlanded on its origin (entry 141). Either way the release arriving re-dispatches
+it on its own branch with that note, and its next publication lands. `consumes`
+is accepted under either adoption whatever the node's publication policy.
 
 Under `published` the node is **not scheduled at all** until every one of those
 dependencies answers released. It holds beside the existing `paused_by` gate
@@ -5473,7 +5478,9 @@ run will ever lift it — that status is for a draft a release arrives to lift, 
 it holds the run. Where the node also awaits a release, the release reason wins
 and the node settles `complete-but-draft` as before. Refused by the loader,
 before anything dispatches, on a node whose resolved publication opens no change
-request, in the shape `consumes` is refused on a `local-direct` identity.
+request, because there is no change request for it to be a draft of. A
+`consumes` is not refused there: a `fast` `local-direct` node awaiting a release
+is held unlanded as `complete-but-held` instead (entry 141).
 Reserved in the schema's metadata-key list and readable at every schema version
 this build reads, refused by its own name below the version that adds it,
 exactly as `body` is.
@@ -12819,7 +12826,69 @@ the host does. `src/taskgraph.rs`'s
 `the_boundary_fields_reconcile_with_the_records_they_are_read_from` reads a private project
 holding a public and a private task.
 
-## 141. A driver's cost grew with its run's history, and every member heartbeat was a journal record — OPEN
+## 141. A fast node on an identity that opens no change request could not wait for its release — OPEN
+
+**Proposal, for the planner who owns the contract: add one node status,
+`complete-but-held`, and one settlement outcome beside it, `held-for-release`;
+state that a `fast` node whose publication opens no change request, and whose
+release it adopted early is still out, is held unlanded on its origin until that
+release exists and is then re-dispatched and landed; give `node-settled` an optional
+`awaiting`; and give `status <RUN> --json` a per-node `nodes` list at run-reading
+schema version 3.** The plan this was built on states the shape, and the manager
+ruled the merge path's timing (`c-1e3731485a275a94025d526589aa677c`), `awaiting` as
+data (`c-d3ab23a843798ad5ee25f02e67ada63f`) and the reading's `nodes` with its
+version (`c-70b85c0d5fcfc95e6340da9c0c7b9fae`).
+
+Entry 51's draft is a state of a change request, so a `local-direct` identity —
+which squashes a branch onto its base with git alone — had nothing to hold a `fast`
+node's temporary pin in, and the loader refused every `consumes` on one. Waiting on a
+release and publishing without a change request are independent decisions, so the
+refusal is withdrawn: the loader accepts `consumes` on any publication under either
+adoption, and plan load and every live edit give one answer by construction.
+
+**The hold.** Where `release::awaiting` answers a release still out at the
+publication closeout, and the node's publication — its own `merge_policy`, else its
+identity's as `onevcs::rules_check` resolves it, read through
+`destination::opens_a_change_request` — opens no change request, the closeout calls
+no `onevcs` publish. It closes the session and puts the branch on the identity's
+origin through `onevcs::preserve`, and the node settles `complete-but-held` with
+`{outcome: "held-for-release", detail, branch, head, remote, awaiting}`. The detail
+reads `complete, and held unlanded: awaiting the <target> release of <producer>,
+kept on <branch> at <commit> (<pushed|already on origin|no origin>); it lands when
+that release arrives`. A preservation `onevcs` refuses settles `failed` under
+`infrastructure-failure`; a policy the closeout cannot read publishes with the reason
+as before, so `onevcs` decides. The hold is reached only after the dispatch's judge
+accepted the work. The identity's merge path does not run at the hold, because the
+preserving push carries no gate; it runs once, at landing, over the re-pinned tree.
+
+**The lift mirrors entry 51's exactly.** `complete-but-held` is read everywhere
+`complete-but-draft` is, through the one predicate `NodeStatus::awaits_release`: not
+settled, no dependent starts, a run holding only these is waiting and fires no hook,
+write-back projects it in progress, maintenance keeps its branch, `changes` books its
+time to the release wait. When every release it awaits answers released, the engine
+journals `release-adopted`, delivers the arrival note and returns the node to the
+frontier pinned to its branch; that dispatch's publication carries no reason and the
+normal `local-direct` publication lands it. A release of a target it does not await
+lifts nothing.
+
+**`awaiting`** is `[{producer, target}]`, one entry per release still awaited in the
+order the node's reference rows list them, written on every `complete-but-held`
+settlement and every awaiting-release `complete-but-draft` one, and absent from
+every other — so an older reader and every existing record are unaffected.
+`status <RUN> --json` carries it per node on the new `nodes` list, and a view reads
+it rather than the detail prose.
+
+```json
+{
+  "bundle_versions": {"events": "1.11.0"},
+  "run_reading_schema_version": 3,
+  "node_statuses": ["complete-but-held"],
+  "outcomes": ["held-for-release"],
+  "node_settled_fields": ["awaiting"]
+}
+```
+
+## 142. A driver's cost grew with its run's history, and every member heartbeat was a journal record — OPEN
 
 **Proposal, for the planner who owns the contract: the Merged stream paragraph, the
 `PARKED` paragraph and the `watch` verb take the three changes below.** The manager ruled
@@ -12894,7 +12963,7 @@ alone, and is back under it: 157 quota units in each of three runs on this host,
 171 and 171 on `main` at `2f569b5b` (ruled by the manager, correlation
 `c-77cf790d4e5ce3690a9c0a640758389c`).
 
-## 142. The bus's derived counts and byte-offset cursors added four files to a run's channel directory — RESOLVED
+## 143. The bus's derived counts and byte-offset cursors added four files to a run's channel directory — RESOLVED
 
 **Ruled by the planner on the plan node `op-journal-scaling`, and `docs/contract.md` edited to
 match.** This build links `onemessagebus` 0.9.4, the newest release `Cargo.toml` permits.

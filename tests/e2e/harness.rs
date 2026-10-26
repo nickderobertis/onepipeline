@@ -1814,8 +1814,20 @@ impl World {
     /// the release-targets document names it by — and the file its answer is
     /// written to.
     pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        self.probe_at(repository, name, probe_script().0)
+    }
+
+    /// The same, committed under a script name of its own — `<name>-probe.sh`, or
+    /// `.bat` — so one repository can carry a probe per release target, each
+    /// answering from its own file.
+    pub fn probe_for_target(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let script = format!("{name}-{}", probe_script().0);
+        self.probe_at(repository, name, &script)
+    }
+
+    fn probe_at(&self, repository: &Repository, name: &str, script: &str) -> (String, PathBuf) {
         let answer = self.root.join(format!("{name}.version"));
-        let (script, body) = probe_script();
+        let (_, body) = probe_script();
         let path = repository.checkout.join(script);
         onepipeline_testfakes::executable(
             &path,
@@ -7642,6 +7654,9 @@ pub struct Counts {
     pub statuses: u64,
     pub publications: u64,
     pub upstream_reads: u64,
+    /// Rounds of upstream reads begun before the upstream interval since the
+    /// round before them had passed.
+    pub early_upstream_reads: u64,
     pub release_asks: u64,
     /// Pool-maintenance sweeps the driver started.
     pub maintenance_sweeps: u64,
@@ -7668,6 +7683,7 @@ impl Counts {
             statuses: self.statuses - before.statuses,
             publications: self.publications - before.publications,
             upstream_reads: self.upstream_reads - before.upstream_reads,
+            early_upstream_reads: self.early_upstream_reads - before.early_upstream_reads,
             release_asks: self.release_asks - before.release_asks,
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
@@ -7702,6 +7718,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         statuses: count("statuses"),
         publications: count("publications"),
         upstream_reads: count("upstream_reads"),
+        early_upstream_reads: count("early_upstream_reads"),
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
@@ -7756,6 +7773,34 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
         "task": format!("## What\nShip {id}.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- {id} is published."),
         "deps": deps,
     })
+}
+
+/// Hold one node's every `node-settled` record and its `status <RUN> --json`
+/// entry to carrying **no** `awaiting`: the field is written only on a node held
+/// for a release it adopted early, and an older reader must never meet it on any
+/// other settlement.
+pub fn no_awaiting(world: &World, run: &str, node: &str) {
+    let settled = world.events_of(run, "node-settled");
+    let of_node: Vec<&Value> = settled
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    assert!(!of_node.is_empty(), "{node} never settled in {run}");
+    for event in of_node {
+        assert!(
+            event["payload"].get("awaiting").is_none(),
+            "{node}'s settlement carries `awaiting`: {event}"
+        );
+    }
+    let reading = world.run(&["status", run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .unwrap_or_else(|| panic!("`status {run} --json` does not list {node}: {reading}"));
+    assert!(
+        entry.get("awaiting").is_none(),
+        "{node}'s reading carries `awaiting`: {entry}"
+    );
 }
 
 /// A plan holding these nodes.

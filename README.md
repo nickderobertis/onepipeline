@@ -313,7 +313,13 @@ opened the change request as a draft and what the publication answered for it �
 never that the closeout marked it ready, because the closeout lifts nothing itself.
 A node declared `draft: true` leaves its change request as a draft for a person
 instead — opened as one, or held as one, and never lifted by green checks — and
-settles `done` with outcome `change-draft`; its dependents proceed. A node declared
+settles `done` with outcome `change-draft`; its dependents proceed. A `fast` node still
+awaiting a release it adopted early is held rather than landed: as a draft change request
+it settles `complete-but-draft` under `change-draft`, and on an identity whose publication
+opens no change request (`local-direct`) its finished branch is held unlanded on its origin
+and it settles `complete-but-held` with outcome `held-for-release`. Either way its
+dependents wait, and the release arriving re-dispatches it on that branch and lands it.
+`consumes` is accepted on every publication policy under either adoption. A node declared
 `publish: "preserve"` keeps its work rather than landing it: no drafter runs and
 nothing is published, its branch is put on the identity's origin with `onevcs
 preserve`, its session closes, and it settles `done` with outcome `preserved`, naming

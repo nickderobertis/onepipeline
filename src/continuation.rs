@@ -423,7 +423,7 @@ pub(crate) fn dispatch_of(
 /// Every key a stored settlement may carry: the registered `node-settled` document's, and
 /// `remote`, which the settling writer adds beside them for a node whose branch it put on an
 /// origin. `continued` is this build's own record of a launch, and never a stored field.
-const SETTLEMENT_KEYS: [&str; 12] = [
+const SETTLEMENT_KEYS: [&str; 13] = [
     "status",
     "outcome",
     "detail",
@@ -436,6 +436,7 @@ const SETTLEMENT_KEYS: [&str; 12] = [
     "completed_steps",
     "base",
     "stack",
+    "awaiting",
 ];
 
 /// Every key a stored settlement's `stack` carries, and every key one of its parents does.

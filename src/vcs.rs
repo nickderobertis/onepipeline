@@ -490,6 +490,17 @@ pub fn assemble_stack_base(request: &onevcs::StackBaseRequest) -> Result<onevcs:
 /// pin become permanent in a base branch in the first place.
 pub const DRAFTED: &str = "change-draft";
 
+/// The word a node settles on when its work is finished and accepted, its
+/// publication opens **no** change request, and a release it adopted early has
+/// not happened yet — so its branch is kept unlanded on its identity's origin as
+/// `complete-but-held` rather than squashed onto its base with the temporary pin
+/// in it.
+///
+/// [`DRAFTED`]'s twin for `local-direct`: there is no change request to be a
+/// draft, and the outcome says so rather than borrowing that word for a change
+/// that does not exist.
+pub const HELD_FOR_RELEASE: &str = "held-for-release";
+
 /// The word a node settles on when its change request's required checks came back
 /// green and it is **kept as a draft for its own user's review** — what `onevcs`'s
 /// draft lifecycle answers under `change-open` with approvals required.
@@ -3781,6 +3792,50 @@ mod tests {
                 "settles `done` with outcome `{REVIEW_DRAFTED}`, unlanded"
             )),
             "README.md does not say a green team draft settles done as {REVIEW_DRAFTED}"
+        );
+    }
+
+    /// The held-for-release word, and the status it settles under, are the ones
+    /// entry 141 of the divergence record names, and the contract and the README
+    /// name both in the same breath.
+    #[test]
+    fn the_held_for_release_word_is_what_the_divergence_record_names() {
+        let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+        let record = std::fs::read_to_string(docs.join("contract-divergences.md"))
+            .expect("the divergence record ships");
+        let entry = record
+            .split("\n## ")
+            .find(|entry| entry.starts_with("141."))
+            .expect("the record carries entry 141");
+        let block: serde_json::Value = entry
+            .split("```json")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .and_then(|block| serde_json::from_str(block).ok())
+            .expect("entry 141 carries the json block this test drives");
+        let held = crate::graph::NodeStatus::CompleteHeld.as_str();
+        assert_eq!(block["outcomes"], serde_json::json!([HELD_FOR_RELEASE]));
+        assert_eq!(block["node_statuses"], serde_json::json!([held]));
+        assert_eq!(
+            crate::graph::NodeStatus::parse(held),
+            Some(crate::graph::NodeStatus::CompleteHeld)
+        );
+        let flat = |path: std::path::PathBuf| {
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{} ships: {error}", path.display()))
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let said = format!("settles **`{held}`** with outcome **`{HELD_FOR_RELEASE}`**");
+        assert!(
+            flat(docs.join("contract.md")).contains(&said),
+            "docs/contract.md does not say a held node {said}"
+        );
+        let said = format!("settles `{held}` with outcome `{HELD_FOR_RELEASE}`");
+        assert!(
+            flat(docs.join("../README.md")).contains(&said),
+            "README.md does not say a held node {said}"
         );
     }
 

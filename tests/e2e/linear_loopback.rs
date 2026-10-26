@@ -37,6 +37,10 @@ pub const PROJECT: &str = "project-1";
 /// The operation one request named, by the root field of the document the plugin sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Operation {
+    /// `originIssues: issues originProjects: projects organization` beside
+    /// `teams{…states} projectStatuses`: every origin's counterpart a copy looks up, asked in one
+    /// request before its first write, with everything that write resolves riding on it.
+    CounterpartLookups,
     /// `teams{…states} projectStatuses`: everything a status write resolves, in one request.
     Resolution,
     /// `issue(id:)` beside `teams{…states} projectStatuses`: the issue an update naming a status
@@ -82,7 +86,9 @@ pub enum Operation {
 impl Operation {
     fn of(query: &str) -> Self {
         let query = query.trim_start();
-        if query.contains("issue(id:") && query.contains("teams(") {
+        if query.contains("originIssues:") {
+            Self::CounterpartLookups
+        } else if query.contains("issue(id:") && query.contains("teams(") {
             Self::IssueResolved
         } else if query.contains("teams(") && query.contains("projectStatuses(") {
             Self::Resolution
@@ -511,6 +517,21 @@ impl Linear {
             _ => "",
         };
         let data = match operation {
+            Operation::CounterpartLookups => {
+                // Every issue and the project, if it holds one, whatever the filters: the plugin
+                // confirms each row against each origin itself, as it does a listing's.
+                let mut data = world.resolution();
+                data["organization"] = json!({"id": "organization-1"});
+                data["originIssues"] = json!({
+                    "nodes": world.issues.iter().map(|held| world.render(held)).collect::<Vec<_>>(),
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                });
+                data["originProjects"] = json!({
+                    "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
+                    "pageInfo": {"hasNextPage": false, "endCursor": null},
+                });
+                data
+            }
             Operation::Resolution => world.resolution(),
             Operation::IssueResolved => {
                 let mut data = world.resolution();
@@ -552,7 +573,14 @@ impl Linear {
                     return refusal("an issueUpdate carries a non-empty `input` object");
                 };
                 match world.update(id, input) {
-                    Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
+                    Ok(mut issue) => {
+                        // A rewrite reads the issue's relations back in its own answer; this
+                        // endpoint relates nothing.
+                        if query.contains("relations(") {
+                            issue["relations"] = empty_page();
+                        }
+                        json!({"issueUpdate": {"success": true, "issue": issue}})
+                    }
                     Err(why) => return refusal(&why),
                 }
             }
@@ -588,9 +616,11 @@ impl Linear {
                 world.project_content = stored_form(content);
                 // The content as stored, which the plugin selects in its answer and compares
                 // with what it sent, as Linear answers it.
-                json!({"projectUpdate": {"success": true, "project": {
-                    "id": PROJECT, "content": world.project_content,
-                }}})
+                let mut project = world.project();
+                if query.contains("relations(") {
+                    project["relations"] = empty_page();
+                }
+                json!({"projectUpdate": {"success": true, "project": project}})
             }
             Operation::IssueCreate => {
                 let Some(input) = variables["input"].as_object() else {
@@ -838,6 +868,10 @@ impl World {
         for (field, value) in input {
             let valid = match (field.as_str(), value) {
                 ("stateId" | "description" | "title", Value::String(_)) => true,
+                // The team holds no labels, so the one label set an update can name is none.
+                ("labelIds", Value::Array(labels)) => labels.is_empty(),
+                // A rewrite restates the project the issue is filed under: the one held here.
+                ("projectId", Value::String(project)) => self.holds(project),
                 // Linear's own scale: 0 for none, then 1 (urgent) to 4 (low).
                 ("priority", Value::Number(priority)) => {
                     priority.as_u64().is_some_and(|priority| priority <= 4)
@@ -957,18 +991,18 @@ pub const PATIENCE: Duration = Duration::from_secs(120);
 /// issue's `description`, a project's `content` and a document's `content` is stored as this
 /// answers, and a read hands back what was stored.
 ///
-/// The rules are onetaskgraph-linear's, from the section of its crate documentation headed
-/// **"Ruling: what Linear does to Markdown on write, declared"**
-/// (`crates/onetaskgraph-linear/src/lib.rs`), which is their one authoritative statement. This
-/// is a model of that ruling written here, not a call into the plugin's own rewrite, so a plugin
-/// that sends what Linear would rewrite is answered with the rewritten text — and is refused
-/// `stored-content-diverged` by the store, or read back with a digest its provenance does not
-/// record — exactly as hosted Linear would answer it. Every rule holds outside a fenced block
-/// and outside an inline code span opened and closed on one line, which are kept byte for byte,
-/// and a Markdown link or image is kept as written. Each rule is listed in [`RULES`] with the
-/// ruling's own example. `the_loopback_stores_every_example_the_ruling_states` holds each, and
-/// `the_loopback_stores_what_the_linked_plugin_declares` reconciles the whole model with the
-/// linked plugin's own declaration, so a rule the ruling adds or changes fails here.
+/// The rules are the ones onetaskgraph-linear declared, up to 0.12.3, in the section of its
+/// crate documentation headed **"Ruling: what Linear does to Markdown on write, declared"**,
+/// with that ruling's own examples. From 0.12.4 the plugin predicts nothing: its ruling "what
+/// Linear stores is read off each write's own answer" takes the stored content from each
+/// write's answer and, where it differs from what was sent, sends one follow-up write of it. So
+/// this model no longer has to match a rewrite the plugin performs; it is what makes this
+/// endpoint rewrite as hosted Linear does, so a journey drives that follow-up write and the
+/// digests recorded over what was stored rather than over what was sent. Every rule holds
+/// outside a fenced block and outside an inline code span opened and closed on one line, which
+/// are kept byte for byte, and a Markdown link or image is kept as written. Each rule is listed
+/// in [`RULES`] with its example, and `the_loopback_stores_every_example_the_ruling_states`
+/// holds each.
 pub fn stored_form(content: &str) -> String {
     let mut stored = String::with_capacity(content.len());
     // The fence a block is open under: its character and how many of it opened it.
@@ -1510,113 +1544,4 @@ fn malformed_requests_are_refused_before_a_valid_graphql_read() {
     let answer: Value = serde_json::from_str(body).expect("the GraphQL response");
     assert_eq!(answer["data"]["project"]["id"], PROJECT);
     assert_eq!(linear.log().len(), 3);
-}
-
-/// The model is reconciled with the linked Linear plugin's own declaration of what Linear
-/// stores — `TaskSource::stored_form`, the function its ruling names — over every example of
-/// [`RULES`] and a corpus mixing every construct a rule reads, domains under top-level domains
-/// on [`AUTOLINKED`] and off it among them: a rule the ruling adds, drops or changes, or a domain
-/// it moves on or off its list, fails here rather than leaving this endpoint modelling a
-/// Linear the store no longer declares.
-#[test]
-fn the_loopback_stores_what_the_linked_plugin_declares() {
-    let plugin = onetaskgraph_core::PluginKind::Linear.plugin();
-    let source = plugin
-        .build(
-            &onetaskgraph_plugin_api::SourceName::new("tracker").expect("a source name"),
-            &json!({"api_key_env": "LOOPBACK_KEY", "team": TEAM, "endpoint": "http://127.0.0.1:9/graphql"}),
-            &onetaskgraph_core::Secrets::load(onetaskgraph_core::Environment::from_pairs([(
-                "LOOPBACK_KEY",
-                "a-loopback-key",
-            )]))
-            .expect("no secrets file is named"),
-        )
-        .unwrap_or_else(|error| panic!("the linked Linear plugin builds: {error}"));
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a runtime");
-    let declared = |content: &str| {
-        runtime
-            .block_on(source.stored_form(content))
-            .unwrap_or_else(|error| panic!("the plugin declares what it stores: {error}"))
-    };
-
-    let mut corpus: Vec<String> = RULES
-        .iter()
-        .flat_map(|(_, written, kept)| [(*written).to_owned(), (*kept).to_owned()])
-        .collect();
-    // Every two- and three-letter top-level domain and the longer ones in common use, decided
-    // independently of [`AUTOLINKED`], so a domain the plugin links and this list omits — or
-    // the reverse — is in the corpus whichever list moved.
-    let letters = || ('a'..='z').map(String::from);
-    let mut tops: Vec<String> = letters()
-        .flat_map(|first| letters().map(move |second| format!("{first}{second}")))
-        .collect();
-    tops.extend(
-        tops.clone()
-            .into_iter()
-            .flat_map(|two| letters().map(move |third| format!("{two}{third}"))),
-    );
-    tops.extend(["info", "live", "tech", "site", "shop", "blog", "cloud"].map(str::to_owned));
-    let domains: Vec<String> = tops.iter().map(|top| format!("a.{top}")).collect();
-    corpus.extend(domains.iter().map(|domain| format!("see {domain} now")));
-    let atoms: Vec<String> = [
-        "- ",
-        "* ",
-        "  ",
-        "| a | b |",
-        "| --- |:-:|",
-        "```",
-        "~~~",
-        "\n",
-        "\n\n",
-        "x",
-        "_y_",
-        "snake_case",
-        "https://a.io/b.",
-        "[x]",
-        "]",
-        "~",
-        "\\\"",
-        "\\d",
-        "-->",
-        "`code _a_`",
-        "![a](u)",
-        "[l](t)",
-        "# h",
-        "> q",
-        "1. one",
-        "<!-- m `{\"k\":1}` -->",
-        " ",
-        "\t",
-        "a@b.com",
-        "\r\n",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .chain([" a.com ", " a.io/b ", " a.xyz ", "x.example.org."].map(str::to_owned))
-    .collect();
-    // A fixed linear congruential sequence, so a failure names the same input on every run.
-    let mut seed: u64 = 0x5eed;
-    let mut next = || {
-        seed = seed
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        usize::try_from(seed >> 33).expect("31 bits fit")
-    };
-    for _ in 0..20_000 {
-        let length = next() % 12;
-        corpus.push(
-            (0..length)
-                .map(|_| atoms[next() % atoms.len()].as_str())
-                .collect(),
-        );
-    }
-    for content in corpus {
-        assert_eq!(
-            stored_form(&content),
-            declared(&content),
-            "the loopback and the linked Linear plugin store {content:?} differently"
-        );
-    }
 }

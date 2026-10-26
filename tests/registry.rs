@@ -291,12 +291,12 @@ fn what_moved_since_the_capture_is_the_phase_prose_the_significance_matcher_and_
             "agent.note@1/$defs/Delivery",
             "agent.note@1/properties/delivery",
             // onemessagebus 0.9.4 reserves its record-count file's `.jsonl.count`
-            // name, so its transport refuses a document called by it (entry 142).
+            // name, so its transport refuses a document called by it (entry 143).
             "onemessagebus.transport-request@1/$defs/DocumentName/description",
         ],
         "what moved since the capture is not only `onevcs`'s `Phase` prose, the \
          `significance` matcher field entry 123 adds, the note's `delivery` entry 133 adds, \
-         and the document name 0.9.4 reserves (entry 142)"
+         and the document name 0.9.4 reserves (entry 143)"
     );
     // It is that producer's own words, not a third wording invented here.
     let phase = registry

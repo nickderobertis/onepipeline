@@ -1372,9 +1372,12 @@ fn fields_of<T: schemars::JsonSchema>() -> Vec<String> {
 }
 
 /// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's
-/// term scope, every node's clearance, and the terms each scoped repository contributes
-/// now. A changed term, a changed visibility or a changed scope is a different key, so a
-/// payload cached as passing is judged again rather than passed on its bytes.
+/// term scope, every node's clearance, the terms each scoped repository contributes now,
+/// and the host's public phrases as the linked onevcs reads them (or that it cannot). A
+/// changed term, a changed visibility, a changed scope or an added, removed or changed
+/// phrase is a different key, so a payload cached as passing is judged again rather than
+/// passed on its bytes — and a phrase the host withdraws is not honoured by a pass cached
+/// while it stood.
 pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<String> {
     use sha2::Digest;
     let view = crate::views::RunView::open(paths)?;
@@ -1390,11 +1393,16 @@ pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<Stri
             }
         })
         .collect();
+    let public_phrases = match onevcs::public_phrases() {
+        Ok(phrases) => serde_json::json!(phrases),
+        Err(error) => serde_json::json!({"unreadable": error.to_string()}),
+    };
     let document = serde_json::json!({
         "scope": resolved.scope,
         "clearances": resolved.clearances,
         "public_destinations": resolved.public_destinations,
         "terms": terms,
+        "public_phrases": public_phrases,
     });
     let digest = sha2::Sha256::digest(document.to_string().as_bytes());
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
