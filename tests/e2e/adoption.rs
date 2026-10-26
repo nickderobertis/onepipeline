@@ -7088,6 +7088,23 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
     assert_eq!(reading["ending"], Value::Null, "{reading}");
     assert_ne!(reading["word"], "SETTLED", "{reading}");
     assert_ne!(reading["word"], "DRIVER DEAD", "{reading}");
+    // Every node is listed, in plan order: the producer done on its landing, and the
+    // dependent pending with nothing recorded for it.
+    let listed: Vec<&str> = reading["nodes"]
+        .as_array()
+        .expect("the reading lists its nodes")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(listed, [ENGINE, "consumer", "follower"], "{reading}");
+    let producer = reading_node(world, &run, ENGINE);
+    assert_eq!(producer["status"], "done", "{producer}");
+    assert_eq!(producer["outcome"], "merged", "{producer}");
+    assert!(producer.get("awaiting").is_none(), "{producer}");
+    assert_eq!(
+        reading_node(world, &run, "follower"),
+        json!({"id": "follower", "status": "pending", "outcome": null, "detail": null})
+    );
     world
         .run(&["status", &run])
         .exited(0)
@@ -7131,7 +7148,20 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
     // (4) The awaited target releases. The worker put back on the branch is told
     // which version, and rewrites the pin to it on top of the held commit.
     world.script("consumer.work", &pin("\"0.2.0\""));
+    // The re-dispatch is held open once it starts, so the reading of a node that has
+    // left its held settlement can be read: no `consumer.go` until it is.
+    std::fs::remove_file(world.fakes.join("consumer.go")).expect("the first hold's release");
     releases_at(&host.crate_answer, "0.2.0");
+    world.until("the consumer to be re-dispatched", |world| {
+        tasks_of(world, "consumer").len() == 2
+    });
+    // Back at work, it is no longer reported with the words or the wait of the
+    // settlement it has left.
+    let running = reading_node(world, &run, "consumer");
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(running["detail"], Value::Null, "{running}");
+    assert!(running.get("awaiting").is_none(), "{running}");
+    world.release("consumer.go");
     world.until("the consumer to land", |world| {
         settled_status(world, &run, "consumer").as_deref() == Some("done")
     });
@@ -7518,4 +7548,73 @@ fn a_hold_whose_preservation_the_origin_refuses_fails_the_node_by_name() {
     );
     assert_eq!(host.bases(), (base_before, checkout_before));
     assert!(!dispatched(world, &run, "follower"));
+}
+
+/// A node whose branch is **level with its base** is never held: it has nothing to
+/// land, so it settles as any level branch does — `failed` under `empty-branch`,
+/// for a worker that committed nothing it was asked for — awaiting nothing,
+/// whatever release is still out.
+#[test]
+fn a_local_direct_node_awaiting_a_release_with_a_level_branch_settles_and_is_not_held() {
+    let host = HeldHost::new("adoption-held-level");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    world.script("consumer.wait", "");
+    let run = start(
+        world,
+        "adoption-held-level",
+        vec![engine(), held_consumer(Some("crate"))],
+    );
+    // Its worker writes nothing at all.
+    world.unscript("consumer.work");
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(settled["payload"]["outcome"], "empty-branch", "{settled}");
+    crate::harness::no_awaiting(world, &run, "consumer");
+    assert!(!host.crate_answer.exists(), "a release came out");
+    assert_eq!(host.bases(), (base_before, checkout_before));
+}
+
+/// A node that states `merge_policy: local-direct` **itself** is held unlanded
+/// on an identity whose own rules open change requests: the policy it publishes
+/// under is its own where it states one, read through the same predicate the
+/// loader uses.
+#[test]
+fn a_node_naming_local_direct_itself_is_held_on_a_change_request_identity() {
+    let host = HeldHost::new("adoption-held-own-policy");
+    let world = &host.world;
+    consumer_opens_a_change(world);
+    let (base_before, checkout_before) = host.bases();
+    world.script("consumer.wait", "");
+    world.script("consumer.work-file", "pin");
+    let mut node = held_consumer(Some("crate"));
+    node["merge_policy"] = json!("local-direct");
+    let run = start(world, "adoption-held-own-policy", vec![engine(), node]);
+    world.until("the consumer to be dispatched", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.script("consumer.work", &pin("{ branch = \"the engine's\" }"));
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    assert_eq!(
+        settled["payload"]["outcome"], "held-for-release",
+        "{settled}"
+    );
+    assert!(
+        world.changes_opened().is_empty(),
+        "{:?}",
+        world.changes_opened()
+    );
+    assert_eq!(host.bases(), (base_before, checkout_before));
 }
