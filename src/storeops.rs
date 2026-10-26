@@ -132,8 +132,10 @@ pub(crate) enum Scope<'a> {
     WriteBack { projection_at: &'a str },
     /// A stop's release attempt started at `projection_at`.
     Release { projection_at: &'a str },
-    /// The one item an attempt's operations now concern, inside that attempt.
-    Item(&'a str),
+    /// The one item an attempt's operations now concern, inside that attempt, and whether the
+    /// snapshot that attempt projects carries the settlement of the node the item stands for:
+    /// what tells a settlement's write-back from a dispatch's that landed after it settled.
+    Item { item: &'a str, settled: bool },
     /// The check of an edit a planner sent.
     Edit,
 }
@@ -153,11 +155,15 @@ enum Context {
         projection_at: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        settled: bool,
     },
     Release {
         projection_at: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         item: Option<String>,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        settled: bool,
     },
     Edit,
 }
@@ -175,20 +181,24 @@ impl Context {
             Scope::WriteBack { projection_at } => Self::WriteBack {
                 projection_at: projection_at.to_owned(),
                 item: None,
+                settled: false,
             },
             Scope::Release { projection_at } => Self::Release {
                 projection_at: projection_at.to_owned(),
                 item: None,
+                settled: false,
             },
             Scope::Edit => Self::Edit,
-            Scope::Item(named) => match outer? {
+            Scope::Item { item, settled } => match outer? {
                 Self::WriteBack { projection_at, .. } => Self::WriteBack {
                     projection_at: projection_at.clone(),
-                    item: Some(named.to_owned()),
+                    item: Some(item.to_owned()),
+                    settled,
                 },
                 Self::Release { projection_at, .. } => Self::Release {
                     projection_at: projection_at.clone(),
-                    item: Some(named.to_owned()),
+                    item: Some(item.to_owned()),
+                    settled,
                 },
                 other => other.clone(),
             },
@@ -278,13 +288,38 @@ mod tests {
             Scope::WriteBack {
                 projection_at: "2026-10-24T14:02:46.658Z",
             },
-            || about(Scope::Item("design"), || line(Operation::TaskUpdate)),
+            || {
+                about(
+                    Scope::Item {
+                        item: "design",
+                        settled: false,
+                    },
+                    || line(Operation::TaskUpdate),
+                )
+            },
         );
         assert_eq!(
             read,
             json!({"at_ms": read["at_ms"], "operation": "task-update", "phase": "write-back",
                    "projection_at": "2026-10-24T14:02:46.658Z", "item": "design"})
         );
+        // An item whose settlement the attempt projects says so; one whose does not, above,
+        // carries no such word.
+        let settled = about(
+            Scope::WriteBack {
+                projection_at: "2026-10-24T14:02:46.658Z",
+            },
+            || {
+                about(
+                    Scope::Item {
+                        item: "design",
+                        settled: true,
+                    },
+                    || line(Operation::TaskUpdate),
+                )
+            },
+        );
+        assert_eq!(settled["settled"], json!(true), "{settled}");
         let reread = about(
             Scope::Reread {
                 node: "build",
@@ -296,8 +331,15 @@ mod tests {
         assert_eq!(reread["node"], "build");
         assert_eq!(reread["held_on"], json!(["vault"]));
         // An item names nothing outside the projection it narrows.
-        let stray = about(Scope::Item("design"), || line(Operation::Task));
+        let stray = about(
+            Scope::Item {
+                item: "design",
+                settled: true,
+            },
+            || line(Operation::Task),
+        );
         assert_eq!(stray.get("item"), None, "{stray}");
+        assert_eq!(stray.get("settled"), None, "{stray}");
         assert_eq!(stray.get("phase"), None, "{stray}");
         let bare = line(Operation::Task);
         assert_eq!(bare.get("phase"), None, "{bare}");

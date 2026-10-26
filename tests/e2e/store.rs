@@ -1859,26 +1859,6 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
             .any(|operation| operation["operation"] == "project-status-set")
     });
     let operations = world.store_operations(name);
-    if let Ok(dump) = std::env::var("DUMP_OPS") {
-        std::fs::write(format!("{dump}.ops.json"), serde_json::to_string(&operations).unwrap()).unwrap();
-        std::fs::write(format!("{dump}.journal.json"), serde_json::to_string(&world.journal(name)).unwrap()).unwrap();
-        let _ = std::fs::copy(world.run_file(name, "writeback-projections.jsonl"), format!("{dump}.proj.jsonl"));
-    }
-    let stamp = |kind: &str, node: &str| -> u64 {
-        let journal = world.events_of(name, kind);
-        let event = journal
-            .iter()
-            .find(|event| event["labels"]["node"] == node)
-            .unwrap_or_else(|| panic!("{node} has no {kind}"));
-        millis(event["ts"].as_str().expect("an event's stamp"))
-    };
-    let item_ops = |node: &str, from: u64, to: u64| -> Vec<&Value> {
-        operations
-            .iter()
-            .filter(|op| op["phase"] == "write-back" && op["item"] == node)
-            .filter(|op| (from..to).contains(&op["at_ms"].as_u64().unwrap_or(0)))
-            .collect()
-    };
     // Every node is ready from the run's start, having no dependency.
     let ready = millis(
         world.events_of(name, "run-started")[0]["ts"]
@@ -1906,17 +1886,13 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
     let mut launch_claim: Vec<&Value> = Vec::new();
     for i in 1..=20 {
         let node = format!("task-{i:02}");
-        let (dispatched, settled) = (
-            stamp("node-dispatched", &node),
-            stamp("node-settled", &node),
-        );
-        launch_claim.extend(item_ops(&node, 0, dispatched));
+        let written = write_back_of(&world, name, &operations, &node);
+        launch_claim.extend(written.launch_claim);
         // From readiness to its process starting: what preparing it asked, and its write-back
-        // projection — the node's status moved to running — which lands after the record of the
-        // dispatch, from the snapshot that record is folded into, and before the settlement.
-        let mut dispatch_operations = preparing(ready, dispatched);
-        dispatch_operations.extend(item_ops(&node, dispatched, settled));
-        let settlement_projection = item_ops(&node, settled, u64::MAX);
+        // projection — the node's status moved to running.
+        let mut dispatch_operations = preparing(ready, written.dispatched);
+        dispatch_operations.extend(written.dispatch);
+        let (settled, settlement_projection) = (written.settled, written.settlement);
         dispatches.push(json!({
             "node": node,
             "operations": by_kind(dispatch_operations.iter().copied()),
@@ -1982,6 +1958,122 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
                 .collect::<Vec<_>>(),
             "attempts": attempts,
         }),
+    );
+}
+
+/// What the write-back asked the store for about one node's item, by the moment of the run each
+/// operation served: the run's first projection, its dispatch, and its settlement.
+struct WriteBackOf<'a> {
+    /// When the node was dispatched and settled, as the journal stamps them.
+    dispatched: u64,
+    settled: u64,
+    /// Before its dispatch: the run's first projection, claiming every node queued.
+    launch_claim: Vec<&'a Value>,
+    /// Its status moved to running, from the snapshot the record of its dispatch is folded into.
+    dispatch: Vec<&'a Value>,
+    /// Its settlement written back, and anything later projected of it.
+    settlement: Vec<&'a Value>,
+}
+
+/// Each of `node`'s write-back operations, read off the run's `store-operations.jsonl`, sorted
+/// into the moment of the run it served — which is what the per-dispatch and per-settlement
+/// budgets count.
+fn write_back_of<'a>(
+    world: &World,
+    run: &str,
+    operations: &'a [Value],
+    node: &str,
+) -> WriteBackOf<'a> {
+    let stamp = |kind: &str| -> u64 {
+        let journal = world.events_of(run, kind);
+        let event = journal
+            .iter()
+            .find(|event| event["labels"]["node"] == node)
+            .unwrap_or_else(|| panic!("{node} has no {kind}"));
+        millis(event["ts"].as_str().expect("an event's stamp"))
+    };
+    let (dispatched, settled) = (stamp("node-dispatched"), stamp("node-settled"));
+    let item_ops = |from: u64, to: u64| -> Vec<&'a Value> {
+        operations
+            .iter()
+            .filter(|op| op["phase"] == "write-back" && op["item"] == node)
+            .filter(|op| (from..to).contains(&op["at_ms"].as_u64().unwrap_or(0)))
+            .collect()
+    };
+    WriteBackOf {
+        dispatched,
+        settled,
+        launch_claim: item_ops(0, dispatched),
+        dispatch: item_ops(dispatched, settled),
+        settlement: item_ops(settled, u64::MAX),
+    }
+}
+
+/// A dispatch's projection that reaches the store only after its node has settled is still that
+/// dispatch's: held at the write-back with `solo` running and unsettled until `solo` has settled,
+/// its one task update lands after the settlement, and the settlement's own write-back follows.
+/// Each is counted once, against the moment it served — the dispatch one update, the settlement
+/// one — which is the ordering that read one settlement as two in the per-settlement budget.
+#[test]
+fn a_dispatch_projection_landing_after_its_node_settled_is_counted_against_the_dispatch() {
+    let projecting = crate::harness::Rendezvous::failpoint();
+    let world = World::new("store-operations-late-dispatch")
+        .with_env("ONEPIPELINE_TEST_PROJECTION_DISPATCHED_NODE", "solo")
+        .with_env(
+            "ONEPIPELINE_TEST_PROJECTION_DISPATCHED_GATE",
+            &projecting.address(),
+        );
+    let agent_held = world.rendezvous("solo");
+    let name = "late";
+    let project = world.plan(name, &plan_of(name, vec![agent("solo", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    // The write-back has taken the snapshot with `solo` running and holds it off the store; the
+    // agent is held too, so that snapshot is taken before anything settles.
+    let projection = projecting.arrived_within_a_step(&world, "solo's dispatch to be projecting");
+    agent_held
+        .arrived_within_a_step(&world, "solo's agent to start")
+        .release();
+    world.until("solo to settle", |world| {
+        !world.events_of(name, "node-settled").is_empty()
+    });
+    projection.release();
+    world.until("the run to settle", |world| {
+        world.run_file(name, "result.json").is_file()
+    });
+    assert_eq!(world.run_json(name, "result.json")["state"], "complete");
+    world.until("the run's last projection to be recorded", |world| {
+        world
+            .store_operations(name)
+            .iter()
+            .any(|operation| operation["operation"] == "project-status-set")
+    });
+    let operations = world.store_operations(name);
+    let written = write_back_of(&world, name, &operations, "solo");
+    let updates = |ops: &[&Value]| -> Vec<String> {
+        ops.iter()
+            .map(|op| op["operation"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    // The ordering this journey exists for was driven: both of `solo`'s updates — the held
+    // dispatch's and the settlement's — reached the store after its settlement was recorded.
+    assert_eq!(
+        operations
+            .iter()
+            .filter(|op| op["item"] == "solo")
+            .filter(|op| op["at_ms"].as_u64().unwrap_or(0) >= written.settled)
+            .count(),
+        2,
+        "solo's dispatch projection was not held past its settlement: {operations:#?}"
+    );
+    assert_eq!(
+        updates(&written.settlement),
+        ["task-update"],
+        "the settlement's write-back, counted: {operations:#?}"
+    );
+    assert_eq!(
+        updates(&written.dispatch),
+        ["task-update"],
+        "the dispatch's write-back, counted: {operations:#?}"
     );
 }
 
