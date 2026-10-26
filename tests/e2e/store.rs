@@ -1859,6 +1859,11 @@ fn each_dispatch_and_settlement_of_a_twenty_task_run_records_the_store_operation
             .any(|operation| operation["operation"] == "project-status-set")
     });
     let operations = world.store_operations(name);
+    if let Ok(dump) = std::env::var("DUMP_OPS") {
+        std::fs::write(format!("{dump}.ops.json"), serde_json::to_string(&operations).unwrap()).unwrap();
+        std::fs::write(format!("{dump}.journal.json"), serde_json::to_string(&world.journal(name)).unwrap()).unwrap();
+        let _ = std::fs::copy(world.run_file(name, "writeback-projections.jsonl"), format!("{dump}.proj.jsonl"));
+    }
     let stamp = |kind: &str, node: &str| -> u64 {
         let journal = world.events_of(name, kind);
         let event = journal
