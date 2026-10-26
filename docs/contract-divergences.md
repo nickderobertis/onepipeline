@@ -12021,7 +12021,7 @@ launch setting.
   "store_review_keys": [],
   "results_schema_version": 2,
   "results_golden": "tests/golden/review-results-v2.json",
-  "checkpoint_schema_version": 14,
+  "checkpoint_schema_version": 15,
   "test_seams": ["after-reply-post", "after-decline-post", "after-edit-rejected"],
   "bundle_versions": {"events": "1.7.0", "planner_channel": "1.5.0"}
 }
@@ -12887,3 +12887,105 @@ it rather than the detail prose.
   "node_settled_fields": ["awaiting"]
 }
 ```
+
+## 142. A driver's cost grew with its run's history, and every member heartbeat was a journal record — OPEN
+
+**Proposal, for the planner who owns the contract: the Merged stream paragraph, the
+`PARKED` paragraph and the `watch` verb take the three changes below.** The manager ruled
+each on the plan node `op-journal-scaling` (correlations
+`c-1d51b107c05330156c86c648645884bf` and `c-3135b48c5c7173b19043b7f00c2ae8ae`), and this
+build implements them; `docs/contract.md`'s own wording is unchanged until the planner
+rules on it.
+
+1. **Member liveness is kept beside the journal, not in it.** A driver no longer appends a
+   `member-heartbeat` to `events.jsonl`. It keeps each in-flight dispatch member's latest
+   beat in `<run>/liveness.json` — `{"schema_version": 1, "members": [{"node",
+   "graph_run", "member", "last_heartbeat_at"}]}`, one entry per member keyed by the
+   first three, written whole and atomically when a beat advances an entry, dropped when
+   its dispatch settles (the block after this list is one such document, which
+   `heartbeat::tests` reads into the type) — and a reader takes a member's last beat as the later of the
+   journal's and the file's, so a run an earlier build journalled reads as it did. Every
+   other record a member emits is still journalled.
+2. **`PARKED` counts a dispatch member's heartbeat as activity, and an observer's not at
+   all.** The paragraph's "its journal has been quiet" reads "its journal and its
+   dispatch members' heartbeats have been quiet". An observer's members belong to no
+   dispatch: their beats are neither journalled nor kept, so they no longer keep a run
+   from reading `PARKED` — **a run with no dispatch in flight and a live observer can now
+   read `PARKED` where it read `ACTIVE`.** `OBSERVER DEAD` and `OBSERVER NOT RESTARTED`
+   read the launch record and `oneagentgraph`'s own history, as before. A heartbeat no
+   longer wakes an armed watch; every other record that woke one still does.
+3. **A `watch` given no `--cursor`, and an attached driver's first render, start at the
+   byte the run's checkpoint covers** rather than at the journal's first byte: they print
+   the records past it — the whole journal of a run with no checkpoint yet — and then
+   everything as it arrives. What a watch returns on is unchanged: it still returns at
+   once on a planner surface left unread before it armed, its heartbeat and ending lines
+   count every unread surface off the channel's own state, it returns only on
+   settlements after it armed, and its ending cursor resumes with nothing skipped or
+   repeated. A watch given a cursor is unchanged, and so is one given `--all`: it asks
+   for every event in the store, so with no cursor it still reads from the journal's
+   first byte.
+
+```json
+{"schema_version": 1,
+ "members": [{"node": "build", "graph_run": "graph-run-1", "member": "worker",
+              "last_heartbeat_at": "2026-10-23T12:00:00.000Z"}]}
+```
+
+Behind the three, and inside the existing contract: every per-pass, per-append and
+per-call reader on the driver's path, `status <run>` and `status --json`, `watch` and
+`reply`'s read before it queues resumes from `checkpoint.json` (schema 15, still the one
+journal-derived snapshot, still regenerable and safe to delete) and the bytes appended past
+it, never from byte 0; a record arriving past the checkpoint that the merge order would
+place in front of a covered one is folded after the covered history; and a checkpoint of
+another schema is rebuilt by one streaming read. `RunView::open` keeps its whole-store
+`events`, and its state is that same fold. Entry 130's block names the checkpoint schema
+this build writes, so it reads 15 with it. The plan stated this snapshot's move as 13 to
+14; merging `main`, whose transcript references (entry 130's last paragraph) took 14 for
+a different document — its seal still over the covered bytes, with no tally — moved this
+one to 15 (ruled by the manager, correlation `c-d02b1d64475c6b7ed6664d80d23372a6`), so a version-14 document is one this build refuses and rebuilds like any
+other it does not write, rather than one number naming two shapes.
+
+**The publication fence (entry 128) narrows only when it grows or empties.** Entry 128's
+driver writes `onepipeline.publishing` again without each node once its publication has
+settled and its settlement has landed. A driver of this build, still driving, writes it
+only when the nodes under way include one it does not name, or none at all: a fence naming
+every publication under way and some that have settled stands until then, and the next
+write names exactly what is under way. Such a fence is empty exactly when the exact one
+would be, so a takeover starts at the same moment as before. The takeover's waiting line
+no longer says the named publications are under way or gives a since-time: it says the
+displaced driver's publication fence still names them, set at the time it was written, and
+that the run starts once that fence clears or that driver acknowledges. A superseded
+driver, and the move to none (still lingering ten seconds first), are unchanged. Why: a
+driver whose passes are faster observes each overlapping publication start and settle
+separately, and wrote the fence once per settlement, so its store writes grew with how
+often it passed. The busy review round's quota budget went over its threshold on that
+alone, and is back under it: 157 quota units in each of three runs on this host, against
+171 and 171 on `main` at `2f569b5b` (ruled by the manager, correlation
+`c-77cf790d4e5ce3690a9c0a640758389c`).
+
+## 143. The bus's derived counts and byte-offset cursors added four files to a run's channel directory — RESOLVED
+
+**Ruled by the planner on the plan node `op-journal-scaling`, and `docs/contract.md` edited to
+match.** This build links `onemessagebus` 0.9.4, the newest release `Cargo.toml` permits.
+0.9.4's envelope and filter grammar, its parser included, are 0.9.3's unchanged, so the
+contract's marked copy of them is re-decided against 0.9.4 with its wording kept. What 0.9.4
+changes is how its queues are counted and claimed:
+- It keeps a record count beside each numbered queue's log, once that log is counted with a
+  record already in it: `replies.jsonl.count` and `commands.jsonl.count`.
+- It keeps a byte offset beside each cursor a single reader claims from:
+  `replies-cursor.json.offset` and `commands-cursor.json.offset`.
+
+So the contract's list of the layout's files goes from seven to eleven. **The public
+`onepipeline::channel::layout::FILES` changes type from `[&str; 7]` to `[&str; 11]`**, a
+breaking change to the library's surface. All four files are the core's derived state,
+regenerable from its logs as its cursors are.
+
+**A read over a channel written by an earlier build now leaves the two cursor offsets** beside
+its cursors. The core writes a cursor's offset whenever a reader claims through it, so a
+read-only pass over a channel directory is no longer write-free. Every file the earlier build
+wrote is left byte for byte as it was, and each offset written holds the position its cursor
+names (`tests/channel_layout.rs`, `tests/e2e/recorded_channel.rs`).
+
+**Ruling:** the planner ruled the 0.9.4 link and these contract edits (correlation
+`c-82fe4a181e152433729ebea43a33067d`), and that a read may create the core's derived cursor
+files (correlation `c-ac162df8dd377e864a0238c2006a76ee`).

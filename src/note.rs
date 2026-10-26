@@ -925,15 +925,20 @@ fn unreadable_record(envelope: &Envelope, field: &str, error: &serde_json::Error
     ))
 }
 
-/// The same, read off the run's own journal.
+/// The same, read off the run's own journal: over the records the projection keeps
+/// whole for exactly this fold — every commit carrying a note, and each dispatch of
+/// a node one was ever written for ([`RunState::recalled`]) — off the run's
+/// checkpoint and what was appended past it, rather than its whole history.
+///
+/// [`RunState::recalled`]: crate::projection::RunState::recalled
 ///
 /// # Errors
 ///
 /// [`standing`]'s.
 pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
-    // llmlint: ignore-block[boundary_inputs_validated] `journal::read` is the crate's
-    // one reader of its own journal, the same one the projection that decides the run's
-    // whole state reads through, and a line it drops — blank, truncated, unparseable —
+    // llmlint: ignore-block[boundary_inputs_validated] the records are the ones the
+    // projection that decides the run's whole state folded, through the crate's one
+    // reader of its own journal, and a line it drops — blank, truncated, unparseable —
     // is a line that state was decided without too; a stricter reader here would
     // decide a node's notes from a record the engine itself never saw. What this fold
     // validates is the layer above that: a record of this crate's own kind, parsed
@@ -944,7 +949,7 @@ pub(crate) fn standing_for(paths: &RunPaths, node: &str) -> Result<Standing> {
     // `a_note_a_dispatch_read_survives_the_engines_own_redispatch_of_the_node` drives
     // it through that path over a real run's journal; the refusal is held by
     // `note::tests` over the fold, for the reason the caller's arm records.
-    standing(&crate::journal::read(&paths.journal()), node)
+    standing(&crate::checkpoint::current(paths).recalled, node)
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // llmlint: ignore-end[boundary_inputs_validated]
 }

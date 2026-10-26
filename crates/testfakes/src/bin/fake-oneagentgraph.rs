@@ -2288,6 +2288,11 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
 /// `<key>.unplaceable-beats-after-the-first` keeps beating on a clock that stops
 /// being readable: one placeable beat, then a stream of unplaceable ones, which
 /// is what a reader has to keep reporting liveness through.
+///
+/// `<key>.activity-with-each-beat` makes the member work as well as beat: each
+/// tick also publishes one `turn-activity` naming the tick, the record a running
+/// turn emits most, so a journey can watch a member's work reach the journal
+/// while it is held.
 fn hold(
     args: &[String],
     dir: &std::path::Path,
@@ -2317,10 +2322,31 @@ fn hold(
     let loses_the_clock = dir
         .join(format!("{key}.unplaceable-beats-after-the-first"))
         .exists();
+    let works = dir.join(format!("{key}.activity-with-each-beat")).exists();
     // Above every `seq` the turn's own envelopes use, so a beat can never be
     // taken for one of them.
     let mut seq = 100;
+    let mut tick = 0;
     fake::wait_for_any_ticking(until, every, &mut || {
+        if works {
+            tick += 1;
+            publish(&serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": oneagentgraph::event::EventKind::TurnActivity.as_str(),
+                "labels": stamp_session(
+                    &labels,
+                    &stream(),
+                    oneagentgraph::event::EventKind::TurnActivity,
+                ),
+                // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the sibling publishes this payload as an open map and owns no type for it; its reader here is `projection::fold_activity`, which this shape is read through end to end by the `journal_scaling` and `views` journeys, so a reading that moved would fail them.
+                "payload": {"kind": "tool_use", "name": "Bash", "detail": format!("tick {tick}")},
+            }));
+            seq += 1;
+        }
         let stamp = if loses_the_clock && seq > 100 {
             unplaceable_now()
         } else {

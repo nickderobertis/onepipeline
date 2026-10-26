@@ -895,9 +895,11 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     let undecided = settled_and_closed(&world, "unwatchedalongside");
     let undecided_paths = paths_of(&world, &undecided);
     world.script("build.wait", "hold");
-    // Beating while held, so the run goes on recording between this build's
-    // reads — which is what the previous release's writer does beside it.
+    // Working while held, so the run goes on recording between this build's
+    // reads — which is what the previous release's writer does beside it. Each
+    // beat brings one `turn-activity`, since a beat itself is no journal record.
     world.script("build.heartbeat", "1500");
+    world.script("build.activity-with-each-beat", "");
     let recording = held(&world, "unwatchedrecording");
     let recording_paths = paths_of(&world, &recording);
     let mut older = document(&recording_paths);
@@ -931,11 +933,11 @@ fn a_document_at_a_superseded_schema_is_refreshed_and_decided_from_the_run() {
     // alternate for as long as both are running, and this build meets a document
     // at the old schema over a store that has **grown** since it last refreshed.
     // Staged as that writer leaves it — the document the run's own writer
-    // maintains, once a beat has landed and it has accounted for it, put at the
+    // maintains, once a record of the work has landed and it has accounted for it, put at the
     // old schema — and asked again: decided the same way, refreshed the same way,
     // and from the store as it now stands rather than from anything remembered.
     let refreshed_len = document(&recording_paths)["journal_len"].as_u64();
-    world.until("the recording run's writer to account for a beat", |_| {
+    world.until("the recording run's writer to account for its work", |_| {
         document(&recording_paths)["journal_len"].as_u64() > refreshed_len
     });
     let mut older = document(&recording_paths);

@@ -157,13 +157,74 @@ fn every_recorded_history_offered_through_the_document_writes_what_the_compiled_
             } else {
                 written
             };
+            // The core's derived record counts and cursor offsets name the file they
+            // were taken over, by its identity on disk, and seal over it: two
+            // directories hold two files, so those two fields differ by construction.
+            // Their digest is of the last record they count, whose bytes carry the
+            // stamp read out of the logs above, and their offset is a byte of their
+            // own log, which differs where a command's author does. So each offset is
+            // held to its own log, and the count and the cursor are held equal.
+            let (compiled, written) = if file.ends_with(".count") || file.ends_with(".offset") {
+                for dir in [&compiled_dir, &linked_dir] {
+                    assert_offset_ends_its_records(name, dir, file);
+                }
+                (
+                    read(&compiled_dir).map(|text| without_file_identity(&text)),
+                    read(&linked_dir).map(|text| without_file_identity(&text)),
+                )
+            } else {
+                (read(&compiled_dir), written)
+            };
             assert_eq!(
-                read(&compiled_dir),
-                written,
+                compiled, written,
                 "{name}: the document's bus wrote a different {file}"
             );
         }
     }
+}
+
+/// `text`, a derived count or offset the core kept, without what names the bytes it
+/// was taken over rather than the position it holds: the file's on-disk identity,
+/// the digest of the last record it counts (stamp and all), the byte that record
+/// ends at in that file, and the seal over them.
+fn without_file_identity(text: &str) -> String {
+    let mut held: Value = serde_json::from_str(text).expect("a derived file is JSON");
+    if let Value::Object(fields) = &mut held {
+        fields.remove("file");
+        fields.remove("digest");
+        fields.remove("offset");
+        fields.remove("seal");
+    }
+    held.to_string()
+}
+
+/// A derived count or offset in `dir`, if the core kept one, ends exactly where its
+/// log's first `count` records do.
+fn assert_offset_ends_its_records(name: &str, dir: &Path, file: &str) {
+    let Ok(text) = std::fs::read_to_string(dir.join(file)) else {
+        return;
+    };
+    let held: Value = serde_json::from_str(&text).expect("a derived file is JSON");
+    let log = file.strip_suffix(".count").map_or_else(
+        || {
+            file.trim_end_matches(".offset")
+                .replace("-cursor.json", ".jsonl")
+        },
+        str::to_owned,
+    );
+    let counted = usize::try_from(held["count"].as_u64().expect("a count")).expect("it fits");
+    let ends_at: usize = std::fs::read(dir.join(&log))
+        .expect("the log beside it")
+        .split_inclusive(|byte| *byte == b'\n')
+        .take(counted)
+        .map(<[u8]>::len)
+        .sum();
+    assert_eq!(
+        held["offset"],
+        ends_at as u64,
+        "{name}: {file} is not where {log}'s first {counted} records end in {}",
+        dir.display()
+    );
 }
 
 /// `text`, a command log, with every record that omits its author given the

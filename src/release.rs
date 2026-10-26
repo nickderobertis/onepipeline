@@ -718,7 +718,9 @@ impl Watch {
     pub(crate) fn of_run(paths: &RunPaths) -> Self {
         let mut adopted = BTreeSet::new();
         let mut arrived = BTreeSet::new();
-        for event in journal::read(&paths.journal()) {
+        // Off the run's checkpoint rather than its history: the fold keeps every
+        // record of these two kinds as written. See `RunState::recalled`.
+        for event in crate::checkpoint::recalled(paths) {
             let Some(node) = event.labels.node.clone().and_then(|node| renderable(&node)) else {
                 continue;
             };
@@ -1160,7 +1162,11 @@ impl Watch {
             return Ok(met_landings);
         }
         self.relayed = Some(Instant::now());
-        let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
+        // How far each stream has been relayed, off the run's checkpoint and what
+        // was appended past it rather than off a read of its whole history.
+        // Read only once a session's stream is about to be: a pass with no session
+        // to relay reads nothing of the run at all.
+        let mut marks: Option<crate::vcs::Watermarks> = None;
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that
             // session as it is written, and two readers of one stream deciding
@@ -1195,6 +1201,9 @@ impl Watch {
                     .get(node)
                     .and_then(|node| node.persona.as_deref()),
             );
+            let relayed = marks.get_or_insert_with(|| {
+                crate::vcs::Watermarks::of_streams(crate::checkpoint::streams_reached(paths))
+            });
             for mut envelope in crate::vcs::events(session.token(), filter) {
                 if releases_nothing
                     || envelope.dimensions.phase != Some(crate::event::Phase::Release)
@@ -1465,7 +1474,7 @@ impl Watch {
         if !self.stated.contains_key(&paths.run) {
             self.stated.insert(
                 paths.run.clone(),
-                stated_landings(&journal::read(&paths.journal())),
+                stated_landings(&crate::checkpoint::current(paths)),
             );
         }
         self.stated.get(&paths.run)?.get(node).cloned()
@@ -2478,7 +2487,9 @@ pub(crate) fn watching(
 /// Another run's folded state, for a cross-DAG dependency.
 fn upstream_of(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Option<RunState> {
     let upstream = upstream_paths(paths, reference)?;
-    Some(crate::projection::fold(&journal::read(&upstream.journal())))
+    // Off that run's checkpoint and what was appended past it, as its own views
+    // read it: the fold is the same one, and its history is not read again.
+    Some(crate::checkpoint::current(&upstream))
 }
 
 /// Where the run a cross-DAG dependency names keeps its own record.
@@ -2504,8 +2515,7 @@ fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> O
 /// Beside a stated **commit**, the change request the same fold knows the node's
 /// work by — [`RunState::known_change_url`] — which is what the release question
 /// falls back to when `onevcs` cannot resolve the commit.
-fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, Stated> {
-    let state = crate::projection::fold(events);
+fn stated_landings(state: &RunState) -> BTreeMap<String, Stated> {
     state
         .stated_landings
         .iter()
@@ -3186,14 +3196,14 @@ mod tests {
             Some("opened"),
             json!({"status": "done", "change_url": "https://example.invalid/pull/7"}),
         );
-        let read = stated_landings(&[
+        let read = stated_landings(&crate::projection::fold(&[
             opened,
             stated("opened", "3f9a1c2ab"),
             stated("restated", "https://example.invalid/pull/8"),
             stated("restated", "9d8c7b6ef"),
             stated("unknown", "0a1b2c3d4"),
             stated("url", "https://example.invalid/pull/9"),
-        ]);
+        ]));
         let fallback = |node: &str| read[node].fallback.as_deref();
         assert_eq!(fallback("opened"), Some("https://example.invalid/pull/7"));
         assert_eq!(fallback("restated"), Some("https://example.invalid/pull/8"));
@@ -3271,12 +3281,12 @@ mod tests {
         };
         let stated = |node: &str, landing: &str| json!([{"kind": "landing-from-evidence", "node": node, "landing": landing}]);
         assert_eq!(
-            stated_landings(&[
+            stated_landings(&crate::projection::fold(&[
                 edit(stated("publish", "3f9a1c2ab")),
                 edit(stated("other", "https://example.invalid/pull/1")),
                 // A record corrected twice: the newest correction is the one.
                 edit(stated("publish", "9d8c7b6ef")),
-            ])
+            ]))
             .into_iter()
             .map(|(node, stated)| (node, stated.landing))
             .collect::<BTreeMap<String, String>>(),
@@ -3308,13 +3318,13 @@ mod tests {
             stated("publish", "3f9a1c"),
         ] {
             assert!(
-                stated_landings(&[edit(unreadable.clone())]).is_empty(),
+                stated_landings(&crate::projection::fold(&[edit(unreadable.clone())])).is_empty(),
                 "{unreadable} was read as a landing"
             );
         }
         // And a run whose journal states none has none, which is every run that
         // has never had a settlement corrected.
-        assert!(stated_landings(&[]).is_empty());
+        assert!(stated_landings(&crate::projection::fold(&[])).is_empty());
     }
 
     /// One release, as the note and the record name it.

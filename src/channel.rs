@@ -2290,12 +2290,42 @@ impl ChannelState {
     pub(crate) fn claim_commands_answering(&self) -> crate::Result<Vec<Claimed>> {
         let commands = self.plain(COMMANDS)?;
         let mut claimed = Vec::new();
+        crate::loopstats::queue_claimed();
         while let Some(envelope) = commands
             .claim(&ConsumerName::default_consumer())
             .map_err(queue_failure)?
         {
             claimed.push(Claimed::of(envelope.record));
         }
+        Ok(claimed)
+    }
+
+    /// [`claim_commands_answering`](Self::claim_commands_answering), unless the
+    /// command queue has not moved since `seen`: the queue's change token taken
+    /// before the caller's last claim, which this keeps current.
+    ///
+    /// A claim takes the queue's lock and reads its log from the cursor's offset,
+    /// so a claim per pass would cost each pass a locked read that finds nothing
+    /// new. That is the whole queue's history on a bus without cursor offsets,
+    /// as before 0.9.4.
+    /// The token is taken before the claim it stands for: an envelope appended
+    /// after it moves the next token, and so does the cursor that claim
+    /// committed, so the claim after a non-empty one runs once and finds the
+    /// queue drained. A claim that finds nothing commits nothing, so the token
+    /// then stays put until something is queued.
+    pub(crate) fn claim_commands_moved(
+        &self,
+        seen: &mut Option<Fingerprint>,
+    ) -> crate::Result<Vec<Claimed>> {
+        let now = self
+            .transport()
+            .ok()
+            .and_then(|transport| transport.fingerprint(&queue_name(COMMANDS)).ok());
+        if now.is_some() && *seen == now {
+            return Ok(Vec::new());
+        }
+        let claimed = self.claim_commands_answering()?;
+        *seen = now;
         Ok(claimed)
     }
 

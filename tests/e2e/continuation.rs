@@ -1546,7 +1546,7 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     let said = launched_over(taking);
     assert!(
         said.contains(&format!(
-            "has not acknowledged in {}s, and its publication of 'x' has been under way since",
+            "has not acknowledged in {}s, and its publication fence still names 'x', set at",
             theirs.as_secs()
         )),
         "{said}"
@@ -1566,6 +1566,107 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     assert_eq!(stored_publishing(&world, &project), Value::Null);
     drop(successor);
     drop(held);
+}
+
+/// A required check that has started and has not finished.
+const CHECKS_RUNNING: &str = "lint in_progress - required";
+
+/// The number of the change request the host opened from `node`'s branch.
+fn change_of(world: &World, node: &str) -> u64 {
+    let opened = world.changes_opened();
+    opened
+        .iter()
+        .find(|change| {
+            change["head"]
+                .as_str()
+                .is_some_and(|head| head.ends_with(&format!("/{node}")))
+        })
+        .and_then(|change| change["number"].as_u64())
+        .unwrap_or_else(|| panic!("no change request from {node}'s branch: {opened:?}"))
+}
+
+/// Two of the displaced driver's publications overlap and one settles first: its fence goes
+/// on naming both until it names none, rather than being written again without the one
+/// that settled. The adopter is held exactly as long as the exact fence would hold it —
+/// until the publication still under way has finished — and says that the fence still
+/// names both and when it was set, rather than that both are under way.
+#[test]
+fn a_fence_still_naming_a_settled_publication_holds_the_takeover_as_the_exact_one_would() {
+    let (interval, grace) = (8, 12);
+    let theirs = takeover_wait(grace);
+    let world = team_world("takeover-superset")
+        .with_env(CLAIM_INTERVAL_ENV, &interval.to_string())
+        .with_env(crate::harness::CANCEL_GRACE_ENV, &grace.to_string())
+        // Long enough that y's checks are still being watched when the journey concludes them.
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "300");
+    // Both changes' checks run until the journey concludes each.
+    world.script("gh.checks", CHECKS_RUNNING);
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    let successor = world
+        .on_host("host-b")
+        .with_env(CLAIM_INTERVAL_ENV, "5")
+        .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
+    let run = "superset";
+    let mut plan = plan_of(run, vec![lifecycle("x", &[]), lifecycle("y", &[])]);
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    world.until("both publications to be fenced", |world| {
+        stored_publishing(world, &project)["nodes"] == json!(["x", "y"])
+            && world.changes_opened().len() == 2
+    });
+    let set_at = stored_publishing(&world, &project)["at"].clone();
+
+    // x's checks conclude: x settles and its settlement reaches the board, while y's
+    // publication goes on.
+    world.script(&format!("gh.checks.{}", change_of(&world, "x")), GREEN);
+    world.until("x's settlement to reach the store", |world| {
+        stored_settlements(world, &project).contains_key("x")
+    });
+    assert_eq!(settled(&world, run, "x")["outcome"], "change-review-draft");
+
+    let taking = take_over_in_background(&successor, &project);
+    until_claimed_on(&world, &project, "host-b");
+    let landed = std::time::Instant::now();
+    // Past the whole wait and a few polls more, y's publication is still under way: the
+    // adopter has minted nothing, as it would not have over a fence naming y alone.
+    std::thread::sleep(theirs + std::time::Duration::from_secs(8));
+    assert!(
+        successor.run_file(run, "launch.json").metadata().is_err(),
+        "the adopter minted its run {:?} after its claim landed, while y's publication was \
+         still under way",
+        landed.elapsed()
+    );
+    // Many passes after x's settlement landed, the fence still names both, as set when the
+    // second was named: a superset of the publications under way, empty only when they are.
+    let fence = stored_publishing(&world, &project);
+    assert_eq!(fence["nodes"], json!(["x", "y"]), "{fence}");
+    assert_eq!(fence["at"], set_at, "{fence}");
+    world.script(&format!("gh.checks.{}", change_of(&world, "y")), GREEN);
+    let said = launched_over(taking);
+    assert!(
+        said.contains(&format!(
+            "has not acknowledged in {}s, and its publication fence still names 'x', 'y', set \
+             at {}: run '{run}' starts once that fence clears",
+            theirs.as_secs(),
+            set_at.as_str().unwrap_or_default()
+        )),
+        "{said}"
+    );
+    assert!(!said.contains("under way since"), "{said}");
+    assert_eq!(settled(&world, run, "y")["outcome"], "change-review-draft");
+    successor.until("the adopter to settle", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    let mut theirs_dispatched = dispatched(&world, run);
+    theirs_dispatched.sort();
+    assert_eq!(theirs_dispatched, vec!["x".to_owned(), "y".to_owned()]);
+    assert!(dispatched(&successor, run).is_empty());
+    one_change_request_per_branch(&world);
+    drop(successor);
 }
 
 /// How a journey keeps the displaced driver's settlement of `x` off the store.
@@ -1698,7 +1799,7 @@ fn a_takeover_waits_for_a_settlement_off_the_store(name: &str, off: OffTheStore)
     again.release();
     let said = launched_over(taking);
     assert!(
-        said.contains("and its publication of 'x' has been under way since"),
+        said.contains("and its publication fence still names 'x', set at"),
         "{said}"
     );
     z.arrived().release();

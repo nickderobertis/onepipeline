@@ -7670,6 +7670,9 @@ pub struct Counts {
     pub records_folded: u64,
     /// Reads of the project's driver claim the driver asked its plan store for.
     pub claim_reads: u64,
+    /// Claims of the run's command queue the driver made, each of which takes the
+    /// queue's lock and reads its log from the cursor's offset.
+    pub queue_claims: u64,
 }
 
 impl Counts {
@@ -7686,6 +7689,7 @@ impl Counts {
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
             claim_reads: self.claim_reads - before.claim_reads,
+            queue_claims: self.queue_claims - before.queue_claims,
         }
     }
 }
@@ -7720,6 +7724,7 @@ pub fn counts(world: &World, run: &str) -> Counts {
         store_bytes: count("store_bytes"),
         claim_reads: count("claim_reads"),
         records_folded: count("records_folded"),
+        queue_claims: count("queue_claims"),
     }
 }
 

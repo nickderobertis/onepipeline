@@ -20,8 +20,8 @@
 //! | queue | policy | files |
 //! | --- | --- | --- |
 //! | [`SURFACES`] | held pending, blocking first, a waiting check-in superseded, projected | `surfaces.jsonl`, `queue.json` |
-//! | [`REPLIES`] | plain, numbered, a claim passing over a commands-only reply | `replies.jsonl`, `replies-cursor.json` |
-//! | [`COMMANDS`] | plain, numbered | `commands.jsonl`, `commands-cursor.json` |
+//! | [`REPLIES`] | plain, numbered, a claim passing over a commands-only reply | `replies.jsonl`, `replies.jsonl.count`, `replies-cursor.json`, `replies-cursor.json.offset` |
+//! | [`COMMANDS`] | plain, numbered | `commands.jsonl`, `commands.jsonl.count`, `commands-cursor.json`, `commands-cursor.json.offset` |
 //! | [`COMMAND_OUTCOMES`] | plain | `command-outcomes.jsonl` |
 //!
 //! Three rulings the bus's `docs/queues.md` recorded, each now this crate's and
@@ -73,15 +73,22 @@ pub const PROJECTION: &str = "queue.json";
 
 /// Every file a channel directory of this layout holds, in the order a
 /// comparison reports them: each queue's log, the surfaces queue's
-/// [`PROJECTION`], and a cursor for each queue a single reader claims from.
-/// Held to what the queues actually write by this module's tests.
-pub const FILES: [&str; 7] = [
+/// [`PROJECTION`], and a cursor for each queue a single reader claims from —
+/// with the core's own derived state beside them: the record count it keeps
+/// beside each numbered queue's log once that log is counted with a record in
+/// it, and the byte offset it keeps beside each cursor. Held to what the queues
+/// actually write by this module's tests.
+pub const FILES: [&str; 11] = [
     "surfaces.jsonl",
     PROJECTION,
     "replies.jsonl",
+    "replies.jsonl.count",
     "replies-cursor.json",
+    "replies-cursor.json.offset",
     "commands.jsonl",
+    "commands.jsonl.count",
     "commands-cursor.json",
+    "commands-cursor.json.offset",
     "command-outcomes.jsonl",
 ];
 
@@ -1410,6 +1417,24 @@ mod tests {
                 results: Vec::new(),
             })
             .expect("answered");
+        // A numbered queue's record count is kept once the queue is counted with a
+        // record already in it, as every queue of a run past its first is: a second
+        // reply and a second command, so the directory holds what a run's does.
+        channel
+            .answer(
+                &ReplyEnvelope {
+                    message: Some("again".to_owned()),
+                    ..ReplyEnvelope::default()
+                },
+                3,
+            )
+            .expect("answered again");
+        let mut again = Map::new();
+        again.insert("op".to_owned(), Value::from("finding"));
+        again.insert("message".to_owned(), Value::from("n"));
+        channel
+            .submit(planner(), vec![again])
+            .expect("submitted again");
         let mut written: Vec<String> = std::fs::read_dir(&dir)
             .expect("the channel directory")
             .flatten()

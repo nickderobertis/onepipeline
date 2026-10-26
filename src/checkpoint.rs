@@ -18,12 +18,12 @@
 //! the landing non-breaking both ways — nothing but this module reads the file, and
 //! a predecessor's run root simply has none.
 //!
-//! The fourth condition is asked of the **file**: it is at least as long as the
-//! marker claims, the marker ends where a record ends, and the covered bytes
-//! together with the marker's own claims seal to what the document carries. The
-//! seal is what makes the journal outrank the cache — no count can see a covered
-//! record rewritten in place at identical length — and it is
-//! [`Coverage::corroborated_by`].
+//! The fourth condition is asked of the **file** only as far as it can be without
+//! reading what the marker covers: the journal is at least as long as the marker
+//! claims. The rest is asked of the **document** — its claims and the fold it
+//! carries seal to what it says ([`Coverage::corroborated_by`]) — so an edited
+//! claim or an edited fold takes a rebuild, and a journal cut back past the marker
+//! takes one too.
 //!
 //! # The hazard the coverage marker answers
 //!
@@ -56,14 +56,38 @@
 //! discards the checkpoint, and the marker written after the whole-store fold
 //! covers it.
 //!
+//! # Nothing covered is read again
+//!
+//! The journal is append-only, and what this document covers is history no pass,
+//! append, view or reply of a live run needs to read twice: on a long run that
+//! history is hundreds of megabytes, and a reader that went back over it per
+//! record made every record cost the whole run. So a reader resumes from this
+//! document and the bytes appended past it, and nothing else:
+//!
+//! - The seal is over the document alone. It does not prove the covered bytes
+//!   are still the bytes that were folded, and nothing on a live path reads them
+//!   to ask.
+//! - A record arriving past the marker that the merge order would place **in
+//!   front of** a covered one — a worker's record relayed late, stamped when the
+//!   worker wrote it — is folded **after** what is covered, in the merge order of
+//!   what arrived with it. The covered fold is a barrier the merge does not
+//!   reach back across. Nothing in the fold a node's settlement, its dispatch or
+//!   its graph turns on is a relayed sibling record, and those are the records a
+//!   driver writes in its own stream's order, so moving a late relayed record to
+//!   the barrier moves only what that record says about its node's activity —
+//!   and it says the same thing either side of the barrier.
+//! - A document that cannot be used — absent, unreadable, at another version, of
+//!   another run, refused by its seal, or longer than the journal — is rebuilt by
+//!   **one streaming read** of the journal from its first byte, folded a bounded
+//!   window at a time, so a rebuild costs one pass over the store and memory
+//!   bounded by the window rather than by the run.
+//!
 //! # One order, for both readers
 //!
 //! One document holding one fold means one order: [`journal::merge_order`], which
 //! [`crate::views`], [`crate::summary`] and [`crate::telemetry`] already read the
-//! store in and which is the only ordering promise an envelope carries. The
-//! reconcile loop folded the file as appended before this; what moves is only where
-//! a relayed record sits against its own, since the merge keeps a stream in its own
-//! `seq` whatever the stamps say.
+//! store in and which is the only ordering promise an envelope carries — within
+//! what one read takes, with the covered fold as the barrier above.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] serialized fields an older build
 // wrote, on `src/summary.rs`'s terms and carrying that file's own suppression. The shape a
@@ -128,6 +152,13 @@ use crate::projection::{self, RunState};
 /// recorded rather than as a copy, resolved when the readout is drawn: a
 /// version-13 fold holds no reference, and resumed from it a node whose dispatch
 /// references its history would read as still doing whatever its last copy said.
+/// Version 15 is the document a reader resumes from **without reading what it
+/// covers**: its seal is taken over its own claims and the fold alone, it carries
+/// the summary's running [`Tally`] beside the state, and a record arriving after
+/// what it covers is folded after it whatever its stamp says — see the module
+/// note's *Nothing covered is read again*. An earlier version's seal is over the
+/// covered journal bytes and it carries no tally, so it is rebuilt by one
+/// streaming read rather than resumed from.
 // llmlint: ignore[changed_behavior_has_e2e] a version-1 document is one the build before
 // this one wrote, which no invocation of this build can produce: what a user can reach —
 // a checkpoint at this version being resumed from, and one at a version this build does
@@ -135,7 +166,7 @@ use crate::projection::{self, RunState};
 // refusal of the checked-in version-1 document itself is held by
 // `the_document_the_build_before_this_one_wrote_is_refused_rather_than_read` below, over
 // the real reader and the real file.
-pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 14;
+pub(crate) const CHECKPOINT_SCHEMA_VERSION: u32 = 15;
 
 /// Read the version, refusing a document this build cannot honestly read.
 fn this_version<'de, D: serde::Deserializer<'de>>(reader: D) -> Result<u32, D::Error> {
@@ -197,15 +228,14 @@ pub(crate) struct Coverage {
     /// The greatest `seq` folded per stream.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) streams: BTreeMap<String, u64>,
-    /// **The seal: this marker, over the journal bytes it claims.**
+    /// **The seal: this marker, over the document it is written in.**
     ///
-    /// What makes the journal authoritative rather than the document. Every field
-    /// above says something a reader would otherwise have to take on trust — how
-    /// many bytes, how many records, how far the order reached — and none of them
-    /// can see a covered record rewritten in place at identical length. This is
-    /// FNV-1a over the covered bytes and then over those fields, so a reader
-    /// recomputes it from the file plus the claims in front of it and refuses a
-    /// prefix or a claim that has moved. See [`sealed_with`](Self::sealed_with).
+    /// Every field above says something a reader would otherwise have to take on
+    /// trust — how many bytes, how many records, how far the order reached — and so
+    /// does the fold beside it. This is FNV-1a over those fields and then over the
+    /// fold and the tally, so a reader recomputes it from the document and refuses
+    /// one any part of which has moved since a writer sealed it. See
+    /// [`sealed_with`](Self::sealed_with) for why the covered bytes are not in it.
     ///
     /// Hex, because a persisted 128-bit integer is one a consumer reading JSON
     /// numbers as doubles rounds.
@@ -245,12 +275,6 @@ pub(crate) fn digested(from: u128, bytes: &[u8]) -> u128 {
     bytes.iter().fold(from, |digest, byte| {
         (digest ^ u128::from(*byte)).wrapping_mul(FNV_PRIME)
     })
-}
-
-/// The digest of a journal's first `bytes` bytes, or `None` where the file does not
-/// hold them.
-fn digest_of_prefix(journal: &std::path::Path, bytes: u64) -> Option<u128> {
-    ledger::read_range(journal, 0, bytes).map(|prefix| digested(NOTHING_DIGESTED, &prefix))
 }
 
 pub(crate) fn as_hex<S: serde::Serializer>(digest: &u128, writer: S) -> Result<S::Ok, S::Error> {
@@ -311,34 +335,20 @@ impl Coverage {
                 .is_none_or(|reached| *reached <= event.seq)
     }
 
-    /// Whether the merge order puts every record this accounts for in front of
-    /// **every** record the store has grown by since.
-    ///
-    /// One half of what the journal is asked about a marker; the other half is
-    /// [`corroborated_by`](Self::corroborated_by), which
-    /// asks whether the covered bytes are still the bytes this was folded from.
-    fn sorts_in_front_of(&self, grown: &[(Option<Envelope>, u64)]) -> bool {
-        grown
-            .iter()
-            .filter_map(|(event, _)| event.as_ref())
-            .all(|event| self.is_in_front_of(event))
-    }
-
-    /// This marker's seal: the journal bytes it covers, then its own claims, then
-    /// the state written beside it.
+    /// This marker's seal: its own claims, then the fold and the tally written
+    /// beside it.
     ///
     /// Everything the document asserts goes in, in a fixed order, so **anything
     /// edited no longer seals to what the document carries** — a claim, or the fold
     /// itself. [`digest`](Self::digest) does not go in, which is what stops it
     /// sealing over itself.
     ///
-    /// What that leaves is a document no part of which has moved since a writer
-    /// sealed it, over a journal prefix that has not moved either. It is still not a proof that the state is the *fold* of those
-    /// bytes — only folding them proves that, which is the cost this document
-    /// removes — but there is no longer any part of the document a reader takes on
-    /// trust separately from the rest.
-    fn sealed_with(&self, digested_bytes: u128, state: &RunState) -> u128 {
-        let mut sealed = digested(digested_bytes, &self.bytes.to_le_bytes());
+    /// The covered journal bytes do not go in either, and that is the point of
+    /// version 15: a reader that had to digest them to trust this document read the
+    /// whole history it exists to spare — see the module note's *Nothing covered is
+    /// read again*.
+    fn sealed_with(&self, state: &RunState, tally: &Tally) -> u128 {
+        let mut sealed = digested(NOTHING_DIGESTED, &self.bytes.to_le_bytes());
         sealed = digested(sealed, &self.records.to_le_bytes());
         if let Some(at) = &self.at {
             sealed = digested(sealed, at.ts.as_bytes());
@@ -353,41 +363,22 @@ impl Coverage {
         // rather than by somebody remembering to add it here — and the crate's
         // `float_roundtrip` is what makes a value read back the value written, so
         // the two sides digest the same bytes.
-        match serde_json::to_vec(state) {
-            Ok(written) => digested(sealed, &written),
+        match (serde_json::to_vec(state), serde_json::to_vec(tally)) {
+            (Ok(state), Ok(tally)) => digested(digested(sealed, &state), &tally),
             // A state that will not serialize is one no writer could have sealed,
             // so nothing may match it.
-            Err(_) => sealed.wrapping_add(1),
+            _ => sealed.wrapping_add(1),
         }
     }
 
-    /// Whether the journal corroborates every claim this marker makes.
+    /// Whether the journal and the document together corroborate every claim this
+    /// marker makes, short of reading what it covers.
     ///
-    /// **What makes the journal authoritative.** Three questions of the file rather
-    /// than of the document: it is at least as long as the marker claims, the marker
-    /// ends where a record ends, and the covered bytes together with everything the
-    /// document asserts seal to what it carries. The third is the one nothing else
-    /// can answer — a covered record rewritten in place at the same length moves no
-    /// count and no maximum — and it is why a truncated or edited prefix, an edited
-    /// claim about one, or an edited fold takes a full fold.
-    ///
-    /// Asked where a marker arrives **from a document**, which is the boundary it is
-    /// about. A marker this process established by folding those very bytes, under
-    /// the run's single-writer lock over an append-only file, has no document to
-    /// corroborate — and re-digesting the prefix per applied command would put back a
-    /// cost that grows with the run.
-    fn corroborated_by(&self, journal: &std::path::Path, state: &RunState) -> Option<u128> {
-        if length_of(journal) < self.bytes {
-            return None;
-        }
-        // A marker inside a line loses the record it lands in for every reader
-        // afterwards. Asked of the byte in front of it, which is the terminator the
-        // appender wrote.
-        if self.bytes > 0 && !ends_a_record(journal, self.bytes) {
-            return None;
-        }
-        digest_of_prefix(journal, self.bytes)
-            .filter(|digested_bytes| self.sealed_with(*digested_bytes, state) == self.digest)
+    /// Two questions: the file is at least as long as the marker claims — a
+    /// journal cut back, or replaced by a shorter one, holds none of what was
+    /// folded — and everything the document asserts seals to what it carries.
+    fn corroborated_by(&self, journal: &std::path::Path, state: &RunState, tally: &Tally) -> bool {
+        length_of(journal) >= self.bytes && self.sealed_with(state, tally) == self.digest
     }
 
     /// Account for one more record.
@@ -414,9 +405,13 @@ impl Coverage {
 
 /// One run's fold, and the marker saying how much of its journal it accounts
 /// for.
+///
+/// The one journal-derived snapshot of a run, and the type its writer and every
+/// reader of `checkpoint.json` share: regenerable from `events.jsonl`, and safe to
+/// delete.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Checkpoint {
+pub(crate) struct Checkpoint {
     /// The document's own version, so a reader can refuse one it does not
     /// understand. See [`CHECKPOINT_SCHEMA_VERSION`].
     #[serde(deserialize_with = "this_version")]
@@ -429,6 +424,85 @@ struct Checkpoint {
     run_id: String,
     coverage: Coverage,
     state: RunState,
+    /// What the summary document is derived from beside the state, over the same
+    /// records. See [`Tally`].
+    tally: Tally,
+}
+
+/// **What a run's summary counts beside its state**, over the same records the
+/// state was folded from.
+///
+/// Carried in the checkpoint so the journal writer that keeps `summary.json`
+/// current resumes it from this document rather than by walking the store: the
+/// state alone does not say how many records there were, which kind the order
+/// ended on, how the run's clock was spent, or which nodes a judge turned down.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Tally {
+    /// The run's clock and usage, a record at a time.
+    pub(crate) aggregate: crate::telemetry::Aggregate,
+    /// How many records were folded.
+    pub(crate) events: u64,
+    /// The kind of the record folded last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_event_kind: Option<String>,
+    /// The nodes some folded record carries a **failing judge verdict** for. A
+    /// verdict is on the settlement that carried it and nothing later withdraws
+    /// one, so the set only grows.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub(crate) judged: std::collections::BTreeSet<String>,
+    /// How many lines read were no record this build can read: a driver that meets
+    /// one reports that the graph it drives may be missing an edit.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) unreadable: u64,
+    /// Every line read that a [`journal::Integrity`] counts as lost, in file order,
+    /// each where it is: what a view says of a store's own losses, kept here
+    /// because the fold already met every one of them and a view asking again
+    /// would read the whole store to be told.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) losses: Vec<LineLost>,
+}
+
+/// One line [`Tally::losses`] holds: [`journal::Lost`], placed by its line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LineLost {
+    /// Which class it is lost under.
+    pub(crate) kind: journal::LossKind,
+    /// The 1-based line it is on, counted from the journal's first byte.
+    pub(crate) line: u64,
+    /// Where in the file the line begins.
+    pub(crate) offset: u64,
+    /// How many of its bytes are not a record this build can read.
+    pub(crate) bytes: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
+}
+
+impl Tally {
+    /// Count one record that belongs at the end of what has been folded.
+    pub(crate) fn take(&mut self, paths: &RunPaths, event: &Envelope) {
+        self.aggregate.fold(paths, event);
+        self.events += 1;
+        self.last_event_kind = Some(event.kind.0.clone());
+        if let Some(node) = crate::report::a_judge_failed(event) {
+            self.judged.insert(node.to_string());
+        }
+    }
+}
+
+/// Whether a [`Projected`] writes what it folds back to the run's checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Persist {
+    /// Written whenever the marker moves: the reconcile loop, and a reader that
+    /// folds once and leaves the next reader what it folded.
+    Yes,
+    /// Held in memory only: a reader that folds on every append — a journal
+    /// writer's summary, a driver's own rendering — and would otherwise rewrite
+    /// the whole document per record.
+    No,
 }
 
 /// A run's folded state, and how much of its journal that state accounts for.
@@ -442,6 +516,8 @@ pub(crate) struct Projected {
     /// The fold of exactly what [`coverage`](Self::coverage) accounts for, which
     /// is the only state the marker may be written beside.
     covered: RunState,
+    /// The tally over the same records.
+    covered_tally: Tally,
     coverage: Coverage,
     /// That, with the records past the marker folded onto it: the whole store.
     ///
@@ -451,19 +527,25 @@ pub(crate) struct Projected {
     /// sort in front — and folding them onto a state that already carried them
     /// would count each of them twice.
     state: RunState,
+    /// The tally over the whole store.
+    tally: Tally,
+    /// The byte every record read so far ends at: the marker, and the open instant
+    /// past it.
+    read_through: u64,
+    /// How many lines end at [`read_through`](Self::read_through): what a line read
+    /// past it is numbered after.
+    lines_through: u64,
+    /// The greatest `seq` each stream reached in the records past the marker —
+    /// what a writer opening on this run takes its next `seq` above, beside the
+    /// marker's own.
+    claimed_past: BTreeMap<String, u64>,
     /// How many journal records the last fold took.
     ///
     /// Kept on the value rather than read back off the process-wide counter this
     /// also reports to, so a check can hold one fold to what the store grew by
     /// without a fold running beside it moving the number.
     took: u64,
-    /// The digest of the covered bytes alone, which the marker's seal is taken over.
-    ///
-    /// In memory rather than on the wire: a reader that verified a seal read those
-    /// bytes to do it and so has this already, and one that folded them has it by
-    /// construction. Persisting it beside the seal would be one fact twice, with an
-    /// edit to either making the pair disagree.
-    digested_bytes: u128,
+    persist: Persist,
     /// What this driver's latest readjustment read, kept for the rest of its trigger.
     /// In memory only: a fresh driver reads again at its first trigger.
     pub(crate) readjust: crate::readjust::Readjuster,
@@ -483,45 +565,78 @@ impl std::ops::DerefMut for Projected {
     }
 }
 
+/// How much of a journal a rebuild folds at a time.
+///
+/// The bound on what one read holds in memory, whatever the run's length: a
+/// record is a few kilobytes and the largest this host's runs carry is under one
+/// megabyte, so a window of this size always holds whole records and a rebuild of
+/// a run of any length is one pass over it.
+const REBUILD_WINDOW: u64 = 16 * 1024 * 1024;
+
 impl Projected {
-    /// Fold a run, resuming from its checkpoint where there is a usable one.
+    /// Fold a run, resuming from its checkpoint where there is a usable one, and
+    /// writing what it folds back.
     pub(crate) fn open(paths: &RunPaths) -> Self {
-        let resumed = readable(paths).and_then(|checkpoint| {
-            let digested_bytes = checkpoint
-                .coverage
-                .corroborated_by(&paths.journal(), &checkpoint.state)?;
-            Some((checkpoint, digested_bytes))
+        Self::open_with(paths, Persist::Yes)
+    }
+
+    /// Fold a run, resuming from its checkpoint where there is a usable one.
+    pub(crate) fn open_with(paths: &RunPaths, persist: Persist) -> Self {
+        let resumed = readable(paths).filter(|checkpoint| {
+            checkpoint.coverage.corroborated_by(
+                &paths.journal(),
+                &checkpoint.state,
+                &checkpoint.tally,
+            )
         });
         let mut projected = match resumed {
-            Some((checkpoint, digested_bytes)) => Self {
+            Some(checkpoint) => Self {
                 state: checkpoint.state.clone(),
                 covered: checkpoint.state,
+                tally: checkpoint.tally.clone(),
+                covered_tally: checkpoint.tally,
+                read_through: checkpoint.coverage.bytes,
+                lines_through: checkpoint.coverage.records,
                 coverage: checkpoint.coverage,
+                claimed_past: BTreeMap::new(),
                 took: 0,
+                persist,
                 readjust: crate::readjust::Readjuster::default(),
-                digested_bytes,
             },
-            None => Self::empty(),
+            None => Self::empty(persist),
+        };
+        // Where there was no document to resume from, the journal is folded from
+        // its first byte in windows, and the refresh below reads the last of them.
+        let rebuilt = match projected.coverage.bytes {
+            0 => projected.rebuild(paths),
+            _ => 0,
         };
         projected.refresh(paths);
+        projected.took += rebuilt;
         projected
     }
 
     /// Fold what the run's journal has grown by, leaving the state a fold of the
     /// whole store leaves.
+    ///
+    /// Reads from the marker and never in front of it: a record past it that the
+    /// merge order would have placed in front of a covered one is folded after
+    /// what is covered — see the module note. Only a journal **shorter** than the
+    /// marker, which no longer holds what was folded, is rebuilt.
     pub(crate) fn refresh(&mut self, paths: &RunPaths) {
         let journal = paths.journal();
-        let mut grown = journal::finished_records_after(&journal, self.coverage.bytes);
-        if length_of(&journal) < self.coverage.bytes || !self.coverage.sorts_in_front_of(&grown) {
+        let mut rebuilt = 0;
+        if length_of(&journal) < self.coverage.bytes {
             // What this driver read and planned is not folded from the journal, so the
-            // whole-store fold below cannot put it back: it is kept across it.
+            // rebuild below cannot put it back: it is kept across it.
             let readjust = std::mem::take(&mut self.readjust);
-            *self = Self::empty();
+            *self = Self::empty(self.persist);
             self.readjust = readjust;
-            grown = journal::finished_records_after(&journal, 0);
+            rebuilt = self.rebuild(paths);
         }
-        self.took = grown.len() as u64;
-        self.take(paths, &grown);
+        let grown = journal::finished_lines_from(&journal, self.coverage.bytes);
+        self.took = rebuilt + grown.len() as u64;
+        self.take_with(paths, &grown, OpenInstant::HeldBack, Persist::Yes);
         // Not folded from the journal and therefore not part of what a fold of it
         // produces: `crate::crossdag` fills this in **after** a fold, from another
         // run's ledger, and a caller that had done so already must find it exactly
@@ -531,8 +646,67 @@ impl Projected {
         self.state.cross_dag = BTreeMap::new();
     }
 
+    /// Fold all but the last window of the journal, a window at a time, and say
+    /// how many records that took.
+    ///
+    /// Every window this folds is covered whole — the windows are what bounds
+    /// memory, and each one is a barrier exactly as the marker is for a resumed
+    /// fold. The last window is left to [`refresh`](Self::refresh), which reads it
+    /// as it reads any tail: its final instant held open, and the document written
+    /// once.
+    fn rebuild(&mut self, paths: &RunPaths) -> u64 {
+        self.rebuild_in(paths, REBUILD_WINDOW)
+    }
+
+    /// [`rebuild`](Self::rebuild), a `window` of bytes at a time.
+    fn rebuild_in(&mut self, paths: &RunPaths, window: u64) -> u64 {
+        let journal = paths.journal();
+        let mut window = window;
+        let mut took = 0;
+        loop {
+            let length = length_of(&journal);
+            let from = self.coverage.bytes;
+            if window >= length.saturating_sub(from) {
+                return took;
+            }
+            let grown = journal::finished_lines_within(&journal, from, window);
+            if grown.is_empty() {
+                // A window holding no finished record is one record larger than the
+                // window, widened so it is read whole next time.
+                window = window.saturating_mul(2);
+                continue;
+            }
+            took += grown.len() as u64;
+            self.take_with(paths, &grown, OpenInstant::Covered, Persist::No);
+        }
+    }
+
     pub(crate) fn into_state(self) -> RunState {
         self.state
+    }
+
+    /// The tally over the whole store, as [`Deref`](std::ops::Deref) gives the
+    /// state.
+    pub(crate) fn tally(&self) -> &Tally {
+        &self.tally
+    }
+
+    /// The byte the marker stops at: everything in front of it is covered.
+    pub(crate) fn covered_bytes(&self) -> u64 {
+        self.coverage.bytes
+    }
+
+    /// The byte every record this fold has read ends at.
+    pub(crate) fn read_through(&self) -> u64 {
+        self.read_through
+    }
+
+    /// The greatest `seq` any record of `stream` claims, of every record this fold
+    /// has read — what a writer opening on the run takes its next one above.
+    pub(crate) fn seq_claimed(&self, stream: &str) -> Option<u64> {
+        let covered = self.coverage.streams.get(stream).copied();
+        let past = self.claimed_past.get(stream).copied();
+        covered.max(past)
     }
 
     #[cfg(test)]
@@ -547,7 +721,7 @@ impl Projected {
 
     /// The fold of a store with nothing in it, as [`projection::fold`] starts
     /// from.
-    fn empty() -> Self {
+    fn empty(persist: Persist) -> Self {
         let empty = RunState {
             strict: true,
             ..RunState::default()
@@ -555,10 +729,15 @@ impl Projected {
         Self {
             state: empty.clone(),
             covered: empty,
+            tally: Tally::default(),
+            covered_tally: Tally::default(),
             coverage: Coverage::default(),
+            read_through: 0,
+            lines_through: 0,
+            claimed_past: BTreeMap::new(),
             took: 0,
+            persist,
             readjust: crate::readjust::Readjuster::default(),
-            digested_bytes: NOTHING_DIGESTED,
         }
     }
 
@@ -567,52 +746,52 @@ impl Projected {
     ///
     /// Two folds, split where the marker will stop: the records it may account
     /// for go onto the covered state, and the ones past it onto a copy of it.
-    /// Both runs are folded in [`journal::merge_order`], and the split holds in
-    /// that order as well as in the file's because a covered prefix is one
-    /// nothing past it sorts in front of — which is the same statement the marker
-    /// is chosen by.
-    fn take(&mut self, paths: &RunPaths, grown: &[(Option<Envelope>, u64)]) {
-        self.take_with(paths, grown, OpenInstant::HeldBack);
-    }
-
+    /// Both runs are folded in [`journal::merge_order`].
     fn take_with(
         &mut self,
         paths: &RunPaths,
-        grown: &[(Option<Envelope>, u64)],
+        grown: &[journal::FinishedLine],
         open: OpenInstant,
+        write: Persist,
     ) {
         crate::loopstats::records_folded(grown.len() as u64);
-        // Read **raw and before anything is folded**: the digest has to equal what a
-        // later reader takes off the file rather than what these records decoded to,
-        // and a marker whose seal did not cover what it claims is the one thing this
-        // document must never carry. Where those bytes cannot be read the marker
-        // takes in nothing this pass, which costs the next reader's saving and never
-        // an answer.
-        let accountable = extent(&self.coverage, grown, open);
-        let taking: u64 = grown[..accountable].iter().map(|(_, bytes)| bytes).sum();
-        let taken = match taking {
-            0 => Some(Vec::new()),
-            _ => ledger::read_range(&paths.journal(), self.coverage.bytes, taking),
-        };
-        let (covered, ahead) = grown.split_at(taken.as_ref().map_or(0, |_| accountable));
+        let accountable = extent(grown, open);
+        let (covered, ahead) = grown.split_at(accountable);
 
-        fold_in_merge_order(&mut self.covered, covered);
-        for (event, bytes) in covered {
-            self.coverage.absorb(event.as_ref(), *bytes);
+        let first = self.coverage.records;
+        fold_in_merge_order(
+            paths,
+            &mut self.covered,
+            &mut self.covered_tally,
+            covered,
+            first,
+        );
+        for line in covered {
+            self.coverage.absorb(line.record.as_ref(), line.bytes);
+        }
+        self.read_through = self.coverage.bytes + ahead.iter().map(|line| line.bytes).sum::<u64>();
+        self.lines_through = self.coverage.records + ahead.len() as u64;
+        self.claimed_past = BTreeMap::new();
+        for event in ahead.iter().filter_map(|line| line.record.as_ref()) {
+            let reached = self.claimed_past.entry(event.stream.clone()).or_default();
+            *reached = (*reached).max(event.seq);
         }
         // Only where the marker actually moved. A store whose every record the
         // marker cannot be extended over would otherwise rewrite an unchanged
         // document on every read, and a reader that saved nothing would pay a
         // write to say so.
-        if let Some(taken) = taken.filter(|taken| !taken.is_empty()) {
-            self.digested_bytes = digested(self.digested_bytes, &taken);
+        if !covered.is_empty() {
             self.coverage.digest = self
                 .coverage
-                .sealed_with(self.digested_bytes, &self.covered);
-            self.write(paths);
+                .sealed_with(&self.covered, &self.covered_tally);
+            if self.persist == Persist::Yes && write == Persist::Yes {
+                self.write(paths);
+            }
         }
         self.state = self.covered.clone();
-        fold_in_merge_order(&mut self.state, ahead);
+        self.tally = self.covered_tally.clone();
+        let first = self.coverage.records;
+        fold_in_merge_order(paths, &mut self.state, &mut self.tally, ahead, first);
     }
 
     /// Write the checkpoint.
@@ -631,6 +810,7 @@ impl Projected {
                 run_id: paths.run.clone(),
                 coverage: self.coverage.clone(),
                 state: self.covered.clone(),
+                tally: self.covered_tally.clone(),
             },
         );
     }
@@ -642,15 +822,94 @@ impl Projected {
 /// The sort belongs here rather than at the read: the file's order is not the
 /// fold's, and a record this build cannot read drops out of the run entirely —
 /// it folds to nothing, and placing it would need a timestamp it does not have.
-fn fold_in_merge_order(state: &mut RunState, records: &[(Option<Envelope>, u64)]) {
+///
+/// `first` is how many lines are in front of `records`, which is what each loss
+/// among them is numbered after.
+fn fold_in_merge_order(
+    paths: &RunPaths,
+    state: &mut RunState,
+    tally: &mut Tally,
+    records: &[journal::FinishedLine],
+    first: u64,
+) {
     let mut ordered: Vec<Envelope> = records
         .iter()
-        .filter_map(|(event, _)| event.clone())
+        .filter_map(|line| line.record.clone())
         .collect();
+    tally.unreadable += (records.len() - ordered.len()) as u64;
+    for (at, line) in (first + 1..).zip(records) {
+        if let Some(lost) = line.lost {
+            tally.losses.push(LineLost {
+                kind: lost.kind,
+                line: at,
+                offset: lost.offset,
+                bytes: lost.bytes,
+            });
+        }
+    }
     journal::merge_order(&mut ordered);
     for event in &ordered {
         projection::fold_one(state, event);
+        tally.take(paths, event);
     }
+}
+
+/// The records of the rare kinds [`RunState::recalled`] keeps, off the run's
+/// checkpoint and what was appended past it — what a driver starting on a run
+/// reads them back from instead of its whole history.
+pub(crate) fn recalled(paths: &RunPaths) -> Vec<Envelope> {
+    Projected::open_with(paths, Persist::No).state.recalled
+}
+
+/// The greatest `seq` each stream reached across the whole store, off the run's
+/// checkpoint and what was appended past it.
+pub(crate) fn streams_reached(paths: &RunPaths) -> BTreeMap<String, u64> {
+    let projected = Projected::open_with(paths, Persist::No);
+    let mut reached = projected.coverage.streams.clone();
+    for (stream, seq) in &projected.claimed_past {
+        let held = reached.entry(stream.clone()).or_default();
+        *held = (*held).max(*seq);
+    }
+    reached
+}
+
+/// A run's folded state off its checkpoint and what was appended past it, writing
+/// nothing back: what a reader beside a driver that keeps the run's checkpoint
+/// itself folds — another run's record, or a dependency's — once per question.
+pub(crate) fn current(paths: &RunPaths) -> RunState {
+    Projected::open_with(paths, Persist::No).into_state()
+}
+
+/// What a run's journal holds that is not a whole record — the
+/// [`journal::Integrity`] a read of the whole file answers — off the losses its
+/// checkpoint's fold already met and a read of only what lies past them.
+///
+/// The fold numbers each loss as it meets it, so every line in front of what it
+/// has read is accounted for without being read again; what is past that is the
+/// one record a writer may be in the middle of, and the fragments an append healed
+/// out of the file are in the log kept beside it, as they always were.
+pub(crate) fn integrity(paths: &RunPaths) -> journal::Integrity {
+    let projected = Projected::open_with(paths, Persist::No);
+    let journal = paths.journal();
+    let mut integrity =
+        journal::losses_from(&journal, projected.read_through, projected.lines_through);
+    let mut read = journal::Integrity {
+        healed: ledger::torn_tails(&journal),
+        ..journal::Integrity::default()
+    };
+    for lost in &projected.tally.losses {
+        read.count(
+            usize::try_from(lost.line).unwrap_or(usize::MAX),
+            Some(journal::Lost {
+                kind: lost.kind,
+                offset: lost.offset,
+                bytes: lost.bytes,
+            }),
+        );
+    }
+    read.truncated.append(&mut integrity.truncated);
+    read.unparseable.append(&mut integrity.unparseable);
+    read
 }
 
 /// Fold a run from its checkpoint, and leave the checkpoint where this fold
@@ -663,6 +922,16 @@ pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
     Projected::open(paths).into_state()
 }
 
+/// The byte a reader of what a run records **from now on** starts at: where the
+/// run's checkpoint stops, once it has been brought up to the journal as it stands.
+///
+/// What a watch given no cursor, and a driver's attached stream, start their reads
+/// at: everything in front of it is folded, so nothing they decide from is there,
+/// and printing it was a read of the whole history per call.
+pub(crate) fn resume_point(paths: &RunPaths) -> u64 {
+    Projected::open(paths).coverage.bytes
+}
+
 /// The fold of a run **proved ended**, with its
 /// checkpoint written covering every record — the trailing ones sharing the
 /// journal's last timestamp included, which [`fold_and_checkpoint`] holds back.
@@ -673,18 +942,12 @@ pub(crate) fn fold_and_checkpoint(paths: &RunPaths) -> RunState {
 /// arrival but an adoption, which is stamped later. So covering the final records
 /// costs nothing a reader relies on, and it is what lets `onepipeline host` read an
 /// ended run's final stop and running set off this document without opening the
-/// journal. Should a record arrive that sorts in front of the marker anyway, the
-/// existing [`Coverage::sorts_in_front_of`] check discards the document and the
-/// next reader refolds — the answer every run had before checkpoints existed.
-///
-/// The document keeps its shape, version and seal, so a reader at an older pin
-/// verifies it as it verifies any other, finds nothing past the marker, and —
-/// writing only when the marker moves — leaves it as it is.
+/// journal.
 pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
     let mut projected = Projected::open(paths);
-    let rest = journal::finished_records_after(&paths.journal(), projected.coverage.bytes);
+    let rest = journal::finished_lines_from(&paths.journal(), projected.coverage.bytes);
     if !rest.is_empty() {
-        projected.take_with(paths, &rest, OpenInstant::Covered);
+        projected.take_with(paths, &rest, OpenInstant::Covered, Persist::Yes);
     }
     projected.into_state()
 }
@@ -693,21 +956,12 @@ pub(crate) fn fold_ended_and_checkpoint(paths: &RunPaths) -> RunState {
 /// exactly the journal a **current** `summary.json` stamps — `journal_len` bytes
 /// and `event_count` records — so the journal is not opened.
 ///
-/// **The seal is not re-taken here, and that is an accepted trust assumption.**
-/// Re-taking it reads every covered byte, which is the cost this exists to remove.
-/// What stands in for it is the summary's stamp: a current summary (its journal
-/// length and modification time match the journal's) proves the journal has not
-/// moved since that summary was written. It proves nothing about this document:
-/// **an edit to the checkpoint's state that keeps its run, its version and its
-/// coverage counts is not detected on this path.** The assumption holds only
-/// here: a checkpoint whose counts differ from the current summary's is refused,
-/// and the caller then folds through [`fold_ended_and_checkpoint`], which verifies the seal or
-/// refolds the journal, as every cold read does.
-// llmlint: ignore-block[boundary_inputs_validated] the seal is chained over the covered
-// journal bytes before the state, so no part of it can be checked without reading every one
-// of them, which is the cost this exists to remove. The document is still refused at another
-// version, as another run's, or as anything but this build's shape (`readable`); the manager
-// accepted the trust assumption the doc comment above states, under its conditions.
+/// The document is held to its seal here as it is everywhere else: since version
+/// 15 the seal is over the document alone, so checking it reads none of the
+/// journal. A current summary (its journal length and modification time match the
+/// journal's) is what says the journal has not moved since; a checkpoint whose
+/// counts differ from it is refused, and the caller then folds through
+/// [`fold_ended_and_checkpoint`], as every cold read does.
 pub(crate) fn covering_whole(
     paths: &RunPaths,
     journal_len: u64,
@@ -715,11 +969,15 @@ pub(crate) fn covering_whole(
 ) -> Option<RunState> {
     readable(paths)
         .filter(|checkpoint| {
-            checkpoint.coverage.bytes == journal_len && checkpoint.coverage.records == event_count
+            checkpoint.coverage.bytes == journal_len
+                && checkpoint.coverage.records == event_count
+                && checkpoint
+                    .coverage
+                    .sealed_with(&checkpoint.state, &checkpoint.tally)
+                    == checkpoint.coverage.digest
         })
         .map(|checkpoint| checkpoint.state)
 }
-// llmlint: ignore-end[boundary_inputs_validated]
 
 /// Whether a fold may cover the records sharing the journal's last timestamp.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -741,25 +999,6 @@ fn readable(paths: &RunPaths) -> Option<Checkpoint> {
         .filter(|checkpoint| checkpoint.run_id == paths.run)
 }
 
-/// Whether a byte offset sits just past a record's own terminator.
-///
-/// The one thing a marker's byte count claims that a reader can check without
-/// reading the prefix, and the claim everything else it says rests on: a tail read
-/// from inside a line drops the record it lands in, and every reader afterwards
-/// folds a store nobody wrote. A byte that cannot be read at all answers `false`,
-/// which is one more unusable checkpoint.
-fn ends_a_record(journal: &std::path::Path, at: u64) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut file) = std::fs::File::open(journal) else {
-        return false;
-    };
-    if file.seek(SeekFrom::Start(at - 1)).is_err() {
-        return false;
-    }
-    let mut byte = [0u8; 1];
-    file.read_exact(&mut byte).is_ok() && byte[0] == b'\n'
-}
-
 /// How long the journal is, where there is one.
 ///
 /// A journal that is not there is zero bytes long, which is what a run with a
@@ -770,88 +1009,17 @@ fn length_of(journal: &std::path::Path) -> u64 {
 
 /// **How many of the records a store has grown by a coverage may account for.**
 ///
-/// The **largest** prefix nothing past it sorts in front of, which is the module
-/// note's condition — largest rather than first, because a marker that stopped at
-/// the first inversion never passes it.
-///
-/// Read as spans: a record sorting in front of an earlier one rules out the
-/// boundaries *between* the two, so each contributes one span, found by binary
-/// search against the running maxima in front of it, and the answer is the largest
-/// boundary no span covers. Linear but for those searches, which the whole-store
-/// fold needs.
-///
-/// The trailing records sharing the store's last timestamp are held back, as
-/// [`crate::summary`]'s maintainer holds the same run open and for the same
-/// reason: the next arrival is stamped at or after that instant, so leaving it
-/// uncovered is what lets an ordinary one sort in front of something without
-/// making the marker unusable.
-fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)], open: OpenInstant) -> usize {
-    let cap = match open {
+/// Every one but the trailing records sharing the store's last timestamp, which
+/// are held back as [`crate::summary`]'s writer holds the same run open and for
+/// the same reason: the next arrival is stamped at or after that instant, so
+/// leaving them uncovered is what lets an ordinary one sort in front of them in
+/// the merge rather than land behind the barrier. A run proved ended has no next
+/// arrival, and covers them all.
+fn extent(grown: &[journal::FinishedLine], open: OpenInstant) -> usize {
+    match open {
         OpenInstant::HeldBack => before_the_open_instant(grown),
         OpenInstant::Covered => grown.len(),
-    };
-    // One more than the boundaries there are, so a span ending at the last of
-    // them closes inside the array rather than off the end of it.
-    let mut ruled_out = vec![0i64; cap + 2];
-    let mut rule_out = |from: usize, to: usize| {
-        if from <= cap {
-            ruled_out[from] += 1;
-            ruled_out[to.min(cap) + 1] -= 1;
-        }
-    };
-    // The greatest `(ts, stream)` in front of each boundary, which only ever
-    // grows — so the first record to reach past a given place is found by
-    // searching this rather than by scanning back through the store.
-    let mut reached: Vec<Option<Placed>> = vec![coverage.at.clone()];
-    // Each stream's own records: where each sits in the store, and the greatest
-    // `seq` that stream had reached there. Growing too, for the same reason, and
-    // per stream because the merge keeps a stream in its own `seq` whatever the
-    // stamps say.
-    let mut per_stream: BTreeMap<&str, Vec<(usize, u64)>> = BTreeMap::new();
-    for (at, (event, _)) in grown.iter().enumerate() {
-        let front = reached[at].clone();
-        let Some(event) = event else {
-            // A record this build cannot read folds to nothing, so no boundary is
-            // ruled out by where the merge would put it.
-            reached.push(front);
-            continue;
-        };
-        let placed = placed(event);
-        if front.as_ref().is_some_and(|front| *front > placed) {
-            // The merge puts this record in front of one appended before it, so
-            // every boundary between the two is one it would be carried across.
-            let first =
-                reached.partition_point(|reached| reached.as_ref().is_none_or(|at| *at <= placed));
-            rule_out(first, at);
-        }
-        let stream = per_stream.entry(event.stream.as_str()).or_default();
-        if stream
-            .last()
-            .is_some_and(|(_, reached)| *reached > event.seq)
-        {
-            // The same statement about one stream's own order. The `seq` the
-            // marker already carries for this stream cannot be the record in
-            // front: a checkpoint is only usable where every record the store has
-            // grown by is past it, which `corroborated` has already asked.
-            let first = stream.partition_point(|(_, reached)| *reached <= event.seq);
-            rule_out(stream[first].0 + 1, at);
-        }
-        let carried = stream.last().map_or(event.seq, |(_, reached)| *reached);
-        stream.push((at, carried.max(event.seq)));
-        reached.push(Some(match front {
-            Some(front) if front > placed => front,
-            _ => placed,
-        }));
     }
-    let mut covered = 0;
-    let mut spanning = 0;
-    for (boundary, opened) in ruled_out.iter().enumerate().take(cap + 1) {
-        spanning += opened;
-        if spanning == 0 {
-            covered = boundary;
-        }
-    }
-    covered
 }
 
 /// How many of a store's records may be considered for a marker at all.
@@ -861,11 +1029,11 @@ fn extent(coverage: &Coverage, grown: &[(Option<Envelope>, u64)], open: OpenInst
 /// stamped out of order does not hold an earlier instant open too — those records
 /// are placed already, and taking them with the tail would move a boundary
 /// nothing arriving next can reach.
-fn before_the_open_instant(grown: &[(Option<Envelope>, u64)]) -> usize {
+fn before_the_open_instant(grown: &[journal::FinishedLine]) -> usize {
     let Some(last) = grown
         .iter()
         .rev()
-        .find_map(|(event, _)| event.as_ref().map(|event| event.ts.clone()))
+        .find_map(|line| line.record.as_ref().map(|event| event.ts.clone()))
     else {
         // Nothing datable in the whole of it: no instant is open, because no
         // arrival can sort in front of a record that folds to nothing.
@@ -873,7 +1041,7 @@ fn before_the_open_instant(grown: &[(Option<Envelope>, u64)]) -> usize {
     };
     grown
         .iter()
-        .rposition(|(event, _)| event.as_ref().is_some_and(|event| event.ts != last))
+        .rposition(|line| line.record.as_ref().is_some_and(|event| event.ts != last))
         .map_or(0, |before| before + 1)
 }
 
@@ -1092,9 +1260,7 @@ mod tests {
     fn seal_and_write(paths: &RunPaths, document: &mut Value) {
         let parsed: Checkpoint =
             serde_json::from_value(document.clone()).expect("a document this build reads");
-        let bytes = digest_of_prefix(&paths.journal(), parsed.coverage.bytes)
-            .expect("the journal holds the bytes the marker claims");
-        let sealed = parsed.coverage.sealed_with(bytes, &parsed.state);
+        let sealed = parsed.coverage.sealed_with(&parsed.state, &parsed.tally);
         document["coverage"]["digest"] = json!(format!("{sealed:032x}"));
         crate::ledger::write_json(&paths.checkpoint(), document).expect("written");
     }
@@ -1378,16 +1544,16 @@ mod tests {
     }
 
     #[test]
-    fn a_coverage_the_journal_does_not_corroborate_folds_the_whole_store() {
+    fn a_marker_claiming_more_than_the_journal_holds_folds_the_whole_store() {
         let (root, paths, whole) = a_run_with_a_checkpoint("uncorroborated");
-        // A marker claiming to account for records the store in front of it does not
-        // sort after: the settlement appended since is stamped now, and this says
-        // everything covered was written a century later. **Sealed as a writer would
-        // have sealed it**, so what refuses it is the ordering condition rather than
-        // the seal — which is the condition this journey is about.
-        let mut ahead = document(&paths);
-        ahead["coverage"]["at"] = json!({"ts": "2199-01-01T00:00:00.000Z", "stream": "zzzz"});
-        seal_and_write(&paths, &mut ahead);
+        // A marker claiming bytes the journal does not hold: a store cut back, or
+        // replaced by a shorter one, holds none of what was folded. **Sealed as a
+        // writer would have sealed it**, so what refuses it is the length rather
+        // than the seal — which is the condition this journey is about.
+        let mut longer = document(&paths);
+        let held = std::fs::metadata(paths.journal()).expect("a journal").len();
+        longer["coverage"]["bytes"] = json!(held + 4_096);
+        seal_and_write(&paths, &mut longer);
         assert_eq!(a_view_of(&paths), whole);
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1414,21 +1580,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// A store whose **first** records the merge order rearranges accounts for
-    /// nothing rather than for something it cannot place.
+    /// **A record arriving behind what is covered is folded after it, and nothing
+    /// covered is read to place it.**
+    ///
+    /// The covered bytes are overwritten with bytes that are no record at all, so a
+    /// reader that went back over them — to digest them, or to re-sort the store
+    /// around the late arrival — would fold a store with nothing in it. The record
+    /// appended is stamped a century before everything covered, on a stream of its
+    /// own: the merge order would put it first, and the fold puts it after the
+    /// covered history instead.
     #[test]
-    fn a_marker_is_never_extended_over_a_record_a_reordering_would_move() {
-        let root = scratch("never-extended");
-        let paths = a_run(&root, "r-unplaceable");
-        relayed(&paths, "graph-b", 0, "2099-01-01T00:00:03.000Z", "build");
-        relayed(&paths, "graph-a", 0, "2099-01-01T00:00:01.000Z", "build");
-        let state = folded_as(&fold_and_checkpoint(&paths));
-        let covered = super::readable(&paths).map(|stored| stored.coverage);
-        assert!(
-            covered.is_none_or(|covered| covered.records == 0),
-            "a record the merge order moves was accounted for"
+    fn a_record_arriving_behind_what_is_covered_is_folded_without_reading_what_is_covered() {
+        let root = scratch("behind-the-barrier");
+        let paths = a_recorded_run(&root, "r-barrier");
+        settle(&paths, "build", "done");
+        let _ = fold_and_checkpoint(&paths);
+        let covered = super::readable(&paths).expect("a checkpoint").coverage;
+        assert!(covered.records > 0, "nothing was accounted for");
+
+        let store = paths.journal();
+        let mut held = std::fs::read(&store).expect("the run's journal");
+        let span = usize::try_from(covered.bytes).expect("a length");
+        held[..span].fill(b'#');
+        std::fs::write(&store, &held).expect("the covered bytes are overwritten");
+        relayed(&paths, "graph-0", 0, "1999-01-01T00:00:00.000Z", "build");
+
+        let mut projected = Projected::open(&paths);
+        let past = journal::finished_records_from(&store, covered.bytes).len() as u64;
+        assert_eq!(
+            projected.took(),
+            past,
+            "the fold took records in front of the marker"
         );
-        assert_eq!(state, without_a_checkpoint(&paths));
+        assert_eq!(
+            projected.statuses().get("build"),
+            Some(&crate::graph::NodeStatus::Done),
+            "the covered settlement is not in the fold"
+        );
+        let build = projected
+            .activity
+            .get("build")
+            .and_then(|activity| activity.progress)
+            .expect("the late record folded as the node's activity");
+        assert_eq!(build.events(), 1);
+        // And it stays folded once: the next refresh reads nothing in front of the
+        // marker and folds the record no second time.
+        projected.refresh(&paths);
+        assert!(projected.took() <= past);
+        assert_eq!(
+            projected
+                .activity
+                .get("build")
+                .and_then(|activity| activity.progress)
+                .map(crate::projection::Progress::events),
+            Some(1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1508,6 +1714,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **What a run's store lost is said off the fold that met it**, the same as a
+    /// read of the whole file says it.
+    ///
+    /// Every class [`journal::integrity`] tells apart — a blank line it passes
+    /// over, a line this build cannot read, a fragment with a record glued after
+    /// it, and a record whose writer has not finished it — each numbered and
+    /// placed where the file holds it: in front of the marker, past it, and in the
+    /// unfinished tail a fold never reads as a record. And then again once the
+    /// covered bytes are overwritten, which only a reader that never goes back over
+    /// them still answers.
+    #[test]
+    fn what_a_store_lost_is_read_off_the_fold_as_a_whole_read_says_it() {
+        let root = scratch("losses");
+        let paths = a_recorded_run(&root, "r-losses");
+        let store = paths.journal();
+        an_instant_later();
+        crate::ledger::append_line(&store, "").expect("appended");
+        crate::ledger::append_line(&store, "this is not a record").expect("appended");
+        settle(&paths, "build", "done");
+        let glued = crate::ledger::read_records(&store)
+            .last()
+            .map(|record| record.text.clone())
+            .expect("a settlement");
+        crate::ledger::append_line(&store, &format!("{{\"v\":1,\"torn\"{glued}"))
+            .expect("appended");
+        an_instant_later();
+        settle(&paths, "ship", "done");
+        let _ = fold_and_checkpoint(&paths);
+        crate::ledger::append_line(&store, "past the marker").expect("appended");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&store)
+            .expect("the journal");
+        std::io::Write::write_all(&mut file, b"{\"v\":1,\"half").expect("a torn tail");
+
+        let whole = journal::integrity(&store);
+        assert_eq!(whole.unparseable.len(), 2, "{whole:?}");
+        assert_eq!(whole.truncated.len(), 2, "{whole:?}");
+        assert_eq!(integrity(&paths), whole);
+
+        let covered = super::readable(&paths).expect("a checkpoint").coverage;
+        let mut held = std::fs::read(&store).expect("the run's journal");
+        held[..usize::try_from(covered.bytes).expect("a length")].fill(b'#');
+        std::fs::write(&store, &held).expect("the covered bytes are overwritten");
+        assert_eq!(integrity(&paths).phrase(), whole.phrase());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Every value the state carries goes back through the check that made it,
     /// rather than straight into the field.
     ///
@@ -1581,33 +1835,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// **A covered record rewritten in place at identical length takes a full
-    /// fold.**
-    ///
-    /// The one modification no count can see: the byte count, the record count and
-    /// both ordering maxima are exactly what they were, so the digest is the only
-    /// thing that refuses it — and it has to, or a reader serves a state folded
-    /// from bytes the file no longer holds. The checkpoint carries an account of
-    /// its covered records the journal does not support, so a document that *was*
-    /// accepted would be visible rather than indistinguishable.
+    /// A rebuild folded a window at a time — windows far smaller than a record
+    /// included, which it widens until one fits — lands on the state one read of
+    /// the whole store folds to, and covers every record but the last instant.
+    // llmlint: ignore[changed_behavior_has_e2e] a journey crossing a window needs a journal past sixteen megabytes per run of the suite; this drives the real reader and fold over a real run store at windows down to one byte, and the journeys drive the rebuild a deleted and an earlier build's checkpoint take.
     #[test]
-    fn a_covered_record_changed_at_identical_length_folds_the_whole_store() {
+    fn a_rebuild_in_windows_lands_on_the_whole_stores_fold() {
+        let root = scratch("windows");
+        let paths = a_recorded_run(&root, "r-windows");
+        settle(&paths, "build", "done");
+        settle(&paths, "ship", "done");
+        let _ = std::fs::remove_file(paths.checkpoint());
+        let whole = folded_as(&Projected::open_with(&paths, Persist::No).state);
+        for window in [1, 64, 4_096] {
+            let mut rebuilt = Projected::empty(Persist::No);
+            let took = rebuilt.rebuild_in(&paths, window);
+            // A window as long as the store leaves all of it to the refresh below.
+            assert_eq!(took > 0, window < 4_096, "window {window} took {took}");
+            rebuilt.refresh(&paths);
+            assert_eq!(folded_as(&rebuilt.state), whole, "window {window}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **A covered record rewritten in place keeps the checkpoint's account of it.**
+    ///
+    /// The journal is append-only, and what the marker covers is history no reader
+    /// goes back over: the document planted here says something the journal does
+    /// not, and a reader that resumed from it — rather than re-reading the prefix
+    /// to check it — is the one that reports what the document says. A whole-store
+    /// fold, with no document to resume from, reads the rewritten bytes and reports
+    /// what they say instead.
+    #[test]
+    fn a_covered_record_changed_in_place_is_never_read_again() {
         let root = scratch("prefix-changed");
         let paths = a_recorded_run(&root, "r-changed");
         settle(&paths, "build", "done");
         let _ = fold_and_checkpoint(&paths);
-
-        let marker = super::readable(&paths)
-            .expect("the checkpoint that read wrote")
-            .coverage;
-        // Sealed as a writer would have sealed it, so what refuses this document is
-        // the prefix moving underneath it rather than the plant itself.
         let mut planted = document(&paths);
         planted["state"]["outcomes"]["build"] = json!("carried-from-the-checkpoint");
         seal_and_write(&paths, &mut planted);
         settle(&paths, "ship", "done");
 
-        // One covered line replaced by as many bytes as it held.
         let store = paths.journal();
         let held = std::fs::read(&store).expect("the run's journal");
         let mut lines: Vec<Vec<u8>> = held
@@ -1616,39 +1885,13 @@ mod tests {
             .collect();
         let changed = lines[0].len() - 1;
         lines[0] = b"#".repeat(changed).into_iter().chain(*b"\n").collect();
-        let mangled = lines.concat();
-        assert_eq!(
-            mangled.len(),
-            held.len(),
-            "this journey did not hold the store's length"
-        );
-        std::fs::write(&store, &mangled).expect("the journal is rewritten");
-        let after = super::readable(&paths)
-            .expect("the checkpoint is still there")
-            .coverage;
-        // Everything the marker *counts* is where it was — which is the whole point:
-        // no count can see this rewrite, so only the seal can. The seal itself moved
-        // when the plant above was sealed, and is not what is being held still here.
-        assert_eq!(
-            (after.bytes, after.records, &after.at, &after.streams),
-            (marker.bytes, marker.records, &marker.at, &marker.streams),
-            "the marker moved, so this journey is not about a store that did not"
-        );
+        std::fs::write(&store, lines.concat()).expect("the journal is rewritten");
 
-        // The control is a reader with no checkpoint at all over **this** store,
-        // taken after the rewrite rather than before it: what the criterion asks is
-        // that the two agree about the journal as it now stands.
-        let whole = without_a_checkpoint(&paths);
         let read = folded_as(&fold_and_checkpoint(&paths));
         assert_eq!(
-            read.get("outcomes")
-                .and_then(|outcomes| outcomes.get("build")),
-            None,
-            "a checkpoint over a rewritten prefix was folded from anyway: {read}"
-        );
-        assert_eq!(
-            read, whole,
-            "the state after a rewritten prefix is not the state the whole store folds to"
+            read["outcomes"]["build"],
+            json!("carried-from-the-checkpoint"),
+            "the reader went back over the covered history: {read}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1659,10 +1902,7 @@ mod tests {
     /// later build of this crate parses, and the only thing that stops a marker
     /// field being renamed, an absence becoming a zero, the digest turning back
     /// into a number, or the version moving without anyone deciding to move it.
-    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v14.json");
-
-    /// The digest of the journal bytes the golden's marker covers.
-    const GOLDEN_BYTES_DIGESTED: u128 = 0x1234_5678_9abc_def0_1234_5678_9abc_def0;
+    const GOLDEN: &str = include_str!("../tests/golden/checkpoint-v15.json");
 
     /// The document the golden pins, built through the types.
     ///
@@ -1708,6 +1948,39 @@ mod tests {
             // Written only for a node that kept its branch, and pinned for the same
             // reason.
             remotes: BTreeMap::from([("kept".to_string(), onevcs::Preservation::Pushed)]),
+            // What a view, a note and the write-back read off the fold rather than
+            // the run's history, pinned for the same reason.
+            noted: std::collections::BTreeSet::from(["build".to_string()]),
+            last_turns: BTreeMap::from([(
+                "build".to_string(),
+                crate::agentgraph::TurnAddress::of("graph-run-1", "worker").expect("an address"),
+            )]),
+            dispatched_nodes: std::collections::BTreeSet::from(["build".to_string()]),
+            settled_details: BTreeMap::from([(
+                "build".to_string(),
+                "awaiting the engine's release".to_string(),
+            )]),
+            settled_awaiting: BTreeMap::from([(
+                "build".to_string(),
+                vec![crate::views::AwaitedRelease {
+                    producer: "github.com/owner/engine".to_string(),
+                    target: "crate".to_string(),
+                }],
+            )]),
+            sessions_opened: BTreeMap::from([(
+                "build".to_string(),
+                crate::projection::SessionOpened {
+                    token: Some(onevcs::SessionToken("session-1".into())),
+                    base: crate::vcs::BranchName::checked("main").expect("a branch"),
+                    at: "2026-09-08T11:00:00.000Z".into(),
+                },
+            )]),
+            board_settlements: BTreeMap::from([(
+                "build".to_string(),
+                serde_json::Map::from_iter([("status".to_string(), json!("done"))]),
+            )]),
+            settled_clean: std::collections::BTreeSet::from(["ship".to_string()]),
+            hook_marker: Some(crate::hooks::FiredOver::Live),
             // Written only for a node whose last activity referenced its history,
             // and pinned for the same reason.
             activity: BTreeMap::from([(
@@ -1745,12 +2018,28 @@ mod tests {
             streams: BTreeMap::from([("golden-host-1".to_string(), 41)]),
             digest: 0,
         };
-        coverage.digest = coverage.sealed_with(GOLDEN_BYTES_DIGESTED, &state);
+        // The summary's tally, pinned for the same reason: its names are the
+        // document's as much as the state's are.
+        let tally = Tally {
+            aggregate: crate::telemetry::Aggregate::default(),
+            events: 42,
+            last_event_kind: Some("node-settled".into()),
+            judged: std::collections::BTreeSet::from(["build".to_string()]),
+            unreadable: 1,
+            losses: vec![LineLost {
+                kind: journal::LossKind::Unparseable,
+                line: 7,
+                offset: 1_024,
+                bytes: 33,
+            }],
+        };
+        coverage.digest = coverage.sealed_with(&state, &tally);
         Checkpoint {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             run_id: "golden".into(),
             coverage,
             state,
+            tally,
         }
     }
 
@@ -1763,14 +2052,15 @@ mod tests {
     /// the one before it kept the closure rule's facts, and the one before it kept
     /// each node's base and the branches its driver retired, the one before it
     /// kept what putting a kept branch on its origin found to do, the one before
-    /// a reparent cleared a waiting approval's recorded wait, and the one before
-    /// a node's activity kept the `transcript` reference it recorded.
+    /// a reparent cleared a waiting approval's recorded wait, the one before a
+    /// node's activity kept the `transcript` reference it recorded, and the one
+    /// before a resumed reader read nothing the document covers.
     ///
     /// What proves each fold change is a version and not a quiet re-reading: each
     /// is a real document, byte-for-byte the shape this build writes, and the
     /// reader has to refuse it rather than resume from a fold it would not have
     /// computed.
-    const GOLDEN_EARLIER: [(u32, &str); 13] = [
+    const GOLDEN_EARLIER: [(u32, &str); 14] = [
         (1, include_str!("../tests/golden/checkpoint-v1.json")),
         (2, include_str!("../tests/golden/checkpoint-v2.json")),
         (3, include_str!("../tests/golden/checkpoint-v3.json")),
@@ -1784,6 +2074,7 @@ mod tests {
         (11, include_str!("../tests/golden/checkpoint-v11.json")),
         (12, include_str!("../tests/golden/checkpoint-v12.json")),
         (13, include_str!("../tests/golden/checkpoint-v13.json")),
+        (14, include_str!("../tests/golden/checkpoint-v14.json")),
     ];
 
     #[test]
@@ -1800,13 +2091,13 @@ mod tests {
     }
 
     #[test]
-    fn a_schema_14_document_is_the_shape_the_golden_pins() {
+    fn a_schema_15_document_is_the_shape_the_golden_pins() {
         let rendered = serde_json::to_string_pretty(&a_checkpoint()).expect("it serialises");
         if std::env::var_os("ONEPIPELINE_WRITE_CHECKPOINT_GOLDEN").is_some() {
             std::fs::write(
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/tests/golden/checkpoint-v14.json"
+                    "/tests/golden/checkpoint-v15.json"
                 ),
                 format!("{rendered}\n"),
             )
@@ -1816,12 +2107,12 @@ mod tests {
             rendered.trim(),
             GOLDEN.trim(),
             "the checkpoint document changed shape. If that was deliberate, bump \
-             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v14.json together"
+             CHECKPOINT_SCHEMA_VERSION and update tests/golden/checkpoint-v15.json together"
         );
     }
 
     #[test]
-    fn a_schema_14_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
+    fn a_schema_15_document_round_trips_and_a_version_this_build_does_not_read_is_refused() {
         let read: Checkpoint =
             serde_json::from_str(GOLDEN).expect("the golden reads back into the types");
         // Compared through the wire rather than through `PartialEq`, which the
@@ -1837,8 +2128,7 @@ mod tests {
         // claims, so a claim read back differently would not seal to this.
         assert_eq!(
             read.coverage.digest,
-            read.coverage
-                .sealed_with(GOLDEN_BYTES_DIGESTED, &read.state),
+            read.coverage.sealed_with(&read.state, &read.tally),
             "the document read back does not seal to what it carries"
         );
 

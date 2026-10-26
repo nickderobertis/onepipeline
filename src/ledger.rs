@@ -265,6 +265,13 @@ impl RunPaths {
         self.dir.join("checkpoint.json")
     }
 
+    /// The run's **member liveness**: each in-flight dispatch member's latest
+    /// heartbeat, overwritten in place rather than journalled. See
+    /// [`crate::heartbeat`].
+    pub(crate) fn liveness(&self) -> PathBuf {
+        self.dir.join("liveness.json")
+    }
+
     /// The directory holding one record per live **watch** of this run.
     ///
     /// A directory of small records rather than one document, for the reason
@@ -1468,6 +1475,22 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     write_atomic(path, body.as_bytes(), Durability::Record)
 }
 
+/// [`write_json`] for a derived document a lost write costs nothing durable:
+/// published by the same rename, with no disk sync.
+///
+/// For the files a journal append or a relayed beat rewrites. The summary and the
+/// append receipt are caches a reader checks against the journal before it trusts
+/// them, and the journal they follow is not synced either, so syncing them bought
+/// no durability the record itself has. The liveness file is not rebuilt from the
+/// journal: losing it loses only the beats since the journal last carried one, and
+/// the next beat writes it again. Each sync cost every relayed record its share of
+/// the host's sync latency on a thread that writes them one at a time.
+pub fn write_json_derived<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    write_atomic(path, body.as_bytes(), Durability::Projection)
+}
+
 /// What a write is asked to survive, beyond the reader it is already safe from.
 ///
 /// Every write through [`write_atomic`] is published by a rename. A directory
@@ -2052,6 +2075,7 @@ pub fn read_records(path: &Path) -> Vec<Record> {
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
     counted(bytes.len(), ());
+    crate::loopstats::journal_read(path, 0, bytes.len() as u64);
     #[cfg(test)]
     crate::readprobe::read(path, 0, bytes.len() as u64);
     records_of(&bytes, 0)
@@ -2174,6 +2198,7 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
             }
         }
     }
+    crate::loopstats::journal_read(path, from, start - from);
     #[cfg(test)]
     crate::readprobe::read(path, from, start - from);
     counted(usize::try_from(start - from).unwrap_or(usize::MAX), lines)
@@ -2224,6 +2249,7 @@ pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
     let want = usize::try_from(len).ok()?;
     let mut bytes = vec![0u8; want];
     file.read_exact(&mut bytes).ok()?;
+    crate::loopstats::journal_read(path, from, len);
     #[cfg(test)]
     crate::readprobe::read(path, from, len);
     Some(counted(bytes.len(), bytes))

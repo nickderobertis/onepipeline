@@ -31,8 +31,8 @@ use serde_json::{json, Value};
 
 use crate::harness::{binary, repo_file, World};
 use crate::recorded_support::{
-    aged, answered, journalled_here, normalized, recorded, recorded_world, seeded_with,
-    without_the_reset_report, LAYOUT, RELEASE, RUN,
+    aged, answered, assert_core_derived_holds, is_core_derived, journalled_here, normalized,
+    recorded, recorded_world, seeded_with, without_the_reset_report, LAYOUT, RELEASE, RUN,
 };
 
 /// The variable that turns these journeys from comparing into capturing.
@@ -79,8 +79,30 @@ fn answers_over(fixture: &str, program: &Path) -> Value {
     // than copied into the answer a second time; one they changed, or wrote, is
     // held whole.
     let seeded_from = recorded(&format!("channel/{fixture}"));
+    // The core's derived files are no earlier build's: each one a read wrote
+    // is held to the files beside it here, and kept out of what is compared with
+    // the release, which wrote none.
+    for file in LAYOUT.into_iter().filter(|file| is_core_derived(file)) {
+        if channel.join(file).exists() {
+            assert_core_derived_holds(fixture, &channel, file);
+        }
+    }
+    let mut undeclared: Vec<String> = std::fs::read_dir(&channel)
+        .expect("the channel directory")
+        .flatten()
+        .filter(|entry| entry.path().is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|file| !LAYOUT.contains(&file.as_str()))
+        .collect();
+    undeclared.sort();
+    assert_eq!(
+        undeclared,
+        Vec::<String>::new(),
+        "{fixture}: the reads left a channel file the layout does not name"
+    );
     let after: BTreeMap<&str, Value> = LAYOUT
         .into_iter()
+        .filter(|file| !is_core_derived(file))
         .filter_map(|file| {
             let bytes = std::fs::read(channel.join(file)).ok()?;
             let held = if std::fs::read(seeded_from.join(file)).ok().as_ref() == Some(&bytes) {

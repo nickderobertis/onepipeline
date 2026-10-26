@@ -249,8 +249,10 @@ fn a_preserved_node_puts_its_branch_on_the_origin_and_lands_nothing() {
         .out_has(&settled_line)
         .out_has("remote=pushed");
     // `watch` writes its human line to standard error and its record to
-    // standard output, and both say where the work is.
-    let watched = world.run(&["watch", "kept", "--timeout", "1"]);
+    // standard output, and both say where the work is. Asked from the journal's
+    // first byte: a watch given no cursor starts where the run's checkpoint stops,
+    // and an ended run's checkpoint covers its settlement.
+    let watched = world.run(&["watch", "kept", "--cursor", "1:kept:0", "--timeout", "1"]);
     assert!(
         watched.stderr.contains(&settled_line) && watched.stderr.contains("remote=pushed"),
         "`watch` did not render the kept branch:\n{}",

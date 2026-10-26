@@ -113,9 +113,11 @@ fn record(
 }
 
 /// Whether `run`'s journal already holds a `home-status` record: a run that has one writes
-/// its home nothing more, whatever endings follow.
+/// its home nothing more, whatever endings follow. Asked of the records the run's fold keeps
+/// whole, among them every `home-status`, so a driver closing out reads none of its history.
 pub(crate) fn recorded(paths: &crate::ledger::RunPaths) -> bool {
-    journal::read(&paths.journal())
+    crate::checkpoint::current(paths)
+        .recalled
         .iter()
         .any(|event| PipelineKind::from_wire(&event.kind) == Some(PipelineKind::HomeStatus))
 }

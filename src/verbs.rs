@@ -1157,7 +1157,7 @@ fn submit(
         // read in the instant after this process applied an edit to it is not a state an
         // invocation can put a run into; the read that succeeds is driven end to end by
         // `tests/e2e/adoption.rs`.
-        match RunView::open(paths) {
+        match RunView::open_current(paths) {
             Ok(view) => advice.extend(crate::release::hold_warnings_for_stated_landings(
                 &view.state,
                 &envelope.commands,

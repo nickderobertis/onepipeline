@@ -2172,13 +2172,21 @@ impl Watermarks {
     /// The marks a run's own store already stands at.
     ///
     /// Folded from what was relayed rather than tracked beside it, so what stops
-    /// a record being relayed twice is the record.
+    /// a record being relayed twice is the record. A driver reads the same marks
+    /// off its run's checkpoint ([`of_streams`](Self::of_streams)); this is the
+    /// fold that reading is held equal to.
+    #[cfg(test)]
     pub fn of_relayed(envelopes: &[Envelope]) -> Self {
         let mut marks = Self::default();
         for envelope in envelopes {
             marks.reached(envelope);
         }
         marks
+    }
+
+    /// The marks each stream stands at, as already counted.
+    pub(crate) fn of_streams(reached: BTreeMap<String, u64>) -> Self {
+        Self { reached }
     }
 
     /// Record that one envelope was relayed.
@@ -2611,6 +2619,27 @@ impl BranchName {
     }
 }
 
+impl Serialize for BranchName {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+/// Read back through [`BranchName::checked`], so a written name is one a stream's
+/// record could have named.
+impl<'de> Deserialize<'de> for BranchName {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let written = String::deserialize(deserializer)?;
+        Self::checked(&written)
+            .ok_or_else(|| serde::de::Error::custom(format!("'{written}' is no branch name")))
+    }
+}
+
 impl std::fmt::Display for BranchName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -2928,6 +2957,27 @@ mod tests {
 
     use super::*;
     use crate::plan::Node;
+
+    /// **A written branch name reads back only as one [`BranchName::checked`]
+    /// accepts**: a checkpoint's session base round-trips, and an empty name or one
+    /// holding whitespace is refused, so the checkpoint is rebuilt rather than a
+    /// dispatch pinned to it.
+    #[test]
+    fn a_written_branch_name_reads_back_only_as_one_the_check_accepts() {
+        let base = BranchName::checked("release/1.2").expect("a branch");
+        let written = serde_json::to_value(&base).expect("a name writes");
+        assert_eq!(written, serde_json::json!("release/1.2"));
+        assert_eq!(
+            serde_json::from_value::<BranchName>(written).expect("it reads back"),
+            base
+        );
+        for refused in ["", "two words", "tab\there"] {
+            assert!(
+                serde_json::from_value::<BranchName>(serde_json::json!(refused)).is_err(),
+                "{refused:?} read as a branch"
+            );
+        }
+    }
 
     /// Run git in `at`, as a person setting a repository up, and hand back its stdout.
     fn git_out(at: &std::path::Path, args: &[&str]) -> String {

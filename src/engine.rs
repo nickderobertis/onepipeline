@@ -551,6 +551,10 @@ impl Settlement {
 pub(crate) enum Message {
     /// One envelope, relayed from wherever the dispatch ran.
     Event(Box<Envelope>),
+    /// One envelope the relay has already put in the run's journal — or, for a
+    /// member's heartbeat, in its liveness file — before the loop saw it. See
+    /// [`journalling_relay`].
+    Journalled(Box<Envelope>),
     /// A dispatch that produced nothing is being started again.
     ///
     /// Recorded as another `node-dispatched`, because that is what it is: the
@@ -1577,12 +1581,23 @@ fn converge(
     let mut reworks_due: Vec<ReworkDue> = Vec::new();
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
-    let (tx, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    let (to_loop, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // Every dispatch, delivery and probe sends through the relay, which journals a
+    // dispatch's envelopes as they arrive rather than when this loop next waits.
+    // A driver taking the run over has ended every dispatch the one before it
+    // left in flight, so the liveness that driver kept is dropped with them.
+    crate::heartbeat::clear(paths);
+    let tx = journalling_relay(paths, to_loop)?;
     // Where a note waits for its conversation, so this loop does not: see
     // [`NoteDeliveries`]. What it holds outstanding is shared with every
     // dispatch this loop starts, which is what lets a re-dispatch wait for it.
     let notes_in_flight = DeliveriesInFlight::default();
     let mut deliveries = NoteDeliveries::new(&tx, &notes_in_flight, paths);
+    // What answers a queued envelope while a pass runs, rather than at its end:
+    // see [`InPass`]. Stopped when this loop returns, however it returns.
+    let in_pass = InPass::start(paths, launch)?;
+    let _in_pass_stops = InPassStops(std::sync::Arc::clone(&in_pass));
+    deliveries.in_pass = Some(std::sync::Arc::clone(&in_pass));
     // What a driver before this one claimed and never answered, ahead of
     // anything this one claims: held envelopes are judged first on every pass.
     let recovered = recover_claimed(paths, journal, &channel)?;
@@ -1686,6 +1701,14 @@ fn converge(
 
     loop {
         crate::loopstats::pass();
+        // What the claimer applied while the last pass ran, folded before this one
+        // decides anything off the state.
+        // And a board the claimer's settle moved is owed the move.
+        if in_pass.pass_begins(&in_flight, !deliveries.behind.is_empty()) {
+            state.refresh(paths);
+            derived = None;
+            unpublished = true;
+        }
         state.readjust.read_this_pass = false;
         // A node that landed since the last pass — a settlement, a `settle`, a
         // relayed `merge-completed` — tells `onevcs` which earlier attempts on
@@ -1808,7 +1831,7 @@ fn converge(
         // Every landing the journal relayed, a readjustment found, or a catch-up reads off the
         // run's sessions, handed to the write-back's closure thread: none of it waits here.
         if let Some(writeback) = &writeback {
-            closures.pass(paths, state, writeback);
+            closures.pass(paths, state, state.read_through(), writeback);
         }
         // One hold, beside the decision points rather than in place of them: a
         // node a person is holding and a node a release is holding are both nodes
@@ -2002,6 +2025,9 @@ fn converge(
         let started_here = if superseded_by.is_some() {
             false
         } else {
+            // The in-pass claimer may have applied an envelope naming a node since this
+            // pass derived it ready: such a node waits for the loop to fold it.
+            let mut admit = |node: &str| in_pass.admit(node);
             // A placement at dispatch, and a restack, read their stack parents' standings
             // first: once a pass, and once for each node however long it is held.
             if !state.readjust.read_this_pass
@@ -2030,11 +2056,12 @@ fn converge(
                 &mut workspaces,
                 &mut stacking,
                 &notes_in_flight,
+                &mut admit,
             )?;
             if started {
                 derived = None;
             }
-            // Restacks open sessions too: the same claim reading admits both
+            // Restacks open sessions too: the same admission holds both
             // scheduling paths, even when no ordinary dispatch became ready.
             let statuses = statuses_of(&mut derived, state);
             let restacked = start_restacks(
@@ -2050,6 +2077,7 @@ fn converge(
                 &releases,
                 &mut workspaces,
                 &notes_in_flight,
+                &mut admit,
             )?;
             let statuses = statuses_of(&mut derived, state);
             let readjusted = start_readjustments(
@@ -2064,6 +2092,7 @@ fn converge(
                 &paused,
                 &releases,
                 &notes_in_flight,
+                &mut admit,
             )?;
             started || restacked || readjusted
         };
@@ -2176,6 +2205,13 @@ fn converge(
                 || graph::is_terminal(&statuses)
                 || !any_node_can_still_move(&statuses)
             {
+                // The claimer stands down before the run's last claim, and anything
+                // it applied or handed back while this pass ran is folded and judged
+                // by another pass rather than left behind the close-out.
+                // llmlint: ignore[changed_behavior_has_e2e] the refusal needs an envelope claimed beside the very pass that finds the run converged, a scheduling race no journey can place; what the claimer applies and hands back is driven by the `journal_scaling` claim journeys, and the close-out every run takes passes this arm's other side.
+                if !in_pass.stand_down() {
+                    continue;
+                }
                 match close_out_and_drain(
                     paths,
                     journal,
@@ -2295,14 +2331,19 @@ fn converge(
                 upstream_seen = now;
                 true
             };
-            wait_for_work(
+            // Between passes the claimer stands down: this wait ends on the queue
+            // moving, and the pass it starts claims.
+            in_pass.waiting(true);
+            let waited = wait_for_work(
                 paths,
                 &rx,
                 &channel,
                 &mut channel_seen,
                 deadline,
                 &mut outside,
-            )?
+            );
+            in_pass.waiting(false);
+            waited?
         };
         // llmlint: ignore-block[changed_behavior_has_e2e] no journey can drive this arm:
         // `wait_for_work` answers `None` only for its receiver's `Disconnected`, and this
@@ -2343,8 +2384,12 @@ fn converge(
         let mut opened_a_session = false;
         for message in arrived {
             // llmlint: ignore-end[changed_behavior_has_e2e]
+            // What the relay already wrote is applied as it is applied here, and only
+            // the write is not made a second time. One it could not write reaches
+            // here unwritten, so this loop's own write reports why.
+            let journalled = matches!(message, Message::Journalled(_));
             match message {
-                Message::Event(envelope) => {
+                Message::Event(envelope) | Message::Journalled(envelope) => {
                     if envelope.kind == oneagentgraph::event::EventKind::MemberSettled {
                         if let Some(node) = envelope.labels.node.as_deref() {
                             crate::ordering::settlement_started(node)?;
@@ -2377,7 +2422,9 @@ fn converge(
                             opened_a_session = true;
                         }
                     }
-                    journal.relay(&envelope)?;
+                    if !journalled {
+                        journal.relay(&envelope)?;
+                    }
                     // A branch a node of this run pushed is a branch every draft
                     // stacked on it may now owe a restack against, and that is
                     // decided from the record — so the record is read again here,
@@ -2687,6 +2734,9 @@ fn converge(
                         )?;
                     }
                     settle(paths, journal, settlement)?;
+                    // Its members heartbeat no more: their liveness goes with the
+                    // dispatch.
+                    crate::heartbeat::settled(paths, &settlement.node);
                     // Only now may the dispatch thread let go of the registry
                     // entries its node's dispatches held: the settlement is on
                     // the record, so no reader finds a running node no process
@@ -2901,6 +2951,354 @@ fn statuses_of(
     cache.get_or_insert_with(|| state.statuses()).clone()
 }
 
+/// **The claimer**: what answers a queued reply envelope while the reconcile loop
+/// is inside a pass, rather than when the pass ends.
+///
+/// The loop claims the run's command queue once a pass, so an envelope that
+/// arrived as a pass began waited for that pass to end — and a pass held by a
+/// slow host, a slow board or a long fold held every envelope behind it, an
+/// unrelated `settle` included. This thread claims while a pass runs, judges
+/// each envelope against a fold of its own resumed from the run's checkpoint, and
+/// applies it through the same [`reconcile_envelope`] the loop and a `reply`
+/// taking the run over use.
+///
+/// # What it takes, and what it leaves the loop
+///
+/// Only an envelope **no dispatch of this loop is part of**: every command a
+/// `settle` naming no node in flight. The first claimed envelope that is anything else is handed back, with
+/// everything claimed after it, and the loop judges them at its next claim in the
+/// order they were claimed, ahead of anything it claims itself. So an envelope
+/// answered here is one the loop's own claim would have answered the same way, a
+/// pass sooner.
+///
+/// # How it and the loop stay out of each other's way
+///
+/// - **One claim at a time**: the loop's claim and this one take the same lock,
+///   so envelopes are judged in claim order.
+/// - **One node, one writer**: a node an envelope applied here named is one the
+///   loop does not start until it has folded what was applied, and a node the loop
+///   is starting is one this does not take an envelope naming — both decided under
+///   one lock ([`admit`](Self::admit)).
+/// - **The loop folds what was applied** before its next pass decides anything,
+///   and does not close the run out while anything applied here is unfolded.
+/// - **Between passes it stands down**: the loop is waiting then, and its wait
+///   ends on the queue moving, so the loop claims itself.
+#[derive(Debug, Default)]
+pub(crate) struct InPass {
+    shared: std::sync::Mutex<InPassState>,
+    claiming: std::sync::Mutex<()>,
+}
+
+#[derive(Debug, Default)]
+struct InPassState {
+    /// Nodes the loop has in flight, or is starting.
+    // llmlint: ignore[invalid_states_unrepresentable] the ids of nodes the loop itself dispatched off the validated graph; this crate has no node-id type, and every node-keyed set the loop holds is keyed this way.
+    in_flight: BTreeSet<String>,
+    /// Nodes an envelope applied here named, which the loop does not start until
+    /// it has folded what was applied.
+    // llmlint: ignore[invalid_states_unrepresentable] the names a claimed envelope's commands carry, held only so the loop does not start those nodes before it folds what was applied; a name the graph does not hold is refused when the envelope is applied, and holding it here starts or stops nothing.
+    touched: BTreeSet<String>,
+    /// Whether anything was applied here the loop has not folded yet.
+    applied: bool,
+    /// Whether the loop holds envelopes it claimed behind a note: nothing is taken
+    /// past them.
+    holding: bool,
+    /// What the loop is doing, which decides whether this may claim.
+    mode: InPassMode,
+    /// What was claimed here and is the loop's to judge, in claim order.
+    handed: Vec<crate::channel::Claimed>,
+}
+
+/// What the loop a claimer serves is doing.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum InPassMode {
+    /// Inside a pass: the claimer claims.
+    #[default]
+    InPass,
+    /// Waiting between passes: the loop claims once the queue moves.
+    Waiting,
+    /// Done with the claimer, for good.
+    Stopped,
+}
+
+impl InPass {
+    fn state(&self) -> std::sync::MutexGuard<'_, InPassState> {
+        self.shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn claiming(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.claiming
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn take_handed(&self) -> Vec<crate::channel::Claimed> {
+        std::mem::take(&mut self.state().handed)
+    }
+
+    /// Whether anything was applied here that the loop has not folded, answered
+    /// once: the loop folds it on hearing so.
+    fn take_applied(&self) -> bool {
+        std::mem::take(&mut self.state().applied)
+    }
+
+    /// Whether nothing applied here is waiting for the loop to fold it, and
+    /// nothing claimed here is waiting for the loop to judge it.
+    fn settled(&self) -> bool {
+        let state = self.state();
+        !state.applied && state.handed.is_empty()
+    }
+
+    /// Whether the loop may start `node`: no envelope applied here named it since
+    /// the loop last folded. A node admitted is one this claimer leaves alone.
+    // llmlint: ignore[changed_behavior_has_e2e] the refusal arm needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place; the claimer's applying and handing back are driven by `journal_scaling::a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_released` and `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused`.
+    fn admit(&self, node: &str) -> bool {
+        let mut state = self.state();
+        if state.touched.contains(node) {
+            return false;
+        }
+        state.in_flight.insert(node.to_owned());
+        true
+    }
+
+    /// The loop starts a pass: what it has in flight, whether it holds envelopes
+    /// behind a note, and whether anything applied here needs folding first —
+    /// answered once, so what was applied is folded by exactly one pass.
+    fn pass_begins(&self, in_flight: &BTreeMap<String, Dispatch>, holding: bool) -> bool {
+        let mut state = self.state();
+        state.in_flight = in_flight.keys().cloned().collect();
+        state.holding = holding;
+        if state.mode != InPassMode::Stopped {
+            state.mode = InPassMode::InPass;
+        }
+        state.touched.clear();
+        std::mem::take(&mut state.applied)
+    }
+
+    fn waiting(&self, waiting: bool) {
+        let mut state = self.state();
+        if state.mode != InPassMode::Stopped {
+            state.mode = if waiting {
+                InPassMode::Waiting
+            } else {
+                InPassMode::InPass
+            };
+        }
+    }
+
+    /// Start the claimer for one run's loop.
+    fn start(paths: &RunPaths, launch: &LaunchRecord) -> Result<std::sync::Arc<Self>> {
+        let in_pass = std::sync::Arc::new(Self::default());
+        let claimer = std::sync::Arc::clone(&in_pass);
+        let paths = paths.clone();
+        let launch = launch.clone();
+        std::thread::Builder::new()
+            .name("engine-claim".to_owned())
+            .spawn(move || claimer.run(&paths, &launch))
+            .map_err(|e| Error::Invalid(format!("cannot start the envelope claimer: {e}")))?;
+        Ok(in_pass)
+    }
+
+    fn stop(&self) {
+        self.state().mode = InPassMode::Stopped;
+    }
+
+    /// Stop claiming, wait out a claim in progress, and say whether nothing it
+    /// applied or claimed is still the loop's to fold or judge.
+    fn stand_down(&self) -> bool {
+        self.stop();
+        let _claiming = self.claiming();
+        self.settled()
+    }
+
+    fn run(&self, paths: &RunPaths, launch: &LaunchRecord) {
+        let channel = ChannelState::of_run(paths, launch);
+        let mut seen = channel.fingerprint();
+        let mut held: Option<(Journal, Projected)> = None;
+        loop {
+            std::thread::sleep(CHANNEL_POLL);
+            {
+                let state = self.state();
+                match state.mode {
+                    InPassMode::Stopped => return,
+                    InPassMode::Waiting => continue,
+                    InPassMode::InPass => {}
+                }
+                if state.holding || !state.handed.is_empty() {
+                    continue;
+                }
+            }
+            let now = channel.fingerprint();
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            let (journal, projected) =
+                held.get_or_insert_with(|| (Journal::open(paths), Projected::open(paths)));
+            // llmlint: ignore[changed_behavior_has_e2e] a claim that fails needs the run's channel to refuse a read mid-pass, which is host sabotage; what is not claimed here stays queued for the loop's own claim, the path every envelope took before this thread.
+            if let Err(error) = self.claim(paths, launch, &channel, journal, projected) {
+                eprintln!(
+                    "onepipeline: run '{}': claiming envelopes beside a pass failed, and the \
+                     loop claims them instead: {error}",
+                    paths.run
+                );
+            }
+        }
+    }
+
+    /// Claim what is queued and answer what this may answer, handing the rest to
+    /// the loop.
+    fn claim(
+        &self,
+        paths: &RunPaths,
+        launch: &LaunchRecord,
+        channel: &ChannelState,
+        journal: &mut Journal,
+        projected: &mut Projected,
+    ) -> Result<()> {
+        let _claiming = self.claiming();
+        {
+            let state = self.state();
+            if state.mode != InPassMode::InPass || state.holding || !state.handed.is_empty() {
+                return Ok(());
+            }
+        }
+        let claimed = channel.claim_commands_answering()?;
+        if claimed.is_empty() {
+            return Ok(());
+        }
+        projected.refresh(paths);
+        let mut handing = false;
+        for record in claimed {
+            // llmlint: ignore[changed_behavior_has_e2e] an undecodable record is handed back exactly as an envelope naming a dispatch in flight is, which `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused` drives; the loop refuses it as it always has.
+            let envelope = match record {
+                crate::channel::Claimed::Envelope(envelope) if !handing => envelope,
+                other => {
+                    handing = true;
+                    self.state().handed.push(other);
+                    continue;
+                }
+            };
+            let Some(named) = answerable_beside_a_pass(&envelope.commands) else {
+                handing = true;
+                self.state()
+                    .handed
+                    .push(crate::channel::Claimed::Envelope(envelope));
+                continue;
+            };
+            {
+                let mut state = self.state();
+                // llmlint: ignore[changed_behavior_has_e2e] a settle of a node in flight is refused by the loop's own validation however it is claimed; handing it back keeps it in claim order behind whatever the loop holds, the order `what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_answered_refused` drives.
+                if named.iter().any(|node| state.in_flight.contains(node)) {
+                    handing = true;
+                    state
+                        .handed
+                        .push(crate::channel::Claimed::Envelope(envelope));
+                    continue;
+                }
+                state.touched.extend(named);
+                state.applied = true;
+            }
+            let id = envelope.id;
+            // The same seam the loop's own processing of an envelope fails at.
+            let applied = crate::review::failing(&format!("fail-envelope-{id}")).and_then(|()| {
+                reconcile_envelope(
+                    paths,
+                    journal,
+                    projected,
+                    channel,
+                    launch,
+                    &mut BTreeMap::new(),
+                    None,
+                    envelope,
+                )
+                .map(|_| ())
+            });
+            if let Err(error) = applied {
+                let mut owed =
+                    std::collections::VecDeque::from([refused_for_failure(paths, id, &error)]);
+                pay_owed(channel, &mut owed)?;
+            }
+            projected.refresh(paths);
+        }
+        Ok(())
+    }
+}
+
+/// Stops a loop's claimer when the loop is done with it.
+struct InPassStops(std::sync::Arc<InPass>);
+
+impl Drop for InPassStops {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+
+/// The nodes an envelope's commands name, where every one of them is a command
+/// [`InPass`] may answer beside a pass — or `None` where any is not.
+fn answerable_beside_a_pass(commands: &[Command]) -> Option<BTreeSet<String>> {
+    let mut named = BTreeSet::new();
+    for command in commands {
+        match command {
+            // A settlement by hand is the envelope a held pass kept from its
+            // answer longest, and the one this answers; anything else waits for
+            // the loop's own claim.
+            Command::Settle { id, .. } => {
+                named.insert(id.clone());
+            }
+            _ => return None,
+        }
+    }
+    (!named.is_empty()).then_some(named)
+}
+
+/// The relay between the run's dispatches and its reconcile loop: what a
+/// dispatch's members emit is put in the run's journal **as it arrives**, and then
+/// handed to the loop.
+///
+/// A pass of the loop can be long — a publication, a board, a slow host — and a
+/// record that waited for the loop to finish one before it reached the journal was
+/// a record every reader of the run was missing for as long. So this thread owns a
+/// journal writer of its own and nothing else: it writes each envelope, keeps a
+/// member's heartbeat in the run's liveness file instead ([`crate::heartbeat`]),
+/// and forwards every message in the order it arrived, so a settlement still
+/// reaches the loop after every record its dispatch sent before it.
+///
+/// It only ever relays — it never emits a record of this crate's own — so its
+/// writer claims no sequence number the loop's might also claim. An envelope it
+/// could not write goes on to the loop unwritten, whose own write then reports
+/// why, which is where a failed write has always ended a run.
+fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sender<Message>> {
+    let (tx, rx) = mpsc::channel::<Message>();
+    let paths = paths.clone();
+    std::thread::Builder::new()
+        .name("engine-journal".to_owned())
+        .spawn(move || {
+            let mut journal = Journal::open(&paths);
+            for message in rx {
+                let message = match message {
+                    Message::Event(envelope) if crate::heartbeat::is_heartbeat(&envelope) => {
+                        crate::heartbeat::beat(&paths, &envelope);
+                        Message::Journalled(envelope)
+                    }
+                    // llmlint: ignore[changed_behavior_has_e2e] a relay that cannot write needs the run's journal to refuse an append mid-run, which is host sabotage; the arm hands the envelope on unwritten so the loop's own write — the one every relayed record took before this thread, and whose failure is reported as it always was — makes the attempt again.
+                    Message::Event(envelope) => match journal.relay(&envelope) {
+                        Ok(()) => Message::Journalled(envelope),
+                        Err(_) => Message::Event(envelope),
+                    },
+                    other => other,
+                };
+                if to_loop.send(message).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|e| Error::Invalid(format!("cannot start the journal relay: {e}")))?;
+    Ok(tx)
+}
+
 /// Wait until there is a reason to reconcile, and hand back what arrived.
 ///
 /// The four things that can be one: a dispatch thread said something, the
@@ -2981,7 +3379,7 @@ fn wait_for_work(
 /// see [`crate::ordering::push_received`] — so the drain after it starts again from the
 /// release rather than from before the hold.
 fn held_at_push(message: &Message) -> Result<bool> {
-    let Message::Event(envelope) = message else {
+    let (Message::Event(envelope) | Message::Journalled(envelope)) = message else {
         return Ok(false);
     };
     if envelope.source != crate::event::Source::Vcs || !crate::vcs::is_push(&envelope.kind) {
@@ -3324,8 +3722,9 @@ fn report_holds(
 /// driver that meets one reports rather than quietly executing a graph it knows
 /// is incomplete. It still drives: refusing would leave the run with nothing
 /// driving it, which is strictly worse than driving it with the operator told.
-fn report_unreadable_records(paths: &RunPaths, state: &RunState) {
-    if state.strict && !journal::has_unreadable_lines(&paths.journal()) {
+fn report_unreadable_records(paths: &RunPaths, state: &Projected) {
+    // Counted by the fold as it read, rather than by reading the whole store again.
+    if state.strict && state.tally().unreadable == 0 {
         return;
     }
     eprintln!(
@@ -3656,9 +4055,31 @@ fn reconcile_edits(
 ) -> Result<bool> {
     let mut changed = false;
     crate::review::failpoint("before-claim")?;
+    // One claim at a time between this loop and the claimer working beside its
+    // passes, so envelopes are judged in the order they were claimed. What that
+    // claimer took and handed back — an envelope naming a dispatch in flight, or
+    // one that does not decode — was claimed before anything claimed now.
+    let in_pass = deliveries
+        .as_deref()
+        .and_then(|deliveries| deliveries.in_pass.clone());
+    let _claiming = in_pass.as_deref().map(InPass::claiming);
+    // What the claimer applied earlier in this pass is folded before anything claimed
+    // now is judged: an envelope judged without it would be judged against a run
+    // that has not had it — a second `settle` of a node taken for the first.
+    if in_pass.as_deref().is_some_and(InPass::take_applied) {
+        state.refresh(paths);
+        changed = true;
+    }
+    let mut fresh = in_pass
+        .as_deref()
+        .map(InPass::take_handed)
+        .unwrap_or_default();
     // Claimed before what an earlier pass kept is taken, so a queue that refuses
     // the claim leaves it for the next pass rather than dropped with the error.
-    let fresh = channel.claim_commands_answering()?;
+    fresh.extend(match deliveries.as_deref_mut() {
+        Some(deliveries) => channel.claim_commands_moved(&mut deliveries.queue_seen)?,
+        None => channel.claim_commands_answering()?,
+    });
     let (mut claimed, mut owed) = deliveries
         .as_deref_mut()
         .map(|deliveries| {
@@ -6173,6 +6594,9 @@ struct Handed {
 /// here, unoffered, until that one is answered — see [`NoteDeliveries::hand`].
 /// Nothing else waits on a note.
 pub(crate) struct NoteDeliveries {
+    /// The claimer answering envelopes beside this driver's passes, where it runs
+    /// one. See [`InPass`].
+    in_pass: Option<std::sync::Arc<InPass>>,
     /// The loop's own channel, which each delivery thread answers on.
     answering: Sender<Message>,
     /// What every dispatch thread reads the outstanding deliveries' nodes from.
@@ -6195,6 +6619,10 @@ pub(crate) struct NoteDeliveries {
     /// written there — see [`crate::channel::deliveries`]. `None` for a
     /// reconciler with no run of its own to report on.
     sidecar: Option<Sidecar>,
+    /// The command queue's change token as it stood before this driver's last
+    /// claim, so a pass whose queue has not moved claims nothing — see
+    /// [`ChannelState::claim_commands_moved`].
+    queue_seen: Option<onemessagebus::Fingerprint>,
 }
 
 /// The live-delivery sidecar one driver keeps current.
@@ -6351,6 +6779,7 @@ impl Drop for PendingDelivery {
 impl NoteDeliveries {
     fn new(tx: &Sender<Message>, in_flight: &DeliveriesInFlight, paths: &RunPaths) -> Self {
         Self {
+            in_pass: None,
             answering: tx.clone(),
             in_flight: in_flight.clone(),
             outstanding: BTreeMap::new(),
@@ -6361,11 +6790,15 @@ impl NoteDeliveries {
                 paths: paths.clone(),
                 written: None,
             }),
+            queue_seen: None,
         }
     }
 
     fn idle(&self) -> bool {
-        self.outstanding.is_empty() && self.behind.is_empty() && self.owed.is_empty()
+        self.outstanding.is_empty()
+            && self.behind.is_empty()
+            && self.owed.is_empty()
+            && self.in_pass.as_deref().is_none_or(InPass::settled)
     }
 
     /// Take what the journal holds of a recovered envelope, if it holds anything:
@@ -7801,12 +8234,13 @@ fn nowhere_to_carry(id: &str) -> Error {
 /// record instead — which is what makes a note to a node whose dispatch has
 /// *finished* reach the member that had it, and be refused by that member's own
 /// account of how it ended.
+///
+/// Off the run's checkpoint and what was appended past it, where the fold keeps
+/// each node's latest address as [`RunState::last_turns`]: a note is answered per
+/// envelope, and reading the run's whole history backwards for it made every note
+/// to a long run cost that run's length.
 pub(crate) fn last_turn_address(paths: &RunPaths, node: &str) -> Option<TurnAddress> {
-    journal::read(&paths.journal())
-        .into_iter()
-        .rev()
-        .filter(|envelope| envelope.labels.node.as_deref() == Some(node))
-        .find_map(|envelope| addressed_by(&envelope))
+    crate::checkpoint::current(paths).last_turns.remove(node)
 }
 
 /// Carry one arrival note into a node's running turn, falling through to that
@@ -8110,6 +8544,7 @@ fn start_ready(
     workspaces: &mut crate::pool::Workspaces,
     stacking: &mut StackingPlacement,
     notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     // Nothing new starts once this run's shutdown has begun. Asked here rather
     // than left to the teardown that is coming: the driver goes on scheduling
@@ -8323,6 +8758,12 @@ fn start_ready(
                 }
             }
         }
+        // A node an envelope the in-pass claimer applied named since the pass derived it
+        // ready waits for the loop to fold that envelope.
+        if !admit(&node.id) {
+            workspaces.keep_resuming(&node.id, resume);
+            break;
+        }
         crate::continuation::before_dispatch(&node.id);
         let cancel = CancellationToken::new();
         // llmlint: ignore-block[changed_behavior_has_e2e] each `?` is the refusal of a
@@ -8464,6 +8905,7 @@ fn start_restacks(
     releases: &crate::release::Watch,
     workspaces: &mut crate::pool::Workspaces,
     notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     // llmlint: ignore-block[changed_behavior_has_e2e] the three holds a restack shares with
     // a dispatch — a shutdown begun, a decision point holding the draft, its identity with no
@@ -8527,6 +8969,10 @@ fn start_restacks(
                 continue;
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
+          // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the in-pass claimer's `admit`, through the same closure — whose refusal needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place (see `InPass::admit`).
+        if !admit(&node.id) {
+            break;
+        }
         journal.emit(
             journal::PipelineKind::NodeRestackStarted,
             journal::labels(&paths.run, Some(&node.id)),
@@ -8609,15 +9055,13 @@ struct AtDispatch {
 /// pass, and the same fold the continuation composes its own notes from, so the
 /// two cannot disagree about what a dispatch was owed.
 ///
-/// **Only where the projected state says a note can stand.** The fold reads the
-/// run's whole journal, and a dispatch is the one act a run performs once per
-/// node, so asking it of every dispatch made recording a hundred-node run pay a
-/// hundred reads of its own growing store — forty megabytes over one such run,
-/// every byte of which folded to nothing, because nobody had noted a node. What
-/// the fold can find is bounded by what the projection already holds: see
-/// [`may_hold_a_note`]. A node it rules out, and a replacement whose superseded
-/// nodes it rules out, is composed with nothing and spends nothing without the
-/// store being opened.
+/// **Only where the projected state says a note can stand**, and then over the
+/// records [`RunState::recalled`] keeps rather than the run's journal: a dispatch
+/// is the one act a run performs once per node, so a fold of the whole store per
+/// dispatch made recording a hundred-node run pay a hundred reads of its own
+/// growing store. What the fold can find is bounded by what the projection already
+/// holds: see [`may_hold_a_note`]. A node it rules out, and a replacement whose
+/// superseded nodes it rules out, is composed with nothing and spends nothing.
 ///
 /// # Errors
 ///
@@ -8637,11 +9081,14 @@ fn notes_at_dispatch(paths: &RunPaths, state: &RunState, node: &str) -> Result<A
             carried_in: Vec::new(),
         });
     }
-    let journal = journal::read(&paths.journal());
-    let standing = crate::note::drain_carried(paths, node, crate::note::standing(&journal, node)?)?;
+    // The records a node's notes are folded from are the few the projection keeps
+    // whole — every commit carrying a note, and each dispatch of a node one was
+    // ever written for — so the fold reads those rather than the run's history.
+    let journal = &state.recalled;
+    let standing = crate::note::drain_carried(paths, node, crate::note::standing(journal, node)?)?;
     let mut spent = standing.read();
     for superseded in supersedes {
-        spent.extend(crate::note::standing(&journal, superseded)?.notes());
+        spent.extend(crate::note::standing(journal, superseded)?.notes());
     }
     Ok(AtDispatch {
         spent,
@@ -8878,6 +9325,7 @@ fn repair_red_verdicts(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     let red: Vec<(String, crate::readjust::Red)> = state
         .readjust
@@ -8915,6 +9363,10 @@ fn repair_red_verdicts(
         ) else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the in-pass claimer's `admit`, through the same closure — whose refusal needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place (see `InPass::admit`).
+        if !admit(&id) {
+            break;
+        }
         state.readjust.red.remove(&id);
         // On the placement it was published on, so its session opens on that base.
         let stack = state.stacks.get(&id).and_then(|_| {
@@ -9010,6 +9462,7 @@ fn start_readjustments(
     paused: &BTreeSet<String>,
     releases: &crate::release::Watch,
     notes_in_flight: &DeliveriesInFlight,
+    admit: &mut dyn FnMut(&str) -> bool,
 ) -> Result<bool> {
     if crate::shutdown::begun(paths) {
         return Ok(false);
@@ -9026,6 +9479,7 @@ fn start_readjustments(
         paused,
         releases,
         notes_in_flight,
+        admit,
     )?;
     let owed: Vec<String> = state
         .graph
@@ -9216,6 +9670,10 @@ fn start_readjustments(
         ) else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] this path asks the one admission `start_ready` asks — the in-pass claimer's `admit`, through the same closure — whose refusal needs an envelope applied beside a pass in the instant between that pass deriving a node ready and starting it, a scheduling race no journey can place (see `InPass::admit`).
+        if !admit(&id) {
+            break;
+        }
         let onto: Vec<crate::payload::RestackOnto> = match &stack {
             Some(stack) => stack
                 .parents()
@@ -14443,17 +14901,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// What a dispatch is composed with is read off the store only for a node
-    /// the projected state says a note can stand for, and the answer is the
-    /// fold's own where it is.
+    /// What a dispatch is composed with is answered off the projected state —
+    /// the records [`RunState::recalled`] keeps whole — and never off the store,
+    /// for a node nobody noted, a node a note was read or carried for, and a
+    /// replacement composed from the node it supersedes.
     ///
-    /// The bound is measured rather than inferred: a run of a hundred nodes
-    /// nobody noted was paying a whole-journal read per dispatch, and no view of
-    /// the run shows that. Driven over a real run directory, through the real
-    /// journal writer and the real fold, and read through the thread's own
-    /// account of the store's bytes.
+    /// The bound is measured rather than inferred: a run of a hundred nodes was
+    /// paying a whole-journal read per dispatch, and no view of the run shows
+    /// that. Driven over a real run directory, through the real journal writer and
+    /// the real fold, and read through the thread's own account of the store's
+    /// bytes.
     #[test]
-    fn a_dispatch_reads_the_store_for_its_notes_only_where_the_state_says_one_can_stand() {
+    fn a_dispatch_is_composed_with_its_notes_off_the_fold_without_reading_the_store() {
         let root = std::env::temp_dir().join(format!("onepipeline-notes-at-{}", sys::pid()));
         let _ = std::fs::remove_dir_all(&root);
         let paths = RunPaths::under(&root, "demo");
@@ -14543,19 +15002,19 @@ mod tests {
             "a node nothing was recorded about had the store read for its notes"
         );
         let (bytes, spent, carried) = measured("owed");
-        assert!(bytes > 0, "a carried note was answered without the record");
+        assert_eq!(bytes, 0, "a carried note had the store read for it");
         assert_eq!(spent, Vec::<String>::new());
         assert_eq!(carried, vec!["stop re-running the judged tier".to_string()]);
         let (bytes, spent, carried) = measured("noted");
-        assert!(bytes > 0, "a read note was answered without the record");
+        assert_eq!(bytes, 0, "a read note had the store read for it");
         assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
         assert_eq!(carried, Vec::<String>::new());
         // The replacement was never dispatched and holds no note of its own; what
         // it spends is what stood for the node it supersedes.
         let (bytes, spent, carried) = measured("noted-2");
-        assert!(
-            bytes > 0,
-            "a replacement was composed without the superseded node's record"
+        assert_eq!(
+            bytes, 0,
+            "a replacement had the store read for the superseded node's notes"
         );
         assert_eq!(spent, vec!["stop re-running the judged tier".to_string()]);
         assert_eq!(carried, Vec::<String>::new());
@@ -15507,6 +15966,7 @@ mod tests {
         outstanding: impl IntoIterator<Item = (u64, Outstanding)>,
     ) -> NoteDeliveries {
         NoteDeliveries {
+            in_pass: None,
             answering: mpsc::channel().0,
             in_flight: in_flight.clone(),
             outstanding: outstanding.into_iter().collect(),
@@ -15514,6 +15974,7 @@ mod tests {
             owed: std::collections::VecDeque::new(),
             recovered: BTreeMap::new(),
             sidecar: None,
+            queue_seen: None,
         }
     }
 

@@ -145,6 +145,16 @@ mod holds;
 mod host_view;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod journal;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a driver whose cost is its
+// run's live state: each journey drives the compiled binary's reconcile loop, its relay, its
+// claimer, its checkpoint and liveness files and the `reply`, `status` and `watch` views over
+// one real run store, holding a pass open or a member beating for twenty heartbeats while it
+// does. What any of them exercises is `engine`, `checkpoint`, `projection`, `journal`,
+// `ledger`, `heartbeat`, `views` and `driver` together, so the narrowest edge they can
+// honestly sit behind is the crate itself, which is this target's; a project edged narrower
+// would drop them out of `nx affected` for the very changes to the loop they exist to catch.
+mod journal_scaling;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
 // `tests/e2e/landing.rs`, and is carried here too because this declaration is the other
 // site the rule reads: the module is measured at about 45 seconds on an idle host, and

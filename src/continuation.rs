@@ -1024,8 +1024,21 @@ impl ClaimWatch {
     /// Written only where it differs from what the store is known to hold, bounded by
     /// [`CLAIM_READ_DEADLINE`], and not inside a wait the store asked for. A superseded
     /// driver reads before it clears, and clears only a fence of its own.
+    ///
+    /// A driver still driving lets a fence go on naming a publication that has settled
+    /// until its next write names one more, or none: a fence standing over every
+    /// publication under way and some that have settled holds a takeover exactly as long
+    /// as the exact one would, since it is empty only when that is, and each settlement
+    /// that is not a write is a write the driver's cost no longer pays per pass.
     pub(crate) fn fence(&mut self, nodes: &std::collections::BTreeSet<String>) -> bool {
-        if self.fenced.as_ref() == Some(nodes) {
+        let covered = self.fenced.as_ref() == Some(nodes)
+            || (self.standing == Standing::Driving
+                && !nodes.is_empty()
+                && self
+                    .fenced
+                    .as_ref()
+                    .is_some_and(|fenced| nodes.is_subset(fenced)));
+        if covered {
             self.lingering = None;
             return true;
         }
@@ -1320,9 +1333,9 @@ pub(crate) fn hand_over(
             Some(standing) if said.as_ref() != Some(&standing) => {
                 match &standing {
                     Ok(publishing) => eprintln!(
-                        "onepipeline: {whom} has not acknowledged in {}s, and its publication of \
-                         {} has been under way since {}: run '{}' starts once that has finished, \
-                         or once {whom} acknowledges",
+                        "onepipeline: {whom} has not acknowledged in {}s, and its publication \
+                         fence still names {}, set at {}: run '{}' starts once that fence \
+                         clears, or once {whom} acknowledges",
                         wait.as_secs(),
                         publishing
                             .nodes
@@ -1405,9 +1418,11 @@ pub(crate) fn release_left_standing(
     }
 }
 
-/// The claim this run's `start --take-over` passed, off its own `driver-taken-over`.
+/// The claim this run's `start --take-over` passed, off its own `driver-taken-over` — among
+/// the records the run's fold keeps whole, so an adoption reads none of its history for it.
 fn taken_over(paths: &crate::ledger::RunPaths) -> Option<DriverClaim> {
-    crate::journal::read(&paths.journal())
+    crate::checkpoint::current(paths)
+        .recalled
         .into_iter()
         .filter(|event| {
             event.source == crate::event::Source::Pipeline

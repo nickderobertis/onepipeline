@@ -2296,6 +2296,43 @@ impl TurnAddress {
     }
 }
 
+/// How an address is written where a checkpoint keeps one: its two parts, by name.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenAddress {
+    run: String,
+    member: String,
+}
+
+impl serde::Serialize for TurnAddress {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        WrittenAddress {
+            run: self.run.clone(),
+            member: self.member.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Read back through [`TurnAddress::of`], so a written address holds the same
+/// invariant one read off a relayed record does.
+impl<'de> serde::Deserialize<'de> for TurnAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let written = WrittenAddress::deserialize(deserializer)?;
+        Self::of(&written.run, &written.member).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "run '{}' and member '{}' are no turn address",
+                written.run, written.member
+            ))
+        })
+    }
+}
+
 /// What one `oneagentgraph interrupt` answered.
 ///
 /// The three outcomes are not interchangeable, which is the whole reason that
@@ -2700,6 +2737,34 @@ pub fn health() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A written address reads back only as one [`TurnAddress::of`] accepts.** What
+    /// a checkpoint keeps of a node's last turn round-trips, and one holding a member
+    /// name that would name a path outside the run, or a blank run, is refused, so a
+    /// checkpoint carrying it is rebuilt rather than addressing a note there.
+    #[test]
+    fn a_written_turn_address_reads_back_only_as_one_the_check_accepts() {
+        let address = TurnAddress::of("graph-run-1", "worker").expect("an address");
+        let written = serde_json::to_value(&address).expect("an address writes");
+        assert_eq!(
+            written,
+            serde_json::json!({"run": "graph-run-1", "member": "worker"})
+        );
+        assert_eq!(
+            serde_json::from_value::<TurnAddress>(written).expect("it reads back"),
+            address
+        );
+        for refused in [
+            serde_json::json!({"run": "graph-run-1", "member": "../outside"}),
+            serde_json::json!({"run": "  ", "member": "worker"}),
+            serde_json::json!({"run": "graph-run-1", "member": "worker", "extra": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<TurnAddress>(refused.clone()).is_err(),
+                "{refused} read as an address"
+            );
+        }
+    }
 
     /// The spelling `record_by_process` sends is the one the linked sibling's
     /// executable parses as `history show RUN`.

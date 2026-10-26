@@ -338,6 +338,79 @@ pub struct RunState {
     // named above; making it the fold's boundary instead would silently discard a
     // reason a newer driver wrote, which is the bug this field exists to avoid.
     pub holds: BTreeMap<String, Vec<Value>>,
+    /// When each node's open hold of each kind began, by the kind's word — and
+    /// [`RELEASE_AWAITED`] for a hold awaiting a release — as the run's own
+    /// `node-held` records date it: a hold of a kind starts at the first record
+    /// carrying it, and ends at one that does not, at `node-unheld`, or at the
+    /// node's dispatch. Folded so a reader dates a hold without reading the run's
+    /// history for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `holds` beside it is: by the graph-validated node id the record carries, and by the kind's own wire word.
+    pub(crate) held_since: BTreeMap<String, BTreeMap<String, u64>>,
+    /// The stamp of the latest node dispatch or settlement: what an elapsed watch
+    /// reports as the run's last progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_progress_at: Option<u64>,
+    /// Every record of the few rare kinds a driver reads back whole when it starts
+    /// — a release a node adopted or that arrived for it, and the attempts a
+    /// landing superseded — kept as written and in the order folded, so their
+    /// readers decide from them exactly as they did from the journal without
+    /// reading the run's history for them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recalled: Vec<Envelope>,
+    /// The nodes a note was delivered to or withdrawn from, by any commit folded:
+    /// whose dispatches [`recalled`](Self::recalled) keeps, so a fold of a node's
+    /// notes over those records resets where a fold over the whole journal does.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] by the node id each note record carries, as `held_since` is keyed.
+    pub(crate) noted: BTreeSet<String>,
+    /// Where the latest `oneagentgraph` record of each node said its turn was:
+    /// what a note to a node with no turn in flight is addressed to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `held_since` beside it is, by the node id the record carries.
+    pub(crate) last_turns: BTreeMap<String, crate::agentgraph::TurnAddress>,
+    /// Every node a `node-dispatched` of this crate's named, whatever became of it
+    /// since: what `status` counts a run's own dispatches by.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-dispatched` records carry, which the graph validated when it dispatched them, as `held_since` is keyed.
+    pub(crate) dispatched_nodes: BTreeSet<String>,
+    /// The `detail` each node's newest `node-settled` carried, where it carried one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the settlement's own prose, quoted and never parsed.
+    pub(crate) settled_details: BTreeMap<String, String>,
+    /// The releases each node's newest `node-settled` said it still awaits, where it
+    /// named any this build can read: what `status --json` lists for a node held
+    /// for a release, read off the fold rather than the run's history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `settled_details` beside it is.
+    pub(crate) settled_awaiting: BTreeMap<String, Vec<crate::views::AwaitedRelease>>,
+    /// The first record of each node's latest session `onevcs` opened: what the
+    /// write-back pins a dispatch in flight to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is.
+    pub(crate) sessions_opened: BTreeMap<String, SessionOpened>,
+    /// Every node an `edit-committed` added, as the newest addition wrote it —
+    /// removed nodes included, which the graph no longer holds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the id of the node it holds, which the graph validated when the edit was committed.
+    pub(crate) nodes_added: BTreeMap<String, crate::plan::Node>,
+    /// Each node's settlement as the write-back board holds it: the newest
+    /// `node-settled`'s payload, less a clean restack's or readjustment's that left
+    /// the draft where it was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the producer's own payload, kept as written for the reason `holds` keeps its reasons so.
+    pub(crate) board_settlements: BTreeMap<String, serde_json::Map<String, Value>>,
+    /// The nodes whose next settlement ends a restack or readjustment no agent turn
+    /// was spent on. See [`board_settlements`](Self::board_settlements).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-settled` records carry, as `board_settlements` beside it is keyed.
+    pub(crate) settled_clean: BTreeSet<String>,
+    /// The run-end hook's marker the epoch the run is now in carries, if it carries
+    /// one: what [`crate::hooks::adoption_starts_epoch`] asks, folded as each
+    /// record arrives by the one rule [`crate::hooks`] reads a journal by, so an
+    /// adoption decides it without walking the run's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook_marker: Option<crate::hooks::FiredOver>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -1191,16 +1264,24 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    let marked = crate::hooks::Marked::before(state, event);
+    fold_record(state, event);
+    marked.after(state, event);
+}
+
+/// [`fold_one`], short of the run-end hook's marker it keeps beside the fold.
+fn fold_record(state: &mut RunState, event: &Envelope) {
     #[cfg(test)]
     crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
     // edit, no claim — and not a write that keeps the run looking busy either,
-    // so a run reads exactly as it would without it. Only `status` reads it, off
-    // the store.
+    // so a run reads exactly as it would without it. Only `status` reads it, and
+    // it reads it whole off `recalled`, where nothing else looks for one.
     if event.source == Source::Pipeline
         && journal::PipelineKind::from_wire(&event.kind)
             == Some(journal::PipelineKind::DriverExited)
     {
+        state.recalled.push(event.clone());
         return;
     }
     state.last_write_at = Some(
@@ -1215,11 +1296,26 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // evidence of which identity refused when it stops running, and the only
         // evidence of where it is doing it.
         fold_activity(state, event);
+        fold_addresses(state, event);
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
         fold_landing_commit(state, event);
         fold_push(state, event);
+        // A landing that closes issues, kept whole for the closure watch a driver
+        // starts on its first pass: it is owed until a `landing-closures` names it,
+        // and a run holds one per landing. Kept on what the record says of itself;
+        // the watch reads its `closes` through `onevcs`'s own reader when it takes it.
+        if event.labels.node.is_some()
+            && crate::vcs::is_landing(&event.kind)
+            && event
+                .payload
+                .get("closes")
+                .and_then(Value::as_array)
+                .is_some_and(|closes| !closes.is_empty())
+        {
+            state.recalled.push(event.clone());
+        }
         return;
     }
     // This library's own record, at an envelope schema this build does not know.
@@ -1246,6 +1342,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         return;
     } // llmlint: ignore-end[changed_behavior_has_e2e]
     let payload = &event.payload;
+    fold_recall(state, event);
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
             if journal::owed_until_closed(payload) {
@@ -1645,6 +1742,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
+            fold_commit(state, event, kind, operations.as_deref());
             let Some(operations) = operations else {
                 // An `edit-committed` whose operations this build cannot fold
                 // might have been an authoritative graph mutation.
@@ -1897,6 +1995,302 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         }
         Some(journal::PipelineKind::BranchesRetired) => fold_retired_branches(state, payload),
         _ => {}
+    }
+}
+
+/// What a node's session's first `session-opened` said:
+/// [`RunState::sessions_opened`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionOpened {
+    /// The session's token, where the record named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token: Option<onevcs::SessionToken>,
+    /// The base it opened against.
+    pub(crate) base: crate::vcs::BranchName,
+    /// The record's own `ts`.
+    // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
+    pub(crate) at: String,
+}
+
+/// Fold where a sibling's record says its node's turn is, and what session it
+/// opened: [`RunState::last_turns`] and [`RunState::sessions_opened`].
+fn fold_addresses(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    if event.source == Source::Agentgraph {
+        let address = event
+            .labels
+            .run_id
+            .as_deref()
+            .zip(event.labels.member.as_deref())
+            .and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member));
+        if let Some(address) = address {
+            state.last_turns.insert(node.clone(), address);
+        }
+    }
+    if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
+        return;
+    }
+    let token = event
+        .payload
+        .get("token")
+        .and_then(Value::as_str)
+        .map(|token| onevcs::SessionToken(token.to_owned()));
+    // One open is journalled twice — as the dispatch relays it and as `onevcs`
+    // streams it — and the first of them is the one kept.
+    if token.is_some()
+        && state
+            .sessions_opened
+            .get(node)
+            .is_some_and(|held| held.token == token)
+    {
+        return;
+    }
+    if let Some(base) = event
+        .payload
+        .get("base")
+        .and_then(Value::as_str)
+        .and_then(crate::vcs::BranchName::checked)
+    {
+        state.sessions_opened.insert(
+            node.clone(),
+            SessionOpened {
+                token,
+                base,
+                at: event.ts.clone(),
+            },
+        );
+    }
+}
+
+/// Fold what a commit says that only its readers read back: the notes it
+/// carries, kept whole in [`RunState::recalled`], and the nodes it adds.
+///
+/// A commit whose operations this build cannot read is kept too, so a reader that
+/// refuses one still meets it.
+fn fold_commit(
+    state: &mut RunState,
+    event: &Envelope,
+    kind: journal::PipelineKind,
+    operations: Option<&[Operation]>,
+) {
+    let Some(operations) = operations else {
+        state.recalled.push(event.clone());
+        return;
+    };
+    let mut noted = false;
+    for operation in operations {
+        match operation {
+            Operation::NoteDelivered { node, .. } | Operation::NoteWithdrawn { node, .. } => {
+                state.noted.insert(node.clone());
+                noted = true;
+            }
+            Operation::NodeAdded { node, .. } if kind == journal::PipelineKind::EditCommitted => {
+                state.nodes_added.insert(node.id.clone(), (**node).clone());
+            }
+            _ => {}
+        }
+    }
+    if noted {
+        state.recalled.push(event.clone());
+    }
+}
+
+/// Fold a node's settlement as the write-back board holds it:
+/// [`RunState::board_settlements`].
+fn fold_board_settlement(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeRestacked | journal::PipelineKind::NodeReadjusted) => {
+            if event.payload.get("agent_dispatched") == Some(&Value::Bool(false)) {
+                state.settled_clean.insert(node.clone());
+            }
+        }
+        Some(journal::PipelineKind::NodeSettled) => {
+            // The settlement as the node reached it: which launch read it back from
+            // the store is this run's record, and the board's settlement is what the
+            // next launch continues — the same fields, whoever carried them.
+            let mut settlement = event.payload.clone();
+            settlement.remove("continued");
+            // A clean restack or readjustment that left the draft where it was
+            // moves only its head and its unread verdict, and neither is the
+            // board's to hold. One that moved the draft's base or stack is.
+            let placed = |settled: &serde_json::Map<String, Value>| {
+                settled.get("stack").map(|stack| {
+                    let mut stack = stack.clone();
+                    if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
+                        for parent in parents {
+                            // Where it stands is its branch: a parent's head moves
+                            // with every push, and its node with every rework of
+                            // that same branch.
+                            if let Some(parent) = parent.as_object_mut() {
+                                parent.remove("head");
+                                parent.remove("node");
+                            }
+                        }
+                    }
+                    stack
+                })
+            };
+            let unmoved = |before: &serde_json::Map<String, Value>| {
+                ["base", "status", "branch", "change_url", "landing"]
+                    .iter()
+                    .all(|key| before.get(*key) == settlement.get(*key))
+                    && placed(before) == placed(&settlement)
+            };
+            if state.settled_clean.remove(node)
+                && state.board_settlements.get(node).is_some_and(unmoved)
+            {
+                return;
+            }
+            state.board_settlements.insert(node.clone(), settlement);
+        }
+        _ => {}
+    }
+}
+
+/// The hold kind [`RunState::held_since`] dates a release hold under: a reason
+/// awaiting a dependency's release.
+pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
+
+/// Fold what a reader dates a node's holds and a run's progress by, off one of
+/// this crate's own records: [`RunState::held_since`] and
+/// [`RunState::last_progress_at`].
+fn fold_recall(state: &mut RunState, event: &Envelope) {
+    let at = millis_of(&event.ts);
+    if recalled_whole(state, event) {
+        state.recalled.push(event.clone());
+    }
+    fold_board_settlement(state, event);
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeDispatched) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.dispatched_nodes.insert(node.clone());
+            }
+        }
+        Some(journal::PipelineKind::NodeSettled) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                match event.payload.get("detail").and_then(Value::as_str) {
+                    Some(detail) => {
+                        state
+                            .settled_details
+                            .insert(node.clone(), detail.to_owned());
+                    }
+                    None => {
+                        state.settled_details.remove(node);
+                    }
+                }
+                match event
+                    .payload
+                    .get(journal::SETTLED_AWAITING)
+                    .and_then(|awaiting| serde_json::from_value(awaiting.clone()).ok())
+                {
+                    Some(awaiting) => {
+                        state.settled_awaiting.insert(node.clone(), awaiting);
+                    }
+                    None => {
+                        state.settled_awaiting.remove(node);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeDispatched | journal::PipelineKind::NodeSettled) => {
+            if let Some(at) = at {
+                state.last_progress_at = Some(state.last_progress_at.map_or(at, |was| was.max(at)));
+            }
+            if journal::PipelineKind::from_wire(&event.kind)
+                == Some(journal::PipelineKind::NodeDispatched)
+            {
+                if let Some(node) = event.labels.node.as_ref() {
+                    state.held_since.remove(node);
+                }
+            }
+        }
+        Some(journal::PipelineKind::NodeUnheld) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.held_since.remove(node);
+            }
+        }
+        Some(journal::PipelineKind::NodeHeld) => {
+            let Some(node) = event.labels.node.as_ref() else {
+                return;
+            };
+            let reasons = event
+                .payload
+                .get("reasons")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut kinds: std::collections::BTreeSet<&str> = reasons
+                .iter()
+                .filter_map(crate::engine::hold_kind)
+                .map(crate::views::HoldKind::as_str)
+                .collect();
+            if reasons
+                .iter()
+                .any(|reason| crate::engine::release_awaited(reason).is_some())
+            {
+                kinds.insert(RELEASE_AWAITED);
+            }
+            let since = state.held_since.entry(node.clone()).or_default();
+            since.retain(|kind, _| kinds.contains(kind.as_str()));
+            for kind in kinds {
+                if !since.contains_key(kind) {
+                    if let Some(at) = at {
+                        since.insert(kind.to_string(), at);
+                    }
+                }
+            }
+            if since.is_empty() {
+                state.held_since.remove(node);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether [`RunState::recalled`] keeps one of this crate's records whole.
+///
+/// Every kind here is one a run writes a handful of — a release told or arrived,
+/// a landing's supersessions, a shutdown and what it stopped, an adoption or a
+/// takeover, a refusal, a continuation off the store, a scratch ending, a
+/// landing's closures, the run's home's status — or, for a dispatch,
+/// one of a node some note was ever written for, whose notes reset there.
+/// Commits are kept by [`fold_commit`], which reads their operations once.
+fn recalled_whole(state: &RunState, event: &Envelope) -> bool {
+    use journal::PipelineKind as K;
+    match K::from_wire(&event.kind) {
+        Some(
+            K::ReleaseAdopted
+            | K::ReleaseArrived
+            | K::BranchesSuperseded
+            | K::DriverAdopted
+            | K::DispatchStopped
+            | K::HostShutdown
+            | K::ScratchRemoved
+            | K::ScratchRetained
+            | K::LandingClosures
+            | K::DriverTakenOver
+            | K::HomeStatus,
+        ) => true,
+        Some(K::EditRejected) => event.payload.contains_key("envelope"),
+        Some(K::NodeSettled) => event.payload.contains_key("continued"),
+        Some(K::NodeDispatched) => {
+            event.payload.contains_key(crate::note::CARRIED_KEY)
+                || event
+                    .labels
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| state.noted.contains(node))
+        }
+        _ => false,
     }
 }
 
@@ -4061,7 +4455,8 @@ mod tests {
     /// A `driver-exited` changes nothing the run is: folded with and without
     /// one — after a settlement, a pause, and a reported error alike — the state
     /// is the same, down to when the run last wrote, so every view and verdict
-    /// read off the fold reads the same.
+    /// read off the fold reads the same. The record itself is kept whole among
+    /// [`RunState::recalled`] and nowhere else, for the one view that quotes it.
     #[test]
     fn a_driver_exit_folds_to_the_state_the_run_had_without_it() {
         let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
@@ -4102,8 +4497,14 @@ mod tests {
                     ("last_answered_command", Value::Null),
                 ],
             ));
+            let mut folded = fold(&with);
             assert_eq!(
-                serde_json::to_value(fold(&with)).expect("a state serializes"),
+                folded.recalled.pop().map(|kept| kept.seq),
+                Some(seq),
+                "the {settlement} driver-exited is not kept for the view that quotes it"
+            );
+            assert_eq!(
+                serde_json::to_value(folded).expect("a state serializes"),
                 unchanged,
                 "a {settlement} driver-exited changed the fold"
             );

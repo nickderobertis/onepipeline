@@ -172,6 +172,7 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         monitor.stdout
     );
 
+    // Every event in the store (`--all`), from the run's first byte.
     let watched = world.run(&["watch", run, "--all", "--timeout", "0"]);
     assert!(
         watched
@@ -221,7 +222,10 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
     assert_eq!(returned["input"], Value::Null, "{returned}");
     // Through the `planner` profile a bare `watch` reads with, no relayed turn
     // is shown, reference or not: that profile is what a supervisor wakes on.
-    let planner = world.run(&["watch", run, "--timeout", "0"]);
+    // From the run's first byte, since a watch through a profile given no cursor
+    // starts where the run's checkpoint stops.
+    let from_the_start = format!("1:{run}:0");
+    let planner = world.run(&["watch", run, "--cursor", &from_the_start, "--timeout", "0"]);
     assert!(
         machine(&planner.stdout)
             .iter()
@@ -260,7 +264,7 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
         &std::fs::read(&checkpoint).expect("reading the run left a checkpoint"),
     )
     .expect("the checkpoint is JSON");
-    assert_eq!(earlier["schema_version"], json!(14), "{earlier}");
+    assert_eq!(earlier["schema_version"], json!(15), "{earlier}");
     let doing = &mut earlier["state"]["activity"][NODE]["doing"];
     assert!(
         doing["activity"]["history_id"].is_string(),
@@ -359,6 +363,7 @@ fn a_dispatch_in_flight_shows_each_tool_calls_description_and_the_whole_instruct
 
     // What the agent said once released, both as its own activity and as the
     // turn's closing words, served whole on the machine record.
+    // Every event in the store (`--all`), from the run's first byte.
     let settled = world.run(&["watch", run, "--all", "--timeout", "0"]);
     let records = machine(&settled.stdout);
     let said: Vec<&Value> = records
@@ -481,6 +486,7 @@ fn assert_unavailable_everywhere(
         "`monitor` does not say the call's transcript is unavailable:\n{}",
         monitor.stdout
     );
+    // Every event in the store (`--all`), from the run's first byte.
     let watched = world.run(&["watch", run, "--all", "--timeout", "0"]);
     assert!(
         watched.stderr.contains(diagnostic),

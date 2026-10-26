@@ -379,8 +379,9 @@ pub(crate) fn said(record: &LandingClosures) -> String {
 /// node with a recorded landing. A landing a `landing-closures` record already names is never
 /// handed over again, so stopping and adopting a run asks the store nothing new.
 pub(crate) struct Watch {
-    /// How far into the journal this driver has read.
-    read_to: u64,
+    /// How far into the journal this driver has read, once its first pass has taken
+    /// what the run's fold already holds: `None` before it.
+    read_to: Option<u64>,
     /// Every landing commit a `landing-closures` record names.
     recorded: BTreeSet<String>,
     /// Whether a catch-up is due on the next pass.
@@ -402,7 +403,7 @@ impl Watch {
     /// A driver's watch, owing a catch-up on its first pass.
     pub(crate) fn new() -> Self {
         Self {
-            read_to: 0,
+            read_to: None,
             recorded: BTreeSet::new(),
             catch_up: true,
             scanned: BTreeSet::new(),
@@ -419,40 +420,38 @@ impl Watch {
     /// One pass: hand `writeback` every landing of the run the journal or a catch-up shows
     /// that no record names yet. Reads the journal only past where it last stopped, and a
     /// session stream only for a node that landed since this driver last read it.
+    ///
+    /// The first pass reads none of the run's history: every `landing-closures` and every
+    /// relayed landing that closes issues is among the records `state` keeps whole, and
+    /// `folded_through` is the byte that fold reached, which the journal is read past. A
+    /// `node-landed` in that history needs nothing of its own, since a first pass catches
+    /// up anyway.
     pub(crate) fn pass(
         &mut self,
         paths: &crate::ledger::RunPaths,
         state: &crate::projection::RunState,
+        folded_through: u64,
         writeback: &crate::writeback::Writeback,
     ) {
-        let grown = crate::journal::finished_records_after(&paths.journal(), self.read_to);
         let mut relayed = Vec::new();
-        for (record, occupies) in grown {
-            self.read_to += occupies;
-            let Some(record) = record else { continue };
-            if record.source == Source::Pipeline {
-                match PipelineKind::from_wire(&record.kind) {
-                    Some(PipelineKind::LandingClosures) => {
-                        if let Some(commit) = record.payload.get("commit").and_then(Value::as_str) {
-                            self.recorded.insert(commit.to_owned());
-                        }
-                    }
-                    Some(PipelineKind::NodeLanded) => self.catch_up = true,
-                    _ => {}
+        let read_to = match self.read_to {
+            Some(read_to) => read_to,
+            None => {
+                for record in &state.recalled {
+                    self.take(record, state, &mut relayed);
                 }
-                continue;
+                folded_through
             }
-            let ours = record
-                .labels
-                .node
-                .as_deref()
-                .is_some_and(|node| state.graph.get(node).is_some());
-            if ours {
-                if let Some(landing) = Landing::of_event(&record) {
-                    relayed.push(landing);
-                }
+        };
+        let mut reached = read_to;
+        for (record, occupies) in crate::journal::finished_records_after(&paths.journal(), read_to)
+        {
+            reached += occupies;
+            if let Some(record) = record {
+                self.take(&record, state, &mut relayed);
             }
         }
+        self.read_to = Some(reached);
         // Records first: a record later in the same read names a landing relayed earlier in
         // it, which a run adopted after its closure was written must not ask about again.
         for landing in relayed {
@@ -479,6 +478,38 @@ impl Watch {
                 if let Some(landing) = Landing::of_unlabelled(&envelope) {
                     self.owe(landing.of_node(node.clone()), writeback);
                 }
+            }
+        }
+    }
+
+    /// Take one record of the run's: a closure it names, a landing it asks to catch up
+    /// on, or a relayed landing of one of the run's nodes, put in `relayed`.
+    fn take(
+        &mut self,
+        record: &Envelope,
+        state: &crate::projection::RunState,
+        relayed: &mut Vec<Landing>,
+    ) {
+        if record.source == Source::Pipeline {
+            match PipelineKind::from_wire(&record.kind) {
+                Some(PipelineKind::LandingClosures) => {
+                    if let Some(commit) = record.payload.get("commit").and_then(Value::as_str) {
+                        self.recorded.insert(commit.to_owned());
+                    }
+                }
+                Some(PipelineKind::NodeLanded) => self.catch_up = true,
+                _ => {}
+            }
+            return;
+        }
+        let ours = record
+            .labels
+            .node
+            .as_deref()
+            .is_some_and(|node| state.graph.get(node).is_some());
+        if ours {
+            if let Some(landing) = Landing::of_event(record) {
+                relayed.push(landing);
             }
         }
     }
