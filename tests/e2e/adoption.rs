@@ -7099,6 +7099,16 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
         "`unpublished` does not count the held branch: {:?}",
         host.unpublished()
     );
+    // The plan of record carries it as work still in hand.
+    world.until_store("the store to carry the held node as in progress", |world| {
+        world
+            .store_tasks(&format!("plans:{}", project_id(&run)))
+            .iter()
+            .any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "consumer"
+                    && task["item"]["status"]["category"] == "in-progress"
+            })
+    });
 
     // (3) A release of the producer's **other** target lifts nothing: the probe that
     // answers it is not the one this node awaits, however many polls go by.
@@ -7189,6 +7199,21 @@ fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_on
         host.pushes(),
         1,
         "the merge path did not run exactly once, at landing"
+    );
+    // The time it spent held, from its settlement to the release re-dispatching it,
+    // is booked to the release wait of its one change.
+    let telemetry = world
+        .run(&["telemetry", &run, "--changes", "--json"])
+        .exited(0)
+        .json();
+    let change = telemetry["changes"]
+        .as_array()
+        .and_then(|changes| changes.iter().find(|change| change["node"] == "consumer"))
+        .unwrap_or_else(|| panic!("the change telemetry has no consumer: {telemetry}"))
+        .clone();
+    assert!(
+        change["segments"]["release_wait"].as_f64().unwrap_or(0.0) >= 1.0,
+        "the held change's wait is not booked to the release: {change}"
     );
     assert!(
         !host.unpublished().contains(&branch),
@@ -7448,4 +7473,49 @@ fn a_held_node_survives_its_driver_stop_and_shutdown_and_lands_once_adopted() {
     world.until("the run to settle", |world| {
         world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
     });
+}
+
+/// A held node whose branch its origin will not take is **not** held: the
+/// preservation `onevcs` refuses settles it `failed` under
+/// `infrastructure-failure`, exactly as a kept branch's refused preservation does,
+/// and the work stays on the local branch with nothing landed.
+#[test]
+fn a_hold_whose_preservation_the_origin_refuses_fails_the_node_by_name() {
+    let host = HeldHost::new("adoption-held-unpreserved");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    // The consumer's origin itself turns every push down, which no `--no-verify`
+    // reaches.
+    let hook = host.consumer.origin.join("hooks").join("pre-receive");
+    onepipeline_testfakes::executable(
+        &hook,
+        "#!/bin/sh\necho 'this origin takes no pushes' >&2\nexit 1\n",
+    );
+    let (run, _) = start_held(&host, "adoption-held-unpreserved", Some("crate"));
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(
+        settled["payload"]["outcome"], "infrastructure-failure",
+        "{settled}"
+    );
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
+    let branch = settled["payload"]["branch"]
+        .as_str()
+        .expect("the settlement names its branch")
+        .to_owned();
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&format!(
+            "onevcs could not preserve {branch} to hold it for its release"
+        )) && detail.contains("pre-receive hook declined"),
+        "{detail}"
+    );
+    assert!(host.on_origin(&format!("refs/heads/{branch}")).is_none());
+    assert!(
+        host.consumer.has_branch(world, &branch),
+        "the work is gone from the checkout"
+    );
+    assert_eq!(host.bases(), (base_before, checkout_before));
+    assert!(!dispatched(world, &run, "follower"));
 }

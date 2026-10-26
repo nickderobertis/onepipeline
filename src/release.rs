@@ -2302,8 +2302,15 @@ pub(crate) fn held_detail(
 ) -> String {
     let kept = match kept {
         onevcs::Preservation::Pushed => "pushed",
+        // llmlint: ignore-block[changed_behavior_has_e2e] a hold is the first push of a
+        // freshly closed session's branch to an identity that has an origin — every
+        // journey's — so the push always moves something and `pushed` is the one answer
+        // a run reaches. These two arms only name `onevcs`'s other two answers to the
+        // same push; `release::tests::a_held_detail_names_each_preservation_in_words`
+        // holds their words, and the held-landing journeys drive the `pushed` arm.
         onevcs::Preservation::AlreadyOnOrigin => "already on origin",
         onevcs::Preservation::NoRemote => "no origin",
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     format!(
         "complete, and held unlanded: awaiting the {target} release of {producer}, kept on \
@@ -2770,6 +2777,30 @@ fn awaits_late_landing(state: &RunState, node: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held node's detail names its release, branch and commit, and what its
+    /// preservation answered in words a person reads — each of the three answers.
+    #[test]
+    fn a_held_detail_names_each_preservation_in_words() {
+        let awaited = crate::payload::Awaited {
+            producer: "github.com/owner/engine".into(),
+            target: "crate".into(),
+        };
+        for (kept, said) in [
+            (onevcs::Preservation::Pushed, "pushed"),
+            (onevcs::Preservation::AlreadyOnOrigin, "already on origin"),
+            (onevcs::Preservation::NoRemote, "no origin"),
+        ] {
+            assert_eq!(
+                held_detail(&awaited, "feat/consumer", "4f2c9e1", kept),
+                format!(
+                    "complete, and held unlanded: awaiting the crate release of \
+                     github.com/owner/engine, kept on feat/consumer at 4f2c9e1 ({said}); it \
+                     lands when that release arrives"
+                )
+            );
+        }
+    }
     use onevcs::Baseline;
 
     fn dependency(target: Option<&str>, style: Option<ReleaseStyle>) -> Dependency {
