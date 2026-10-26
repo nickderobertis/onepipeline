@@ -720,6 +720,11 @@ fn a_run_whose_covered_history_is_overwritten_is_driven_viewed_and_answered() {
     // Held quiet, beating and doing nothing more, so every event its line counts
     // is one the journey can name.
     a_held_member(&world, "next", false);
+    // Held too, so the run cannot end before the journey takes the driver's reads:
+    // the scratch handling a driver does as it lets go of an ended run reads the
+    // whole journal once, and that is the run's ending, not a pass, append, view or
+    // reply — the stop below ends it, after those reads are taken.
+    world.script("told.wait", "hold");
     world.run(&["adopt", run, "--detach"]).exited(0);
     world.until(
         "the ready node to be dispatched and its turn open",
