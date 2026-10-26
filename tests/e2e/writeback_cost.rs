@@ -304,8 +304,8 @@ fn the_comparable_plan() -> (Value, Vec<Value>, Vec<Vec<Vec<String>>>) {
     assert_eq!(
         created[0]["spent"],
         json!({
-            "requests": 4, "budgets": [{
-                "budget": "graphql", "unit": "points", "amount": 4, "lower_bound": false
+            "requests": 3, "budgets": [{
+                "budget": "graphql", "unit": "points", "amount": 3, "lower_bound": false
             }]
         }),
         "{}",
