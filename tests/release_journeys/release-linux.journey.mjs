@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -36,6 +36,7 @@ import {
   PyPIDouble,
 } from "../../release/tests/support/release-doubles.mjs";
 import { Registry } from "../../npm/test/registry-support.mjs";
+import { assertSbomShape } from "../../npm/test/sbom-support.mjs";
 
 const ROOT = process.cwd();
 const VERSION = readFileSync(join(ROOT, "Cargo.toml"), "utf8").match(
@@ -220,6 +221,34 @@ async function otherPlatformsPublished(s, linux) {
 
 let built;
 let linux;
+
+/// A copy of the build, changed by `tamper`, published against fresh doubles
+/// with `env` over a release job's, refused before anything is uploaded.
+async function publishTampered(tamper, env = {}) {
+  const s = await services();
+  const out = join(ROOT, "target", "release-journeys", `tampered-${process.pid}`);
+  rmSync(out, { recursive: true, force: true });
+  try {
+    mkdirSync(out, { recursive: true });
+    execFileSync("cp", ["-a", join(OUT, "linux"), join(out, "linux")]);
+    const manifest = join(out, "linux", "build.json");
+    const build = JSON.parse(
+      readFileSync(manifest, "utf8").replaceAll(join(OUT, "linux"), join(out, "linux")),
+    );
+    tamper(build, join(out, "linux"));
+    writeFileSync(manifest, JSON.stringify(build));
+    const result = await run("just", ["release-linux", "publish"], {
+      env: { ...s.env, ONEPIPELINE_RELEASE_OUT: out, ...env },
+    });
+    assert.deepEqual(writesOf(s), {}, "nothing was published");
+    assert.deepEqual(s.github.writes(), [], "the Release was not written to");
+    return result;
+  } finally {
+    await s.stop();
+    rmSync(out, { recursive: true, force: true });
+  }
+}
+const of = (build, kind) => build.artifacts.find((a) => a.kind === kind);
 
 before(async () => {
   rmSync(OUT, { recursive: true, force: true });
@@ -717,32 +746,6 @@ describe("registry verification refuses what a user could not run", () => {
 });
 
 describe("publication refuses a build that is not the plan, untouched", () => {
-  /// A copy of the build, changed by `tamper`, published against fresh doubles.
-  async function publishTampered(tamper) {
-    const s = await services();
-    const out = join(ROOT, "target", "release-journeys", `tampered-${process.pid}`);
-    rmSync(out, { recursive: true, force: true });
-    try {
-      mkdirSync(out, { recursive: true });
-      execFileSync("cp", ["-a", join(OUT, "linux"), join(out, "linux")]);
-      const manifest = join(out, "linux", "build.json");
-      const build = JSON.parse(
-        readFileSync(manifest, "utf8").replaceAll(join(OUT, "linux"), join(out, "linux")),
-      );
-      tamper(build, join(out, "linux"));
-      writeFileSync(manifest, JSON.stringify(build));
-      const result = await run("just", ["release-linux", "publish"], {
-        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: out },
-      });
-      assert.deepEqual(writesOf(s), {}, "nothing was published");
-      return result;
-    } finally {
-      await s.stop();
-      rmSync(out, { recursive: true, force: true });
-    }
-  }
-  const of = (build, kind) => build.artifacts.find((a) => a.kind === kind);
-
   it("refuses a build of another version", async () => {
     const result = await publishTampered((build) => {
       build.version = "0.0.1";
@@ -803,6 +806,98 @@ describe("publication refuses a build that is not the plan, untouched", () => {
     assert.equal(result.code, 1, said(result));
     assert.match(result.stderr, /requires GLIBC_2\.\d+, above the planned floor 2\.17/);
   });
+});
+
+/// Where every npm platform package carries its binary's SBOM.
+const SBOM = "package/sboms/onepipeline.cyclonedx.json";
+
+/// The SBOM a packed npm package carries, and every file it carries under sboms/.
+function npmSbom(tgz) {
+  const files = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" })
+    .split("\n")
+    .filter((name) => name.startsWith("package/sboms/") && !name.endsWith("/"));
+  return { files, text: execFileSync("tar", ["-xzOf", tgz, SBOM], { encoding: "utf8" }) };
+}
+
+/// Rewrite a packed npm package's SBOM: drop it (`-`) or replace it with `payload`.
+const REPLACE_SBOM = `
+import io, sys, tarfile
+path, payload = sys.argv[1], sys.argv[2]
+with tarfile.open(path) as original:
+    members = [(m, original.extractfile(m).read() if m.isfile() else None) for m in original.getmembers()]
+with tarfile.open(path, 'w:gz') as changed:
+    for member, data in members:
+        if member.name == 'package/sboms/onepipeline.cyclonedx.json':
+            if payload == '-': continue
+            data = payload.encode(); member.size = len(data)
+        changed.addfile(member, io.BytesIO(data) if data is not None else None)
+`;
+
+describe("the real build's SBOM, with PyPI publication off", () => {
+  const PACKAGE = "onepipeline-cli-linux-x64";
+  const OFF = { PYPI_PUBLISH: "false", PYPI_TOKEN: "", NPM_PUBLISH: "true" };
+
+  it("is the wheel's own, and npm serves it with every linked crate at Cargo.lock's version", async () => {
+    // maturin generated it from the manylinux build's own Cargo graph.
+    const wheel = execFileSync(
+      "python3",
+      [
+        "-c",
+        "import sys,zipfile; w=zipfile.ZipFile(sys.argv[1]); " +
+          "n,=[n for n in w.namelist() if '.dist-info/sboms/' in n]; sys.stdout.write(w.read(n).decode())",
+        of(linux, "wheel").path,
+      ],
+      { encoding: "utf8" },
+    );
+    const staged = npmSbom(of(linux, "npm").path);
+    assert.deepEqual(staged.files, [SBOM], "the staged package carries one file under sboms/");
+    assert.equal(staged.text, wheel, "the staged package carries the wheel's SBOM");
+    assertSbomShape(staged.text, VERSION);
+
+    const s = await services();
+    const served = join(mkdtempSync(join(SCRATCH, "served-")), `${PACKAGE}-${VERSION}.tgz`);
+    try {
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT, ...OFF };
+      const published = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(published.code, 0, said(published));
+      assert.match(published.stdout, /skipped PyPI \(PYPI_PUBLISH off\)/);
+      assert.equal(s.pypi.files.size, 0, "nothing was uploaded to PyPI");
+      const tarball = s.npm.packages.get(PACKAGE)?.versions.get(VERSION)?.tarball;
+      assert.ok(tarball, `npm took ${PACKAGE}@${VERSION}`);
+      writeFileSync(served, tarball);
+      const fromNpm = npmSbom(served);
+      assert.deepEqual(fromNpm.files, [SBOM], "the served package carries one file under sboms/");
+      assert.equal(fromNpm.text, wheel, "npm serves the wheel's SBOM");
+      assertSbomShape(fromNpm.text, VERSION);
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+    } finally {
+      await s.stop();
+      rmSync(dirname(served), { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, payload, reason] of [
+    ["lacks its SBOM", "-", "omitted sboms/onepipeline.cyclonedx.json"],
+    [
+      "carries a document that is not CycloneDX",
+      '{"bomFormat": "SPDX"}',
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+  ]) {
+    it(`refuses the real package when it ${label}, naming it, before any upload`, async () => {
+      const result = await publishTampered((build) => {
+        const npm = of(build, "npm");
+        execFileSync("python3", ["-c", REPLACE_SBOM, npm.path, payload]);
+        npm.sha256 = sha(readFileSync(npm.path));
+      }, OFF);
+      assert.equal(result.code, 1, said(result));
+      assert.ok(
+        result.stderr.includes(`npm package ${PACKAGE} ${reason}, so nothing is published`),
+        said(result),
+      );
+    });
+  }
 });
 
 describe("a registry switched off", () => {
