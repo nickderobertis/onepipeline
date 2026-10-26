@@ -1231,11 +1231,14 @@ onevcs-testing = "0.19.22"
 # and `justfile`'s CLI is held to it so the host reads the store release its driver links.
 # **0.12.4 takes what Linear stored off each write's own answer**, retiring
 # `TaskSource::stored_form`, and batches a copy's origin lookups into one read; the loopback
-# Linear in `tests/e2e/linear_loopback.rs` answers what it now sends. It is linked at a
-# later commit of its line; `[patch.crates-io]` below says why.
-onetaskgraph-core = "=0.12.4"
-onetaskgraph-plugin-api = "=0.12.4"
-onetaskgraph-local-md = "=0.12.4"
+# Linear in `tests/e2e/linear_loopback.rs` answers what it now sends.
+# **0.12.5 lets a public projection carry an anchor whose only attribute is `id` or `name`**,
+# so a private plan whose public task owns a schema-2 budget copies onto the board
+# (`tests/e2e/publication_boundary.rs`'s
+# `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
+onetaskgraph-core = "=0.12.5"
+onetaskgraph-plugin-api = "=0.12.5"
+onetaskgraph-local-md = "=0.12.5"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1549,16 +1552,3 @@ codegen-units = 1
 [[test]]
 name = "codex_server"
 path = "tests/codex_server/main.rs"
-
-# The store family, built from onetaskgraph's main ahead of the release carrying it: the
-# commit after 0.12.4 lets a public projection carry an anchor whose only attribute is
-# `id` or `name`, so a private plan whose public task owns a schema-2 budget copies onto
-# the board (`tests/e2e/publication_boundary.rs`'s
-# `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
-# The commit still carries 0.12.4, so the pins above and `justfile`'s
-# `onetaskgraph-version` keep that number; the whole table goes at the release that
-# ships the commit, and the pins move to it.
-[patch.crates-io]
-onetaskgraph-core = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "a60ee4e82313f5e7d61995ba194de6921e5bd4f9" }
-onetaskgraph-plugin-api = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "a60ee4e82313f5e7d61995ba194de6921e5bd4f9" }
-onetaskgraph-local-md = { git = "https://github.com/nickderobertis/onetaskgraph", rev = "a60ee4e82313f5e7d61995ba194de6921e5bd4f9" }

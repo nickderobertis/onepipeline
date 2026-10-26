@@ -72,8 +72,7 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Exactly what `[patch.crates-io]` links, and empty when it links nothing: an
-# allowance for a pin no build asks for is one a revision could quietly
+# Empty: an allowance for a pin no build asks for is one a revision could quietly
 # come back through. With `unknown-git` at `deny`
 # this is the whole of what a git source may be, so any of them — a sibling pinned
 # back, or a transitive dependency that grew one — fails here.
@@ -84,6 +83,4 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # other side. `tests/patch_pin.rs` holds this list equal to `Cargo.toml`'s
 # `[patch.crates-io]`, including when both are empty, so the exemption is deleted
 # in the same change that deletes the block.
-allow-git = [
-  "https://github.com/nickderobertis/onetaskgraph?rev=a60ee4e82313f5e7d61995ba194de6921e5bd4f9",
-]
+allow-git = []
