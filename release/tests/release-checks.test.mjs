@@ -929,6 +929,144 @@ describe("a re-run of a build job whose earlier attempt published part of it", (
   });
 });
 
+/// Rewrite a built npm package's SBOM — dropped, or replaced by `payload` — and
+/// re-record its hash in build.json, so only the SBOM check stands in the way.
+const REPLACE_NPM_SBOM = `
+import hashlib, io, json, sys, tarfile
+from pathlib import Path
+out, payload = Path(sys.argv[1]), sys.argv[2]
+manifest = json.loads((out / 'build.json').read_text())
+artifact, = [a for a in manifest['artifacts'] if a['kind'] == 'npm']
+source = Path(artifact['path'])
+with tarfile.open(source) as original:
+    members = [(m, original.extractfile(m).read() if m.isfile() else None) for m in original.getmembers()]
+with tarfile.open(source, 'w:gz') as changed:
+    for member, data in members:
+        if member.name == 'package/sboms/onepipeline.cyclonedx.json':
+            if payload == '-': continue
+            data = payload.encode(); member.size = len(data)
+        changed.addfile(member, io.BytesIO(data) if data is not None else None)
+artifact['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+(out / 'build.json').write_text(json.dumps(manifest))
+`;
+
+/// What a packed npm package carries under sboms/, by member name.
+const NPM_SBOMS = `
+import io, json, sys, tarfile
+with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as bundle:
+    print(json.dumps({m.name: bundle.extractfile(m).read().decode()
+                      for m in bundle.getmembers() if m.isfile() and m.name.startswith('package/sboms/')}))
+`;
+
+describe("a platform package's SBOM with PyPI publication off", () => {
+  const PACKAGE = "onepipeline-cli-win32-x64";
+  const SBOM = "package/sboms/onepipeline.cyclonedx.json";
+
+  async function services() {
+    const github = await new GitHubDouble().start();
+    github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    const env = (out) =>
+      releaseEnv(github, out, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        PYPI_PUBLISH: "false",
+        PYPI_TOKEN: "",
+        PUBLISH_NPM_AWAIT_BUDGET: "30",
+        PUBLISH_NPM_AWAIT_INTERVAL: "1",
+      });
+    const stop = async () => {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    };
+    return { github, pypi, npm, env, stop };
+  }
+
+  async function standInBuild(base) {
+    const result = await run(PYTHON, [
+      "-c",
+      STAND_IN_BUILD,
+      join(base, "windows"),
+      "the build's onepipeline.exe",
+    ]);
+    assert.equal(result.code, 0, said(result));
+    return JSON.parse(readFileSync(join(base, "windows", "build.json"), "utf8"));
+  }
+
+  function sbomsOf(tarball) {
+    return JSON.parse(
+      execFileSync(PYTHON, ["-c", NPM_SBOMS], { input: tarball, encoding: "utf8" }),
+    );
+  }
+
+  it("stages the platform package with the wheel's SBOM and publishes it to npm alone", async () => {
+    const s = await services();
+    const base = scratch("release-sbom");
+    try {
+      const manifest = await standInBuild(base);
+      const staged = readFileSync(manifest.artifacts.find((a) => a.kind === "npm").path);
+      const expected =
+        '{"bomFormat": "CycloneDX", "metadata": {"component": {"name": "onepipeline"}}}';
+      assert.deepEqual(sbomsOf(staged), { [SBOM]: expected }, "the staged package carries it");
+
+      const published = await run("just", ["release-windows", "publish"], { env: s.env(base) });
+      assert.equal(published.code, 0, said(published));
+      assert.match(published.stdout, /skipped PyPI \(PYPI_PUBLISH off\)/);
+      assert.equal(s.pypi.writes().length, 0, "nothing was uploaded to PyPI");
+      const served = s.npm.packages.get(PACKAGE)?.versions.get(VERSION)?.tarball;
+      assert.ok(served, `npm took ${PACKAGE}@${VERSION}`);
+      assert.deepEqual(sbomsOf(served), { [SBOM]: expected }, "the package npm serves carries it");
+    } finally {
+      await s.stop();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, payload, reason] of [
+    ["lacks its SBOM", "-", "omitted sboms/onepipeline.cyclonedx.json"],
+    [
+      "carries a document that is not an object",
+      "[]",
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+    [
+      "carries a document that is not CycloneDX",
+      '{"bomFormat": "SPDX"}',
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+  ]) {
+    it(`refuses to publish a platform package that ${label}, naming it, before any upload`, async () => {
+      const s = await services();
+      const base = scratch("release-sbom");
+      try {
+        await standInBuild(base);
+        const replaced = await run(PYTHON, [
+          "-c",
+          REPLACE_NPM_SBOM,
+          join(base, "windows"),
+          payload,
+        ]);
+        assert.equal(replaced.code, 0, said(replaced));
+        const refused = await run("just", ["release-windows", "publish"], { env: s.env(base) });
+        assert.equal(refused.code, 1, said(refused));
+        assert.ok(
+          refused.stderr.includes(`npm package ${PACKAGE} ${reason}, so nothing is published`),
+          said(refused),
+        );
+        assert.deepEqual(s.github.writes(), [], "nothing was uploaded to the Release");
+        assert.equal(s.pypi.writes().length, 0, "nothing was uploaded to PyPI");
+        assert.deepEqual(s.npm.timeline, [], "nothing was published to npm");
+      } finally {
+        await s.stop();
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 describe("a lock that links an engine twice", () => {
   let github;
   let copy;
