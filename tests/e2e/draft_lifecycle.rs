@@ -320,6 +320,8 @@ fn a_plan_s_own_draft_is_never_lifted_by_green_checks() {
     assert_eq!(host_holds(&world, 1), "draft");
     assert!(gh_pr(&world, "ready").is_empty(), "{:?}", gh_calls(&world));
     assert!(gh_pr(&world, "merge").is_empty(), "{:?}", gh_calls(&world));
+    // A draft the plan asked for awaits no release, so it carries no `awaiting`.
+    crate::harness::no_awaiting(&world, run, "service");
 }
 
 /// `change-open` now waits for its checks: a red required check sends the node back

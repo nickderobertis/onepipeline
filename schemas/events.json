@@ -1,5 +1,5 @@
 {
-  "version": "1.10.1",
+  "version": "1.11.0",
   "description": "The agent stack's event envelope, filter, artifact reference and labels, and the payload of every onepipeline pipeline kind, as onepipeline declares them.",
   "schemas": [
     {
@@ -1085,6 +1085,16 @@
               }
             ],
             "description": "Where a settlement this run did not reach itself came from: present exactly on\nthe settlement a launch read back from its project's store and continued,\nrather than dispatched. Entry 119 of `docs/contract-divergences.md`."
+          },
+          "awaiting": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/Awaited"
+            },
+            "description": "The releases a node held for them still awaits, one per release in the\norder its reference rows list them: present exactly on a `complete-but-held`\nsettlement and on a `complete-but-draft` one awaiting a release, and absent\nfrom every other. What a view reads the wait off, rather than the detail."
           }
         },
         "required": [
@@ -1140,6 +1150,11 @@
                 "type": "string",
                 "const": "complete-but-draft",
                 "description": "`complete-but-draft`."
+              },
+              {
+                "type": "string",
+                "const": "complete-but-held",
+                "description": "`complete-but-held`."
               },
               {
                 "type": "string",
@@ -1314,6 +1329,24 @@
               }
             ],
             "description": "Where a continued settlement was read."
+          },
+          "Awaited": {
+            "type": "object",
+            "properties": {
+              "producer": {
+                "type": "string",
+                "description": "The producer's repository identity, its normalized origin."
+              },
+              "target": {
+                "type": "string",
+                "description": "The release target of it awaited: the one the node's `consumes` names, else\nthe producer's `default_target`."
+              }
+            },
+            "required": [
+              "producer",
+              "target"
+            ],
+            "description": "One release a held node still awaits."
           }
         }
       }
@@ -3084,6 +3117,11 @@
                 "type": "string",
                 "const": "complete-but-draft",
                 "description": "`complete-but-draft`."
+              },
+              {
+                "type": "string",
+                "const": "complete-but-held",
+                "description": "`complete-but-held`."
               },
               {
                 "type": "string",

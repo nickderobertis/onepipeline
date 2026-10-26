@@ -661,6 +661,7 @@ fn cycle(
                     to = Some(match outcome {
                         Some(crate::vcs::REVIEW_DRAFTED) => State::ReviewWait,
                         Some(crate::vcs::DRAFTED) => held_for.unwrap_or(State::ReleaseWait),
+                        Some(crate::vcs::HELD_FOR_RELEASE) => State::ReleaseWait,
                         // llmlint: ignore[changed_behavior_has_e2e] `queued` is a host's merge
                         // queue taking the change, which the `gh` double offers no queue for;
                         // `a_requeue_and_a_release_wait_after_a_dispatch_are_each_their_own_wait`
@@ -1160,26 +1161,34 @@ mod tests {
         assert_eq!(sum(&change), 50_000);
     }
 
+    /// A change held for its release books the wait to `release_wait`, whether it is
+    /// held as a draft change request or, where its publication opens none, held
+    /// unlanded on its origin.
     #[test]
     fn a_change_left_a_draft_for_its_release_waits_until_the_runs_last_record() {
-        let mut events = opened_and_checked();
-        events.push(pipeline(
-            21,
-            "node-settled",
-            json!({"status": "complete-but-draft", "outcome": crate::vcs::DRAFTED}),
-        ));
-        events.push(pipeline(60, "release-wait", json!({})));
-        // A record of another node is still the run's last record.
-        let mut elsewhere = pipeline(70, "node-ready", json!({}));
-        elsewhere.labels.node = Some("another".into());
-        events.push(elsewhere);
-        let change = one(&events);
-        assert_eq!(change.cycle_seconds, None);
-        assert_eq!(change.landed_at, None);
-        let ms = ms_of(&change);
-        assert_eq!(ms[&Segment::ReleaseWait], 49_000);
-        assert_eq!(ms[&Segment::Other], 1_000);
-        assert_eq!(sum(&change), 70_000);
+        for (status, outcome) in [
+            ("complete-but-draft", crate::vcs::DRAFTED),
+            ("complete-but-held", crate::vcs::HELD_FOR_RELEASE),
+        ] {
+            let mut events = opened_and_checked();
+            events.push(pipeline(
+                21,
+                "node-settled",
+                json!({"status": status, "outcome": outcome}),
+            ));
+            events.push(pipeline(60, "release-wait", json!({})));
+            // A record of another node is still the run's last record.
+            let mut elsewhere = pipeline(70, "node-ready", json!({}));
+            elsewhere.labels.node = Some("another".into());
+            events.push(elsewhere);
+            let change = one(&events);
+            assert_eq!(change.cycle_seconds, None, "{status}");
+            assert_eq!(change.landed_at, None, "{status}");
+            let ms = ms_of(&change);
+            assert_eq!(ms[&Segment::ReleaseWait], 49_000, "{status}");
+            assert_eq!(ms[&Segment::Other], 1_000, "{status}");
+            assert_eq!(sum(&change), 70_000, "{status}");
+        }
     }
 
     #[test]

@@ -377,7 +377,8 @@ pub(crate) struct Named {
 /// `resume.branch`, and its current dispatch session's branch.
 ///
 /// Live is every status a node can still move out of — pending, ready and running,
-/// and the held ones: waiting, blocked, parked and complete-but-draft — and one
+/// and the held ones: waiting, blocked, parked, complete-but-draft and
+/// complete-but-held — and one
 /// more: a lifecycle node settled `done` whose change is unlanded, which is a
 /// draft awaiting review that a `rework` continues and a restack moves, so the
 /// branch it settled on is named too. Every other settled node's branch is
@@ -1550,6 +1551,7 @@ mod tests {
             ("waiting", NodeStatus::Waiting),
             ("blocked", NodeStatus::Blocked),
             ("draft", NodeStatus::CompleteDraft),
+            ("held", NodeStatus::CompleteHeld),
         ];
         let settled = [
             ("done", NodeStatus::Done),
