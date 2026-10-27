@@ -835,15 +835,25 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        // Before anything is started, so that everything this test starts is
-        // something its teardown can reach. See [`Drop for World`](World).
-        onepipeline_testfakes::containment::enrol();
-        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Enrolled in [`World::at`], before anything is started, so that everything
+        // this test starts is something its teardown can reach. See
+        // [`Drop for World`](World).
         let root = scratch_base().join(format!(
             "op-{}-{}",
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
+        Self::at(&root, name)
+    }
+
+    /// A fresh world rooted at `root` rather than at a name only this process holds:
+    /// for `tests/journal_workload`, whose generated run names the world's paths, so a
+    /// world at one root twice is what makes one generation reproduce byte for byte.
+    /// Whatever `root` held is removed first, and the world removes it when dropped.
+    pub fn at(root: &Path, name: &str) -> Self {
+        onepipeline_testfakes::containment::enrol();
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root = root.to_path_buf();
         let _ = std::fs::remove_dir_all(&root);
         // Created before it is resolved, because resolving a path asks the
         // filesystem about it, and in the one spelling the binary will report —
@@ -1523,7 +1533,15 @@ impl World {
     /// of its own must not be able to answer one. What a journey states about
     /// resolving *nothing* by name says so with [`World::empty_path`].
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
-        let mut command = self.cmd(args);
+        self.agentgraph_cmd_on(&binary(), args)
+    }
+
+    /// [`agentgraph_cmd`](World::agentgraph_cmd) for another `onepipeline`
+    /// executable, wired to this world and the real stack exactly as the build
+    /// under test is — for `tests/journal_workload`, which measures the release
+    /// build rather than this one.
+    pub fn agentgraph_cmd_on(&self, program: &Path, args: &[&str]) -> Command {
+        let mut command = self.cmd_on(program, args);
         command
             .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
             .env(

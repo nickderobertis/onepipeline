@@ -567,11 +567,15 @@ impl std::ops::DerefMut for Projected {
 
 /// How much of a journal a rebuild folds at a time.
 ///
-/// The bound on what one read holds in memory, whatever the run's length: a
+/// The bound on what one read holds in memory, whatever the run's length. A window
+/// is held parsed and merge-ordered, which takes several times its bytes: at 16 MiB
+/// a driver adopting a run whose checkpoint an earlier build wrote peaked about
+/// 100 MB above one resuming from its own (`tests/journal_workload`), so the window
+/// is kept small enough that the rebuild's memory stays in the driver's budget. A
 /// record is a few kilobytes and the largest this host's runs carry is under one
-/// megabyte, so a window of this size always holds whole records and a rebuild of
-/// a run of any length is one pass over it.
-const REBUILD_WINDOW: u64 = 16 * 1024 * 1024;
+/// megabyte, so a window of this size holds whole records; one that holds none is
+/// widened until it does, and a rebuild of a run of any length is one pass over it.
+const REBUILD_WINDOW: u64 = 2 * 1024 * 1024;
 
 impl Projected {
     /// Fold a run, resuming from its checkpoint where there is a usable one, and
@@ -1838,7 +1842,6 @@ mod tests {
     /// A rebuild folded a window at a time — windows far smaller than a record
     /// included, which it widens until one fits — lands on the state one read of
     /// the whole store folds to, and covers every record but the last instant.
-    // llmlint: ignore[changed_behavior_has_e2e] a journey crossing a window needs a journal past sixteen megabytes per run of the suite; this drives the real reader and fold over a real run store at windows down to one byte, and the journeys drive the rebuild a deleted and an earlier build's checkpoint take.
     #[test]
     fn a_rebuild_in_windows_lands_on_the_whole_stores_fold() {
         let root = scratch("windows");

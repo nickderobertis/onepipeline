@@ -1544,6 +1544,14 @@ path = "tests/pool_workload/main.rs"
 name = "scratch_workload"
 path = "tests/scratch_workload/main.rs"
 
+# The journal workload: the release-built driver adopting synthesized runs of 1 to
+# 800 MB, recorded for the driver's journal budgets. Its own Nx project
+# (`tests/journal_workload/project.json`), run only by that project's `workload`
+# target (`just workload`), so no per-change selection pays for an 800 MB journal.
+[[test]]
+name = "journal_workload"
+path = "tests/journal_workload/main.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

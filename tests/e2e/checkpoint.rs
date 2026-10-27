@@ -556,3 +556,75 @@ fn an_attached_launch_folds_nothing_while_its_run_records_nothing() {
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// **A checkpoint an earlier build wrote, over a store wider than several rebuild
+/// windows, is rebuilt to the whole store's fold, every record but the last instant
+/// covered once.**
+///
+/// A run this host's drivers adopt carries the document the build before them wrote,
+/// at a schema this one refuses, so adopting it rebuilds the fold from the journal's
+/// first byte, a window at a time. The windows are what bound that rebuild's memory;
+/// what has to hold across them is the fold: the state reads as a fold with no
+/// document at all reads, and the marker the rebuild writes accounts for exactly the
+/// records in front of the last instant — none dropped at a window's edge, none
+/// counted twice — ending on the byte that instant's line starts at.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes an earlier build's
+// document or lengthens a settled run's journal; a store this wide stands in for a long
+// run's, which a journey cannot run in its time.
+#[test]
+fn an_earlier_builds_checkpoint_over_a_store_wider_than_its_windows_rebuilds_the_whole_fold() {
+    let world = a_settled_run("checkpoint-wide-rebuild");
+    let store = world.run_file("tail", "events.jsonl");
+    let mut held = std::fs::read_to_string(&store).expect("the run's journal");
+    // About five megabytes of another producer's records, each stamped after
+    // everything the store holds, so the file's order is the merge's.
+    let detail = "w".repeat(900);
+    for seq in 0..5_500u64 {
+        let record = json!({
+            "v": 1,
+            "ts": format!("2999-01-01T{:02}:{:02}:{:02}.{:03}Z",
+                seq / 3_600_000 % 24, seq / 60_000 % 60, seq / 1_000 % 60, seq % 1_000),
+            "stream": "graph-wide",
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": "turn-activity",
+            "labels": {"run_id": "tail", "node": "build"},
+            "payload": {"tool": "Edit", "detail": detail},
+            "artifacts": [],
+        });
+        held.push_str(&format!("{record}\n"));
+    }
+    std::fs::write(&store, &held).expect("the journal is appended to");
+    let last_line = held.trim_end_matches('\n').rsplit('\n').next().unwrap();
+    let records = world.journal("tail").len();
+
+    let at = world.run_file("tail", "checkpoint.json");
+    let mut earlier = parsed(&std::fs::read(&at).expect("the run's checkpoint"));
+    earlier["schema_version"] = json!(13);
+    write_checkpoint(&world, &earlier);
+
+    let rebuilt = summary_line(&world);
+    assert!(rebuilt.contains("2/2 done"), "{rebuilt}");
+    let written = parsed(&std::fs::read(&at).expect("the rebuild's checkpoint"));
+    assert_ne!(
+        written["schema_version"],
+        json!(13),
+        "the earlier document was kept"
+    );
+    assert_eq!(
+        written["coverage"]["records"],
+        json!(records - 1),
+        "the rebuild did not cover every record but the last instant, once each"
+    );
+    assert_eq!(
+        written["coverage"]["bytes"],
+        json!(held.len() - last_line.len() - 1),
+        "the marker does not end where the last instant's line starts"
+    );
+    assert_eq!(
+        rebuilt,
+        without_a_checkpoint(&world),
+        "the rebuild and a fold with no document report different states"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
