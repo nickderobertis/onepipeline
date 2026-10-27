@@ -1312,6 +1312,9 @@ include = [
   "README.md",
   "LICENSE",
   "/docs/contract.md",
+  # The npm launcher is shipped by every release (release.yml packs it beside the
+  # platform packages), so a change to it has to be a change release-plz sees.
+  "/npm/onepipeline-cli/bin/onepipeline.js",
   "/personas/**",
   "/graphs/**",
   "/examples/**",

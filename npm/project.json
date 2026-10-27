@@ -59,6 +59,10 @@
         "{workspaceRoot}/release/release.py"
       ]
     },
+    "launcher-process": {
+      "command": "node --test npm/test/launcher-process.test.mjs",
+      "cache": false
+    },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]
