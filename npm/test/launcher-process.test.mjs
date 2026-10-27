@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
@@ -222,6 +222,7 @@ describe("the process the npm-installed command runs as", () => {
   let work;
   let project;
   let program;
+  let packages;
 
   before(() => {
     work = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "launcher-"));
@@ -243,7 +244,8 @@ describe("the process the npm-installed command runs as", () => {
     ]).trim();
     const launcherDir = run("node", ["scripts/npm-build.mjs", "launcher", "--out", dist]).trim();
     project = join(work, "app");
-    installInto(project, [pack(launcherDir, work), pack(platformDir, work)]);
+    packages = [pack(launcherDir, work), pack(platformDir, work)];
+    installInto(project, packages);
     program = join(work, "program.cjs");
     writeFileSync(program, PROGRAM);
   });
@@ -330,6 +332,41 @@ describe("the process the npm-installed command runs as", () => {
       });
     });
   }
+
+  it("says it could not start the engine, and exits 1, when the installed binary will not run", () => {
+    const broken = join(work, "broken");
+    installInto(broken, packages);
+    const engine = join(
+      broken,
+      "node_modules",
+      `onepipeline-cli-${process.platform}-${process.arch}`,
+      "bin",
+      EXE,
+    );
+    // Not executable outside Windows; not a program at all on it.
+    if (WINDOWS) writeFileSync(engine, "not a program\n");
+    else chmodSync(engine, 0o644);
+    const withoutExec = join(work, "broken-without-execve.cjs");
+    writeFileSync(withoutExec, "delete process.execve;\n");
+    const launcher = join(broken, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+    // Exec where there is exec, and the supervised child everywhere.
+    const starts = WINDOWS
+      ? [[process.execPath, [launcher]]]
+      : [
+          [process.execPath, [launcher]],
+          [process.execPath, ["--require", withoutExec, launcher]],
+        ];
+    for (const [command, prefix] of starts) {
+      const refused = spawnSync(command, [...prefix, "--version"], {
+        cwd: broken,
+        encoding: "utf8",
+        env: engineEnv(work),
+      });
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.equal(refused.stdout, "");
+      assert.match(refused.stderr, /^onepipeline: failed to launch the onepipeline binary: /);
+    }
+  });
 
   // The launcher as its own process: Windows always, and on Linux and macOS a
   // Node.js without `process.execve`, which this host stands in for by removing it.
