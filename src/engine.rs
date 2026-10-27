@@ -1741,6 +1741,9 @@ fn converge(
             moved = true;
             crate::ordering::edits_taken()?;
         }
+        // Where a journey holds the pass past its own claim, so the claimer is what
+        // takes an envelope queued now.
+        crate::review::failpoint("after-claim")?;
         deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an
         // adoption's, before its first dispatch — reads where every draft stands now.
@@ -3199,9 +3202,10 @@ impl InPass {
                     continue;
                 }
                 state.touched.extend(named);
-                state.applied = true;
             }
             let id = envelope.id;
+            // Where a journey holds this claim mid-apply while the loop begins its next pass.
+            crate::review::failpoint("claimer-applying")?;
             // The same seam the loop's own processing of an envelope fails at.
             let applied = crate::review::failing(&format!("fail-envelope-{id}")).and_then(|()| {
                 reconcile_envelope(
@@ -3216,6 +3220,10 @@ impl InPass {
                 )
                 .map(|_| ())
             });
+            // Said only once the apply is over: a pass beginning while it runs would
+            // otherwise fold a journal without it and, taking this as folded, never
+            // fold it again. Unsaid, the loop's claim waits out this one and folds it.
+            self.state().applied = true;
             if let Err(error) = applied {
                 let mut owed =
                     std::collections::VecDeque::from([refused_for_failure(paths, id, &error)]);

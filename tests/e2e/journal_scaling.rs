@@ -41,6 +41,28 @@ fn release_the_pass(seam: &Path) {
     let _ = std::fs::remove_file(seam.join("before-claim"));
     std::fs::write(seam.join("before-claim.release"), "").expect("the pass is released");
 }
+
+/// Arm one failpoint, so the driver holds there the next time it reaches it.
+fn arm(seam: &Path, stage: &str) {
+    std::fs::write(seam.join(stage), "").expect("the seam is armed");
+}
+
+/// Whether the driver has reached an armed failpoint.
+fn reached(seam: &Path, stage: &str) -> bool {
+    seam.join(format!("{stage}.reached")).is_file()
+}
+
+/// Hold one failpoint the driver reaches on each pass while armed, until it is reached.
+fn hold_at(world: &World, seam: &Path, stage: &str, what: &str) {
+    arm(seam, stage);
+    world.until(what, |_| reached(seam, stage));
+}
+
+/// Let whatever is held at `stage` go on, and stop holding there.
+fn release_at(seam: &Path, stage: &str) {
+    let _ = std::fs::remove_file(seam.join(stage));
+    std::fs::write(seam.join(format!("{stage}.release")), "").expect("the stage is released");
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The variable asking every process the binary starts to report where it read a
@@ -220,6 +242,94 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
         on_the_board(world, &path, "later")
             .is_some_and(|item| item["onepipeline.settlement"]["status"] == "done")
     });
+    world.release("build.go");
+}
+
+/// A `settle` the claimer is still applying when the loop's next pass begins is
+/// folded by that pass all the same, and the node it readied starts without
+/// anything else about the run moving.
+///
+/// The ordering is the one a slow host puts a reply in: the claimer takes the
+/// envelope while a pass runs past its own claim, the pass ends, and the next one
+/// begins before the claimer has finished applying it. A pass that took the
+/// claimer's word for the apply at that moment folded a journal without it — and,
+/// the queue having moved no further, never folded it again: the node the settle
+/// readied stayed unstarted for as long as nothing else moved the run.
+#[test]
+fn a_settle_the_claimer_is_still_applying_as_a_pass_begins_is_folded_by_that_pass() {
+    let (world, seam) = held_world("scaling-claim-overlap");
+    let run = "claimoverlap";
+    // Beating, so the loop passes while the member is held and has a pass to hold.
+    a_held_member(&world, "build", false);
+    let path = world.plan(
+        run,
+        &plan_of(
+            run,
+            vec![
+                agent("build", &[]),
+                agent("later", &["build"]),
+                agent("after", &["later"]),
+            ],
+        ),
+    );
+    world.run(&["start", &path, "--detach"]).exited(0);
+    world.until("the held node to be dispatched", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "build")
+    });
+
+    // The pass held past its own claim, so the claimer takes what is queued now —
+    // and is held in turn, having claimed the settle and not yet applied it.
+    arm(&seam, "claimer-applying");
+    hold_at(
+        &world,
+        &seam,
+        "after-claim",
+        "a pass to be held past its claim",
+    );
+    let settle = json!({"version": 2, "commands": [
+        {"op": "settle", "id": "later", "outcome": "done",
+         "evidence": "settled by hand while the claimer is slow to apply it"},
+    ]})
+    .to_string();
+    std::thread::scope(|scope| {
+        let replying = scope.spawn(|| world.run_with_stdin(&["reply", run], &settle));
+        world.until("the claimer to be holding the settle", |_| {
+            reached(&seam, "claimer-applying")
+        });
+
+        // The held pass ends and the next one begins, holding at its own claim: it
+        // began while the claimer was still applying.
+        arm(&seam, "before-claim");
+        release_at(&seam, "after-claim");
+        world.until("the next pass to begin while the settle is applied", |_| {
+            reached(&seam, "before-claim")
+        });
+        release_at(&seam, "claimer-applying");
+        let replied = replying.join().expect("the reply thread");
+        replied.exited(0);
+        let receipt: Value = replied.json();
+        assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+    });
+    release_at(&seam, "before-claim");
+
+    // Nothing else moves the run: `build` is still held, so the only thing that can
+    // start `after` is the pass folding the settle the claimer applied.
+    world.until("the node the settle readied to be dispatched", |world| {
+        world
+            .events_of(run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == "after")
+    });
+    assert!(
+        world
+            .events_of(run, "node-settled")
+            .iter()
+            .all(|event| event["labels"]["node"] != "build"),
+        "the held node settled, so something other than the settle moved the run"
+    );
     world.release("build.go");
 }
 
