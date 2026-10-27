@@ -10,6 +10,11 @@
 //! [`World`], the real `oneagentgraph` linked into the build, and `crates/testfakes`'
 //! `fake-claude` standing in for the members' model turns alone. The generator and
 //! every run it writes are synthesized from a seed; nothing comes from a real journal.
+//!
+//! Linux only: the measurement reads the driver's CPU, memory and threads from `/proc`,
+//! and the release sweep that runs it runs there. Elsewhere it compiles to nothing.
+
+#![cfg(target_os = "linux")]
 
 mod generate;
 #[path = "../e2e/harness.rs"]
