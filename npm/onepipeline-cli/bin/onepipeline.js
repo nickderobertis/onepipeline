@@ -96,10 +96,10 @@ function binaryPath() {
   }
 }
 
-// The console events a Windows console delivers to every process attached to
-// it, the engine included. The engine already has each one, as itself, so this
+// The interrupts a Windows console delivers to every process attached to it,
+// the engine included. The engine already has each one, as itself, so this
 // process and the keeper hold on through them and report what the engine does.
-const CONSOLE_EVENTS = ["SIGINT", "SIGBREAK", "SIGHUP"];
+const CONSOLE_EVENTS = ["SIGINT", "SIGBREAK"];
 
 // The keeper, a Node process this one starts with an IPC channel to it. It
 // starts the engine as its own child, so it knows the engine the moment the
@@ -113,6 +113,7 @@ const { spawn } = require("node:child_process");
 const [binary, ...args] = JSON.parse(process.argv[1]);
 for (const signal of ${JSON.stringify(CONSOLE_EVENTS)}) process.on(signal, () => {});
 const engine = spawn(binary, args, { stdio: "inherit" });
+if (engine.pid !== undefined) process.send({ engine: engine.pid });
 process.on("disconnect", () => {
   engine.kill("SIGKILL");
   process.exit(0);
@@ -122,7 +123,6 @@ engine.on("error", (error) => report({ error: error.message }));
 engine.on("exit", (code) => report({ status: code ?? 1 }));
 `;
 
-// The engine under a keeper, for Windows, which has no exec.
 function supervise(binary, args) {
   for (const signal of CONSOLE_EVENTS) process.on(signal, () => {});
   const keeper = spawn(process.execPath, ["-e", KEEPER, JSON.stringify([binary, ...args])], {
@@ -136,15 +136,27 @@ function supervise(binary, args) {
         `this command, so the binary was not started: ${error.message}`,
     ),
   );
+  let engine = null;
   keeper.on("message", (message) => {
+    if (message.engine) {
+      engine = message.engine;
+      return;
+    }
     if (message.error) fail(`failed to launch the onepipeline binary: ${message.error}`);
     // The engine's exit code verbatim — the contract assigns meaning to 1 and 2,
     // and a caller reads them.
     process.exit(message.status);
   });
-  keeper.on("disconnect", () =>
-    fail("the process keeping the onepipeline binary ended without reporting its status"),
-  );
+  // A keeper gone without the engine's status has left the engine with
+  // nothing to end it, so this process ends it before saying so.
+  keeper.on("disconnect", () => {
+    if (engine !== null) {
+      try {
+        process.kill(engine, "SIGKILL");
+      } catch {}
+    }
+    fail("the process keeping the onepipeline binary ended without reporting its status");
+  });
 }
 
 const binary = binaryPath();
@@ -157,7 +169,7 @@ if (process.platform === "win32") {
     fail(
       `Node.js ${process.version} cannot run onepipeline from npm on ${process.platform}: ` +
         "the command has to become the onepipeline binary's own process, which needs " +
-        "process.execve (Node.js 22.15+ or 23.11+). Upgrade Node.js, or " +
+        `process.execve (Node.js ${require("../package.json").engines.node}). Upgrade Node.js, or ` +
         `${OTHER_INSTALLS.charAt(0).toLowerCase()}${OTHER_INSTALLS.slice(1)}`,
     );
   }

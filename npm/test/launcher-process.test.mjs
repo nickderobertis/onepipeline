@@ -126,6 +126,24 @@ afterEach(() => {
   }
 });
 
+/// The parent `pid` was started by, from the process table.
+function parentOf(pid) {
+  const asked = WINDOWS
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").ParentProcessId`,
+        ],
+        { encoding: "utf8" },
+      )
+    : spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
+  const parent = Number(asked.stdout.trim());
+  assert.ok(parent > 0, `no parent read for ${pid}: ${asked.stderr}`);
+  return parent;
+}
+
 function readRecord(ready) {
   return existsSync(ready) ? JSON.parse(readFileSync(ready, "utf8")) : null;
 }
@@ -365,7 +383,13 @@ describe("the process the npm-installed command runs as", () => {
         assert.equal(refused.status, 1, refused.stderr);
         assert.equal(refused.stdout, "", "the engine ran");
         assert.match(refused.stderr, /cannot run onepipeline from npm on \w+/);
-        assert.match(refused.stderr, /process\.execve \(Node\.js 22\.15\+ or 23\.11\+\)/);
+        const { engines } = JSON.parse(
+          readFileSync(join(project, "node_modules", "onepipeline-cli", "package.json"), "utf8"),
+        );
+        assert.ok(
+          refused.stderr.includes(`process.execve (Node.js ${engines.node})`),
+          refused.stderr,
+        );
         assert.match(refused.stderr, /pip install onepipeline-cli/);
       });
     });
@@ -409,21 +433,43 @@ describe("the process the npm-installed command runs as", () => {
       const child = start(ready, { env: { PROGRAM_EXIT: "5" } });
       const done = finished(child);
       const started = await waitFor("the supervised program", () => readRecord(ready));
-      assert.notEqual(started.ppid, child.pid, "the engine should run under the keeper here");
-      // The launcher's one child is the keeper. (Windows has no `pgrep`; the
-      // keeper is the same code there.)
-      const keeper = WINDOWS
-        ? null
-        : Number(spawnSync("pgrep", ["-P", String(child.pid)], { encoding: "utf8" }).stdout);
+      const keeper = parentOf(started.ppid);
+      assert.notEqual(keeper, child.pid, "the engine should run under the keeper here");
+      assert.equal(parentOf(keeper), child.pid, "the keeper should be the launcher's child");
 
       child.stdin.end("through the launcher\n");
       const ended = await done;
       assert.equal(ended.code, 5, ended.stderr);
       assert.equal(ended.stdout, "through the launcher\n");
-      if (keeper !== null) {
-        assert.ok(keeper > 0, "the launcher started no keeper");
-        await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
-      }
+      await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
+    });
+
+    it("ends the engine and says so when the keeper dies before reporting", async () => {
+      const ready = join(work, "keeper-killed.json");
+      const child = start(ready, { stdio: ["ignore", "pipe", "pipe"], env: { PROGRAM_HOLD: "1" } });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => {
+        stderr += chunk;
+      });
+      const done = exited(child);
+      const started = await waitFor("the supervised program", () => readRecord(ready));
+      const engine = started.ppid;
+
+      process.kill(parentOf(engine), "SIGKILL");
+      assert.equal(await done, 1);
+      await waitFor("the engine to be ended", () => !alive(engine), 15_000);
+      assert.match(stderr, /the process keeping the onepipeline binary ended without reporting/);
+    });
+
+    it("exits 1 when the engine is killed outright", async () => {
+      const ready = join(work, "engine-killed.json");
+      const child = start(ready, { stdio: "ignore", env: { PROGRAM_HOLD: "1" } });
+      const done = exited(child);
+      const started = await waitFor("the supervised program", () => readRecord(ready));
+
+      // SIGKILL leaves no exit code; on Windows TerminateProcess leaves 1.
+      process.kill(started.ppid, "SIGKILL");
+      assert.equal(await done, 1);
     });
 
     it("leaves no engine running when the launcher is killed outright", async () => {
