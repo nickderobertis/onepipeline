@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate: ${{ steps.affected.outputs.crate }}
+      npm: ${{ steps.affected.outputs.npm }}
       macos: ${{ steps.macos.outputs.required }}
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +57,9 @@ jobs:
         id: affected
         env:
           ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
+          echo "npm=$(bash scripts/nx-affected.sh --affects onepipeline-npm)" >> "$GITHUB_OUTPUT"
 
       - name: Classify Mac coverage
         id: macos
@@ -596,6 +599,35 @@ jobs:
         env:
           LEG: ${{ matrix.target }}
         run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
+
+  # The npm launcher's process tree on the two platforms whose launcher paths
+  # Linux's gate cannot take: macOS's exec, and Windows' supervised child with
+  # its console interrupts and its orphan watcher. `onepipeline-npm` depends on
+  # the crate, so a crate change selects this too. Advisory until branch
+  # protection names its legs.
+  launcher:
+    name: npm launcher (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.npm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just npm-launcher
 
   # The required contexts of the path-selected matrix proofs above. A matrix job
   # skipped by its `if:` reports only under its bare key, never a leg's name, so
