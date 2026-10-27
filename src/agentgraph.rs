@@ -4478,22 +4478,49 @@ mod tests {
     /// the burst rather than waiting on a process this run never started.
     #[test]
     fn a_pipe_an_orphan_holds_open_ends_on_the_silence_after_the_graph_is_over() {
+        assert_the_stream_ends_on_a_pipe_an_orphan_holds(Duration::ZERO);
+    }
+
+    /// The same end, with the answer to whether the graph is over arriving
+    /// later than the whole bound this test once held the stream to: what ends
+    /// it is the silence after the graph is found over, however long the
+    /// finding took.
+    #[test]
+    fn a_pipe_an_orphan_holds_open_ends_however_late_the_graph_is_found_over() {
+        assert_the_stream_ends_on_a_pipe_an_orphan_holds(RELAY_POLL * 4 + RELAY_POLL / 2);
+    }
+
+    /// Relay a pipe an orphan holds open past the graph's end, with `over`
+    /// answering after `answering`, and hold that the stream ended **while the
+    /// pipe was still held** — which no end of the pipe can explain.
+    ///
+    /// Decided by what ended the stream rather than by how long it took: the
+    /// orphan's handle is held until the relayed lines are back, so a stream
+    /// that waited for the pipe never comes back at all. The deadline is a guard
+    /// against hanging the suite on that defect, not a bound on the relay.
+    fn assert_the_stream_ends_on_a_pipe_an_orphan_holds(answering: Duration) {
         let (holder, held_open) = mpsc::channel::<()>();
-        let started = Instant::now();
-        let lines = lines_relayed_from(
-            ScriptedPipe {
+        let (relayed, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            let pipe = ScriptedPipe {
                 held: Duration::ZERO,
                 burst: std::io::Cursor::new(b"{\"seq\":1}\n".to_vec()),
                 held_open: Some(held_open),
-            },
-            true,
-        );
-        let waited = started.elapsed();
+            };
+            let over = move || {
+                std::thread::sleep(answering);
+                true
+            };
+            let lines: Vec<String> = relayed_lines(BufReader::new(pipe), over)
+                .map(|line| line.expect("a scripted pipe reads"))
+                .collect();
+            let _ = relayed.send(lines);
+        });
+        let lines = lines.recv_timeout(Duration::from_secs(60));
         drop(holder);
-        assert_eq!(lines, vec!["{\"seq\":1}".to_string()]);
-        assert!(
-            waited < RELAY_POLL * 4,
-            "the stream waited {waited:?} on a pipe the graph had already left"
+        assert_eq!(
+            lines.expect("the stream waited on a pipe the graph had already left"),
+            vec!["{\"seq\":1}".to_string()]
         );
     }
 
