@@ -92,7 +92,7 @@ function alive(pid) {
 /// test that fails part-way ends what it started instead of holding the run open.
 const launched = [];
 
-function launch(child, ready) {
+function track(child, ready) {
   launched.push({ child, ready });
   return child;
 }
@@ -270,7 +270,7 @@ describe("the process the npm-installed command runs as", () => {
     describe("on Linux and macOS", () => {
       // The command npm put on PATH, started the way any caller starts it.
       const start = (ready, env) =>
-        launch(
+        track(
           spawn(join(project, "node_modules", ".bin", "onepipeline"), flowRun(ready), {
             cwd: project,
             env: engineEnv(work, env),
@@ -340,7 +340,7 @@ describe("the process the npm-installed command runs as", () => {
       writeFileSync(withoutExec, "delete process.execve;\n");
     });
     const start = (ready, options = {}) =>
-      launch(
+      track(
         spawn(
           process.execPath,
           [...(WINDOWS ? [] : ["--require", withoutExec]), launcherScript(), ...flowRun(ready)],
@@ -356,10 +356,25 @@ describe("the process the npm-installed command runs as", () => {
       const started = await waitFor("the supervised program", () => readRecord(ready));
       assert.notEqual(started.ppid, child.pid, "the engine should be the launcher's child here");
 
+      // The launcher's other child is its orphan watcher, which a launcher that
+      // exits normally must not leave behind. (Windows has no `pgrep`; the
+      // watcher is the same code there.)
+      const watcher = WINDOWS
+        ? null
+        : Number(
+            spawnSync("pgrep", ["-P", String(child.pid)], { encoding: "utf8" })
+              .stdout.split("\n")
+              .find((pid) => pid && Number(pid) !== started.ppid),
+          );
+
       child.stdin.end("through the launcher\n");
       const ended = await done;
       assert.equal(ended.code, 5, ended.stderr);
       assert.equal(ended.stdout, "through the launcher\n");
+      if (watcher !== null) {
+        assert.ok(watcher > 0, "the launcher started no orphan watcher");
+        await waitFor("the orphan watcher to exit", () => !alive(watcher), 15_000);
+      }
     });
 
     it("leaves no engine running when the launcher is killed outright", async () => {
@@ -380,6 +395,7 @@ describe("the process the npm-installed command runs as", () => {
       for (const [signal, code] of [
         ["SIGINT", 7],
         ["SIGTERM", 8],
+        ["SIGHUP", 10],
       ]) {
         it(`passes ${signal} on to the engine as ${signal} and exits with its status`, async () => {
           const ready = join(work, `${signal}.json`);
@@ -394,6 +410,24 @@ describe("the process the npm-installed command runs as", () => {
           assert.equal(alive(started.ppid), false, "the engine outlived the launcher");
         });
       }
+    }
+
+    if (!WINDOWS) {
+      it("ends itself with the signal that ended the engine", async () => {
+        const ready = join(work, "engine-killed.json");
+        // Held and given no pipes, so its program outliving the engine holds
+        // nothing the launcher's exit waits on.
+        const child = start(ready, { stdio: "ignore", env: { PROGRAM_HOLD: "1" } });
+        const done = new Promise((resolve) =>
+          child.on("exit", (code, signal) => resolve({ code, signal })),
+        );
+        const started = await waitFor("the supervised program", () => readRecord(ready));
+
+        process.kill(started.ppid, "SIGKILL");
+        const ended = await done;
+        assert.equal(ended.signal, "SIGKILL");
+        assert.equal(ended.code, null);
+      });
     }
 
     if (WINDOWS) {

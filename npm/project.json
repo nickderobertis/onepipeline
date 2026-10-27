@@ -60,8 +60,10 @@
       ]
     },
     "launcher-process": {
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what this target tests is the launcher running the engine the crate builds, so its one edge, to `onepipeline`, is what it actually tests. That project's own edges to its test tiers are the crate's choice, argued at the root project.json's own suppression, and the same edge selects `cross` and `install` on a tier-only change. No repo-wide verb runs this target: `just npm-launcher` does, from ci.yml's `launcher` job alone.",
       "command": "node --test npm/test/launcher-process.test.mjs",
-      "cache": false
+      "cache": false,
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
     },
     "check": {
       "executor": "nx:noop",

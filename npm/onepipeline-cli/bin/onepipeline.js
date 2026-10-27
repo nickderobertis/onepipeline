@@ -130,8 +130,13 @@ function supervise(binary, args) {
     detached: true,
     windowsHide: true,
   });
+  // llmlint: ignore-block[changed_behavior_has_e2e] a watcher that cannot start is
+  // Node failing to spawn its own executable, which no journey can stage without
+  // breaking the launcher too; the engine still runs, with nothing but orphan
+  // protection lost, rather than the command refusing to run at all.
   watcher.on("error", () => {});
   watcher.stdin.on("error", () => {});
+  // llmlint: ignore-end[changed_behavior_has_e2e]
   watcher.unref();
 
   const engine = spawn(binary, args, { stdio: "inherit" });
@@ -175,10 +180,12 @@ const binary = binaryPath();
 const args = process.argv.slice(2);
 
 if (process.platform !== "win32" && typeof process.execve === "function") {
-  // Node ignores SIGPIPE and SIGXFSZ, and an ignored signal survives exec while
-  // a handled one returns to its default: handle both so the engine, and every
-  // program it starts, begins with the dispositions a shell would give it.
-  for (const signal of ["SIGPIPE", "SIGXFSZ"]) process.on(signal, () => {});
+  // Node ignores SIGXFSZ, and an ignored signal survives exec while a handled
+  // one returns to its default: handle it so the engine, and every program it
+  // starts, begins with the disposition a shell would give it. (Node ignores
+  // SIGPIPE too, but the engine's runtime ignores that itself and restores it
+  // for what it starts.)
+  process.on("SIGXFSZ", () => {});
   try {
     process.execve(binary, [binary, ...args], process.env);
   } catch (error) {
