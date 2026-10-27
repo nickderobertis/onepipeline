@@ -27,7 +27,6 @@ pub const RUN: &str = "journal-workload-run";
 /// The journal sizes measured, in MB of 1,000,000 bytes.
 const SIZES_MB: [u64; 5] = [1, 20, 80, 160, 800];
 
-/// The seed every size is generated from.
 const SEED: u64 = 20_261_019;
 
 /// The release-built driver: `JOURNAL_WORKLOAD_BINARY`, which `just
@@ -179,7 +178,6 @@ fn journal_workload() {
         println!("journal-workload {size_mb} MB: {record}");
         sizes.push(record);
     }
-    // The commit the recording was taken at, which every figure it holds is cited by.
     let rev = std::process::Command::new("git")
         .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .current_dir(harness::repo_file("."))

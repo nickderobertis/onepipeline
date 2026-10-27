@@ -105,23 +105,33 @@ pub struct Seen {
     pub transcript: Option<(PathBuf, String, u64)>,
 }
 
-/// The `(ordinal, emitted ms, pid)` that follow an [`ACTIVITY_MARK`] in `said`, failing
-/// on a mark whose three numbers are not there: what the double wrote and what this
-/// reads disagree, and every delay measured from it would be wrong.
+/// The `(ordinal, emitted ms, pid)` of a `turn.activity` block, whose text is the
+/// [`ACTIVITY_MARK`] and those three numbers, space-separated, as the double writes it:
+/// none for text that does not open with the mark, and a failure for one that does but
+/// is not exactly that, since every delay measured from it would be wrong.
 fn mark_in(said: &str) -> Option<(u64, i64, u64)> {
-    let at = said.find(ACTIVITY_MARK)?;
-    let rest = &said[at + ACTIVITY_MARK.len()..];
-    let mut words = rest
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|word| !word.is_empty());
-    let mut next = || -> u64 {
-        words
-            .next()
-            .and_then(|word| word.parse().ok())
-            .unwrap_or_else(|| panic!("an activity mark without its three numbers: {said:.200}"))
-    };
-    let (nth, emitted, pid) = (next(), next(), next());
-    Some((nth, i64::try_from(emitted).unwrap(), pid))
+    let rest = said.strip_prefix(ACTIVITY_MARK)?;
+    let words: Vec<u64> = rest
+        .strip_prefix(' ')
+        .and_then(|numbers| {
+            numbers
+                .split(' ')
+                .map(|word| word.parse().ok())
+                .collect::<Option<Vec<u64>>>()
+        })
+        .filter(|words| words.len() == 3)
+        .unwrap_or_else(|| panic!("an activity mark that is not three numbers: {said:.200}"));
+    Some((words[0], i64::try_from(words[1]).unwrap(), words[2]))
+}
+
+/// The first string anywhere in `value` that opens with the [`ACTIVITY_MARK`].
+fn marked_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) if text.starts_with(ACTIVITY_MARK) => Some(text),
+        Value::Array(items) => items.iter().find_map(marked_text),
+        Value::Object(fields) => fields.values().find_map(marked_text),
+        _ => None,
+    }
 }
 
 /// One complete line of the journal or the command-outcomes queue, both of which hold
@@ -157,17 +167,33 @@ fn parse_line(line: &[u8], at_ms: i64) -> Seen {
 
 /// Where a turn-activity record's content is, as `oneagentgraph`'s own transcript reader
 /// finds it: `<history_dir>/<history_project>/<history_session>.jsonl`, the event of
-/// that history run at that index.
+/// that history run at that index. None for a record with no reference or a reference
+/// to a whole transcript rather than one event (no `index`), and a failure for a
+/// reference without every other part.
 fn transcript_of(reference: &Value) -> Option<(PathBuf, String, u64)> {
-    let part = |name: &str| reference[name].as_str();
-    let file = Path::new(part("history_dir")?)
-        .join(part("history_project")?)
-        .join(format!("{}.jsonl", part("history_session")?));
+    if reference.is_null() {
+        return None;
+    }
+    let part = |name: &str| {
+        reference[name]
+            .as_str()
+            .unwrap_or_else(|| panic!("a transcript reference without {name}: {reference}"))
+    };
+    let file = Path::new(part("history_dir"))
+        .join(part("history_project"))
+        .join(format!("{}.jsonl", part("history_session")));
     let history_id = match &reference["history_id"] {
         Value::String(id) => id.clone(),
-        other => other.to_string(),
+        Value::Number(id) => id.to_string(),
+        _ => panic!("a transcript reference without a history_id: {reference}"),
     };
-    Some((file, history_id, reference["index"].as_u64()?))
+    let index = match &reference["index"] {
+        Value::Null => return None,
+        index => index
+            .as_u64()
+            .unwrap_or_else(|| panic!("a transcript reference whose index is {index}")),
+    };
+    Some((file, history_id, index))
 }
 
 /// The `turn.activity` mark of each journalled record whose content is in a member's
@@ -188,8 +214,7 @@ fn marks_in_histories(lines: &[Seen]) -> BTreeMap<(PathBuf, String, u64), (u64, 
             let value: Value = serde_json::from_str(line).unwrap_or_else(|error| {
                 panic!("{}: a line that is not JSON ({error})", file.display())
             });
-            let event = value["event"].to_string();
-            let Some(mark) = mark_in(&event) else {
+            let Some(mark) = marked_text(&value["event"]).and_then(mark_in) else {
                 continue;
             };
             let (Some(run), Some(index)) =
@@ -662,7 +687,6 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
     });
     let dispatched_ms = now_ms();
 
-    // Twenty amends of a running node, one every fifteen seconds, each its own reply.
     let mut rng = generate::Rng::new(seed ^ 0x00A1_1E4D);
     let envelopes_from = now_ms();
     let mut replies = Vec::new();
