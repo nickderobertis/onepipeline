@@ -96,8 +96,8 @@ function binaryPath() {
   }
 }
 
-// The signals a caller ends or interrupts the engine with: the set the engine
-// itself relays to a program it supervises, and Windows' Ctrl+Break, SIGBREAK.
+// The signals a caller ends or interrupts a command with, Windows' Ctrl+Break
+// (SIGBREAK) among them.
 const RELAYED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"];
 
 // Run in a separate Node process for as long as the engine is this process's
@@ -116,8 +116,8 @@ const orphaned = () => {
   if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch {} }
   process.exit(0);
 };
-process.stdin.on("end", orphaned);
-process.stdin.on("error", orphaned);
+process.stdin.on("error", () => {});
+process.stdin.on("close", orphaned);
 `;
 
 // The engine as this process's child, for where exec is not available.
@@ -157,12 +157,6 @@ function supervise(binary, args) {
       if (process.platform !== "win32") engine.kill(signal);
     });
   }
-  // Whatever ends this process with the engine still running ends the engine
-  // too, rather than leaving it to the watcher.
-  process.on("exit", () => {
-    if (engine.exitCode === null && engine.signalCode === null) engine.kill("SIGKILL");
-  });
-
   engine.on("exit", (code, signal) => {
     watcher.kill();
     // Re-raise a terminating signal so callers observe the true cause; otherwise
