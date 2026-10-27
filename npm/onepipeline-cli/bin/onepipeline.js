@@ -147,6 +147,8 @@ function supervise(binary, args) {
   // The keeper's messages cross a process boundary, so each is read as exactly
   // one of its three envelopes; anything else ends the engine and the command.
   const isCount = (value) => Number.isInteger(value) && value >= 0;
+  // A Windows exit code is 32 bits; process.exit would wrap a larger one, 2^32 to 0.
+  const isStatus = (value) => isCount(value) && value <= 0xffffffff;
   keeper.on("message", (message) => {
     const keys = message !== null && typeof message === "object" ? Object.keys(message) : [];
     const [key] = keys;
@@ -159,7 +161,7 @@ function supervise(binary, args) {
     }
     // The engine's exit code verbatim — the contract assigns meaning to 1 and 2,
     // and a caller reads them.
-    if (keys.length === 1 && key === "status" && isCount(message.status)) {
+    if (keys.length === 1 && key === "status" && isStatus(message.status)) {
       process.exit(message.status);
     }
     endEngine();

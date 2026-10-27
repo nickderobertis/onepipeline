@@ -486,42 +486,50 @@ describe("the process the npm-installed command runs as", () => {
       await waitFor("the orphaned engine to be ended", () => !alive(engine), 15_000);
     });
 
-    it("ends the engine and refuses when the keeper reports a status that is not one", async () => {
-      const ready = join(work, "unreadable.json");
-      // Only the keeper has an IPC channel, so only it sends: once the engine's
-      // program is up, a status the launcher must not exit with.
-      const lies = join(work, "keeper-lies.cjs");
-      writeFileSync(
-        lies,
-        `if (process.send) {
+    // Not a status at all, and one exit would wrap to 0: 2^32.
+    for (const [name, status] of [
+      ["not a number", '"done"'],
+      ["out of range", "4294967296"],
+    ]) {
+      it(`ends the engine and refuses when the keeper reports a status ${name}`, async () => {
+        const ready = join(work, `unreadable-${status.length}.json`);
+        // Only the keeper has an IPC channel, so only it sends: once the engine's
+        // program is up, a status the launcher must not exit with.
+        const lies = join(work, `keeper-lies-${status.length}.cjs`);
+        writeFileSync(
+          lies,
+          `if (process.send) {
   const fs = require("node:fs");
   const wait = setInterval(() => {
     if (!fs.existsSync(process.env.LIE_AFTER)) return;
     clearInterval(wait);
-    process.send({ status: "done" });
+    process.send({ status: ${status} });
   }, 50);
 }
 `,
-      );
-      // A file rather than a pipe: what outlives the launcher would hold a pipe open.
-      const log = join(work, "unreadable.stderr");
-      const stderrFile = openSync(log, "w");
-      const child = start(ready, {
-        stdio: ["ignore", "ignore", stderrFile],
-        env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: `--require "${lies}"` },
+        );
+        // A file rather than a pipe: what outlives the launcher would hold a pipe open.
+        const log = join(work, `unreadable-${status.length}.stderr`);
+        const stderrFile = openSync(log, "w");
+        const child = start(ready, {
+          stdio: ["ignore", "ignore", stderrFile],
+          env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: `--require "${lies}"` },
+        });
+        closeSync(stderrFile);
+        const code = await exited(child);
+        const stderr = readFileSync(log, "utf8");
+        const started = readRecord(ready);
+        assert.ok(started, "the engine's program never started");
+        assert.equal(code, 1, stderr);
+        assert.ok(
+          stderr.includes(
+            `the process keeping the onepipeline binary sent an unreadable message: {"status":${status}}`,
+          ),
+          stderr,
+        );
+        await waitFor("the engine to be ended", () => !alive(started.ppid), 15_000);
       });
-      closeSync(stderrFile);
-      const code = await exited(child);
-      const stderr = readFileSync(log, "utf8");
-      const started = readRecord(ready);
-      assert.ok(started, "the engine's program never started");
-      assert.equal(code, 1, stderr);
-      assert.match(
-        stderr,
-        /the process keeping the onepipeline binary sent an unreadable message: \{"status":"done"\}/,
-      );
-      await waitFor("the engine to be ended", () => !alive(started.ppid), 15_000);
-    });
+    }
 
     it("leaves no engine running when the launcher is asked to end with SIGTERM", async () => {
       const ready = join(work, "terminated.json");
