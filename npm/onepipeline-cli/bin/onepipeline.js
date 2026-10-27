@@ -108,20 +108,24 @@ const CONSOLE_EVENTS = ["SIGINT", "SIGBREAK"];
 // however this process ends — TerminateProcess included, where no handler of
 // this process runs — and the keeper then ends the engine: there is no moment
 // at which the engine runs and nothing that would end it knows it, however
-// early in its start this process is ended.
+// early in its start this process is ended. A message the keeper cannot
+// deliver is the same break, seen first: this process ended before the keeper
+// ran, and the failed send ends the engine rather than the keeper alone.
 const KEEPER = `
 const { spawn } = require("node:child_process");
 const [binary, ...args] = JSON.parse(process.argv[1]);
 for (const signal of ${JSON.stringify(CONSOLE_EVENTS)}) process.on(signal, () => {});
 const engine = spawn(binary, args, { stdio: "inherit" });
-if (engine.pid !== undefined) process.send({ engine: engine.pid });
-process.on("disconnect", () => {
+const end = () => {
   engine.kill("SIGKILL");
   process.exit(0);
-});
-const report = (message) => process.send(message, () => process.exit(0));
-engine.on("error", (error) => report({ error: error.message }));
-engine.on("exit", (code) => report({ status: code ?? 1 }));
+};
+process.on("disconnect", end);
+const send = (message, then = () => {}) =>
+  process.send(message, (error) => (error ? end() : then()));
+if (engine.pid !== undefined) send({ engine: engine.pid });
+engine.on("error", (error) => send({ error: error.message }, () => process.exit(0)));
+engine.on("exit", (code) => send({ status: code ?? 1 }, () => process.exit(0)));
 `;
 
 function supervise(binary, args) {

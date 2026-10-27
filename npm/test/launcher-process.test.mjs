@@ -144,6 +144,28 @@ function parentOf(pid) {
   return parent;
 }
 
+/// The running engines whose `flow run` supervises the program recording to
+/// `ready`, from the process table: an engine that never got to start its
+/// program is found as surely as one that did.
+function enginesFor(ready) {
+  const listed = WINDOWS
+    ? spawnSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-Command",
+          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
+        ],
+        { encoding: "utf8" },
+      )
+    : spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
+  assert.equal(listed.status, 0, listed.stderr);
+  return listed.stdout
+    .split(/\r?\n/)
+    .filter((line) => line.includes(" flow run ") && line.includes(ready))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+}
+
 function readRecord(ready) {
   return existsSync(ready) ? JSON.parse(readFileSync(ready, "utf8")) : null;
 }
@@ -392,6 +414,44 @@ describe("the process the npm-installed command runs as", () => {
         );
         assert.match(refused.stderr, /pip install onepipeline-cli/);
       });
+
+      // On Node.js 22 a failed exec aborts Node, so the launcher checks the
+      // binary before it execs; both refusals come from that check.
+      it("refuses, and exits 1, when the installed binary is missing or not a file", () => {
+        const damaged = join(work, "damaged");
+        installInto(damaged, packages);
+        const engine = join(
+          damaged,
+          "node_modules",
+          `onepipeline-cli-${process.platform}-${process.arch}`,
+          "bin",
+          EXE,
+        );
+        const refuse = () =>
+          spawnSync(join(damaged, "node_modules", ".bin", "onepipeline"), ["--version"], {
+            cwd: damaged,
+            encoding: "utf8",
+            env: engineEnv(work),
+          });
+
+        rmSync(engine);
+        const missing = refuse();
+        assert.equal(missing.status, 1, missing.stderr);
+        assert.equal(missing.stdout, "");
+        assert.match(
+          missing.stderr,
+          /^onepipeline: failed to launch the onepipeline binary: ENOENT/,
+        );
+
+        mkdirSync(engine);
+        const directory = refuse();
+        assert.equal(directory.status, 1, directory.stderr);
+        assert.equal(directory.stdout, "");
+        assert.equal(
+          directory.stderr,
+          `onepipeline: failed to launch the onepipeline binary: ${engine} is not a file\n`,
+        );
+      });
     });
   }
 
@@ -486,16 +546,22 @@ describe("the process the npm-installed command runs as", () => {
       await waitFor("the orphaned engine to be ended", () => !alive(engine), 15_000);
     });
 
-    // Not a status at all, and one exit would wrap to 0: 2^32.
-    for (const [name, status] of [
-      ["not a number", '"done"'],
-      ["out of range", "4294967296"],
-    ]) {
-      it(`ends the engine and refuses when the keeper reports a status ${name}`, async () => {
-        const ready = join(work, `unreadable-${status.length}.json`);
+    // Each envelope's field of the wrong type, a status exit would wrap to 0
+    // (2^32), a key the keeper never sends, and a status beside a field it never
+    // sends: none may be read as an envelope.
+    for (const [index, [name, message]] of [
+      ["a status not a number", { status: "done" }],
+      ["a status out of range", { status: 4294967296 }],
+      ["an engine PID not a number", { engine: "1" }],
+      ["an error not a string", { error: 5 }],
+      ["a message it does not know", { done: true }],
+      ["a status with a field beside it", { status: 0, extra: 1 }],
+    ].entries()) {
+      it(`ends the engine and refuses when the keeper reports ${name}`, async () => {
+        const ready = join(work, `unreadable-${index}.json`);
         // Only the keeper has an IPC channel, so only it sends: once the engine's
-        // program is up, a status the launcher must not exit with.
-        const lies = join(work, `keeper-lies-${status.length}.cjs`);
+        // program is up, a message the launcher must not act on.
+        const lies = join(work, `keeper-lies-${index}.cjs`);
         writeFileSync(
           lies,
           `if (process.send) {
@@ -503,13 +569,13 @@ describe("the process the npm-installed command runs as", () => {
   const wait = setInterval(() => {
     if (!fs.existsSync(process.env.LIE_AFTER)) return;
     clearInterval(wait);
-    process.send({ status: ${status} });
+    process.send(${JSON.stringify(message)});
   }, 50);
 }
 `,
         );
         // A file rather than a pipe: what outlives the launcher would hold a pipe open.
-        const log = join(work, `unreadable-${status.length}.stderr`);
+        const log = join(work, `unreadable-${index}.stderr`);
         const stderrFile = openSync(log, "w");
         const child = start(ready, {
           stdio: ["ignore", "ignore", stderrFile],
@@ -523,7 +589,7 @@ describe("the process the npm-installed command runs as", () => {
         assert.equal(code, 1, stderr);
         assert.ok(
           stderr.includes(
-            `the process keeping the onepipeline binary sent an unreadable message: {"status":${status}}`,
+            `the process keeping the onepipeline binary sent an unreadable message: ${JSON.stringify(message)}`,
           ),
           stderr,
         );
@@ -562,8 +628,11 @@ describe("the process the npm-installed command runs as", () => {
       // A keeper that started the engine and missed the launcher's death would
       // still be waiting on it.
       await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
-      const started = readRecord(ready);
-      if (started) assert.equal(alive(started.ppid), false, "the engine outlived the launcher");
+      // The keeper starts the engine before it can learn of the launcher's death,
+      // so by the time it has exited, any engine it started is in the table.
+      const survivors = enginesFor(ready);
+      for (const pid of survivors) process.kill(pid, "SIGKILL");
+      assert.deepEqual(survivors, [], "the engine outlived the launcher");
     });
 
     it("refuses to start the engine, through the installed command, when it cannot start the keeper", () => {
