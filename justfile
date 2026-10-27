@@ -503,9 +503,9 @@ _smoke-run *args:
 
 # The npm launcher's process-tree journeys alone: what the installed command
 # runs as, on the host this runs on. One file of the `onepipeline-npm` project's
-# `test`, which `check` runs on Linux; `.github/workflows/launcher.yml` calls this
-# on macOS and Windows, where `check` never runs and the launcher takes paths
-# Linux cannot reach.
+# `test`, which `check` runs on Linux; `.github/workflows/launcher.yml` (Windows)
+# and `ci.yml`'s Mac lane call this, where `check` never runs and the launcher
+# takes paths Linux cannot reach.
 npm-launcher:
     @node --test npm/test/launcher-process.test.mjs
 

@@ -42,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate: ${{ steps.affected.outputs.crate }}
+      npm: ${{ steps.npm-affected.outputs.npm }}
       macos: ${{ steps.macos.outputs.required }}
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +58,11 @@ jobs:
         env:
           ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
+      - name: Whether the diff reaches the npm distribution
+        id: npm-affected
+        env:
+          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: echo "npm=$(bash scripts/nx-affected.sh --affects onepipeline-npm)" >> "$GITHUB_OUTPUT"
 
       - name: Classify Mac coverage
         id: macos
@@ -775,6 +781,13 @@ jobs:
         if: needs.changes.outputs.crate == 'true'
         timeout-minutes: 180
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # The npm launcher's process-tree journeys, here because this lane is the
+      # one Mac job a pull request may spend. A step of a job already required,
+      # so a failure fails the lane and the `cross (macos-latest)` it reports.
+      - name: npm launcher
+        if: needs.changes.outputs.npm == 'true'
+        timeout-minutes: 60
+        run: just npm-launcher
       - name: What was still running when it stopped
         if: failure() || cancelled()
         continue-on-error: true
