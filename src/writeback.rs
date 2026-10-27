@@ -1956,6 +1956,18 @@ fn worker(
         if let Err(error) = crate::ordering::settlement_projecting(snapshot.settlements.keys()) {
             eprintln!("{error}");
         }
+        // And one, so a journey can hold one dispatch's projection until its node has settled.
+        if let Err(error) = crate::ordering::dispatch_projecting(
+            snapshot
+                .statuses
+                .iter()
+                .filter(|(node, status)| {
+                    **status == NodeStatus::Running && !snapshot.settlements.contains_key(*node)
+                })
+                .map(|(node, _)| node),
+        ) {
+            eprintln!("{error}");
+        }
         let landing = landing_lock(&run_dir).and_then(|file| file.lock().map(|()| file));
         // llmlint: ignore-block[changed_behavior_has_e2e] a run directory the driver cannot open a
         // file in is one it cannot write this attempt's record into either, a line below; the
@@ -3088,12 +3100,19 @@ fn carry_the_difference(
             &mut carrying,
         )?;
     }
+    let lineages = snapshot.lineages();
     for (root, held) in &held {
         let now = &renderings[root];
+        // Whether this attempt writes the settlement of the node the item stands for, which
+        // its operations' lines say: a dispatch's write-back can land after its node settled.
+        let settled = lineages
+            .chain(root)
+            .and_then(<[String]>::last)
+            .is_some_and(|head| snapshot.settlements.contains_key(head));
         update(
             attempt,
             per_item,
-            (root, held, now),
+            (root, held, now, settled),
             &ends,
             baseline,
             &mut carrying,
@@ -3389,7 +3408,7 @@ fn create(
 fn update(
     attempt: &Attempt,
     per_item: NonZeroU64,
-    (root, held, now): (&str, &Held, &Rendering),
+    (root, held, now, settled): (&str, &Held, &Rendering, bool),
     ends: &BTreeMap<String, GlobalId>,
     baseline: &mut Baseline,
     carrying: &mut Carrying,
@@ -3405,7 +3424,11 @@ fn update(
         baseline.save();
         return Ok(());
     }
-    let answer = crate::storeops::about(crate::storeops::Scope::Item(root), || {
+    let item = crate::storeops::Scope::Item {
+        item: root,
+        settled,
+    };
+    let answer = crate::storeops::about(item, || {
         attempt.call(
             StoreCall::TaskUpdate,
             Deadline::Write { per_item, items: 1 },
