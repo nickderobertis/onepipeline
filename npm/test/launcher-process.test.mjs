@@ -486,6 +486,22 @@ describe("the process the npm-installed command runs as", () => {
       await waitFor("the orphaned engine to be ended", () => !alive(engine), 15_000);
     });
 
+    it("leaves no engine running when the launcher is asked to end with SIGTERM", async () => {
+      const ready = join(work, "terminated.json");
+      const child = start(ready, { stdio: "ignore", env: { PROGRAM_HOLD: "1" } });
+      const done = exited(child);
+      const started = await waitFor("the supervised program", () => readRecord(ready));
+      const engine = started.ppid;
+      const keeper = parentOf(engine);
+      assert.ok(alive(engine));
+      // Sent to the launcher alone, as a caller holding its PID sends it; on
+      // Windows Node delivers it as TerminateProcess.
+      child.kill("SIGTERM");
+      await done;
+      await waitFor("the engine to be ended", () => !alive(engine), 15_000);
+      await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
+    });
+
     it("leaves no engine running when the launcher is killed the moment the keeper starts", async () => {
       const ready = join(work, "startup.json");
       const keeperPid = join(work, "startup-keeper.pid");
