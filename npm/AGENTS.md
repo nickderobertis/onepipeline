@@ -13,8 +13,7 @@ was a child-spawning parent. So `engines.node` is the first Node.js with
 child process instead. Windows has no exec: there the engine's status and
 interrupts pass through and no engine outlives the launcher, on any Node.js.
 `npm/test/launcher-process.test.mjs` holds both; CI enforces it on Linux and
-macOS and runs it on Windows in the advisory `launcher.yml` (root `AGENTS.md`
-says why).
+macOS and runs it on Windows in the advisory `launcher.yml`.
 
 Five places name the platform matrix and must move together:
 

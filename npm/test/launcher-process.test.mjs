@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
@@ -484,6 +484,43 @@ describe("the process the npm-installed command runs as", () => {
       child.kill("SIGKILL");
       await done;
       await waitFor("the orphaned engine to be ended", () => !alive(engine), 15_000);
+    });
+
+    it("ends the engine and refuses when the keeper reports a status that is not one", async () => {
+      const ready = join(work, "unreadable.json");
+      // Only the keeper has an IPC channel, so only it sends: once the engine's
+      // program is up, a status the launcher must not exit with.
+      const lies = join(work, "keeper-lies.cjs");
+      writeFileSync(
+        lies,
+        `if (process.send) {
+  const fs = require("node:fs");
+  const wait = setInterval(() => {
+    if (!fs.existsSync(process.env.LIE_AFTER)) return;
+    clearInterval(wait);
+    process.send({ status: "done" });
+  }, 50);
+}
+`,
+      );
+      // A file rather than a pipe: what outlives the launcher would hold a pipe open.
+      const log = join(work, "unreadable.stderr");
+      const stderrFile = openSync(log, "w");
+      const child = start(ready, {
+        stdio: ["ignore", "ignore", stderrFile],
+        env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: `--require "${lies}"` },
+      });
+      closeSync(stderrFile);
+      const code = await exited(child);
+      const stderr = readFileSync(log, "utf8");
+      const started = readRecord(ready);
+      assert.ok(started, "the engine's program never started");
+      assert.equal(code, 1, stderr);
+      assert.match(
+        stderr,
+        /the process keeping the onepipeline binary sent an unreadable message: \{"status":"done"\}/,
+      );
+      await waitFor("the engine to be ended", () => !alive(started.ppid), 15_000);
     });
 
     it("leaves no engine running when the launcher is asked to end with SIGTERM", async () => {

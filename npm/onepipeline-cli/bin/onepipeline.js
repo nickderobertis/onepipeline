@@ -137,24 +137,41 @@ function supervise(binary, args) {
     ),
   );
   let engine = null;
-  keeper.on("message", (message) => {
-    if (message.engine) {
-      engine = message.engine;
-      return;
-    }
-    if (message.error) fail(`failed to launch the onepipeline binary: ${message.error}`);
-    // The engine's exit code verbatim — the contract assigns meaning to 1 and 2,
-    // and a caller reads them.
-    process.exit(message.status);
-  });
-  // A keeper gone without the engine's status has left the engine with
-  // nothing to end it, so this process ends it before saying so.
-  keeper.on("disconnect", () => {
+  const endEngine = () => {
     if (engine !== null) {
       try {
         process.kill(engine, "SIGKILL");
       } catch {}
     }
+  };
+  // The keeper's messages cross a process boundary, so each is read as exactly
+  // one of its three envelopes; anything else ends the engine and the command.
+  const isCount = (value) => Number.isInteger(value) && value >= 0;
+  keeper.on("message", (message) => {
+    const keys = message !== null && typeof message === "object" ? Object.keys(message) : [];
+    const [key] = keys;
+    if (keys.length === 1 && key === "engine" && isCount(message.engine) && message.engine > 0) {
+      engine = message.engine;
+      return;
+    }
+    if (keys.length === 1 && key === "error" && typeof message.error === "string") {
+      fail(`failed to launch the onepipeline binary: ${message.error}`);
+    }
+    // The engine's exit code verbatim — the contract assigns meaning to 1 and 2,
+    // and a caller reads them.
+    if (keys.length === 1 && key === "status" && isCount(message.status)) {
+      process.exit(message.status);
+    }
+    endEngine();
+    fail(
+      `the process keeping the onepipeline binary sent an unreadable message: ` +
+        JSON.stringify(message),
+    );
+  });
+  // A keeper gone without the engine's status has left the engine with
+  // nothing to end it, so this process ends it before saying so.
+  keeper.on("disconnect", () => {
+    endEngine();
     fail("the process keeping the onepipeline binary ended without reporting its status");
   });
 }
