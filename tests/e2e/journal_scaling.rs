@@ -273,7 +273,12 @@ fn a_settle_the_claimer_is_still_applying_as_a_pass_begins_is_folded_by_that_pas
     // The pass held past its own claim, so the claimer takes what is queued now —
     // and is held in turn, having claimed the settle and not yet applied it.
     std::fs::write(seam.join("claimer-applying"), "").expect("the seam is armed");
-    hold_at(&world, &seam, "after-claim", "a pass to be held past its claim");
+    hold_at(
+        &world,
+        &seam,
+        "after-claim",
+        "a pass to be held past its claim",
+    );
     let settle = json!({"version": 2, "commands": [
         {"op": "settle", "id": "later", "outcome": "done",
          "evidence": "settled by hand while the claimer is slow to apply it"},
