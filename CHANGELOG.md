@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.1](https://github.com/nickderobertis/onepipeline/compare/v0.95.0...v0.95.1) - 2026-10-27
+
+### Fixed
+
+- *(test)* stop two tests failing slow Windows runners on wall-clock bounds ([#1228](https://github.com/nickderobertis/onepipeline/pull/1228))
+
 ## [0.95.0](https://github.com/nickderobertis/onepipeline/compare/v0.94.0...v0.95.0) - 2026-10-26
 
 ### Added
