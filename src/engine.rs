@@ -3202,7 +3202,6 @@ impl InPass {
                     continue;
                 }
                 state.touched.extend(named);
-                state.applied = true;
             }
             let id = envelope.id;
             // Where a journey holds this claim mid-apply while the loop begins its next pass.
@@ -3221,6 +3220,10 @@ impl InPass {
                 )
                 .map(|_| ())
             });
+            // Said only once the apply is over: a pass beginning while it runs would
+            // otherwise fold a journal without it and, taking this as folded, never
+            // fold it again. Unsaid, the loop's claim waits out this one and folds it.
+            self.state().applied = true;
             if let Err(error) = applied {
                 let mut owed =
                     std::collections::VecDeque::from([refused_for_failure(paths, id, &error)]);
