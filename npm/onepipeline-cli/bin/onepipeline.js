@@ -28,6 +28,7 @@
 // are stamped from Cargo.toml at publish time by scripts/npm-build.mjs, which
 // also generates the per-platform packages from the release binaries.
 
+const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
@@ -198,7 +199,12 @@ if (process.platform === "win32") {
   // SIGPIPE too, but the engine's runtime ignores that itself and restores it
   // for what it starts.)
   process.on("SIGXFSZ", () => {});
+  // On Node.js 22 an execve that fails aborts this process rather than
+  // throwing, so the binary is checked first: a missing or non-executable one
+  // is refused here with the same message a throwing execve would get.
   try {
+    if (!fs.statSync(binary).isFile()) throw new Error(`${binary} is not a file`);
+    fs.accessSync(binary, fs.constants.X_OK);
     process.execve(binary, [binary, ...args], process.env);
   } catch (error) {
     fail(`failed to launch the onepipeline binary: ${error.message}`);
