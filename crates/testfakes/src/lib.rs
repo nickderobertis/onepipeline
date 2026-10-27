@@ -346,6 +346,13 @@ pub fn segment(name: &str) -> String {
     }
 }
 
+/// What `fake-claude` opens each `turn.activity` reasoning block with, followed by
+/// a space, the block's ordinal, the millisecond it was emitted at and the emitting
+/// turn's pid — the same three words it appends to `activity-emitted.txt` for every
+/// block. One definition, read by the double that writes it and by
+/// `tests/journal_workload`, which finds the blocks in the run's journal.
+pub const ACTIVITY_MARK: &str = "journal-workload activity";
+
 /// A per-node script file, e.g. `build.fail`.
 pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(format!("{node}.{suffix}")))

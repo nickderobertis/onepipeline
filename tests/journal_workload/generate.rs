@@ -10,6 +10,14 @@
 //! Generation is a pure function of `(size, seed, world paths)`: one size twice from one
 //! seed into the same world writes byte-identical files.
 
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] this file writes the
+// run directory onepipeline v0.75.0 left — its plan, stored tasks, agentgraph, vcs and
+// pipeline records, channel queue and launch record — on purpose and frozen at that
+// release: a long run adopted by a newer build is in that shape, so deriving it from
+// today's types would measure a run no host has. Its drift gate is the journey that
+// adopts it: the build under test must finish a pass over it, dispatch its four live
+// nodes and answer twenty amends with exit 0, or the `workload` target fails.
+
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};

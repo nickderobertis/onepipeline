@@ -158,12 +158,19 @@ fn one_seed_generates_one_run() {
 #[test]
 fn journal_workload() {
     let binary = binary();
-    // `JOURNAL_WORKLOAD_SIZES` (`1,20`) measures only those sizes, for a trial, and its
-    // recording goes beside the one the budgets read rather than over it.
+    // `JOURNAL_WORKLOAD_SIZES` (`1,20`) measures only those of the workload's sizes, for
+    // a trial, and its recording goes beside the one the budgets read rather than over it.
     let trial: Option<Vec<u64>> = std::env::var("JOURNAL_WORKLOAD_SIZES").ok().map(|sizes| {
         sizes
             .split(',')
-            .map(|size| size.trim().parse().expect("a size in whole MB"))
+            .map(|size| {
+                let size_mb = size.trim().parse().expect("a size in whole MB");
+                assert!(
+                    SIZES_MB.contains(&size_mb),
+                    "{size_mb} MB is not one of the workload's sizes, {SIZES_MB:?}"
+                );
+                size_mb
+            })
             .collect()
     });
     let mut sizes = Vec::new();
@@ -172,12 +179,18 @@ fn journal_workload() {
         println!("journal-workload {size_mb} MB: {record}");
         sizes.push(record);
     }
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
+    // The commit the recording was taken at, which every figure it holds is cited by.
+    let rev = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
         .current_dir(harness::repo_file("."))
         .output()
-        .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned());
+        .expect("git runs");
+    let commit = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
+    assert!(
+        rev.status.success() && commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "git named no commit: {}",
+        String::from_utf8_lossy(&rev.stderr)
+    );
     let recording = json!({
         "commit": commit,
         "seed": SEED,

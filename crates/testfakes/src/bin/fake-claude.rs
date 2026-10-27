@@ -493,7 +493,7 @@ fn turn(args: &[String], dir: &std::path::Path) -> ExitCode {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |since| since.as_millis());
                     let mark = format!("{nth} {emitted} {}", std::process::id());
-                    activity(&format!("{ACTIVITY_MARK} {mark}"));
+                    activity(&format!("{} {mark}", fake::ACTIVITY_MARK));
                     // Every block emitted, whether or not it ever reaches the journal.
                     fake::append(&dir.join("activity-emitted.txt"), &mark);
                 });
@@ -748,11 +748,6 @@ fn thinking() {
         })
     );
 }
-
-/// What a `turn.activity` block opens with, followed by its ordinal, the millisecond
-/// it was emitted at and the emitting turn's pid — the same three words this double
-/// appends to `activity-emitted.txt` for every block it emits.
-const ACTIVITY_MARK: &str = "journal-workload activity";
 
 /// One reasoning block saying `text`, which `oneharness_core` normalizes to one
 /// `turn-activity` record.

@@ -558,7 +558,7 @@ _scratch-workload-run:
 # tiers) is far under one journey of five sizes; the journey bounds each of its own
 # phases instead.
 _journal-workload-run:
-    @cargo build --release --locked --bin onepipeline --quiet
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
     @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 

@@ -6,6 +6,17 @@
 //! `/proc` counters (CPU and the resident high-water mark), and the `loop-stats.json`
 //! the driver writes at every wait when `ONEPIPELINE_LOOP_STATS` is set.
 
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] the files read here —
+// the journal, the outcomes queue, `liveness.json`, `loop-stats.json`, members'
+// histories and reply receipts — are read from outside the measured process because the
+// release build is measured unmodified, and their types are private to the engine and to
+// `oneagentgraph`; the reply envelope is the one `docs/contract.md` states. Every read
+// fails the measurement, naming what it found, on a line or document that is not the
+// shape it expects, and a measurement that finds no heartbeat, no activity or no outcome
+// for an answered reply fails too, so a shape that drifts fails the `workload` target the
+// release sweep runs rather than recording a figure of nothing. `CHANNEL_POLL_MS` only
+// corrects the reconcile-pass detail, the same at every size.
+
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +30,12 @@ use serde_json::{json, Value};
 use crate::generate::{self, LIVE_NODES};
 use crate::harness::World;
 use crate::{checkpoint, world_at, RUN};
+use onepipeline_testfakes::ACTIVITY_MARK;
 
+/// The `liveness.json` schema this measurement reads (`src/heartbeat.rs`'s
+/// `LIVENESS_SCHEMA_VERSION`, private to the engine): a document at another fails the
+/// measurement rather than being read as no heartbeats.
+const LIVENESS_SCHEMA_VERSION: u64 = 1;
 /// How often the journal, the queue and the driver are looked at.
 const POLL: Duration = Duration::from_millis(25);
 /// The engine's wait between looks at its channel (`src/engine.rs`'s `CHANNEL_POLL`): an
@@ -33,9 +49,6 @@ const IDLE: Duration = Duration::from_secs(60);
 /// The one bound on any phase: a guard against a hang, never a figure. A phase the
 /// driver has not finished within it fails the journey, naming that phase.
 const PATIENCE: Duration = Duration::from_secs(3 * 3600);
-/// What the double stamps into each `turn.activity` block, before its ordinal, its
-/// emission instant and its pid.
-const ACTIVITY_MARK: &str = "journal-workload activity ";
 
 fn now_ms() -> i64 {
     i64::try_from(
@@ -92,21 +105,45 @@ pub struct Seen {
     pub transcript: Option<(PathBuf, String, u64)>,
 }
 
+/// The `(ordinal, emitted ms, pid)` that follow an [`ACTIVITY_MARK`] in `said`, failing
+/// on a mark whose three numbers are not there: what the double wrote and what this
+/// reads disagree, and every delay measured from it would be wrong.
+fn mark_in(said: &str) -> Option<(u64, i64, u64)> {
+    let at = said.find(ACTIVITY_MARK)?;
+    let rest = &said[at + ACTIVITY_MARK.len()..];
+    let mut words = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|word| !word.is_empty());
+    let mut next = || -> u64 {
+        words
+            .next()
+            .and_then(|word| word.parse().ok())
+            .unwrap_or_else(|| panic!("an activity mark without its three numbers: {said:.200}"))
+    };
+    let (nth, emitted, pid) = (next(), next(), next());
+    Some((nth, i64::try_from(emitted).unwrap(), pid))
+}
+
+/// One complete line of the journal or the command-outcomes queue, both of which hold
+/// one JSON object per line with a `kind` or an `id`: a line that is neither fails the
+/// measurement, naming it, rather than being counted as nothing.
 fn parse_line(line: &[u8], at_ms: i64) -> Seen {
-    let value: Value = serde_json::from_slice(line).unwrap_or(Value::Null);
+    let value: Value = serde_json::from_slice(line).unwrap_or_else(|error| {
+        panic!(
+            "a line that is not JSON ({error}): {:.200}",
+            String::from_utf8_lossy(line)
+        )
+    });
+    assert!(
+        value["kind"].is_string() || value["id"].is_u64(),
+        "a line with neither a kind nor an id: {:.200}",
+        String::from_utf8_lossy(line)
+    );
     let text = |v: &Value| v.as_str().map(str::to_owned);
     let marker = ["output", "detail"]
         .iter()
         .find_map(|field| value["payload"][field].as_str())
-        .and_then(|said| said.strip_prefix(ACTIVITY_MARK))
-        .and_then(|rest| {
-            let mut words = rest.split_whitespace();
-            Some((
-                words.next()?.parse().ok()?,
-                words.next()?.parse().ok()?,
-                words.next()?.parse().ok()?,
-            ))
-        });
+        .and_then(mark_in);
     Seen {
         at_ms,
         bytes: line.len() as u64,
@@ -143,31 +180,27 @@ fn marks_in_histories(lines: &[Seen]) -> BTreeMap<(PathBuf, String, u64), (u64, 
         .collect();
     let mut marks = BTreeMap::new();
     for file in files {
-        let text = std::fs::read_to_string(file).unwrap_or_default();
+        // A journalled record names this file, so it exists; it is read once its
+        // members have stopped, so every line is whole.
+        let text = std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
         for line in text.lines() {
-            let value: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+            let value: Value = serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("{}: a line that is not JSON ({error})", file.display())
+            });
+            let event = value["event"].to_string();
+            let Some(mark) = mark_in(&event) else {
+                continue;
+            };
             let (Some(run), Some(index)) =
                 (value["run_id"].as_str(), value["event"]["index"].as_u64())
             else {
-                continue;
+                panic!(
+                    "{}: an activity event with no run_id or event.index",
+                    file.display()
+                );
             };
-            let event = value["event"].to_string();
-            let Some(at) = event.find(ACTIVITY_MARK) else {
-                continue;
-            };
-            let mut words = event[at + ACTIVITY_MARK.len()..]
-                .split(|c: char| !c.is_ascii_digit())
-                .filter(|word| !word.is_empty());
-            let mark = (|| {
-                Some((
-                    words.next()?.parse().ok()?,
-                    words.next()?.parse().ok()?,
-                    words.next()?.parse().ok()?,
-                ))
-            })();
-            if let Some(mark) = mark {
-                marks.insert((file.clone(), run.to_owned(), index), mark);
-            }
+            marks.insert((file.clone(), run.to_owned(), index), mark);
         }
     }
     marks
@@ -258,20 +291,29 @@ pub struct Sampler {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
-fn ticks_of(stat: &str) -> Option<u64> {
-    // Fields after the parenthesised command: utime is the 14th field, stime the 15th.
-    let after = stat.rsplit_once(") ")?.1;
-    let fields: Vec<&str> = after.split_whitespace().collect();
-    Some(fields.get(11)?.parse::<u64>().ok()? + fields.get(12)?.parse::<u64>().ok()?)
+/// utime + stime of a `/proc` `stat` line: the 14th and 15th fields, counted after the
+/// parenthesised command. A line without them is not a `stat` line, and fails.
+fn ticks_of(stat: &str) -> u64 {
+    let field = |nth: usize| -> u64 {
+        stat.rsplit_once(") ")
+            .and_then(|(_, after)| after.split_whitespace().nth(nth))
+            .and_then(|ticks| ticks.parse().ok())
+            .unwrap_or_else(|| panic!("a /proc stat line without field {}: {stat:.200}", nth + 3))
+    };
+    field(11) + field(12)
 }
 
-fn status_kb(status: &str, key: &str) -> u64 {
-    status
-        .lines()
-        .find(|line| line.starts_with(key))
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|kb| kb.parse().ok())
-        .unwrap_or(0)
+/// A `/proc` `status` document's kB figure for `key`: none where the kernel no longer
+/// reports it, which is a process that has exited and not yet been reaped, and a failure
+/// where the line is there but holds no number.
+fn status_kb(status: &str, key: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with(key))?;
+    Some(
+        line.split_whitespace()
+            .nth(1)
+            .and_then(|kb| kb.parse().ok())
+            .unwrap_or_else(|| panic!("/proc status: {line}")),
+    )
 }
 
 impl Sampler {
@@ -289,12 +331,17 @@ impl Sampler {
                 let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
                     break;
                 };
-                let status =
-                    std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+                let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+                    break;
+                };
+                // The driver has exited: what it held is already sampled.
+                let Some(hwm_kb) = status_kb(&status, "VmHWM:") else {
+                    break;
+                };
                 let mut sample = Sample {
                     at_ms,
-                    cpu_ticks: ticks_of(&stat).unwrap_or(0),
-                    hwm_kb: status_kb(&status, "VmHWM:"),
+                    cpu_ticks: ticks_of(&stat),
+                    hwm_kb,
                     flush: None,
                 };
                 if let Ok(meta) = std::fs::metadata(&stats) {
@@ -303,30 +350,49 @@ impl Sampler {
                         .ok()
                         .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
                         .map_or(0, |d| i64::try_from(d.as_micros()).unwrap());
+                    // The driver replaces the file whole, so what is read is one
+                    // document; one without its pass count fails the measurement.
                     if mtime != last_mtime {
-                        let read = std::fs::read_to_string(&stats).ok();
-                        if let Some(value) =
-                            read.and_then(|t| serde_json::from_str::<Value>(&t).ok())
-                        {
+                        if let Ok(text) = std::fs::read_to_string(&stats) {
+                            let value: Value = serde_json::from_str(&text).unwrap_or_else(|e| {
+                                panic!("loop-stats.json is not JSON ({e}): {text:.200}")
+                            });
+                            let passes = value["passes"].as_u64().unwrap_or_else(|| {
+                                panic!("loop-stats.json has no pass count: {text:.200}")
+                            });
                             last_mtime = mtime;
-                            sample.flush =
-                                Some((mtime / 1000, value["passes"].as_u64().unwrap_or(0)));
+                            sample.flush = Some((mtime / 1000, passes));
                         }
                     }
                 }
+                // Overwritten whole and atomically by the driver, so what is read
+                // is one document of the schema it was written at, or the
+                // measurement fails naming what it found.
                 if let Ok(text) = std::fs::read(&beats) {
-                    let value: Value = serde_json::from_slice(&text).unwrap_or(Value::Null);
+                    let value: Value = serde_json::from_slice(&text)
+                        .unwrap_or_else(|e| panic!("liveness.json is not JSON ({e})"));
+                    assert_eq!(
+                        value["schema_version"], LIVENESS_SCHEMA_VERSION,
+                        "liveness.json is at a schema this measurement does not read"
+                    );
+                    let members = value["members"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("liveness.json has no members list"));
                     let mut seen = liveness2.lock().unwrap();
                     seen.largest = seen.largest.max(text.len() as u64);
-                    for beat in value["members"].as_array().into_iter().flatten() {
-                        let field = |name: &str| beat[name].as_str().unwrap_or_default().to_owned();
-                        if LIVE_NODES.contains(&beat["node"].as_str().unwrap_or_default()) {
-                            let key = (
-                                field("node"),
-                                field("graph_run"),
-                                field("member"),
-                                field("last_heartbeat_at"),
-                            );
+                    for beat in members {
+                        let field = |name: &str| {
+                            beat[name].as_str().map(str::to_owned).unwrap_or_else(|| {
+                                panic!("a liveness.json member without {name}: {beat}")
+                            })
+                        };
+                        let key = (
+                            field("node"),
+                            field("graph_run"),
+                            field("member"),
+                            field("last_heartbeat_at"),
+                        );
+                        if LIVE_NODES.contains(&key.0.as_str()) {
                             seen.beats.entry(key).or_insert(at_ms);
                         }
                     }
@@ -378,7 +444,7 @@ fn thread_ticks(pid: u32) -> BTreeMap<String, u64> {
             .and_then(|(_, rest)| rest.rsplit_once(") "))
             .map_or("?", |(name, _)| name);
         let id = entry.file_name().to_string_lossy().into_owned();
-        out.insert(format!("{name}/{id}"), ticks_of(&stat).unwrap_or(0));
+        out.insert(format!("{name}/{id}"), ticks_of(&stat));
     }
     out
 }
@@ -517,26 +583,33 @@ fn amend_text(rng: &mut generate::Rng, node: &str, nth: usize) -> String {
     )
 }
 
-/// The envelope id a reply's receipt names.
-fn receipt_id(stdout: &str) -> Option<u64> {
-    let receipt: Value = serde_json::from_str(stdout).ok()?;
-    receipt["reply"].as_u64().or_else(|| receipt["id"].as_u64())
+/// The envelope id an answered reply's receipt names under `reply`
+/// (`docs/contract-divergences.md` entry 64): a receipt that is not that object fails.
+fn receipt_id(stdout: &str) -> u64 {
+    let receipt: Value = serde_json::from_str(stdout).unwrap_or_else(|error| {
+        panic!("a reply receipt that is not JSON ({error}): {stdout:.200}")
+    });
+    receipt["reply"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("a reply receipt with no reply id: {stdout:.200}"))
 }
 
 /// Every turn-activity block the four workers emitted, as the double recorded it:
 /// `(pid, ordinal) -> emitted ms`.
 fn emitted(world: &World) -> BTreeMap<(u64, u64), i64> {
-    std::fs::read_to_string(world.fakes.join("activity-emitted.txt"))
-        .unwrap_or_default()
+    let path = world.fakes.join("activity-emitted.txt");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    let blocks: BTreeMap<(u64, u64), i64> = text
         .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            let nth: u64 = words.next()?.parse().ok()?;
-            let at: i64 = words.next()?.parse().ok()?;
-            let pid: u64 = words.next()?.parse().ok()?;
-            Some(((pid, nth), at))
+        .map(|line| {
+            let (nth, at, pid) = mark_in(&format!("{ACTIVITY_MARK} {line}"))
+                .unwrap_or_else(|| unreachable!("every line is given the mark"));
+            ((pid, nth), at)
         })
-        .collect()
+        .collect();
+    assert!(!blocks.is_empty(), "the four workers emitted no activity");
+    blocks
 }
 
 /// The measurement at one journal size: a run of `size_mb` MB generated from `seed` at
@@ -551,6 +624,10 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
     let checkpoint_doc: Value =
         serde_json::from_slice(&std::fs::read(world.run_file(RUN, "checkpoint.json")).unwrap())
             .unwrap();
+    assert!(
+        checkpoint_doc["schema_version"].is_u64(),
+        "the checkpoint the build wrote names no schema_version"
+    );
     let checkpoint_bytes = std::fs::metadata(world.run_file(RUN, "checkpoint.json"))
         .unwrap()
         .len();
@@ -683,11 +760,15 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
     for reply in &replies {
         let answer = reply.answer.lock().unwrap();
         let (answered_ms, code, stdout) = answer.as_ref().unwrap();
+        // A refused amend answers fast and measures nothing the budget is about.
+        assert_eq!(*code, Some(0), "a reply was refused: {stdout:.200}");
         latencies.push((answered_ms - reply.submitted_ms) as f64);
         *exits.entry(format!("{code:?}")).or_default() += 1;
-        if let Some(at) = receipt_id(stdout).and_then(|id| outcome_at.get(&id)) {
-            to_outcome.push((at - reply.submitted_ms) as f64);
-        }
+        let id = receipt_id(stdout);
+        let at = outcome_at
+            .get(&id)
+            .unwrap_or_else(|| panic!("reply {id} was answered with no outcome in the queue"));
+        to_outcome.push((at - reply.submitted_ms) as f64);
     }
 
     // Liveness over the working phase: what the journal grew by, by kind, against the
@@ -719,6 +800,12 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
         .filter(|s| working(s) && s.kind == "member-heartbeat" && is_live(s.node.as_deref()))
         .count();
     let heartbeats = beats_kept.max(beats_journalled);
+    // No heartbeat seen anywhere is a reading that has stopped finding them, never a
+    // liveness figure of nothing.
+    assert!(
+        heartbeats > 0,
+        "the four workers' heartbeats were seen nowhere"
+    );
     let per_member_hour = if heartbeats == 0 {
         0.0
     } else {
@@ -731,6 +818,7 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
         .iter()
         .filter(|s| s.at_ms >= idle_from && s.at_ms < idle_to && s.kind == "node-dispatched")
         .count();
+    // The kernel counts VmHWM in KiB; the budget is in megabytes of 1,000,000 bytes.
     let peak_kb = samples.iter().map(|s| s.hwm_kb).max().unwrap_or(0);
 
     json!({
@@ -761,7 +849,7 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
             "threads_cpu_s": idle_threads,
             "pass": passes(&samples, idle_from, idle_to, tick),
         },
-        "peak_rss_mb": peak_kb as f64 / 1024.0,
+        "peak_rss_mb": (peak_kb * 1024) as f64 / 1_000_000.0,
         "liveness": {
             "heartbeats": heartbeats,
             "heartbeats_in_liveness_json": beats_kept,

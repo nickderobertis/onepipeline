@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { report } from "@onebudgetspec/sdk";
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] one producer,
+// `tests/journal_workload/main.rs`, and this one reader run back to back over one tree in
+// the `workload` target, so a drifted field throws here or reaches onebudgetspec as a
+// missing or non-finite result, which it refuses.
 // llmlint: ignore-block[boundary_inputs_validated] onebudgetspec owns validating what a
 // reported budget's command hands it: presence, shape, finiteness and the threshold.
 // This analysis only reads the journey's recording, written by
@@ -53,3 +57,4 @@ report(
   recording.sizes.map((size) => `${size.size_mb} MB: ${detail(size)}`).join("; "),
 );
 // llmlint: ignore-end[boundary_inputs_validated]
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
