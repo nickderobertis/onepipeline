@@ -635,6 +635,14 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
     let lines = journal.finish();
     let outcome_lines = outcomes.finish();
     world.release("observer.go");
+    // What is left of the run is ended here by the build under test, and its launch
+    // record removed, so the world's teardown finds no run of its own to stop: its
+    // `stop --force` is the unoptimized build's, which takes many minutes over an
+    // 800 MB journal. The teardown still ends any process this one left.
+    let _ = world
+        .agentgraph_cmd_on(binary, &["stop", RUN, "--force"])
+        .output();
+    let _ = std::fs::remove_file(world.run_file(RUN, "launch.json"));
 
     // A worker's turn-activity block waits from the instant the double stamped into it
     // to its line's arrival in the journal. Every block emitted is counted, and one never
