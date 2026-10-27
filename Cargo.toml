@@ -1239,9 +1239,9 @@ onevcs-testing = "0.19.22"
 # so a private plan whose public task owns a schema-2 budget copies onto the board
 # (`tests/e2e/publication_boundary.rs`'s
 # `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
-onetaskgraph-core = "=0.12.5"
-onetaskgraph-plugin-api = "=0.12.5"
-onetaskgraph-local-md = "=0.12.5"
+onetaskgraph-core = "=0.12.7"
+onetaskgraph-plugin-api = "=0.12.7"
+onetaskgraph-local-md = "=0.12.7"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
