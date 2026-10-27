@@ -109,6 +109,39 @@ def dist_info_member(wheel, name):
     return members[0]
 
 
+# Where every npm platform package carries its binary's CycloneDX SBOM; the one
+# file under `sboms/`, as scripts/npm-build.mjs's SBOM_PATH puts it there.
+NPM_SBOM = 'sboms/onepipeline.cyclonedx.json'
+
+
+def wheel_sbom(wheel):
+    """The CycloneDX document maturin generated for the wheel's own Cargo build."""
+    members = [name for name in wheel.namelist() if '.dist-info/sboms/' in name and not name.endswith('/')]
+    if not members:
+        raise ValueError('wheel omitted the SBOM')
+    if len(members) != 1 or Path(members[0]).name != Path(NPM_SBOM).name:
+        raise ValueError(f'wheel must carry exactly one .dist-info/sboms/{Path(NPM_SBOM).name}')
+    return wheel.read(members[0])
+
+
+def npm_sbom(bundle, package):
+    """The SBOM a packed npm platform package carries, refused naming the package."""
+    try:
+        member = bundle.getmember(f'package/{NPM_SBOM}')
+    except KeyError:
+        raise ValueError(f'npm package {package} omitted {NPM_SBOM}') from None
+    if not member.isfile():
+        raise ValueError(f'npm package {package} carries {NPM_SBOM} as something other than a file')
+    payload = bundle.extractfile(member).read()
+    try:
+        bom = json.loads(payload)
+    except ValueError:
+        bom = None
+    if not isinstance(bom, dict) or bom.get('bomFormat') != 'CycloneDX':
+        raise ValueError(f'npm package {package} carries {NPM_SBOM} that is not a CycloneDX object')
+    return payload
+
+
 def tar_payload(bundle, name):
     member = bundle.getmember(name)
     if not member.isfile():
@@ -117,8 +150,8 @@ def tar_payload(bundle, name):
 
 
 def validate_npm_archive(bundle, binary_name):
-    files = {'package/README.md', 'package/package.json', f'package/bin/{binary_name}'}
-    directories = {'package', 'package/bin'}
+    files = {'package/README.md', 'package/package.json', f'package/bin/{binary_name}', f'package/{NPM_SBOM}'}
+    directories = {'package', 'package/bin', 'package/sboms'}
     names = set()
     for member in bundle.getmembers():
         name = member.name.rstrip('/')
@@ -214,8 +247,9 @@ def package(target, wheel, out, version):
             binary = stage / Path(name).name
             binary.write_bytes(bundle.read(name))
             binary.chmod(0o755)
-        if not any('.dist-info/sboms/' in n for n in bundle.namelist()):
-            raise ValueError('wheel omitted the SBOM')
+        sbom = out / 'sboms' / target / Path(NPM_SBOM).name
+        sbom.parent.mkdir(parents=True, exist_ok=True)
+        sbom.write_bytes(wheel_sbom(bundle))
     for name in ['README.md', 'LICENSE', 'CHANGELOG.md']:
         shutil.copyfile(name, stage / name)
     archives = out / 'archives'
@@ -233,7 +267,7 @@ def package(target, wheel, out, version):
     (archives / f'onepipeline-v{version}-{target}.sha256').write_text(f'{digest}  {archive.name}\n')
     binary = stage / binary_name(target)
     package = subprocess.check_output(['node', 'scripts/npm-build.mjs', 'platform', '--target',
-        target, '--binary', str(binary), '--out', str(out / 'npm')], text=True).strip()
+        target, '--binary', str(binary), '--sbom', str(sbom), '--out', str(out / 'npm')], text=True).strip()
     tarballs = out / 'npm-artifacts' / target
     tarballs.mkdir(parents=True, exist_ok=True)
     run('npm', 'pack', '--pack-destination', str(tarballs), cwd=package)
@@ -315,6 +349,11 @@ def verify(record, quiet=False):
                     if tar_payload(archive, Path(name).name) != wheel.read(name):
                         raise ValueError('archive executable differs from wheel payload')
         with tarfile.open(record['npm']) as npm:
+            facts = target_facts()[target]
+            # Named before the layout check, so a package lacking its SBOM is
+            # refused as that rather than as an archive missing some member.
+            if npm_sbom(npm, f"onepipeline-cli-{facts['platform']}-{facts['arch']}") != wheel_sbom(wheel):
+                raise ValueError("npm SBOM differs from the wheel's")
             validate_npm_archive(npm, binary_name)
             if tar_payload(npm, f'package/bin/{binary_name}') != payload:
                 raise ValueError('npm executable differs from wheel payload')
@@ -323,7 +362,6 @@ def verify(record, quiet=False):
                 raise ValueError('invalid npm manifest object')
             if package.get('version') != version:
                 raise ValueError('npm version mismatch')
-            facts = target_facts()[target]
             if package.get('name') != f"onepipeline-cli-{facts['platform']}-{facts['arch']}" or package.get('os') != [facts['platform']] or package.get('cpu') != [facts['arch']]:
                 raise ValueError('npm target identity mismatch')
         if hashlib.sha256(payload).hexdigest() != record['binary_sha256']:

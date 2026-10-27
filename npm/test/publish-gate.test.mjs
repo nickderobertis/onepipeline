@@ -173,6 +173,16 @@ describe("the npm publish order", () => {
       // is the real compiled binary, and it is the one the launcher execs.
       const standIn = join(work, "stand-in-binary");
       writeFileSync(standIn, "not this machine's architecture\n");
+      // Every platform package carries its binary's SBOM; what is in it is
+      // launcher.test.mjs's to prove, not the publish order's.
+      const sbom = join(work, "onepipeline.cyclonedx.json");
+      writeFileSync(
+        sbom,
+        JSON.stringify({
+          bomFormat: "CycloneDX",
+          metadata: { component: { name: "onepipeline" } },
+        }),
+      );
 
       for (const [triple, name] of declaredTargets()) {
         const dir = (
@@ -183,6 +193,8 @@ describe("the npm publish order", () => {
             triple,
             "--binary",
             triple === hostTarget() ? hostBinary : standIn,
+            "--sbom",
+            sbom,
             "--out",
             dist,
           ])
@@ -257,7 +269,11 @@ describe("the npm publish order", () => {
       assert.equal(platform.name, name);
       assert.equal(platform.version, version, `${name} must carry the release version`);
       assert.equal(manifest.optionalDependencies[name], version, `${name} must be pinned exactly`);
-      assert.equal(platform.files.length, 1, `${name} must ship exactly its binary`);
+      assert.deepEqual(
+        platform.files.slice(1),
+        ["sboms/onepipeline.cyclonedx.json"],
+        `${name} must ship exactly its binary and its SBOM`,
+      );
       // The payload is in the package, not a promise of one. For the host's
       // package that payload is the compiled binary, and the journeys below
       // install it and run it.

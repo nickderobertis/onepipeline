@@ -389,6 +389,19 @@ def built(platform, out, tag, version):
         expect(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.get('sha256'),
                f'{path} changed after it was built and test-installed',
                'rebuild; only the files the test-install ran may be published')
+        if artifact['kind'] == 'npm' and artifact['target']:
+            # A platform package is the npm consumer's only record of which
+            # crate versions its binary links, so one without it is not published.
+            name = artifact['package'].split(':', 1)[1]
+            rebuild = "rebuild; scripts/npm-build.mjs puts the wheel's SBOM in every platform package"
+            try:
+                with tarfile.open(path) as bundle:
+                    staged.npm_sbom(bundle, name)
+            except tarfile.TarError as error:
+                raise Refused(f'npm package {name} is not a readable tarball ({error}), so nothing is published',
+                              rebuild) from error
+            except ValueError as error:
+                raise Refused(f'{error}, so nothing is published', rebuild) from error
     return manifest
 
 
