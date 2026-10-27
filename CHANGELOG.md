@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.3](https://github.com/nickderobertis/onepipeline/compare/v0.95.2...v0.95.3) - 2026-10-27
+
+### Fixed
+
+- *(tests)* make the settled-from-evidence adoption journey deterministic on Windows ([#1234](https://github.com/nickderobertis/onepipeline/pull/1234))
+
+### Performance
+
+- *(deps)* link the store that batches private-source copies ([#1236](https://github.com/nickderobertis/onepipeline/pull/1236))
+- *(driver)* hold the combined driver's cost flat across journal sizes ([#1230](https://github.com/nickderobertis/onepipeline/pull/1230))
+
 ## [0.95.2](https://github.com/nickderobertis/onepipeline/compare/v0.95.1...v0.95.2) - 2026-10-27
 
 ### Fixed
