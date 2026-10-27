@@ -1,22 +1,22 @@
 // The process tree the npm-installed `onepipeline` gives its caller.
 //
 // On Linux and macOS the launcher replaces itself with the engine, so the PID a
-// caller holds is the engine's. Where it cannot (Windows, or a Node.js without
-// `process.execve`), the engine is its child, and the launcher has to pass the
-// caller's interrupts and the engine's status through faithfully and never leave
-// the engine running past itself.
+// caller holds is the engine's, and a Node.js that cannot do that is refused.
+// Windows has no exec: there the engine runs under a keeper the launcher starts,
+// and the launcher has to pass the console's interrupts and the engine's status
+// through faithfully and never leave the engine running past itself.
 //
 // Everything here is real: the compiled engine, packed into the platform package
 // and installed beside the packed launcher by `npm install`. The engine's
 // long-running journey is `flow run`, which supervises a program, relays
 // SIGINT/SIGTERM/SIGHUP to it and exits with its status; that program
 // (`PROGRAM` below) records which process started it and which signal reached it.
-// CI runs this file on macOS and Windows (`ci.yml`'s `launcher` job); Linux runs
-// it in the gate with the rest of the project's tests.
+// CI runs this file on macOS and Windows (`launcher.yml`); Linux runs it in the
+// gate with the rest of the project's tests.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { chmodSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
@@ -55,6 +55,25 @@ if (process.env.PROGRAM_HOLD) {
   process.stdin.on("end", () => process.exit(Number(process.env.PROGRAM_EXIT ?? 0)));
 }
 record();
+`;
+
+/// Node reporting Windows to the launcher it is preloaded into, and to nothing
+/// that launcher starts.
+const AS_WINDOWS = `Object.defineProperty(process, "platform", { value: "win32" });
+Object.defineProperty(process, "arch", { value: "x64" });
+`;
+
+/// The launcher ended outright the instant its first child — the keeper — has
+/// been started, before anything else of the launcher's runs. The keeper's PID
+/// is left for the test in `KEEPER_PID_FILE`.
+const DIES_AFTER_SPAWN = `const childProcess = require("node:child_process");
+const spawn = childProcess.spawn;
+childProcess.spawn = function (...args) {
+  const child = spawn.apply(this, args);
+  require("node:fs").writeFileSync(process.env.KEEPER_PID_FILE, String(child.pid));
+  process.kill(process.pid, "SIGKILL");
+  return child;
+};
 `;
 
 /// The caller's environment without this host's own onepipeline settings, and
@@ -330,87 +349,80 @@ describe("the process the npm-installed command runs as", () => {
         assert.deepEqual(readRecord(ready).seen, ["SIGTERM"]);
         assert.equal(ended.code, 8, ended.stderr);
       });
+
+      it("refuses a Node.js that cannot exec, rather than running the engine as its child", () => {
+        const withoutExec = join(work, "without-execve.cjs");
+        writeFileSync(withoutExec, "delete process.execve;\n");
+        const refused = spawnSync(
+          join(project, "node_modules", ".bin", "onepipeline"),
+          ["--version"],
+          {
+            cwd: project,
+            encoding: "utf8",
+            env: engineEnv(work, { NODE_OPTIONS: `--require "${withoutExec}"` }),
+          },
+        );
+        assert.equal(refused.status, 1, refused.stderr);
+        assert.equal(refused.stdout, "", "the engine ran");
+        assert.match(refused.stderr, /cannot run onepipeline from npm on \w+/);
+        assert.match(refused.stderr, /process\.execve \(Node\.js 22\.15\+ or 23\.11\+\)/);
+        assert.match(refused.stderr, /pip install onepipeline-cli/);
+      });
     });
   }
 
-  it("says it could not start the engine, and exits 1, when the installed binary will not run", () => {
-    const broken = join(work, "broken");
-    installInto(broken, packages);
-    const engine = join(
-      broken,
-      "node_modules",
-      `onepipeline-cli-${process.platform}-${process.arch}`,
-      "bin",
-      EXE,
-    );
-    // Not executable outside Windows; not a program at all on it.
-    if (WINDOWS) writeFileSync(engine, "not a program\n");
-    else chmodSync(engine, 0o644);
-    const withoutExec = join(work, "broken-without-execve.cjs");
-    writeFileSync(withoutExec, "delete process.execve;\n");
-    const launcher = join(broken, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
-    // Exec where there is exec, and the supervised child everywhere.
-    const starts = WINDOWS
-      ? [[process.execPath, [launcher]]]
-      : [
-          [process.execPath, [launcher]],
-          [process.execPath, ["--require", withoutExec, launcher]],
-        ];
-    for (const [command, prefix] of starts) {
-      const refused = spawnSync(command, [...prefix, "--version"], {
-        cwd: broken,
-        encoding: "utf8",
-        env: engineEnv(work),
-      });
-      assert.equal(refused.status, 1, refused.stderr);
-      assert.equal(refused.stdout, "");
-      assert.match(refused.stderr, /^onepipeline: failed to launch the onepipeline binary: /);
-    }
-  });
-
-  // The launcher as its own process: Windows always, and on Linux and macOS a
-  // Node.js without `process.execve`, which this host stands in for by removing it.
-  describe("where the engine runs as the launcher's child", () => {
-    let withoutExec;
+  // Windows has no exec, so there the engine runs under the launcher's keeper.
+  // Linux and macOS reach that same code by Node reporting `win32` to the
+  // launcher alone (`AS_WINDOWS`), beside a `win32-x64` platform package that
+  // carries this host's engine; the console events stay Windows'.
+  describe("under the keeper Windows runs it with", () => {
+    let asWindows = [];
+    const keeperFixture = (dir, mode = 0o755) => {
+      if (WINDOWS) return;
+      const pkg = join(dir, "node_modules", "onepipeline-cli-win32-x64");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      writeFileSync(
+        join(pkg, "package.json"),
+        JSON.stringify({ name: "onepipeline-cli-win32-x64" }),
+      );
+      writeFileSync(join(pkg, "bin", "onepipeline.exe"), readFileSync(installedEngine()), { mode });
+    };
     before(() => {
-      withoutExec = join(work, "without-execve.cjs");
-      writeFileSync(withoutExec, "delete process.execve;\n");
+      if (WINDOWS) return;
+      const shim = join(work, "as-windows.cjs");
+      writeFileSync(shim, AS_WINDOWS);
+      asWindows = ["--require", shim];
+      keeperFixture(project);
     });
-    const start = (ready, options = {}) =>
+    const start = (ready, options = {}, preload = []) =>
       track(
-        spawn(
-          process.execPath,
-          [...(WINDOWS ? [] : ["--require", withoutExec]), launcherScript(), ...flowRun(ready)],
-          { cwd: project, ...options, env: engineEnv(work, options.env) },
-        ),
+        spawn(process.execPath, [...asWindows, ...preload, launcherScript(), ...flowRun(ready)], {
+          cwd: project,
+          ...options,
+          env: engineEnv(work, options.env),
+        }),
         ready,
       );
 
-    it("passes stdin, stdout and the engine's exit status through", async () => {
+    it("passes stdin, stdout and the engine's exit status through, and leaves no keeper", async () => {
       const ready = join(work, "status.json");
       const child = start(ready, { env: { PROGRAM_EXIT: "5" } });
       const done = finished(child);
       const started = await waitFor("the supervised program", () => readRecord(ready));
-      assert.notEqual(started.ppid, child.pid, "the engine should be the launcher's child here");
-
-      // The launcher's other child is its orphan watcher, which a launcher that
-      // exits normally must not leave behind. (Windows has no `pgrep`; the
-      // watcher is the same code there.)
-      const watcher = WINDOWS
+      assert.notEqual(started.ppid, child.pid, "the engine should run under the keeper here");
+      // The launcher's one child is the keeper. (Windows has no `pgrep`; the
+      // keeper is the same code there.)
+      const keeper = WINDOWS
         ? null
-        : Number(
-            spawnSync("pgrep", ["-P", String(child.pid)], { encoding: "utf8" })
-              .stdout.split("\n")
-              .find((pid) => pid && Number(pid) !== started.ppid),
-          );
+        : Number(spawnSync("pgrep", ["-P", String(child.pid)], { encoding: "utf8" }).stdout);
 
       child.stdin.end("through the launcher\n");
       const ended = await done;
       assert.equal(ended.code, 5, ended.stderr);
       assert.equal(ended.stdout, "through the launcher\n");
-      if (watcher !== null) {
-        assert.ok(watcher > 0, "the launcher started no orphan watcher");
-        await waitFor("the orphan watcher to exit", () => !alive(watcher), 15_000);
+      if (keeper !== null) {
+        assert.ok(keeper > 0, "the launcher started no keeper");
+        await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
       }
     });
 
@@ -428,44 +440,78 @@ describe("the process the npm-installed command runs as", () => {
       await waitFor("the orphaned engine to be ended", () => !alive(engine), 15_000);
     });
 
-    if (!WINDOWS) {
-      for (const [signal, code] of [
-        ["SIGINT", 7],
-        ["SIGTERM", 8],
-        ["SIGHUP", 10],
-      ]) {
-        it(`passes ${signal} on to the engine as ${signal} and exits with its status`, async () => {
-          const ready = join(work, `${signal}.json`);
-          const child = start(ready);
-          const done = finished(child);
-          const started = await waitFor("the supervised program", () => readRecord(ready));
+    it("leaves no engine running when the launcher is killed the moment the keeper starts", async () => {
+      const ready = join(work, "startup.json");
+      const keeperPid = join(work, "startup-keeper.pid");
+      const dies = join(work, "dies-after-spawn.cjs");
+      writeFileSync(dies, DIES_AFTER_SPAWN);
+      const child = start(
+        ready,
+        { stdio: "ignore", env: { PROGRAM_HOLD: "1", KEEPER_PID_FILE: keeperPid } },
+        ["--require", dies],
+      );
+      await exited(child);
+      const keeper = Number(readFileSync(keeperPid, "utf8"));
+      // A keeper that started the engine and missed the launcher's death would
+      // still be waiting on it.
+      await waitFor("the keeper to exit", () => !alive(keeper), 15_000);
+      const started = readRecord(ready);
+      if (started) assert.equal(alive(started.ppid), false, "the engine outlived the launcher");
+    });
 
-          child.kill(signal);
-          const ended = await done;
-          assert.deepEqual(readRecord(ready).seen, [signal]);
-          assert.equal(ended.code, code, ended.stderr);
-          assert.equal(alive(started.ppid), false, "the engine outlived the launcher");
-        });
-      }
-    }
-
-    if (!WINDOWS) {
-      it("ends itself with the signal that ended the engine", async () => {
-        const ready = join(work, "engine-killed.json");
-        // Held and given no pipes, so its program outliving the engine holds
-        // nothing the launcher's exit waits on.
-        const child = start(ready, { stdio: "ignore", env: { PROGRAM_HOLD: "1" } });
-        const done = new Promise((resolve) =>
-          child.on("exit", (code, signal) => resolve({ code, signal })),
-        );
-        const started = await waitFor("the supervised program", () => readRecord(ready));
-
-        process.kill(started.ppid, "SIGKILL");
-        const ended = await done;
-        assert.equal(ended.signal, "SIGKILL");
-        assert.equal(ended.code, null);
+    it("refuses to start the engine, through the installed command, when it cannot start the keeper", () => {
+      const preload = join(work, "no-keeper.cjs");
+      writeFileSync(
+        preload,
+        `${WINDOWS ? "" : AS_WINDOWS}process.execPath = ${JSON.stringify(join(work, "no-such-node"))};\n`,
+      );
+      const bin = join(
+        project,
+        "node_modules",
+        ".bin",
+        WINDOWS ? "onepipeline.cmd" : "onepipeline",
+      );
+      const refused = spawnSync(bin, ["--version"], {
+        cwd: project,
+        encoding: "utf8",
+        shell: WINDOWS,
+        env: engineEnv(work, { NODE_OPTIONS: `--require "${preload}"` }),
       });
-    }
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.equal(refused.stdout, "", "the engine ran without a keeper");
+      assert.match(
+        refused.stderr,
+        /could not start the process that keeps the onepipeline binary from outliving this command, so the binary was not started: /,
+      );
+    });
+
+    it("says it could not start the engine, and exits 1, when the installed binary will not run", () => {
+      const broken = join(work, "broken");
+      installInto(broken, packages);
+      const engine = join(
+        broken,
+        "node_modules",
+        `onepipeline-cli-${process.platform}-${process.arch}`,
+        "bin",
+        EXE,
+      );
+      // Not executable outside Windows; not a program at all on it.
+      if (WINDOWS) writeFileSync(engine, "not a program\n");
+      else chmodSync(engine, 0o644);
+      keeperFixture(broken, 0o644);
+      const launcher = join(broken, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+      // The keeper's way, and on Linux and macOS the exec's too.
+      for (const prefix of WINDOWS ? [[]] : [asWindows, []]) {
+        const refused = spawnSync(process.execPath, [...prefix, launcher, "--version"], {
+          cwd: broken,
+          encoding: "utf8",
+          env: engineEnv(work),
+        });
+        assert.equal(refused.status, 1, refused.stderr);
+        assert.equal(refused.stdout, "");
+        assert.match(refused.stderr, /^onepipeline: failed to launch the onepipeline binary: /);
+      }
+    });
 
     if (WINDOWS) {
       // A console's Ctrl+C and Ctrl+Break, delivered the way a terminal delivers

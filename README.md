@@ -37,7 +37,7 @@ refuse too; the composition layer itself is complete.
 
 ```bash
 pip install onepipeline-cli      # prebuilt binary, no Rust toolchain
-npm install -g onepipeline-cli   # the same binary, via npm
+npm install -g onepipeline-cli   # the same binary, via npm (Node.js 22.15+ or 23.11+)
 cargo install onepipeline        # from crates.io, compiled locally
 ```
 

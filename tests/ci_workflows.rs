@@ -362,7 +362,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
 }
 
 /// The jobs that report a context nobody requires, and that no required job may
-/// wait on: the release sweep, the suppressions comment, and the two workflows
+/// wait on: the release sweep, the suppressions comment, and the three workflows
 /// AGENTS.md records as advisory.
 #[test]
 fn no_required_job_waits_on_an_advisory_one() {
@@ -370,6 +370,7 @@ fn no_required_job_waits_on_an_advisory_one() {
     for (file, key) in [
         ("release-sweep.yml", "release-sweep"),
         ("notignored.yml", "suppressions"),
+        ("launcher.yml", "launcher"),
     ] {
         let job = &all[file]["jobs"][key];
         assert!(!job.is_null(), "{file} has no `{key}` job");
@@ -406,6 +407,7 @@ fn no_required_job_waits_on_an_advisory_one() {
         "notignored.yml",
         "engine-currency.yml",
         "visual-docs.yml",
+        "launcher.yml",
     ] {
         assert!(
             all.contains_key(advisory),

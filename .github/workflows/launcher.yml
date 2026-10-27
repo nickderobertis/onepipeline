@@ -1,0 +1,70 @@
+name: npm launcher
+
+# What the npm-installed `onepipeline` runs as, on the two platforms whose
+# launcher paths Linux's gate cannot take: macOS, where the launcher execs the
+# engine, and Windows, where the engine runs under a keeper with the console's
+# interrupts and an orphan's cleanup to get right. Linux runs the same journeys
+# in `just check`, with the npm project's other tests.
+#
+# **Advisory.** No branch protection requires it: making it required is a
+# branch-protection change only the repository owner approves. It runs where
+# the change reaches the `onepipeline-npm` project — the launcher and its
+# packaging, or the engine it starts — selected the way `ci.yml` selects its
+# matrices, and like them it fails closed to running.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      npm: ${{ steps.affected.outputs.npm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `nx affected` needs the merge base, which a shallow checkout does not
+          # have.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Whether the diff reaches the npm distribution
+        id: affected
+        env:
+          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
+        run: echo "npm=$(bash scripts/nx-affected.sh --affects onepipeline-npm)" >> "$GITHUB_OUTPUT"
+
+  launcher:
+    name: npm launcher (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.npm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - run: just npm-launcher

@@ -15,14 +15,14 @@
 // is the engine: the PID the caller holds is the engine's, a signal sent to it
 // reaches the engine, and a process the engine starts sees the engine as its
 // parent — the process tree a PyPI or cargo install gives. A caller that marks
-// itself by the PID that execs the engine depends on exactly that.
+// itself by the PID that execs the engine depends on exactly that, so a Node.js
+// without `process.execve` (before 22.15 / 23.11) is refused there rather than
+// given a child process in the engine's place.
 //
-// Windows has no exec, and neither does a Node.js older than 22.15 / 23.11; there
-// the engine runs as this process's child (`supervise` below). This process
-// waits for it, leaves the Ctrl+C and Ctrl+Break a console delivers to the
-// engine as they are, passes a signal sent to this process alone on to the
-// engine as itself (outside Windows), exits with the engine's status, and ends
-// the engine rather than orphaning it when this process is ended — abruptly too.
+// Windows has no exec. There the engine runs under a keeper process this one
+// starts (`supervise` below): this process exits with the engine's status, the
+// Ctrl+C and Ctrl+Break a console delivers reach the engine as they are, and the
+// engine is ended rather than orphaned when this process is ended — abruptly too.
 //
 // This file is committed source; the version and the optionalDependency versions
 // are stamped from Cargo.toml at publish time by scripts/npm-build.mjs, which
@@ -96,84 +96,71 @@ function binaryPath() {
   }
 }
 
-// The signals a caller ends or interrupts a command with, Windows' Ctrl+Break
-// (SIGBREAK) among them.
-const RELAYED = ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"];
+// The console events a Windows console delivers to every process attached to
+// it, the engine included. The engine already has each one, as itself, so this
+// process and the keeper hold on through them and report what the engine does.
+const CONSOLE_EVENTS = ["SIGINT", "SIGBREAK", "SIGHUP"];
 
-// Run in a separate Node process for as long as the engine is this process's
-// child. Its stdin is a pipe only this process holds, so it reads end-of-file
-// the moment this process ends, however it ends — `TerminateProcess` and SIGKILL
-// included, where no handler of this process runs. It is told the engine's PID,
-// and is killed first when this process exits normally; end-of-file with a PID
-// and no kill means this process was ended under the engine, so it ends the
-// engine instead of leaving it running unowned.
-const WATCHER = `
-let told = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => { told += chunk; });
-const orphaned = () => {
-  const pid = Number.parseInt(told, 10);
-  if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch {} }
+// The keeper, a Node process this one starts with an IPC channel to it. It
+// starts the engine as its own child, so it knows the engine the moment the
+// engine exists, and tells this process the engine's status. The channel breaks
+// however this process ends — TerminateProcess included, where no handler of
+// this process runs — and the keeper then ends the engine: there is no moment
+// at which the engine runs and nothing that would end it knows it, however
+// early in its start this process is ended.
+const KEEPER = `
+const { spawn } = require("node:child_process");
+const [binary, ...args] = JSON.parse(process.argv[1]);
+for (const signal of ${JSON.stringify(CONSOLE_EVENTS)}) process.on(signal, () => {});
+const engine = spawn(binary, args, { stdio: "inherit" });
+process.on("disconnect", () => {
+  engine.kill("SIGKILL");
   process.exit(0);
-};
-process.stdin.on("error", () => {});
-process.stdin.on("close", orphaned);
+});
+const report = (message) => process.send(message, () => process.exit(0));
+engine.on("error", (error) => report({ error: error.message }));
+engine.on("exit", (code) => report({ status: code ?? 1 }));
 `;
 
-// The engine as this process's child, for where exec is not available.
+// The engine under a keeper, for Windows, which has no exec.
 function supervise(binary, args) {
-  // Detached, so neither a console's Ctrl+C nor a terminal's foreground-group
-  // signal ends it alongside this process: it has to outlive this process to
-  // do its one job.
-  const watcher = spawn(process.execPath, ["-e", WATCHER], {
-    stdio: ["pipe", "ignore", "ignore"],
-    detached: true,
-    windowsHide: true,
+  for (const signal of CONSOLE_EVENTS) process.on(signal, () => {});
+  const keeper = spawn(process.execPath, ["-e", KEEPER, JSON.stringify([binary, ...args])], {
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
   });
-  // llmlint: ignore-block[changed_behavior_has_e2e] a watcher that cannot start is
-  // Node failing to spawn its own executable, which no journey can stage without
-  // breaking the launcher too; the engine still runs, with nothing but orphan
-  // protection lost, rather than the command refusing to run at all.
-  watcher.on("error", () => {});
-  watcher.stdin.on("error", () => {});
-  // llmlint: ignore-end[changed_behavior_has_e2e]
-  watcher.unref();
-
-  const engine = spawn(binary, args, { stdio: "inherit" });
-  engine.on("error", (error) => {
-    watcher.kill();
-    fail(`failed to launch the onepipeline binary: ${error.message}`);
+  // Without a keeper nothing would end the engine if this process were ended,
+  // so no engine is started: the command refuses instead.
+  keeper.on("error", (error) =>
+    fail(
+      `could not start the process that keeps the onepipeline binary from outliving ` +
+        `this command, so the binary was not started: ${error.message}`,
+    ),
+  );
+  keeper.on("message", (message) => {
+    if (message.error) fail(`failed to launch the onepipeline binary: ${message.error}`);
+    // The engine's exit code verbatim — the contract assigns meaning to 1 and 2,
+    // and a caller reads them.
+    process.exit(message.status);
   });
-  if (engine.pid !== undefined) watcher.stdin.write(`${engine.pid}\n`);
-
-  for (const signal of RELAYED) {
-    // A console delivers Ctrl+C and Ctrl+Break to every process attached to it,
-    // the engine included, so on Windows the engine already has the very same
-    // interrupt and relaying it would only end the engine a second, harsher way;
-    // this process stays to report what the engine does with it. Elsewhere the
-    // signal reached this process alone — a `kill` of the PID the caller holds —
-    // so it is passed on as itself.
-    process.on(signal, () => {
-      if (process.platform !== "win32") engine.kill(signal);
-    });
-  }
-  engine.on("exit", (code, signal) => {
-    watcher.kill();
-    // Re-raise a terminating signal so callers observe the true cause; otherwise
-    // propagate the engine's exit code verbatim — the contract assigns meaning to
-    // 1 and 2, and a caller reads them.
-    if (signal) {
-      process.removeAllListeners(signal);
-      process.kill(process.pid, signal);
-    }
-    process.exit(code === null ? 1 : code);
-  });
+  keeper.on("disconnect", () =>
+    fail("the process keeping the onepipeline binary ended without reporting its status"),
+  );
 }
 
 const binary = binaryPath();
 const args = process.argv.slice(2);
 
-if (process.platform !== "win32" && typeof process.execve === "function") {
+if (process.platform === "win32") {
+  supervise(binary, args);
+} else {
+  if (typeof process.execve !== "function") {
+    fail(
+      `Node.js ${process.version} cannot run onepipeline from npm on ${process.platform}: ` +
+        "the command has to become the onepipeline binary's own process, which needs " +
+        "process.execve (Node.js 22.15+ or 23.11+). Upgrade Node.js, or " +
+        `${OTHER_INSTALLS.charAt(0).toLowerCase()}${OTHER_INSTALLS.slice(1)}`,
+    );
+  }
   // Node ignores SIGXFSZ, and an ignored signal survives exec while a handled
   // one returns to its default: handle it so the engine, and every program it
   // starts, begins with the disposition a shell would give it. (Node ignores
@@ -186,4 +173,3 @@ if (process.platform !== "win32" && typeof process.execve === "function") {
     fail(`failed to launch the onepipeline binary: ${error.message}`);
   }
 }
-supervise(binary, args);
