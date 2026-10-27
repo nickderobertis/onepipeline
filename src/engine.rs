@@ -1741,6 +1741,9 @@ fn converge(
             moved = true;
             crate::ordering::edits_taken()?;
         }
+        // Where a journey holds the pass past its own claim, so the claimer is what
+        // takes an envelope queued now.
+        crate::review::failpoint("after-claim")?;
         deliveries.publish();
         // A trigger's readjustment owed on this pass — a continuing launch's or an
         // adoption's, before its first dispatch — reads where every draft stands now.
@@ -3202,6 +3205,8 @@ impl InPass {
                 state.applied = true;
             }
             let id = envelope.id;
+            // Where a journey holds this claim mid-apply while the loop begins its next pass.
+            crate::review::failpoint("claimer-applying")?;
             // The same seam the loop's own processing of an envelope fails at.
             let applied = crate::review::failing(&format!("fail-envelope-{id}")).and_then(|()| {
                 reconcile_envelope(
