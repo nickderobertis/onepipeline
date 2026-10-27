@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.2](https://github.com/nickderobertis/onepipeline/compare/v0.95.1...v0.95.2) - 2026-10-27
+
+### Fixed
+
+- *(budgets)* count one task update per settlement write-back on every run ([#1229](https://github.com/nickderobertis/onepipeline/pull/1229))
+
 ## [0.95.1](https://github.com/nickderobertis/onepipeline/compare/v0.95.0...v0.95.1) - 2026-10-27
 
 ### Fixed
