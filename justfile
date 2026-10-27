@@ -551,9 +551,10 @@ _scratch-workload-run:
 # The `onepipeline-journal-workload` project's `workload` target: the release-built
 # driver adopts a synthesized run at each journal size of 1, 20, 80, 160 and 800 MB,
 # the journey writes `target/budget-records/journal-workload.json`, and the project's
-# own budgets file reads it. One size at a time, under one 24 GiB address-space bound
-# shared by everything the journey starts, so a driver that regrew its memory with
-# its journal fails its allocation rather than pressing a shared host into swap.
+# own budgets file reads it. One size at a time, each process the journey starts bounded
+# at 24 GiB of address space (`ulimit -v` bounds each process, not their sum), so a
+# driver that regrew its memory with its journal fails its allocation rather than
+# pressing a shared host into swap.
 # Through libtest rather than nextest, whose per-test bound (360 s, for the offline
 # tiers) is far under one journey of five sizes; the journey bounds each of its own
 # phases instead.

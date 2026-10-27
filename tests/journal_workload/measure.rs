@@ -733,6 +733,12 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
         std::thread::sleep(Duration::from_millis(100));
     }
     let (samples, liveness) = sampler.finish();
+    // The sampler stops when the driver's `/proc` entry goes; a driver gone before the
+    // idle window closed would leave its figures measured over less than they say.
+    assert!(
+        samples.last().is_some_and(|last| last.at_ms >= idle_to),
+        "the driver was not sampled through the idle window"
+    );
     let lines = journal.finish();
     let outcome_lines = outcomes.finish();
     world.release("observer.go");
@@ -895,4 +901,80 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
         "stop_exit": stopped.status.code(),
         "driver_exit": driver.try_wait().ok().flatten().map(|status| status.to_string()),
     })
+}
+
+/// The arithmetic every budget figure comes out of, held on inputs whose answer is known.
+mod arithmetic {
+    use super::*;
+
+    fn flush(at_ms: i64, passes: u64, cpu_ticks: u64) -> Sample {
+        Sample {
+            at_ms,
+            cpu_ticks,
+            hwm_kb: 0,
+            flush: Some((at_ms, passes)),
+        }
+    }
+
+    /// Nearest rank, rounding the rank up: of seven values the 50th percentile is the 4th
+    /// (rank 3.5) and the 95th the 7th (rank 6.65).
+    #[test]
+    fn percentiles_are_nearest_rank() {
+        let values: Vec<f64> = (1..=7).rev().map(f64::from).collect();
+        assert_eq!(
+            percentiles(&values),
+            json!({"n": 7, "p50": 4.0, "p95": 7.0, "max": 7.0})
+        );
+        assert_eq!(percentiles(&[]), json!({"n": 0}));
+    }
+
+    /// A mark is the double's three numbers after it, and text that only opens with the
+    /// mark is not one.
+    #[test]
+    fn an_activity_mark_is_its_three_numbers() {
+        assert_eq!(
+            mark_in(&format!("{ACTIVITY_MARK} 7 1793054097026 4242")),
+            Some((7, 1_793_054_097_026, 4242))
+        );
+        assert_eq!(mark_in("The quickest proof is to run it."), None);
+        let block =
+            json!({"message": {"content": [{"thinking": format!("{ACTIVITY_MARK} 1 2 3")}]}});
+        assert_eq!(marked_text(&block).and_then(mark_in), Some((1, 2, 3)));
+    }
+
+    #[test]
+    #[should_panic(expected = "an activity mark that is not three numbers")]
+    fn a_truncated_activity_mark_fails_the_measurement() {
+        mark_in(&format!("{ACTIVITY_MARK} 7 1793054097026"));
+    }
+
+    /// Two flushes bracket the passes between them and one channel wait: a pass's time is
+    /// the interval less that wait over the passes, its CPU the ticks over the passes, and
+    /// a bracket outside the window or holding no pass counts nothing.
+    #[test]
+    fn a_pass_is_its_bracket_less_one_channel_wait() {
+        let samples = [
+            flush(0, 0, 0),
+            flush(1_200, 1, 10),
+            flush(1_600, 3, 30),
+            flush(1_800, 3, 31),
+            flush(9_000, 4, 40),
+        ];
+        let measured = passes(&samples, 0, 2_000, 100.0);
+        assert_eq!(measured["count"], 3);
+        assert_eq!(
+            measured["ms"],
+            json!({"n": 2, "p50": 100.0, "p95": 1000.0, "max": 1000.0})
+        );
+        let cpu = measured["cpu_s_per_pass"].as_f64().unwrap();
+        assert!((cpu - 0.1).abs() < 1e-9, "{cpu}");
+    }
+
+    /// CPU over a window is the difference of the samples taken at or before either end.
+    #[test]
+    fn cpu_over_a_window_is_between_its_samples() {
+        let samples = [flush(0, 0, 100), flush(500, 0, 150), flush(1_000, 0, 400)];
+        assert_eq!(cpu_between(&samples, 500, 1_000, 100.0), 2.5);
+        assert_eq!(cpu_between(&samples, 600, 999, 100.0), 0.0);
+    }
 }

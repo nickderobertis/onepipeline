@@ -5,6 +5,9 @@ import { report } from "@onebudgetspec/sdk";
 // `tests/journal_workload/main.rs`, and this one reader run back to back over one tree in
 // the `workload` target, so a drifted field throws here or reaches onebudgetspec as a
 // missing or non-finite result, which it refuses.
+// llmlint: ignore-block[changed_behavior_has_e2e] the `onepipeline-journal-workload:workload`
+// target drives it end to end: the journey writes the recording, then `onebudgetspec check`
+// runs this, its only interface, and refuses a figure over its threshold by name.
 // llmlint: ignore-block[boundary_inputs_validated] onebudgetspec owns validating what a
 // reported budget's command hands it: presence, shape, finiteness and the threshold.
 // This analysis only reads the journey's recording, written by
@@ -58,3 +61,4 @@ report(
 );
 // llmlint: ignore-end[boundary_inputs_validated]
 // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+// llmlint: ignore-end[changed_behavior_has_e2e]

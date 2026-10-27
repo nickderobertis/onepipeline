@@ -84,7 +84,8 @@ pub fn world_at(root: &Path, seed: u64) -> (World, generate::Paths, Value) {
     let store_project = world.plan(RUN, &plan);
     let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
         .map(|host| host.trim().to_owned())
-        .unwrap_or_else(|_| "localhost".into());
+        .expect("the kernel names this host");
+    assert!(!host.is_empty(), "the kernel names this host as nothing");
     let paths = generate::Paths {
         runs: world.runs.clone(),
         project: world.project.clone(),
@@ -136,8 +137,8 @@ pub fn checkpoint(world: &World, binary: &Path) {
 }
 
 /// One size twice from one seed into one world writes byte-identical files: the
-/// generator is a pure function of its seed, so every size this workload measures is
-/// the same run on every host.
+/// generator is a pure function of its seed and the world's paths, so a size measured
+/// twice at one root on one host is the same run both times.
 #[test]
 fn one_seed_generates_one_run() {
     let root = root(1);
