@@ -101,26 +101,31 @@ pub fn world_at(root: &Path, seed: u64) -> (World, generate::Paths, Value) {
 /// Every file of a directory, by its path inside it, with its bytes' sha256.
 fn digests(dir: &Path) -> std::collections::BTreeMap<String, String> {
     use sha2::Digest;
-    let mut out = std::collections::BTreeMap::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(at) = stack.pop() {
-        for entry in std::fs::read_dir(&at).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                let name = path.strip_prefix(dir).unwrap().display().to_string();
-                let digest = sha2::Sha256::digest(std::fs::read(&path).unwrap());
-                out.insert(name, format!("{digest:x}"));
-            }
-        }
-    }
-    out
+    files_under(dir)
+        .into_iter()
+        .map(|path| {
+            let name = path.strip_prefix(dir).unwrap().display().to_string();
+            let digest = sha2::Sha256::digest(std::fs::read(&path).unwrap());
+            (name, format!("{digest:x}"))
+        })
+        .collect()
 }
 
-/// Write the run's checkpoint the way the build under test writes one: by opening the
-/// run with its own read verb, which folds the journal and leaves `checkpoint.json`.
+/// The checkpoint a run onepipeline v0.75.0 drove leaves: `tests/golden/checkpoint-v13.json`
+/// is that schema's checked-in shape, and the one source of it here.
+const CHECKPOINT_V13: &str = include_str!("../golden/checkpoint-v13.json");
+
+/// Leave the run the schema-13 `checkpoint.json` v0.75.0 would have, folded over its
+/// generated journal.
+///
+/// The fold is the build under test's own: its `status` folds the journal and writes its
+/// checkpoint at its own schema. That document is then cut to the keys the schema-13
+/// golden holds, at the top and in its state, and relabelled 13, so it holds no key that
+/// schema lacks. Whatever else `status` left
+/// in the run's directory is removed, so the run is in the shape that release leaves.
 pub fn checkpoint(world: &World, binary: &Path) {
+    let dir = world.run_file(RUN, "");
+    let before: std::collections::BTreeSet<PathBuf> = files_under(&dir).into_iter().collect();
     let output = world
         .agentgraph_cmd_on(binary, &["status", RUN])
         .output()
@@ -130,10 +135,62 @@ pub fn checkpoint(world: &World, binary: &Path) {
         "status: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        world.run_file(RUN, "checkpoint.json").is_file(),
-        "status wrote no checkpoint"
+    let path = world.run_file(RUN, "checkpoint.json");
+    let written: Value = serde_json::from_slice(
+        &std::fs::read(&path).unwrap_or_else(|error| panic!("status wrote no checkpoint: {error}")),
+    )
+    .expect("the build's checkpoint is JSON");
+    for file in files_under(&dir) {
+        if file != path && !before.contains(&file) {
+            std::fs::remove_file(&file).unwrap();
+        }
+    }
+    let golden: Value = serde_json::from_str(CHECKPOINT_V13).unwrap();
+    let keys = |doc: &Value| -> std::collections::BTreeSet<String> {
+        doc.as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    // A key the build left out is one it holds empty, which every schema leaves out.
+    let cut = |doc: &Value,
+               keep: &std::collections::BTreeSet<String>|
+     -> serde_json::Map<String, Value> {
+        doc.as_object()
+            .expect("an object")
+            .iter()
+            .filter(|(key, _)| keep.contains(*key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    };
+    let mut frozen = cut(&written, &keys(&golden));
+    frozen.insert(
+        "state".into(),
+        Value::Object(cut(&written["state"], &keys(&golden["state"]))),
     );
+    frozen.insert("schema_version".into(), golden["schema_version"].clone());
+    let frozen = Value::Object(frozen);
+    assert!(keys(&frozen).is_subset(&keys(&golden)));
+    assert!(keys(&frozen["state"]).is_subset(&keys(&golden["state"])));
+    std::fs::write(&path, serde_json::to_vec(&frozen).unwrap()).unwrap();
+}
+
+/// Every file under `dir`, at any depth.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(at) = stack.pop() {
+        for entry in std::fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
 }
 
 /// One size twice from one seed into one world writes byte-identical files: the

@@ -434,12 +434,14 @@ impl Sampler {
         }
     }
 
-    fn passed(&self) -> bool {
+    /// When the driver wrote the first `loop-stats.json` that counts a finished pass: the
+    /// file's own modification instant, not when this sampler next looked at it.
+    fn first_pass(&self) -> Option<i64> {
         self.samples
             .lock()
             .unwrap()
             .iter()
-            .any(|s| s.flush.is_some_and(|(_, passes)| passes > 0))
+            .find_map(|s| s.flush.filter(|(_, passes)| *passes > 0).map(|(at, _)| at))
     }
 
     fn finish(mut self) -> (Vec<Sample>, Liveness) {
@@ -505,12 +507,19 @@ fn ticks_per_second() -> f64 {
     }
 }
 
+/// What a reconcile-pass figure is: the engine counts passes and times none of them.
+const PASS_BASIS: &str = "flush-interval averages: for each observed interval between two \
+    loop-stats.json flushes that counted a pass, the interval less one 200 ms channel wait \
+    over the passes it counted; not per-pass percentiles";
+
 /// The reconcile passes the loop-stats flushes inside `[from, to)` bracket.
 ///
-/// The driver flushes at every wait, so two consecutive flushes bracket the passes run
-/// between them and at most one channel wait: one pass's time is the interval, less one
-/// [`CHANNEL_POLL_MS`], over the passes it holds. Its CPU is the whole process's ticks
-/// over that interval.
+/// The driver flushes at every wait, so two consecutive flushes this sampler saw bracket
+/// the passes run between them and at least one channel wait. The engine times no pass,
+/// so each interval yields one **average**: the interval, less one [`CHANNEL_POLL_MS`],
+/// over the passes it holds, and the spread is over those averages, labelled
+/// [`PASS_BASIS`] with the intervals and the passes behind it. Its CPU is the whole
+/// process's ticks over the bracketed intervals, per pass.
 fn passes(samples: &[Sample], from: i64, to: i64, tick: f64) -> Value {
     let flushes: Vec<(i64, u64, u64)> = samples
         .iter()
@@ -530,8 +539,10 @@ fn passes(samples: &[Sample], from: i64, to: i64, tick: f64) -> Value {
         walls.push(((t1 - t0) as f64 - CHANNEL_POLL_MS).max(0.0) / n as f64);
     }
     json!({
+        "basis": PASS_BASIS,
         "count": count,
-        "ms": percentiles(&walls),
+        "intervals": walls.len(),
+        "interval_average_ms": percentiles(&walls),
         "cpu_s_per_pass": if count == 0 { 0.0 } else { cpu_ticks as f64 / tick / count as f64 },
     })
 }
@@ -678,9 +689,9 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
     let sampler = Sampler::start(driver.id(), run_dir.clone());
 
     until("the adopting driver's first finished pass", || {
-        sampler.passed()
+        sampler.first_pass().is_some()
     });
-    let first_pass_ms = now_ms();
+    let first_pass_ms = sampler.first_pass().unwrap();
     until("the four live nodes' turns", || {
         journal.count(|s| s.kind == "turn-started" && is_live(s.node.as_deref()))
             >= LIVE_NODES.len()
@@ -863,7 +874,9 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
             "checkpoint_bytes": checkpoint_bytes,
             "checkpoint_schema": checkpoint_doc["schema_version"],
         },
-        "to_first_pass_s": (first_pass_ms - spawned_ms) as f64 / 1000.0,
+        "to_first_pass_flush_s": (first_pass_ms - spawned_ms) as f64 / 1000.0,
+        "to_first_pass_flush_basis": "from spawning the adopting driver to the modification \
+            instant of the first loop-stats.json that counts a finished pass",
         "to_four_dispatches_s": (dispatched_ms - spawned_ms) as f64 / 1000.0,
         "pass": passes(&samples, spawned_ms, idle_to, tick),
         "event_delay_ms": percentiles(&delays),
@@ -890,6 +903,10 @@ pub fn measure(binary: &Path, root: &Path, size_mb: u64, seed: u64) -> Value {
                 .collect::<serde_json::Map<_, _>>(),
             "liveness_bytes": liveness_bytes,
             "other_bytes": other_bytes,
+            "other_kinds": kinds.iter()
+                .filter(|(kind, _)| !is_liveness(kind))
+                .map(|(kind, (n, b))| (kind.clone(), json!({"count": n, "bytes": b})))
+                .collect::<serde_json::Map<_, _>>(),
             "liveness_json_bytes": liveness.largest,
             "bytes_per_member_hour": per_member_hour,
         },
@@ -962,8 +979,9 @@ mod arithmetic {
         ];
         let measured = passes(&samples, 0, 2_000, 100.0);
         assert_eq!(measured["count"], 3);
+        assert_eq!(measured["intervals"], 2);
         assert_eq!(
-            measured["ms"],
+            measured["interval_average_ms"],
             json!({"n": 2, "p50": 100.0, "p95": 1000.0, "max": 1000.0})
         );
         let cpu = measured["cpu_s_per_pass"].as_f64().unwrap();

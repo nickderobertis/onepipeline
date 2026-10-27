@@ -19,14 +19,18 @@ const recording = JSON.parse(
 const ms = (value) => `${Math.round(value)} ms`;
 const spread = (p, unit = ms) =>
   p.n ? `p50 ${unit(p.p50)}, p95 ${unit(p.p95)}, max ${unit(p.max)} of ${p.n}` : "none";
-const passes = (size) => `passes ${size.pass.count} (${spread(size.pass.ms)})`;
+const passes = (size) =>
+  `reconcile passes ${size.pass.count}, pass time as flush-interval averages over ` +
+  `${size.pass.intervals} intervals, not per-pass percentiles ` +
+  `(${spread(size.pass.interval_average_ms)})`;
 
 const budgets = {
   "event-delay": [
     (size) => size.event_delay_ms.p95,
     (size) =>
       `delay ${spread(size.event_delay_ms)} over ${size.activity.emitted} records; ` +
-      `first pass ${size.to_first_pass_s.toFixed(1)} s after adoption; ${passes(size)}`,
+      `first loop-stats flush counting a pass ${size.to_first_pass_flush_s.toFixed(1)} s ` +
+      `after adoption; ${passes(size)}`,
   ],
   "envelope-latency": [
     (size) => size.envelope_latency_ms.p95,
@@ -46,7 +50,8 @@ const budgets = {
     (size) =>
       `${size.liveness.heartbeats} heartbeats, ${size.liveness.liveness_bytes} B of liveness ` +
       `kinds ${JSON.stringify(size.liveness.kinds)}, ${size.liveness.other_bytes} B of other ` +
-      `kinds, liveness.json ${size.liveness.liveness_json_bytes} B`,
+      `kinds ${JSON.stringify(size.liveness.other_kinds)}, ` +
+      `liveness.json ${size.liveness.liveness_json_bytes} B`,
   ],
 };
 
