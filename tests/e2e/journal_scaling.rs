@@ -41,6 +41,28 @@ fn release_the_pass(seam: &Path) {
     let _ = std::fs::remove_file(seam.join("before-claim"));
     std::fs::write(seam.join("before-claim.release"), "").expect("the pass is released");
 }
+
+/// Arm one failpoint, so the driver holds there the next time it reaches it.
+fn arm(seam: &Path, stage: &str) {
+    std::fs::write(seam.join(stage), "").expect("the seam is armed");
+}
+
+/// Whether the driver has reached an armed failpoint.
+fn reached(seam: &Path, stage: &str) -> bool {
+    seam.join(format!("{stage}.reached")).is_file()
+}
+
+/// Hold one failpoint the driver reaches on each pass while armed, until it is reached.
+fn hold_at(world: &World, seam: &Path, stage: &str, what: &str) {
+    arm(seam, stage);
+    world.until(what, |_| reached(seam, stage));
+}
+
+/// Let whatever is held at `stage` go on, and stop holding there.
+fn release_at(seam: &Path, stage: &str) {
+    let _ = std::fs::remove_file(seam.join(stage));
+    std::fs::write(seam.join(format!("{stage}.release")), "").expect("the stage is released");
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The variable asking every process the binary starts to report where it read a
@@ -223,18 +245,6 @@ fn a_settle_queued_while_the_pass_is_held_is_answered_before_the_pass_is_release
     world.release("build.go");
 }
 
-/// Hold one failpoint the driver reaches on each pass while armed, until it is reached.
-fn hold_at(world: &World, seam: &Path, stage: &str, what: &str) {
-    std::fs::write(seam.join(stage), "").expect("the seam is armed");
-    world.until(what, |_| seam.join(format!("{stage}.reached")).is_file());
-}
-
-/// Let whatever is held at `stage` go on, and stop holding there.
-fn release_at(seam: &Path, stage: &str) {
-    let _ = std::fs::remove_file(seam.join(stage));
-    std::fs::write(seam.join(format!("{stage}.release")), "").expect("the stage is released");
-}
-
 /// A `settle` the claimer is still applying when the loop's next pass begins is
 /// folded by that pass all the same, and the node it readied starts without
 /// anything else about the run moving.
@@ -272,7 +282,7 @@ fn a_settle_the_claimer_is_still_applying_as_a_pass_begins_is_folded_by_that_pas
 
     // The pass held past its own claim, so the claimer takes what is queued now —
     // and is held in turn, having claimed the settle and not yet applied it.
-    std::fs::write(seam.join("claimer-applying"), "").expect("the seam is armed");
+    arm(&seam, "claimer-applying");
     hold_at(
         &world,
         &seam,
@@ -287,15 +297,15 @@ fn a_settle_the_claimer_is_still_applying_as_a_pass_begins_is_folded_by_that_pas
     std::thread::scope(|scope| {
         let replying = scope.spawn(|| world.run_with_stdin(&["reply", run], &settle));
         world.until("the claimer to be holding the settle", |_| {
-            seam.join("claimer-applying.reached").is_file()
+            reached(&seam, "claimer-applying")
         });
 
         // The held pass ends and the next one begins, holding at its own claim: it
         // began while the claimer was still applying.
-        std::fs::write(seam.join("before-claim"), "").expect("the seam is armed");
+        arm(&seam, "before-claim");
         release_at(&seam, "after-claim");
         world.until("the next pass to begin while the settle is applied", |_| {
-            seam.join("before-claim.reached").is_file()
+            reached(&seam, "before-claim")
         });
         release_at(&seam, "claimer-applying");
         let replied = replying.join().expect("the reply thread");
