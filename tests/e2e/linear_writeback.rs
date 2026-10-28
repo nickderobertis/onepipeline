@@ -1958,6 +1958,24 @@ fn a_private_linear_home_keeps_public_projections_after_a_live_add() {
     world.until("the anchor to dispatch", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });
+    world.until(
+        "the initial claim and anchor projection to finish",
+        |world| {
+            projection_records(world, name).iter().any(|record| {
+                record["outcome"] == "projected" && record.to_string().contains("anchor")
+            }) && world.run_json(name, onepipeline::cli::WRITEBACK_LANDED_FILE)["items"]["anchor"]
+                ["status"]
+                == "in progress"
+        },
+    );
+    // An existing home's original Markdown can predate Linear's normalization. Keep
+    // its current metadata and claim, but seed that persisted body before the live add.
+    // Only actual GraphQL writes normalize it, using the measured rewrites above.
+    linear.seed_project_content(
+        linear
+            .project_content()
+            .replace("* Keep this home private.", "- Keep this home private."),
+    );
     let mut node = crate::harness::agent("examples", &[]);
     node["repo"] = json!("github.com/owner/library");
     node["classification"] = json!("public");

@@ -369,6 +369,12 @@ impl Linear {
             .unwrap_or_default()
     }
 
+    /// Seed an existing persisted representation. Later GraphQL writes apply Linear's
+    /// current Markdown normalization, even when an older representation read unchanged.
+    pub fn seed_project_content(&self, content: String) {
+        self.lock().project_content = content;
+    }
+
     /// The project content after Linear has stored every write.
     pub fn project_content(&self) -> String {
         self.lock().project_content.clone()
