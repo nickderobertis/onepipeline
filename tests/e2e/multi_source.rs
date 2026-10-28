@@ -37,7 +37,7 @@ fn root_of(world: &World, source: &str) -> PathBuf {
 /// A world whose plan source routes [`ROUTED`] to [`MEMBERS`], with a draft source beside both.
 fn a_routed_world(name: &str) -> World {
     let plans = STORE_SOURCE.to_uppercase();
-    a_two_source_world(name)
+    a_world_with_members_and_draft(name)
         .with_env(
             &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__TO"),
             MEMBERS,
@@ -49,7 +49,7 @@ fn a_routed_world(name: &str) -> World {
 }
 
 /// A world with [`MEMBERS`] and [`DRAFT`] configured beside the plan source, and no routes.
-fn a_two_source_world(name: &str) -> World {
+fn a_world_with_members_and_draft(name: &str) -> World {
     let world = World::new(name);
     let mut configured = world;
     for source in [MEMBERS, DRAFT] {
@@ -1428,7 +1428,7 @@ const OWNER: &str = "github.com/owner/*";
 /// one combined entry, `{repositories: [owner/*], classification: private, to: members}`.
 fn a_combined_world(name: &str, combined: bool) -> World {
     let plans = STORE_SOURCE.to_uppercase();
-    let mut world = a_two_source_world(name)
+    let mut world = a_world_with_members_and_draft(name)
         .with_env(
             &format!("ONETASKGRAPH_SOURCES__{plans}__VISIBILITY"),
             "public",
