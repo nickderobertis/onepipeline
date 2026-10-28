@@ -4,7 +4,7 @@
 // mirrors esbuild/@biomejs and every other "carry the native binary" npm tool:
 //
 //   onepipeline-cli                 launcher (npm/onepipeline-cli, committed)
-//     bin/onepipeline.js            resolves + execs the platform binary
+//     bin/onepipeline.js            resolves + starts the platform binary
 //     optionalDependencies:           one per Rust target a release.yml build job builds
 //       onepipeline-cli-linux-x64
 //       onepipeline-cli-linux-arm64

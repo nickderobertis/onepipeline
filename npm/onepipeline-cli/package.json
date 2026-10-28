@@ -24,7 +24,7 @@
     "bin/onepipeline.js"
   ],
   "engines": {
-    "node": ">=18"
+    "node": "^22.15.0 || >=23.11.0"
   },
   "optionalDependencies": {
     "onepipeline-cli-linux-x64": "0.0.0-managed",

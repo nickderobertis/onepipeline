@@ -3,84 +3,18 @@
 //
 // Nothing here is stubbed. `scripts/npm-build.mjs` assembles the real packages
 // around the real compiled binary, `npm install` resolves them, and the launcher
-// resolves the platform package and execs the binary. Publishing to a registry
+// resolves the platform package and starts the binary. Publishing to a registry
 // is `tests/release_journeys/release-linux.journey.mjs`'s, against a local one, and each
 // release's build jobs install what the real npm serves.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 import { assertSbomShape } from "./sbom-support.mjs";
-
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-
-/// The Rust target triple for the host this test runs on — the one platform
-/// package that can carry a binary this machine can execute.
-function hostTarget() {
-  const key = `${process.platform}-${process.arch}`;
-  const targets = {
-    "linux-x64": "x86_64-unknown-linux-gnu",
-    "linux-arm64": "aarch64-unknown-linux-gnu",
-    "darwin-arm64": "aarch64-apple-darwin",
-    "win32-x64": "x86_64-pc-windows-msvc",
-  };
-  const target = targets[key];
-  assert.ok(target, `no prebuilt npm package exists for ${key}`);
-  return target;
-}
-
-// The staged release builds compile the crate for an explicit `--target`, which
-// takes minutes from cold. In the shared `target/` they would hold its build lock
-// all that time, and a test elsewhere in the gate building into `target/debug`
-// (`tests/build_config.rs`) timed out waiting behind them. Their own directory
-// keeps them out of that lock and still reuses its build on the next run.
-const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
-
-function run(command, args, options = {}) {
-  return execFileSync(command, args, {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    ...options,
-    env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
-  });
-}
-
-/// Pack a package directory into the tarball the registry would serve.
-///
-/// Installing the directory instead would symlink it, and node resolves a
-/// symlinked package's dependencies from its *realpath* — so the launcher would
-/// look for its platform package beside the build output rather than in the
-/// project's node_modules, and never find it. A tarball is both the real shape
-/// and the one `release.yml` publishes.
-function pack(dir, into) {
-  const packed = JSON.parse(
-    run("npm", ["pack", "--json", "--pack-destination", into, dir], {
-      stdio: ["ignore", "pipe", "ignore"],
-    }),
-  );
-  assert.equal(packed.length, 1, "npm pack must produce exactly one tarball");
-  return join(into, packed[0].filename);
-}
-
-/// Install the given packed packages into a throwaway project.
-/// `--omit=optional` keeps npm from reaching the registry for the launcher's
-/// per-platform pins, which exist only once a release has published them: the
-/// platform package under test is passed explicitly instead when it is wanted.
-function installInto(project, packages) {
-  run("npm", [
-    "install",
-    "--prefix",
-    project,
-    "--no-audit",
-    "--no-fund",
-    "--omit=optional",
-    ...packages,
-  ]);
-}
+import { REPO_ROOT, hostTarget, installInto, pack, run } from "./install-support.mjs";
 
 /// Invoke the installed launcher, returning its exit code, stdout, and stderr.
 function launch(project, args) {

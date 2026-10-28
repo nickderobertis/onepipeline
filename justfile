@@ -501,6 +501,15 @@ smoke-real:
 _smoke-run *args:
     @cargo nextest run --locked -E 'binary(smoke)' --no-capture --status-level all "$@"
 
+# The npm launcher's process-tree journeys alone: what the installed command
+# runs as, on the host this runs on. One file of the `onepipeline-npm` project's
+# `test`, which `check` runs on Linux; `.github/workflows/launcher.yml` (Windows)
+# and `ci.yml`'s Mac lane call this, where `check` never runs and the launcher
+# takes paths Linux cannot reach. The engine it builds denies warnings, as every
+# build the gate makes does.
+npm-launcher:
+    @RUSTFLAGS="-D warnings" node --test npm/test/launcher-process.test.mjs
+
 # Outside `check` and `gate` because uv fetches the wheel from a package
 # registry; CI's `release-compat` job calls this, and without uv it fails naming
 # it. It runs the `onepipeline-release-compat` project's uncached target, which

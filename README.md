@@ -37,7 +37,7 @@ refuse too; the composition layer itself is complete.
 
 ```bash
 pip install onepipeline-cli      # prebuilt binary, no Rust toolchain
-npm install -g onepipeline-cli   # the same binary, via npm
+npm install -g onepipeline-cli   # the same binary, via npm (Node.js 22.15+ or 23.11+)
 cargo install onepipeline        # from crates.io, compiled locally
 ```
 
@@ -65,7 +65,7 @@ from source with the command above.
 binary lives in a per-platform package the launcher pins to an exact version and
 npm installs as an *optional* dependency — and **an install silently skips an
 optional dependency it cannot resolve**, leaving an `onepipeline` on `PATH` with
-nothing to exec.
+nothing to run.
 
 **`npm publish` exiting 0 means the registry accepted the upload, not that it
 serves the version.** The gap was measured at 75 seconds on one release, around

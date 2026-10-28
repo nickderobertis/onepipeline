@@ -2,10 +2,20 @@
 
 `onepipeline-cli` on npm is a **launcher** that carries no binary: the prebuilt
 binary ships in a per-platform package (`onepipeline-cli-<platform>-<arch>`)
-that npm selects by `os`/`cpu`, and `bin/onepipeline.js` resolves it and execs
+that npm selects by `os`/`cpu`, and `bin/onepipeline.js` resolves it and starts
 it with the caller's argv.
 
-Five places name that platform matrix and must move together:
+**The installed command is the engine's process, not a parent of it.** On Linux
+and macOS the PID a caller holds must be the engine's: a caller that marks itself
+by the PID that execs the engine re-entered itself without end while the launcher
+was a child-spawning parent. So `engines.node` is the first Node.js with
+`process.execve` (22.15 / 23.11), and an older one is refused, never given a
+child process instead. Windows has no exec: there the engine's status and
+interrupts pass through and no engine outlives the launcher, on any Node.js.
+`npm/test/launcher-process.test.mjs` holds both; CI enforces it on Linux and
+macOS and runs it on Windows in the advisory `launcher.yml`.
+
+Five places name the platform matrix and must move together:
 
 1. `bin/onepipeline.js`'s `PACKAGES` map,
 2. `package.json`'s `optionalDependencies`,
@@ -31,7 +41,7 @@ system, so there is nothing for one to check.
 
 No ESLint `enforce-module-boundaries` rule over the project tags. The two
 projects share no imports — one is a Rust crate, the other a launcher that
-`exec`s its binary — so it would mean adding ESLint to a repo whose JavaScript
+starts its binary — so it would mean adding ESLint to a repo whose JavaScript
 is linted by Biome, purely to enforce a boundary nothing can cross.
 
 No third Nx project for the PyPI wheel. maturin builds it from the same crate,
