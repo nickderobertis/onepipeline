@@ -5297,6 +5297,10 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
 /// Settlement may precede the delivery answer; that answer commits the note and
 /// then replays witnessed turns into separate `note-shown` appends.
 fn assert_judge_note_worker_presentation(world: &World, run: &str) {
+    world.until(
+        "the driver to finish recording the note's presentations",
+        |world| !world.run_file(run, "owner.lock").exists(),
+    );
     let shown = presentations_of(world, run, "build");
     assert_eq!(
         shown
