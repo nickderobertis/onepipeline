@@ -62,6 +62,25 @@ export function profileTable(text) {
   const platforms = Object.fromEntries(
     ["local", "linux", "macos", "windows"].map((name) => [name, new Map()]),
   );
+  const header = section.split("\n").find((line) => line.startsWith("| module |"));
+  if (!header) throw new Error("profile table has no timing header");
+  const columns = header.split("|").map((cell) => cell.trim());
+  if (columns.length !== 12 || columns[2] !== "tests" || new Set(columns.slice(1, -1)).size !== 10)
+    throw new Error("invalid timing header");
+  const labels = {
+    local: /^local Linux s \([0-9a-f]+\)$/,
+    linux: /^CI Linux s$/,
+    macos: /^macOS s$/,
+    windows: /^Windows s$/,
+  };
+  const positions = Object.fromEntries(
+    Object.entries(labels).map(([platform, label]) => {
+      const matches = columns.flatMap((cell, index) => (label.test(cell) ? [index] : []));
+      if (matches.length !== 1)
+        throw new Error(`invalid timing header: expected one ${platform} seconds column`);
+      return [platform, matches[0]];
+    }),
+  );
   let rows = 0;
   const seen = new Set();
   for (const line of section.split("\n")) {
@@ -73,8 +92,8 @@ export function profileTable(text) {
     if (seen.has(cells[1])) throw new Error(`duplicate timing module: ${cells[1]}`);
     rows++;
     seen.add(cells[1]);
-    for (const [index, platform] of Object.keys(platforms).entries()) {
-      const cell = cells[index + 3];
+    for (const platform of Object.keys(platforms)) {
+      const cell = cells[positions[platform]];
       if (cell === "–") continue;
       if (!/^\d+$/.test(cell ?? "") || !Number.isSafeInteger(Number(cell)))
         throw new Error(`invalid ${platform} seconds for ${cells[1]}: ${cell}`);
@@ -123,7 +142,7 @@ export function evidence(
 ) {
   const layout = JSON.parse(readFileSync(layoutPath, "utf8"));
   const graph = moduleGraph(root);
-  validate(layout, graph);
+  validate(layout, graph, root);
   const changes = mergedChanges(root, {
     ref: "origin/main",
     since: "2026-09-15T00:00:00Z",

@@ -156,7 +156,7 @@ export function assertAcyclic(crates) {
 }
 
 /** Validate exact file ownership and account for every source edge across crates. */
-export function validate(mapping, graph) {
+export function validate(mapping, graph, root = ".") {
   const object = (value, keys, where) => {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new Error(`${where} must be an object`);
@@ -210,9 +210,25 @@ export function validate(mapping, graph) {
           throw new Error(`suite ${name}: unknown crate ${crate}`);
       if (suite.reason !== undefined && typeof suite.reason !== "string")
         throw new Error(`${name}.reason must be text`);
+      if (field === "suites" && suite.modules === undefined)
+        throw new Error(`${name}.modules is required for a timed suite`);
       if (suite.modules !== undefined) {
         strings(suite.modules, `${name}.modules`);
+        if (field === "suites" && suite.modules.length === 0)
+          throw new Error(`${name}.modules must not be empty`);
+        const declared =
+          field === "suites"
+            ? new Set(
+                [
+                  ...readFileSync(join(root, "tests/e2e/main.rs"), "utf8").matchAll(
+                    /^mod (\w+);/gm,
+                  ),
+                ].map((match) => match[1]),
+              )
+            : null;
         for (const module of suite.modules) {
+          if (!/^[a-z][a-z0-9_]*$/.test(module) || (declared && !declared.has(module)))
+            throw new Error(`suite ${name}: unknown test module ${module}`);
           if (owned.has(module)) throw new Error(`duplicate suite module: ${module}`);
           owned.add(module);
         }

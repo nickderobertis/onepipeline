@@ -8,6 +8,9 @@ import { affectedSuites, compileMapping } from "../../scripts/crate-split-replay
 import { moduleGraph } from "../../scripts/modularization/graph.mjs";
 import { replayMapping, buildReport } from "../../scripts/modularization/replay.mjs";
 
+const timingHeader =
+  "| module | tests | local Linux s (7a017fa) | CI Linux s | macOS s | Windows s | spawn | wait | build | proposal |";
+
 const scratch = () =>
   mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "modularization-"));
 const put = (root, path, value) => {
@@ -72,6 +75,31 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
     layout.suites = { status: { paths: [], crates: ["command"], typo: true } };
     put(root, "layout.json", layout);
     assert.match(run().stderr, /unknown suite status field: typo/);
+    layout.suites = { status: { paths: [], crates: ["command"] } };
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /modules is required/);
+    put(root, "tests/e2e/main.rs", "mod harness;\nmod status;\n");
+    layout.suites.status.modules = ["unknown"];
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /unknown test module unknown/);
+    layout.suites.status.modules = ["status"];
+    layout.edges = { "command->record": { kind: "shared", fix: "Shared record." } };
+    layout.auxiliarySuites = {
+      contract: {
+        paths: ["tests/contract/**"],
+        crates: ["command"],
+        reason: "Full facade assertions.",
+      },
+    };
+    put(root, "layout.json", layout);
+    assert.equal(run().status, 0);
+    layout.auxiliarySuites.contract.crates = ["absent"];
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /unknown crate absent/);
+    layout.auxiliarySuites.contract.crates = ["command"];
+    layout.auxiliarySuites.contract.paths = "invalid";
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /contract.paths/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -85,22 +113,37 @@ test("source graph ignores literal/comment dependencies and sees grouped imports
       "src/a.rs",
       'use crate::{b::{Thing}, c};\n// crate::d::x\nconst S: &str = "crate::d::x"; /* outer /* inner */ crate::d::hidden */ const RAW: &str = r##"crate::d::hidden"##;',
     );
-    for (const name of ["b", "c", "d"]) put(root, `src/${name}.rs`, "");
+    put(
+      root,
+      "src/a.rs",
+      readFileSync(join(root, "src/a.rs"), "utf8") +
+        "\nfn borrow<'a>(value: &'a str) { let quote = '\\''; let slash = '\\\\'; let newline = '\\n'; crate::c::use_it(); }",
+    );
+    put(
+      root,
+      "src/a.rs",
+      readFileSync(join(root, "src/a.rs"), "utf8") +
+        String.raw`
+fn quoted<'life>(v: &'life str) { let double = '"'; crate::e::real(); }`,
+    );
+    for (const name of ["b", "c", "d", "e"]) put(root, `src/${name}.rs`, "");
     assert.deepEqual(
       moduleGraph(root).edges.map(({ from, to }) => `${from}->${to}`),
-      ["a->b", "a->c"],
+      ["a->b", "a->c", "a->e"],
     );
     put(root, "layout.json", {
       schema: 1,
       crates: {
-        a: { files: ["src/a.rs"], deps: ["b", "c"] },
+        a: { files: ["src/a.rs"], deps: ["b", "c", "e"] },
         b: { files: ["src/b.rs"], deps: [] },
         c: { files: ["src/c.rs"], deps: [] },
         d: { files: ["src/d.rs"], deps: [] },
+        e: { files: ["src/e.rs"], deps: [] },
       },
       edges: {
         "a->b": { kind: "shared", fix: "Shared B." },
         "a->c": { kind: "shared", fix: "Shared C." },
+        "a->e": { kind: "shared", fix: "Shared E." },
       },
     });
     const result = spawnSync(
@@ -109,7 +152,7 @@ test("source graph ignores literal/comment dependencies and sees grouped imports
       { cwd: root, encoding: "utf8" },
     );
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 2);
+    assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 3);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -216,11 +259,14 @@ test("replay selection matches real Nx for command, transitive shared, lock and 
 
 test("profile weights use only current records and preserve missing platform evidence", async () => {
   const { profileTable } = await import("../../scripts/modularization/replay.mjs");
-  const fixture =
-    "### Every e2e module, on the current records\n| x | 1 | 10 | 20 | 30 | – | 0% | 0% | 0% | A |\n<details>\n| x | 1 | 99 | 99 | 99 | 99 |";
+  const fixture = `### Every e2e module, on the current records\n${timingHeader}\n| x | 1 | 10 | 20 | 30 | – | 0% | 0% | 0% | A |\n<details>\n| x | 1 | 99 | 99 | 99 | 99 |`;
   const weights = profileTable(fixture);
   assert.equal(weights.local.get("x"), 10);
   assert.equal(weights.linux.get("x"), 20);
+  assert.equal(
+    profileTable(fixture.replace("CI Linux s | macOS s", "macOS s | CI Linux s")).linux.get("x"),
+    30,
+  );
   assert.equal(weights.windows.has("x"), false);
   assert.throws(() => profileTable("no table"), /no all-module table/);
   assert.throws(
@@ -251,7 +297,12 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     put(root, "tests/e2e/main.rs", "mod harness;\nmod a;\nmod b;\n");
     put(root, "tests/e2e/harness.rs", "");
     put(root, "tests/e2e/a.rs", "fn x() { crate::b::helper(); }");
-    put(root, "tests/e2e/b.rs", 'fn helper() { repo_file("fixtures/record.json"); }');
+    put(
+      root,
+      "tests/e2e/b.rs",
+      'const RECORD: &str = "fixtures/constant.json";\nconst DIRECTORY: &str = "fixtures/runtime";\nfn helper() { repo_file("fixtures/record.json"); repo_file(RECORD); Path::new(env!("CARGO_MANIFEST_DIR")).join(DIRECTORY); }',
+    );
+    put(root, "fixtures/runtime/data.json", "{}");
     put(root, "layout.json", {
       crates: { binary: { paths: ["src/**"], deps: [] } },
       suites: { a: { modules: ["a"], paths: [], crates: ["binary"] } },
@@ -263,6 +314,9 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     const result = JSON.parse(readFileSync(join(root, "layout.json"), "utf8"));
     assert.ok(result.suites.a.paths.includes("tests/e2e/b.rs"));
     assert.ok(result.suites.a.paths.includes("fixtures/record.json"));
+    assert.ok(result.suites.a.paths.includes("fixtures/constant.json"));
+    assert.ok(result.suites.a.paths.includes("fixtures/runtime"));
+    assert.ok(result.suites.a.paths.includes("fixtures/runtime/**"));
     const first = readFileSync(join(root, "layout.json"), "utf8");
     assert.equal(run().status, 0);
     assert.equal(readFileSync(join(root, "layout.json"), "utf8"), first);
@@ -315,7 +369,7 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     put(root, "layout.json", modular);
     const failed = run();
     assert.equal(failed.status, 1);
-    assert.match(failed.stderr, /undeclared test module: missing/);
+    assert.match(failed.stderr, /unknown test module missing/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -442,7 +496,7 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     );
     const modules = Object.values(layout.suites).flatMap((suite) => suite.modules);
     const profile =
-      "### Every e2e module, on the current records\n" +
+      `### Every e2e module, on the current records\n${timingHeader}\n` +
       modules.map((name) => `| ${name} | 1 | 2 | 1 | 3 | – | x | x | x | x |`).join("\n");
     put(root, "docs/test-profile-report.md", profile);
     const result = run("replay", "scripts/modularization/layout.json", "report.json");
@@ -466,6 +520,21 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     const malformed = run("replay", "scripts/modularization/layout.json", "refused.json");
     assert.equal(malformed.status, 1);
     assert.match(malformed.stderr, /invalid linux seconds/);
+    put(
+      root,
+      "docs/test-profile-report.md",
+      profile.replace("CI Linux s | macOS s", "macOS s | CI Linux s"),
+    );
+    assert.equal(run("replay", "scripts/modularization/layout.json", "reordered.json").status, 0);
+    assert.equal(
+      JSON.parse(readFileSync(join(root, "reordered.json"), "utf8")).platforms.linux.summary
+        .testSecondsSkipped,
+      1557,
+    );
+    put(root, "docs/test-profile-report.md", profile.replace("CI Linux s", "unknown seconds"));
+    const badHeader = run("replay", "scripts/modularization/layout.json", "refused-header.json");
+    assert.equal(badHeader.status, 1);
+    assert.match(badHeader.stderr, /invalid timing header/);
     put(root, "docs/test-profile-report.md", profile);
     const stale = run("render");
     assert.equal(stale.status, 1);
