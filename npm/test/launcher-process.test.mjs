@@ -22,6 +22,7 @@ import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { STAGED_TARGET_DIR, hostTarget, installInto, pack, run } from "./install-support.mjs";
+import { spawnable } from "./spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 const EXE = WINDOWS ? "onepipeline.exe" : "onepipeline";
@@ -649,12 +650,13 @@ describe("the process the npm-installed command runs as", () => {
         ".bin",
         WINDOWS ? "onepipeline.cmd" : "onepipeline",
       );
-      const refused = spawnSync(bin, ["--version"], {
-        cwd: project,
-        encoding: "utf8",
-        shell: WINDOWS,
-        env: engineEnv(work, { NODE_OPTIONS: `--require "${preload}"` }),
-      });
+      const refused = spawnSync(
+        ...spawnable(bin, ["--version"], {
+          cwd: project,
+          encoding: "utf8",
+          env: engineEnv(work, { NODE_OPTIONS: `--require "${preload}"` }),
+        }),
+      );
       assert.equal(refused.status, 1, refused.stderr);
       assert.equal(refused.stdout, "", "the engine ran without a keeper");
       assert.match(
