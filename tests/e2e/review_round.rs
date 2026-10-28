@@ -665,6 +665,17 @@ fn a_blocked_round_command_names_its_wait_and_last_observation() {
 /// progress that keeps it alive, and it then exits on its own.
 #[test]
 fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
+    progressing_round(false);
+}
+
+/// The store can reach its second hold before the independent renderer gets CPU time.
+#[test]
+fn a_round_command_waits_for_output_when_the_store_outruns_the_renderer() {
+    progressing_round(true);
+}
+
+fn progressing_round(delay_renderer: bool) {
+    let render = delay_renderer.then(crate::harness::Rendezvous::failpoint);
     let world = World::new("round-command-progress").through_scripted_source();
     let project = world.plan(
         "progressing-round",
@@ -679,7 +690,13 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
         let waiting = scope.spawn(|| {
             round_command(
                 &world,
-                world.cmd(&["start", &project, "--attach"]),
+                {
+                    let mut command = world.cmd(&["start", &project, "--attach"]);
+                    if let Some(render) = &render {
+                        command.env("ONEPIPELINE_TEST_ATTACH_RENDER_GATE", render.address());
+                    }
+                    command
+                },
                 None,
                 &clock,
             )
@@ -695,10 +712,20 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
         clock.advance(almost);
         held.release();
         let held = later.arrived();
-        assert!(
-            written("round-command.stderr") > before,
-            "the command wrote nothing between the two held calls"
-        );
+        if let Some(render) = &render {
+            let rendering = render.arrived_within_a_step(&world, "the attached renderer");
+            assert_eq!(
+                written("round-command.stderr"),
+                before,
+                "the delayed renderer wrote before it was released"
+            );
+            rendering.release();
+        }
+        // A store arrival orders the engine, not the independently polled renderer.
+        // Observe its write before spending the next interval of diagnostic time.
+        world.until("the command to write between the two held calls", |_| {
+            written("round-command.stderr") > before
+        });
         // Restart the count so two reads mean a whole look that came after what it wrote.
         clock.advance(std::time::Duration::ZERO);
         world.until("the command's progress to be seen", |_| clock.read_again());
