@@ -21,7 +21,6 @@ after(() => {
   if (work) rmSync(work, { recursive: true, force: true });
 });
 
-/// A directory holding exactly `files`, as an installer leaves them.
 function directory(name, files) {
   const dir = join(work, name);
   mkdirSync(dir, { recursive: true });
