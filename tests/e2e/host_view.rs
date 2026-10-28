@@ -376,6 +376,100 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
         write(&plan, &original_plan);
         write(&dispatch, &original_dispatch);
     }
+    let manifest = cache.join("manifest.json");
+    let original_manifest = read_json(&manifest);
+    let mut fixed = original.clone();
+    fixed["host"] = json!("another host");
+    let mut invalid_pid = original.clone();
+    invalid_pid["pid"] = json!(-1);
+    let mut fractional_pid = original.clone();
+    fractional_pid["pid"] = json!(1.5);
+    let mut empty_plan = original_plan.clone();
+    empty_plan["tasks"] = json!([]);
+    let mut non_array_plan = original_plan.clone();
+    non_array_plan["tasks"] = json!(null);
+    let mut invalid_task = read_json(&cache.join("runs/live-0/plan.json"));
+    invalid_task["tasks"][1]["id"] = json!("../outside");
+    let mut wrong_shape = original_manifest.clone();
+    wrong_shape["live_runs"] = json!(["live-0", "live-1"]);
+    let extra_plan = cache.join("runs/live-0/plan.json");
+    for (nth, (file, bad, message)) in [
+        (&launch, json!(null), "cached launch must be an object"),
+        (&launch, json!([]), "cached launch must be an object"),
+        (&launch, json!({}), "cached launch is missing"),
+        (&launch, fixed, "cached launch.host differs"),
+        (&launch, invalid_pid, "cached launch must be {pid, token}"),
+        (
+            &launch,
+            fractional_pid,
+            "cached launch must be {pid, token}",
+        ),
+        (
+            &plan,
+            empty_plan,
+            "cached plan.tasks must be a nonempty array",
+        ),
+        (
+            &plan,
+            non_array_plan,
+            "cached plan.tasks must be a nonempty array",
+        ),
+        (
+            &extra_plan,
+            invalid_task,
+            "cached plan task.id must be a run name",
+        ),
+        (
+            &manifest,
+            wrong_shape,
+            "the template's live runs differ from the process shape",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let valid = read_json(file);
+        write(file, &bad);
+        let refused = refused_clone(&format!("invalid-metadata-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        write(file, &valid);
+    }
+    let registry = cache.join("runs/live-0/dispatches");
+    for (nth, replacement) in [
+        None,
+        Some("duplicate-1.json"),
+        Some("gap-9.json"),
+        Some("malformed.json"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let moved = registry.join(format!("{old_pid}-0.json"));
+        // Remove an index, duplicate the remaining index, leave a gap, or
+        // replace its spelling: all must fail before a registry is rebound.
+        let saved = std::fs::read(&moved).unwrap();
+        std::fs::remove_file(&moved).unwrap();
+        if let Some(name) = replacement {
+            std::fs::write(registry.join(name), &saved).unwrap();
+        }
+        let refused = refused_clone(&format!("invalid-registry-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("the template's registry for live-0 differs from the process shape"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        if let Some(name) = replacement {
+            std::fs::remove_file(registry.join(name)).unwrap();
+        }
+        std::fs::write(moved, saved).unwrap();
+    }
     std::fs::write(cache.join("runs/sparse/events.jsonl"), "").unwrap();
     let refused = refused_clone("refused");
     assert_eq!(refused.status.code(), Some(1));

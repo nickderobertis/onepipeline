@@ -4837,9 +4837,8 @@ fn teardown_stops_every_driver_without_spawning_the_cli() {
         before,
         "fixture cleanup does not need another CLI process"
     );
-    assert_eq!(
-        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>(),
-        environment,
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == environment,
         "cleanup restores the caller's environment"
     );
     drop(holder);
@@ -4875,14 +4874,78 @@ fn teardown_with_invalid_child_settings_restores_the_environment() {
         drop(world);
         panic!("an invalid child setting must be rejected");
     }
-    assert_eq!(
-        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>(),
-        before
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == before,
+        "the caller's environment was not restored"
     );
     assert!(
         process_ended(pid),
         "invalid configuration left driver {pid} alive before containment"
     );
+    drop(holder);
+}
+
+/// A native caller inherits the world's removals as well as its assignments;
+/// unwinding after the real stop restores both for the next caller.
+#[test]
+fn a_native_stop_restores_removed_settings_when_its_caller_unwinds() {
+    let world = World::new("teardown-unwind");
+    world.script("work.wait", "hold");
+    let project = world.plan("unwind", &plan_of("unwind", vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the driver to dispatch", |world| {
+        !world.events_of("unwind", "node-dispatched").is_empty()
+    });
+    let pid = u32::try_from(
+        world.run_json("unwind", "launch.json")["pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
+    let holder = world.as_session("keep-the-unwind-owner");
+    let key = onepipeline::cli::FLOW_ENV;
+    let previous = std::env::var_os(key);
+    std::env::set_var(key, "the parent owns this setting");
+    let before = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let command = world.cmd(&[]);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _environment = WorldEnvironment::enter(&command);
+        let probe = Command::new("node")
+            .args(["-e", "process.stdout.write(JSON.stringify({flow:process.env.ONEPIPELINE_FLOW??null,runs:process.env.ONEPIPELINE_RUNS_DIR}))"])
+            .output().expect("a real child inherits the native caller's environment");
+        assert!(probe.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&probe.stdout).unwrap(),
+            serde_json::json!({"flow": null, "runs": world.runs})
+        );
+        onepipeline::verbs::stop(
+            &onepipeline::views::RunPaths::under(&world.runs, "unwind"),
+            onepipeline::verbs::StopRequest {
+                session: &world.session,
+                force: true,
+            },
+        )
+        .expect("the public API stops the real run");
+        panic!("the native caller unwinds after stopping its run");
+    }));
+    let panic = unwound.expect_err("the native caller deliberately unwinds");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"the native caller unwinds after stopping its run")
+    );
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == before,
+        "the caller's environment was not restored"
+    );
+    assert!(
+        process_ended(pid),
+        "the native stop left its driver alive before containment"
+    );
+    match previous {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+    drop(world);
     drop(holder);
 }
 
