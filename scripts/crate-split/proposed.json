@@ -107,7 +107,8 @@
         "tests/e2e/closures.rs",
         "tests/e2e/public_id.rs",
         "tests/recorded/run-root/run-labels",
-        "tests/recorded/run-root/run-labels/**"
+        "tests/recorded/run-root/run-labels/**",
+        "tests/e2e/pool_support.rs"
       ],
       "crates": [
         "onepipeline"

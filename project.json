@@ -60,7 +60,8 @@
         "e2eSource",
         "contractSource",
         "noteJourneySource",
-        "codexServerSource"
+        "codexServerSource",
+        "pooledSlotSource"
       ],
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the one 95% floor merges every tier's profiles, so this report depends on each tier's `test`. An unchanged tier replays only where the Nx cache is warm: a CI runner starts cold, so there a tier-only change re-runs every tier under this aggregate. That cost is accepted for now because selection stays per tier; restoring the Nx cache in CI is recorded as a follow-up.",
       "dependsOn": [
@@ -70,7 +71,8 @@
             "onepipeline-e2e",
             "onepipeline-contract",
             "onepipeline-note-journeys",
-            "onepipeline-codex-server"
+            "onepipeline-codex-server",
+            "onepipeline-pooled-slot"
           ],
           "target": "test"
         }
@@ -168,6 +170,7 @@
     "onepipeline-contract",
     "onepipeline-real-smoke",
     "onepipeline-release-compat",
-    "onepipeline-stop-verdict"
+    "onepipeline-stop-verdict",
+    "onepipeline-pooled-slot"
   ]
 }

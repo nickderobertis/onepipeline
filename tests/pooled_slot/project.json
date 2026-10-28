@@ -1,0 +1,79 @@
+{
+  "name": "onepipeline-pooled-slot",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/pooled_slot",
+  "tags": [
+    "scope:tests",
+    "lang:rust"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build pooled_slot",
+      "inputs": [
+        "pooledSlotSource"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/pooled_slot/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/pooled_slot/main.rs",
+      "inputs": [
+        "pooledSlotSource"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint pooled_slot",
+      "inputs": [
+        "pooledSlotSource"
+      ]
+    },
+    "test": {
+      "command": "just _pooled_slot-test",
+      "inputs": [
+        "pooledSlotSource"
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "test-archive"
+        }
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/llvm-cov-target/onepipeline-pooled_slot-*.profraw"
+      ]
+    },
+    "test-quick": {
+      "command": "just _pooled_slot-test-quick",
+      "inputs": [
+        "pooledSlotSource",
+        {
+          "env": "ONEPIPELINE_TEST_PARTITION"
+        }
+      ],
+      "dependsOn": [
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "test-quick-archive"
+        }
+      ],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}
