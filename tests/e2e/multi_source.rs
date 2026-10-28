@@ -1489,8 +1489,11 @@ fn private_on_routed(id: &str) -> Value {
 /// plan is refused at the plan source, which is declared public. A run launched from that home
 /// loads the configuration, and its live adds land beside that home: a private node naming the
 /// owner's repository in the member source and not the plan source, and a public node of the
-/// same owner too, the write-back's copy being into the home's own source. The plan source holds
-/// only the store's public views of the plan's public tasks, and no private item.
+/// same owner too, the write-back's copy being into the home's own source. The store copies a
+/// plan whole and a plan holding a private task is private as a whole, so no canonical item of
+/// either add reaches the plan source. That source holds only the store's public views the home
+/// records, and no private item. Whether a public view of the live public add reaches it is
+/// measured rather than held: against the linked store none does.
 #[test]
 fn a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source() {
     let plan = |name: &str| {
@@ -1578,6 +1581,22 @@ fn a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_privat
         .collect();
     let canonical = |node: &str| members[node]["id"].as_str().expect("an id").to_owned();
     assert!(views.contains_key(&canonical("core")), "{views:?}");
+    // Both live adds are canonical beside the home, and the plan source holds neither.
+    let in_plans = world.on_onevcs(|| source_nodes(&world, STORE_SOURCE));
+    for node in ["hidden", "shown"] {
+        assert!(
+            canonical(node).starts_with(&format!("{MEMBERS}:")),
+            "{node} is not canonical in the member source: {}",
+            canonical(node)
+        );
+        assert!(
+            !in_plans.contains_key(node)
+                && plans
+                    .iter()
+                    .all(|task| task["id"] != canonical(node).as_str()),
+            "the plan source holds the canonical item of {node}"
+        );
+    }
     for node in ["secret", "hidden"] {
         assert!(
             !views.contains_key(&canonical(node)),
