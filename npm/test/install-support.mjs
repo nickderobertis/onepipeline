@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { spawnable } from "./spawn-support.mjs";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -32,12 +33,14 @@ export function hostTarget() {
 export const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
 
 export function run(command, args, options = {}) {
-  return execFileSync(command, args, {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    ...options,
-    env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
-  });
+  return execFileSync(
+    ...spawnable(command, args, {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      ...options,
+      env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
+    }),
+  );
 }
 
 /// Pack a package directory into the tarball the registry would serve.
