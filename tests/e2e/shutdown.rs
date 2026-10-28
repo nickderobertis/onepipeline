@@ -284,7 +284,7 @@ fn a_shutdown_asks_every_dispatch_to_stop_and_reaps_the_one_that_does_not() {
     );
     // The hook the launch named, which would have written this had anything
     // fired it — including a driver that settled on its way out.
-    std::thread::sleep(Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(500));
     assert!(!hook_fired(&world), "a run-end hook ran on a host shutdown");
 }
 

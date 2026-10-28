@@ -36,10 +36,10 @@
 
 #![cfg(target_os = "linux")]
 
+use onepipeline_testfakes::profile::process::{Child, Command, Stdio};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
 use serde_json::{json, Value};

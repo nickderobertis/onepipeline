@@ -1189,7 +1189,7 @@ fn a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over() {
     let claim = until_claimed_on(&world, &project, "host-b");
     // While x runs the displaced driver reads nothing, so it has not noticed, and the
     // adopter, waiting on it, has minted nothing.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(3));
     assert!(
         world.events_of(run, "driver-superseded").is_empty(),
         "the displaced driver read its claim while it was dispatching"
@@ -1276,7 +1276,10 @@ fn takeover_wait(grace: u64) -> std::time::Duration {
 
 /// `host` taking `project` over, in the background: the launch returns only once the driver
 /// it displaces has let go, which is what a journey arranges while it waits.
-fn take_over_in_background(host: &World, project: &str) -> std::process::Child {
+fn take_over_in_background(
+    host: &World,
+    project: &str,
+) -> onepipeline_testfakes::profile::process::Child {
     let mut command = host.cmd(&["start", project, "--detach", "--take-over"]);
     command
         .current_dir(&host.project)
@@ -1286,7 +1289,7 @@ fn take_over_in_background(host: &World, project: &str) -> std::process::Child {
 }
 
 /// A background takeover's answer: it launched, and what it said on its way.
-fn launched_over(taking: std::process::Child) -> String {
+fn launched_over(taking: onepipeline_testfakes::profile::process::Child) -> String {
     let answered = taking.wait_with_output().expect("the takeover answers");
     let said = String::from_utf8_lossy(&answered.stderr).into_owned();
     assert_eq!(
@@ -1530,7 +1533,7 @@ fn a_publication_held_past_the_whole_takeover_wait_holds_the_takeover_until_it_h
     let landed = std::time::Instant::now();
     // Held past the whole wait — the displaced driver's, longer than the adopter's own — and
     // a few polls more: the adopter has minted nothing, and the publication is still held.
-    std::thread::sleep(theirs + std::time::Duration::from_secs(8));
+    onepipeline_testfakes::profile::thread::sleep(theirs + std::time::Duration::from_secs(8));
     assert!(
         held.holding(),
         "the publication was ended while it was held"
@@ -1633,7 +1636,7 @@ fn a_fence_still_naming_a_settled_publication_holds_the_takeover_as_the_exact_on
     let landed = std::time::Instant::now();
     // Past the whole wait and a few polls more, y's publication is still under way: the
     // adopter has minted nothing, as it would not have over a fence naming y alone.
-    std::thread::sleep(theirs + std::time::Duration::from_secs(8));
+    onepipeline_testfakes::profile::thread::sleep(theirs + std::time::Duration::from_secs(8));
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run {:?} after its claim landed, while y's publication was \
@@ -1896,6 +1899,58 @@ fn a_publication_whose_fence_the_board_refuses_starts_once_a_later_write_lands()
     assert_eq!(stored_publishing(&world, &project), Value::Null);
 }
 
+/// A pass the driver takes inside a refused fence's retry — here the one a second node's
+/// finished turn wakes, which makes its publication due beside the first — writes the fence
+/// no sooner: both publications wait for the retry's own clock, and both start once it lands.
+#[test]
+fn a_pass_inside_a_refused_fences_retry_does_not_write_it_early() {
+    let world = takeover_world("fence-woken", 60).through_scripted_source();
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    let x = world.rendezvous("x");
+    let y = world.rendezvous("y");
+    let run = "fence-woken";
+    // Both in flight at once, so the second turn can end while the first waits on its fence.
+    let mut plan = plan_of(run, vec![lifecycle("x", &[]), lifecycle("y", &[])]);
+    plan["concurrency"] = json!(2);
+    let project = world.plan(run, &plan);
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let first = x.arrived();
+    let second = y.arrived();
+    until_claimed_by(&world, &project, run);
+    world.store_refuses_once("set_project_metadata", &board_down());
+    first.release();
+    world.until_run_file_holds(
+        run,
+        "driver.log",
+        "could not write its publications under way",
+    );
+    let refused_at = std::time::Instant::now();
+    let refused = world.store_asked("set_project_metadata");
+    // y's turn ends inside the retry: its settlement wakes the driver, and its publication
+    // is due on that same pass.
+    second.release();
+    world.until("the fence to be written again", |world| {
+        world.store_asked("set_project_metadata") > refused
+    });
+    let retried_after = refused_at.elapsed();
+    assert!(
+        retried_after >= std::time::Duration::from_secs(3),
+        "the fence was written again {retried_after:?} after the refusal, before its retry was due"
+    );
+    world.until("the driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    for node in ["x", "y"] {
+        let settled = settled(&world, run, node);
+        assert_eq!(settled["outcome"], "change-review-draft", "{settled}");
+    }
+    assert_eq!(created_from(&world).len(), 2);
+    assert_eq!(stored_publishing(&world, &project), Value::Null);
+}
+
 /// A takeover past its wait that finds the project's `onepipeline.publishing` holding
 /// something that is not a driver's publications cannot tell whether the displaced driver
 /// — here one a shutdown ended — has one under way, so it starts nothing and says why;
@@ -1952,7 +2007,9 @@ fn a_takeover_waits_until_a_fence_it_cannot_read_is_cleared(
     let successor = world.on_host("host-b");
     let taking = take_over_in_background(&successor, &project);
     until_claimed_on(&world, &project, "host-b");
-    std::thread::sleep(takeover_wait(1) + std::time::Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(
+        takeover_wait(1) + std::time::Duration::from_secs(5),
+    );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run past a fence it could not read"
@@ -2072,7 +2129,9 @@ fn a_takeover_over_a_claim_stating_no_lease_starts_only_on_an_acknowledgement() 
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
     let taking = take_over_in_background(&successor, &project);
     until_claimed_on(&world, &project, "host-b");
-    std::thread::sleep(takeover_wait(1) + std::time::Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(
+        takeover_wait(1) + std::time::Duration::from_secs(5),
+    );
     assert!(
         successor.run_file(run, "launch.json").metadata().is_err(),
         "the adopter minted its run over a claim stating no lease, which nothing acknowledged"
@@ -2652,7 +2711,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
         }
     };
     // `x` runs well past the old lapse, and nothing ends it.
-    std::thread::sleep(lapsed + Duration::from_secs(6));
+    onepipeline_testfakes::profile::thread::sleep(lapsed + Duration::from_secs(6));
     let ended = |world: &World| {
         world
             .events_of(run, "node-settled")
@@ -2704,7 +2763,7 @@ fn a_claim_read_answering(name: &str, answer: ClaimAnswer) {
                 // more than two of the five-second retries a read the store named no wait
                 // for is made after, it asks the store nothing.
                 let asked = world.store_asked("get_project");
-                std::thread::sleep(Duration::from_secs(11));
+                onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(11));
                 assert_eq!(
                     world.store_asked("get_project"),
                     asked,
@@ -2775,7 +2834,7 @@ fn a_running_driver_reads_its_claim_only_immediately_before_a_publication() {
 
     let before = crate::harness::counts(&world, run);
     let asked = world.store_asked("get_project");
-    std::thread::sleep(Duration::from_secs(10 * interval));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(10 * interval));
     let did = crate::harness::counts(&world, run).since(before);
     let store = world.store_asked("get_project") - asked;
     assert_eq!(did.claim_reads, 0, "the driver read its claim: {did:?}");
@@ -2992,7 +3051,7 @@ fn two_cold_hosts_launching_one_project_at_once_leave_every_draft_alone() {
         .into_iter()
         .map(|host| world.on_host(host))
         .collect();
-    let launches: Vec<std::process::Child> = hosts
+    let launches: Vec<onepipeline_testfakes::profile::process::Child> = hosts
         .iter()
         .map(|host| {
             let mut command = host.cmd(&["start", &project, "--detach"]);
@@ -3227,7 +3286,9 @@ fn a_settlement_dispatch_or_claim_that_is_not_one_refuses_the_launch() {
     world.until("the takeover's claim to reach the store", |world| {
         stored_claim(world, &project)["host"] == host
     });
-    std::thread::sleep(takeover_wait(5) + std::time::Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(
+        takeover_wait(5) + std::time::Duration::from_secs(5),
+    );
     assert!(
         !world.run_file(&format!("{run}-2"), "launch.json").exists(),
         "the takeover minted a run over a claim stating no lease, which nothing acknowledged"
@@ -3360,7 +3421,7 @@ fn an_adoption_whose_claim_read_is_not_answered_goes_on_driving() {
     world.store_stops_holding("get_project");
     read.release();
     until_claimed_by(&world, &project, "deadline");
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(3));
     assert_eq!(
         world.store_asked("get_project"),
         asked,

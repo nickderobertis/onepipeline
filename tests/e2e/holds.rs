@@ -161,7 +161,7 @@ fn a_node_the_concurrency_holds_is_reported_once_however_long_it_waits() {
 
     // Long enough that a record per pass would be hundreds, and a record per
     // look would be a dozen.
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(3));
     let spans = held(&world, "queued", "queued");
     assert_eq!(
         spans.len(),

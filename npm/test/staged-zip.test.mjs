@@ -12,6 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { spawnable } from "./spawn-support.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TARGET = "x86_64-pc-windows-msvc";
@@ -86,10 +87,12 @@ describe("a Windows staged record's zip archive", () => {
       { cwd: REPO_ROOT, encoding: "utf8" },
     ).trim();
     const packed = JSON.parse(
-      execFileSync("npm", ["pack", "--json", "--pack-destination", work, pkg], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-      }),
+      execFileSync(
+        ...spawnable("npm", ["pack", "--json", "--pack-destination", work, pkg], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+        }),
+      ),
     );
     npmTgz = join(work, packed[0].filename);
   });

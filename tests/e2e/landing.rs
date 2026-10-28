@@ -334,7 +334,7 @@ fn bring_the_branch_here(world: &World, checkout: &Path, branch: &str) {
 /// Not through [`git`](fn@git), which asserts: "the branch is not there" is one
 /// of the answers this asks for.
 fn fetched(world: &World, checkout: &Path, remote: &str, refspec: &str) -> bool {
-    std::process::Command::new("git")
+    onepipeline_testfakes::profile::process::Command::new("git")
         .args(["fetch", "--force", remote, refspec])
         .current_dir(checkout)
         .env("GIT_CONFIG_GLOBAL", world.gitconfig())
@@ -345,7 +345,7 @@ fn fetched(world: &World, checkout: &Path, remote: &str, refspec: &str) -> bool 
 /// The first repository under `dir` that holds `branch` as a ref of its own.
 fn clone_holding(dir: &Path, branch: &str) -> Option<std::path::PathBuf> {
     if dir.join(".git").exists() {
-        let held = std::process::Command::new("git")
+        let held = onepipeline_testfakes::profile::process::Command::new("git")
             .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
             .current_dir(dir)
             .output();

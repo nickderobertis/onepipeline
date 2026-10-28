@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { spawnable } from "./spawn-support.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -1061,13 +1062,15 @@ describe("release-only workload selection", () => {
     const graphPath = join(repo.path, "task-graph.json");
     const graph = (args) => {
       const run = spawnSync(
-        join(repo.path, "node_modules", ".bin", "nx"),
-        [...args, `--graph=${graphPath}`],
-        {
-          cwd: repo.path,
-          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
-          encoding: "utf8",
-        },
+        ...spawnable(
+          join(repo.path, "node_modules", ".bin", "nx"),
+          [...args, `--graph=${graphPath}`],
+          {
+            cwd: repo.path,
+            env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+            encoding: "utf8",
+          },
+        ),
       );
       assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
       const tasks = JSON.parse(readFileSync(graphPath, "utf8")).tasks.tasks;

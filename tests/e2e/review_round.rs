@@ -524,7 +524,7 @@ fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what:
 /// host lengthens it without failing it, while one that goes silent for a step fails.
 fn round_command(
     world: &World,
-    command: std::process::Command,
+    command: onepipeline_testfakes::profile::process::Command,
     input: Option<&str>,
     clock: &dyn crate::harness::Clock,
 ) -> crate::harness::Run {
@@ -533,7 +533,7 @@ fn round_command(
 
 fn round_command_capturing(
     world: &World,
-    mut command: std::process::Command,
+    mut command: onepipeline_testfakes::profile::process::Command,
     input: Option<&str>,
     clock: &dyn crate::harness::Clock,
     stderr_release: Option<std::sync::mpsc::Receiver<()>>,
@@ -541,7 +541,7 @@ fn round_command_capturing(
     use std::fs::File;
     use std::process::Stdio;
 
-    struct Child(std::process::Child);
+    struct Child(onepipeline_testfakes::profile::process::Child);
     impl Drop for Child {
         fn drop(&mut self) {
             // This is the child this invocation started, including on an assertion panic.
@@ -798,9 +798,14 @@ fn bash_on(path: &OsStr, system_root: Option<&OsStr>) -> PathBuf {
 ///
 /// The script is named with `/`: it finds its module through `$(dirname "$0")`, and `/` is
 /// the separator that both `dirname` and `node` read on every platform.
-fn reporter(cwd: &Path, path: &OsStr, system_root: Option<&OsStr>) -> std::process::Command {
+fn reporter(
+    cwd: &Path,
+    path: &OsStr,
+    system_root: Option<&OsStr>,
+) -> onepipeline_testfakes::profile::process::Command {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/review-round-quota-budget.sh");
-    let mut command = std::process::Command::new(bash_on(path, system_root));
+    let mut command =
+        onepipeline_testfakes::profile::process::Command::new(bash_on(path, system_root));
     command
         .arg(script.to_string_lossy().replace('\\', "/"))
         .current_dir(cwd)
@@ -941,18 +946,19 @@ fn the_busy_review_round_ends_answered_and_true_and_records_what_it_spent() {
         reworked.push((node, from, projection_lines(&world, run).len()));
     }
     // The bottom draft merged by a person mid-round, its branch kept — no call of the run's.
-    let person = std::process::Command::new(crate::harness::double("fake-gh"))
-        .args([
-            "__person",
-            "merge",
-            "owner/service",
-            &n1.to_string(),
-            "squash",
-            "kept",
-        ])
-        .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
-        .output()
-        .expect("the host double runs");
+    let person =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("fake-gh"))
+            .args([
+                "__person",
+                "merge",
+                "owner/service",
+                &n1.to_string(),
+                "squash",
+                "kept",
+            ])
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .output()
+            .expect("the host double runs");
     assert!(
         person.status.success(),
         "{}",
@@ -1307,7 +1313,9 @@ fn the_busy_review_round_takes_the_whole_group() {
 fn the_counted_git_counts_each_start_and_is_the_real_git_for_it() {
     let world = World::new("counted-git").counting_git();
     let counted = || {
-        let mut command = std::process::Command::new(world.root.join("counted-git/git"));
+        let mut command = onepipeline_testfakes::profile::process::Command::new(
+            world.root.join("counted-git/git"),
+        );
         command.current_dir(&world.root);
         command
     };
@@ -1410,7 +1418,7 @@ struct CloneReads {
 }
 
 /// A child this journey started, ended on an assertion panic too.
-struct Started(std::process::Child);
+struct Started(onepipeline_testfakes::profile::process::Child);
 
 impl Drop for Started {
     fn drop(&mut self) {
@@ -1423,8 +1431,11 @@ impl CloneReads {
     fn opened(name: &str) -> Self {
         let world = World::new(name);
         let checkout = world.repository("local-direct", &[]).checkout;
-        let real = World::resolved_on(&std::process::Command::new("git"), "git")
-            .expect("the host has a git");
+        let real = World::resolved_on(
+            &onepipeline_testfakes::profile::process::Command::new("git"),
+            "git",
+        )
+        .expect("the host has a git");
         let bin = world.root.join("held-git-bin");
         std::fs::create_dir_all(&bin).expect("a directory for the held git");
         std::fs::copy(
@@ -1470,8 +1481,9 @@ impl CloneReads {
     }
 
     /// A real `onevcs` command whose output is kept under `log`.
-    fn onevcs(&self, args: &[&str], log: &str) -> std::process::Command {
-        let mut command = std::process::Command::new(crate::harness::onevcs_binary());
+    fn onevcs(&self, args: &[&str], log: &str) -> onepipeline_testfakes::profile::process::Command {
+        let mut command =
+            onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary());
         command
             .args(args)
             .current_dir(&self.checkout)
@@ -1727,21 +1739,25 @@ const READ_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 #[test]
 fn held_git_refuses_a_hold_whose_clone_does_not_resolve() {
     let world = World::new("held-git-unresolved-clone");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let real = World::resolved_on(
+        &onepipeline_testfakes::profile::process::Command::new("git"),
+        "git",
+    )
+    .expect("the host has a git");
     let control = world.root.join("held");
     std::fs::create_dir_all(&control).expect("a directory for the pause");
     let missing = world.root.join("no-such-clone");
-    let refused = std::process::Command::new(crate::harness::double("held-git"))
-        .args(["init", "--quiet", "initialised"])
-        .current_dir(&world.root)
-        .env("HELD_GIT_REAL", &real)
-        .env("HELD_GIT_HOLD", "1")
-        .env("HELD_GIT_CLONE", &missing)
-        .env("HELD_GIT_DIR", &control)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("held-git runs");
+    let refused =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("held-git"))
+            .args(["init", "--quiet", "initialised"])
+            .current_dir(&world.root)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &missing)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("held-git runs");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(70), "{stderr}");
     assert!(
@@ -1763,25 +1779,29 @@ fn held_git_refuses_a_hold_whose_clone_does_not_resolve() {
 #[test]
 fn held_git_answers_with_the_real_gits_failing_exit_code() {
     let world = World::new("held-git-failing-git");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let real = World::resolved_on(
+        &onepipeline_testfakes::profile::process::Command::new("git"),
+        "git",
+    )
+    .expect("the host has a git");
     let outside = world.root.join("not-a-repository");
     std::fs::create_dir_all(&outside).expect("a directory outside any repository");
-    let direct = std::process::Command::new(&real)
+    let direct = onepipeline_testfakes::profile::process::Command::new(&real)
         .args(["rev-parse", "--verify", "HEAD"])
         .current_dir(&outside)
         .env("GIT_CEILING_DIRECTORIES", &world.root)
         .stdin(std::process::Stdio::null())
         .output()
         .expect("the real git runs");
-    let held = std::process::Command::new(crate::harness::double("held-git"))
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(&outside)
-        .env("GIT_CEILING_DIRECTORIES", &world.root)
-        .env("HELD_GIT_REAL", &real)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("held-git runs");
+    let held =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("held-git"))
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&outside)
+            .env("GIT_CEILING_DIRECTORIES", &world.root)
+            .env("HELD_GIT_REAL", &real)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("held-git runs");
     let stderr = String::from_utf8_lossy(&held.stderr);
     assert!(
         !direct.status.success() && direct.status.code() != Some(70),
@@ -1804,13 +1824,14 @@ fn held_git_fails_when_the_real_git_is_killed_by_a_signal() {
     let world = World::new("held-git-signalled-git");
     let killed = world.root.join("killed-git");
     onepipeline_testfakes::executable(&killed, "#!/bin/sh\nkill -KILL $$\n");
-    let held = std::process::Command::new(crate::harness::double("held-git"))
-        .arg("status")
-        .current_dir(&world.root)
-        .env("HELD_GIT_REAL", &killed)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("held-git runs");
+    let held =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("held-git"))
+            .arg("status")
+            .current_dir(&world.root)
+            .env("HELD_GIT_REAL", &killed)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("held-git runs");
     assert_eq!(
         held.status.code(),
         Some(1),
@@ -1825,15 +1846,20 @@ fn held_git_fails_when_the_real_git_is_killed_by_a_signal() {
 #[test]
 fn held_git_holds_only_the_first_start_inside_its_clone() {
     let world = World::new("held-git-first-start");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let real = World::resolved_on(
+        &onepipeline_testfakes::profile::process::Command::new("git"),
+        "git",
+    )
+    .expect("the host has a git");
     let clone = world.root.join("clone");
     let control = world.root.join("held");
     for directory in [&clone, &control] {
         std::fs::create_dir_all(directory).expect("a directory for the hold");
     }
     let start = || {
-        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        let mut command = onepipeline_testfakes::profile::process::Command::new(
+            crate::harness::double("held-git"),
+        );
         command
             .arg("--version")
             .current_dir(&clone)
@@ -1884,25 +1910,29 @@ fn held_git_holds_only_the_first_start_inside_its_clone() {
 #[test]
 fn held_git_gives_up_a_hold_whose_control_directory_is_removed() {
     let world = World::new("held-git-control-removed");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let real = World::resolved_on(
+        &onepipeline_testfakes::profile::process::Command::new("git"),
+        "git",
+    )
+    .expect("the host has a git");
     let clone = world.root.join("clone");
     let control = world.root.join("held");
     for directory in [&clone, &control] {
         std::fs::create_dir_all(directory).expect("a directory for the hold");
     }
-    let held = std::process::Command::new(crate::harness::double("held-git"))
-        .arg("--version")
-        .current_dir(&clone)
-        .env("HELD_GIT_REAL", &real)
-        .env("HELD_GIT_HOLD", "1")
-        .env("HELD_GIT_CLONE", &clone)
-        .env("HELD_GIT_DIR", &control)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("held-git starts");
+    let held =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("held-git"))
+            .arg("--version")
+            .current_dir(&clone)
+            .env("HELD_GIT_REAL", &real)
+            .env("HELD_GIT_HOLD", "1")
+            .env("HELD_GIT_CLONE", &clone)
+            .env("HELD_GIT_DIR", &control)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("held-git starts");
     world.until("the start to claim the pause", |_| {
         control.join("inside").exists()
     });
@@ -1937,8 +1967,11 @@ fn held_git_gives_up_a_hold_whose_control_directory_is_removed() {
 #[test]
 fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
     let world = World::new("held-git-named-git-dir");
-    let real =
-        World::resolved_on(&std::process::Command::new("git"), "git").expect("the host has a git");
+    let real = World::resolved_on(
+        &onepipeline_testfakes::profile::process::Command::new("git"),
+        "git",
+    )
+    .expect("the host has a git");
     let control = |spelling: &str| {
         let control = world.root.join("held").join(spelling);
         std::fs::create_dir_all(&control).expect("a directory for the hold");
@@ -1948,7 +1981,7 @@ fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
     std::fs::create_dir_all(&outside).expect("a directory to start from");
     let [clone, other] = ["clone", "other"].map(|name| {
         let repository = world.root.join(name);
-        let made = std::process::Command::new(&real)
+        let made = onepipeline_testfakes::profile::process::Command::new(&real)
             .args(["init", "--quiet"])
             .arg(&repository)
             .status()
@@ -1957,7 +1990,9 @@ fn held_git_holds_a_git_that_names_the_clones_git_directory_from_outside() {
         repository
     });
     let start = |args: &[&std::ffi::OsStr], control: &std::path::Path| {
-        let mut command = std::process::Command::new(crate::harness::double("held-git"));
+        let mut command = onepipeline_testfakes::profile::process::Command::new(
+            crate::harness::double("held-git"),
+        );
         command
             .args(args)
             .current_dir(&outside)

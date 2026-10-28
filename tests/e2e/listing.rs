@@ -1240,7 +1240,7 @@ fn status_given_no_run_leaves_the_per_node_block_to_status_given_one() {
 #[cfg(target_os = "linux")]
 fn opened_by(world: &World, argv: &[&str], into: &std::path::Path) -> Vec<String> {
     let inner = world.cmd(argv);
-    let mut traced = std::process::Command::new("strace");
+    let mut traced = onepipeline_testfakes::profile::process::Command::new("strace");
     traced
         // Children too: a listing that shelled out to read a store would have
         // read it just the same.

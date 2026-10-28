@@ -1104,7 +1104,7 @@ fn a_quiet_driver_holding_a_decision_point_reads_as_active_rather_than_parked() 
     });
     // Past the threshold the neighbouring journey parks at, so silence alone can
     // no longer be what keeps this verdict `ACTIVE`.
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(2));
 
     let mut status = world.cmd(&["status", &run]);
     status.env("ONEPIPELINE_PARKED_AFTER_SECONDS", "1");
@@ -2082,7 +2082,7 @@ fn a_driver_that_cannot_take_its_restart_lock_restarts_no_observer_until_it_can(
         said("cannot be taken") > 0
     });
     // Long enough for the watch to look again many times over.
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(1));
     assert_eq!(said("cannot be taken"), 1, "the reason was not said once");
     assert_eq!(
         said("started another observer graph"),
@@ -3098,8 +3098,8 @@ fn a_detached_adoptions_driver_outlives_its_launcher_and_the_interrupt_its_group
 
     // The driver is still there, and still driving: the run reads as driven and
     // its held dispatch is still its own.
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let alive = std::process::Command::new("kill")
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(2));
+    let alive = onepipeline_testfakes::profile::process::Command::new("kill")
         .args(["-0", &retained.to_string()])
         .stderr(Stdio::null())
         .status()
@@ -3848,7 +3848,7 @@ fn a_launch_record_the_driver_cannot_write_does_not_end_a_working_observer() {
 /// silently returned a short table would report a survivor as gone.
 #[cfg(unix)]
 fn process_table() -> Vec<(u32, u32)> {
-    let listed = std::process::Command::new("ps")
+    let listed = onepipeline_testfakes::profile::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid="])
         .output()
         .expect("this host lists its processes");
@@ -3905,7 +3905,7 @@ fn dispatches(driver: u32) -> Vec<u32> {
 
 #[cfg(unix)]
 fn process_name(pid: u32) -> String {
-    let output = std::process::Command::new("ps")
+    let output = onepipeline_testfakes::profile::process::Command::new("ps")
         .args(["-o", "comm=", "-p", &pid.to_string()])
         .output()
         .expect("ps is available to the process-tree journeys");
@@ -3928,7 +3928,7 @@ fn still_listed(pid: u32) -> bool {
 /// recorded would be comparing two renderings rather than two processes.
 #[cfg(unix)]
 fn started_at_of(pid: u32) -> String {
-    let listed = std::process::Command::new("ps")
+    let listed = onepipeline_testfakes::profile::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", "UTC")
         .env("LC_ALL", "C")
@@ -3978,8 +3978,10 @@ fn recorded_start_of(pid: u32) -> String {
 /// against loopback is what the crate's own process-tree tests hold open, and it
 /// outlives every assertion made about it.
 #[cfg(windows)]
-pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child {
-    std::process::Command::new("ping")
+pub(crate) fn stranger_started_after(
+    _stamps: &[String],
+) -> onepipeline_testfakes::profile::process::Child {
+    onepipeline_testfakes::profile::process::Command::new("ping")
         .args(["-n", "300", "127.0.0.1"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -4002,10 +4004,12 @@ pub(crate) fn stranger_started_after(_stamps: &[String]) -> std::process::Child 
 /// until the host's clock has left every one of them behind, so the stand-in is a
 /// stranger by construction rather than by luck.
 #[cfg(unix)]
-pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
+pub(crate) fn stranger_started_after(
+    stamps: &[String],
+) -> onepipeline_testfakes::profile::process::Child {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
-        let mut child = std::process::Command::new("sleep")
+        let mut child = onepipeline_testfakes::profile::process::Command::new("sleep")
             .arg("300")
             .spawn()
             .expect("this host starts a process of its own");
@@ -4019,7 +4023,7 @@ pub(crate) fn stranger_started_after(stamps: &[String]) -> std::process::Child {
             std::time::Instant::now() < deadline,
             "this host kept starting processes inside a second one of {stamps:?} names"
         );
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -4661,7 +4665,7 @@ fn a_stop_run_from_inside_its_own_run_ends_the_run_and_answers() {
     let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
     let deadline = std::time::Instant::now() + crate::harness::ONE_STEP;
     while !process_ended(stopper) && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
     }
     let answered = process_ended(stopper);
     if !answered {
@@ -5894,7 +5898,10 @@ pub(crate) fn ended_follows_the_pid(ended: &Path, from: u64, to: u64) {
 }
 
 #[cfg(target_os = "linux")]
-fn env_of(command: &std::process::Command, name: &str) -> std::ffi::OsString {
+fn env_of(
+    command: &onepipeline_testfakes::profile::process::Command,
+    name: &str,
+) -> std::ffi::OsString {
     command
         .get_envs()
         .find(|(each, _)| *each == name)
@@ -7287,7 +7294,7 @@ fn queued_behind_the_driver(
     run: &str,
     envelope: &serde_json::Value,
     behind: usize,
-) -> std::process::Child {
+) -> onepipeline_testfakes::profile::process::Child {
     use std::io::Write;
 
     let mut replying = world
