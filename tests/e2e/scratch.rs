@@ -1374,7 +1374,7 @@ fn retained_disk_usage_matches_du_for_sparse_files_and_hard_links() {
         .unwrap();
     std::fs::write(dir.join("original"), vec![0; 16384]).unwrap();
     std::fs::hard_link(dir.join("original"), dir.join("alias")).unwrap();
-    let du = std::process::Command::new("du")
+    let du = onepipeline_testfakes::profile::process::Command::new("du")
         .args(["-s", "-B1"])
         .arg(&dir)
         .output()
@@ -1452,7 +1452,9 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
                             && e.raw_os_error() == Some(32)
                             && waiting_since.elapsed() < std::time::Duration::from_secs(30) =>
                     {
-                        std::thread::sleep(std::time::Duration::from_millis(2));
+                        onepipeline_testfakes::profile::thread::sleep(
+                            std::time::Duration::from_millis(2),
+                        );
                     }
                     opened => break opened.unwrap(),
                 }

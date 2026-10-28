@@ -369,6 +369,11 @@ impl Linear {
             .unwrap_or_default()
     }
 
+    /// The project content after Linear has stored every write.
+    pub fn project_content(&self) -> String {
+        self.lock().project_content.clone()
+    }
+
     /// The name of the project status the project is at.
     pub fn project_status(&self) -> String {
         self.lock().project_status.clone()
@@ -538,7 +543,6 @@ impl Linear {
                     "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
                 });
-                data["organization"] = json!({"id": "organization-1"});
                 data
             }
             Operation::Issue => json!({"issue": world.issue(id)}),
@@ -849,9 +853,10 @@ impl World {
     }
 
     /// Everything a status write resolves: the team's workflow states and the workspace's
-    /// project statuses.
+    /// project statuses, and the workspace used to verify a private source.
     fn resolution(&self) -> Value {
         json!({
+            "organization": {"id": "organization-1"},
             "teams": {"nodes": [{"id": "team-1", "states": {
                 "nodes": self.states.iter().map(|named| json!({
                     "id": named.id, "name": named.name, "type": named.kind,

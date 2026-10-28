@@ -36,6 +36,20 @@ fn root_of(world: &World, source: &str) -> PathBuf {
 
 /// A world whose plan source routes [`ROUTED`] to [`MEMBERS`], with a draft source beside both.
 fn a_routed_world(name: &str) -> World {
+    let plans = STORE_SOURCE.to_uppercase();
+    a_world_with_members_and_draft(name)
+        .with_env(
+            &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__TO"),
+            MEMBERS,
+        )
+        .with_env(
+            &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__REPOSITORIES"),
+            ROUTED,
+        )
+}
+
+/// A world with [`MEMBERS`] and [`DRAFT`] configured beside the plan source, and no routes.
+fn a_world_with_members_and_draft(name: &str) -> World {
     let world = World::new(name);
     let mut configured = world;
     for source in [MEMBERS, DRAFT] {
@@ -51,16 +65,7 @@ fn a_routed_world(name: &str) -> World {
                 &root.to_string_lossy(),
             );
     }
-    let plans = STORE_SOURCE.to_uppercase();
     configured
-        .with_env(
-            &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__TO"),
-            MEMBERS,
-        )
-        .with_env(
-            &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__REPOSITORIES"),
-            ROUTED,
-        )
 }
 
 fn on(repo: &str, id: &str, deps: &[&str]) -> Value {
@@ -77,6 +82,22 @@ fn on(repo: &str, id: &str, deps: &[&str]) -> Value {
 /// Author `plan` in the draft source and file it into the plan source with the store's routed
 /// project copy, answering the home project's qualified id.
 fn filed(world: &World, name: &str, plan: &Value) -> String {
+    let (home, _) = filed_anywhere(world, name, plan).unwrap_or_else(|why| panic!("{why}"));
+    assert_eq!(
+        global(&home).source.as_str(),
+        STORE_SOURCE,
+        "the home is not in the plan source: {home}"
+    );
+    home
+}
+
+/// [`filed`], wherever the store's routing homes the plan: its home's qualified id, and the
+/// index of the route entry that placed it there, if one did — or why the copy was refused.
+fn filed_anywhere(
+    world: &World,
+    name: &str,
+    plan: &Value,
+) -> Result<(String, Option<u32>), String> {
     world.plan_in(&root_of(world, DRAFT), name, plan);
     // A `local-md` source is a folder that exists, so both destinations are made before the
     // copy builds them.
@@ -103,19 +124,17 @@ fn filed(world: &World, name: &str, plan: &Value) -> String {
                 statuses: Vec::new(),
             })
             .await
-            .unwrap_or_else(|error| panic!("the routed copy files the plan: {error}"))
-    });
-    let home = report
-        .items
-        .first()
-        .and_then(|item| item.action.destination())
-        .expect("the copy reports where the project landed");
-    assert_eq!(
-        home.source.as_str(),
-        STORE_SOURCE,
-        "the home is not in the plan source: {report:?}"
-    );
-    home.to_string()
+            .map_err(|error| format!("the routed copy did not file the plan: {error}"))
+    })?;
+    let landed = report.items.first().expect("the copy reports the project");
+    let home = landed
+        .action
+        .destination()
+        .ok_or_else(|| format!("the copy filed the project nowhere: {report:?}"))?;
+    Ok((
+        home.to_string(),
+        landed.placed.as_ref().and_then(|placed| placed.route),
+    ))
 }
 
 /// The home's tasks and its members', each by the node id it carries, read with the store's
@@ -169,6 +188,19 @@ fn read_plan_tasks(world: &World, home: &str) -> Result<BTreeMap<String, Value>,
 /// Every task of `source`, whatever project holds it, by the node id it carries — the whole of
 /// what that source holds of any plan.
 fn source_nodes(world: &World, source: &str) -> BTreeMap<String, Value> {
+    source_items(world, source)
+        .into_iter()
+        .filter_map(|task| {
+            let node = task["item"]["metadata"]["onepipeline.id"]
+                .as_str()?
+                .to_owned();
+            Some((node, task))
+        })
+        .collect()
+}
+
+/// Every task of `source`, whatever project holds it and whether or not it names a node.
+fn source_items(world: &World, source: &str) -> Vec<Value> {
     let source = onetaskgraph_plugin_api::SourceName::new(source).expect("a source name");
     world.store_call(|engine| async move {
         let answer = engine
@@ -192,13 +224,7 @@ fn source_nodes(world: &World, source: &str) -> BTreeMap<String, Value> {
         answer
             .items
             .iter()
-            .filter_map(|task| {
-                let task = serde_json::to_value(task).expect("a task renders");
-                let node = task["item"]["metadata"]["onepipeline.id"]
-                    .as_str()?
-                    .to_owned();
-                Some((node, task))
-            })
+            .map(|task| serde_json::to_value(task).expect("a task renders"))
             .collect()
     })
 }
@@ -558,7 +584,7 @@ fn a_routed_first_add_reports_a_refused_home_read_without_retrying_it() {
         log.contains("home read denied") && log.contains("class: refused, kind: refused"),
         "{log}"
     );
-    std::thread::sleep(std::time::Duration::from_secs(8));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(8));
     assert_eq!(world.store_asked("get_project"), reads + 1);
     assert_eq!(world.store_asked("write_project"), writes);
     assert!(!landed_words(&world, &home).unwrap().contains_key("extra"));
@@ -1391,4 +1417,219 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
         !landed.to_string().contains(&format!("{DRAFT}:")),
         "the board's document names the private draft: {landed}"
     );
+}
+
+/// The owner pattern the combined route matches: [`HOME`] and [`ROUTED`] are both its.
+const OWNER: &str = "github.com/owner/*";
+
+/// A world whose plan source is declared public and whose member source is declared private,
+/// with `service` declared a public repository and `engine` a private one, and the store's
+/// boundary checked by the `onevcs` an operator's store names. `combined` gives the plan source
+/// one combined entry, `{repositories: [owner/*], classification: private, to: members}`.
+fn a_combined_world(name: &str, combined: bool) -> World {
+    let plans = STORE_SOURCE.to_uppercase();
+    let mut world = a_world_with_members_and_draft(name)
+        .with_env(
+            &format!("ONETASKGRAPH_SOURCES__{plans}__VISIBILITY"),
+            "public",
+        )
+        .with_env("ONETASKGRAPH_SOURCES__MEMBERS__VISIBILITY", "private")
+        // The home lands in the member source, so a run reads its plan there.
+        .with_env(
+            "ONETASKGRAPH_DEFAULT_SOURCES",
+            &format!("{STORE_SOURCE},{MEMBERS}"),
+        );
+    if combined {
+        world = world
+            .with_env(
+                &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__TO"),
+                MEMBERS,
+            )
+            .with_env(
+                &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__REPOSITORIES"),
+                OWNER,
+            )
+            .with_env(
+                &format!("ONETASKGRAPH_SOURCES__{plans}__ROUTES__0__CLASSIFICATION"),
+                "private",
+            );
+    }
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.repository("local-direct", &[]);
+    world.extra_repository("engine");
+    crate::publication_boundary::declare_visibility(
+        &world,
+        &[("service", "public"), ("engine", "private")],
+    );
+    world
+}
+
+/// A node of [`ROUTED`] classified private, parked so the run holds it without dispatching.
+fn private_on_routed(id: &str) -> Value {
+    let mut node = on(ROUTED, id, &[]);
+    node["classification"] = json!("private");
+    node["parked"] = json!(true);
+    node
+}
+
+/// A plan holding a private task is private as a whole. With one combined entry routing the
+/// owner's private items to a member source declared private, the store's routed copy homes a
+/// plan drafted with a private node of that owner there — where, with no such entry, the same
+/// plan is refused at the plan source, which is declared public. A run launched from that home
+/// loads the configuration, and its live adds land beside that home: a private node naming the
+/// owner's repository in the member source and not the plan source, and a public node of the
+/// same owner too, the write-back's copy being into the home's own source. The store copies a
+/// plan whole and a plan holding a private task is private as a whole, so no canonical item of
+/// either add reaches the plan source. That source holds only the store's public views the home
+/// records, and no private item. Whether a public view of the live public add reaches it is
+/// measured rather than held.
+#[test]
+fn a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source() {
+    let plan = |name: &str| {
+        plan_of(
+            name,
+            vec![on(HOME, "core", &[]), private_on_routed("secret")],
+        )
+    };
+
+    let uncombined = a_combined_world("multi-source-uncombined", false);
+    let refused = uncombined
+        .on_onevcs(|| filed_anywhere(&uncombined, "refused", &plan("refused")))
+        .expect_err("a private plan was filed at a plan source not declared private");
+    assert!(
+        refused.contains("source plans is not declared private"),
+        "{refused}"
+    );
+    drop(uncombined);
+
+    let world = a_combined_world("multi-source-combined", true);
+    world.script("core.work", "core wrote this\n");
+    world.script("core.wait", "hold");
+    let name = "combined";
+    let (home, route) = world
+        .on_onevcs(|| filed_anywhere(&world, name, &plan(name)))
+        .unwrap_or_else(|why| panic!("{why}"));
+    assert_eq!(global(&home).source.as_str(), MEMBERS, "{home}");
+    assert_eq!(route, Some(0), "the combined entry did not place the plan");
+
+    world.run(&["start", &home, "--detach"]).exited(0);
+    world.until("the held node to be dispatched", |world| {
+        world.events_of(name, "node-dispatched").len() == 1
+    });
+    let mut shown = on(HOME, "shown", &[]);
+    shown["parked"] = json!(true);
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 2, "commands": [
+                {"op": "add", "node": private_on_routed("hidden")},
+                {"op": "add", "node": shown},
+            ]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until_store("both added tasks to land", |world| {
+        world.on_onevcs(|| {
+            let members = source_nodes(world, MEMBERS);
+            members.contains_key("hidden") && members.contains_key("shown")
+        })
+    });
+
+    let (members, plans) = world.on_onevcs(|| {
+        (
+            source_nodes(&world, MEMBERS),
+            source_items(&world, STORE_SOURCE),
+        )
+    });
+    let at_home = global(&home).native.to_string();
+    for node in ["core", "secret", "hidden", "shown"] {
+        assert_eq!(
+            members[node]["item"]["project"], at_home,
+            "{node} is not beside the home: {}",
+            members[node]
+        );
+    }
+    assert_eq!(
+        members["hidden"]["item"]["classification"], "private",
+        "{}",
+        members["hidden"]
+    );
+    // The public views the home records, each by the canonical task it shows: only public
+    // tasks have one, and the plan source holds exactly those and nothing else.
+    let views: BTreeMap<String, String> = world.store_project(&home)["items"][0]["item"]
+        ["metadata"]["onetaskgraph.public_projections"]["tasks"]
+        .as_array()
+        .expect("the private home records its public views")
+        .iter()
+        .map(|view| {
+            (
+                view["task"].as_str().expect("a task").to_owned(),
+                view["projection"].as_str().expect("a view").to_owned(),
+            )
+        })
+        .collect();
+    let canonical = |node: &str| members[node]["id"].as_str().expect("an id").to_owned();
+    assert!(views.contains_key(&canonical("core")), "{views:?}");
+    eprintln!(
+        "live public add has a recorded public view: {}",
+        views.contains_key(&canonical("shown"))
+    );
+    // Both live adds are canonical beside the home, and the plan source holds neither.
+    let in_plans = world.on_onevcs(|| source_nodes(&world, STORE_SOURCE));
+    for node in ["hidden", "shown"] {
+        assert!(
+            canonical(node).starts_with(&format!("{MEMBERS}:")),
+            "{node} is not canonical in the member source: {}",
+            canonical(node)
+        );
+        assert!(
+            !in_plans.contains_key(node)
+                && plans
+                    .iter()
+                    .all(|task| task["id"] != canonical(node).as_str()),
+            "the plan source holds the canonical item of {node}"
+        );
+    }
+    for node in ["secret", "hidden"] {
+        assert!(
+            !views.contains_key(&canonical(node)),
+            "{node} has a public view"
+        );
+    }
+    let mut held: Vec<&str> = plans
+        .iter()
+        .map(|task| task["id"].as_str().expect("a qualified id"))
+        .collect();
+    held.sort_unstable();
+    let mut shown_views: Vec<&str> = views.values().map(String::as_str).collect();
+    shown_views.sort_unstable();
+    assert_eq!(
+        held, shown_views,
+        "the plan source holds more than the public views"
+    );
+    for task in &plans {
+        assert_ne!(task["item"]["classification"], "private", "{task}");
+        for word in ["hidden", "secret"] {
+            assert!(
+                !task.to_string().contains(word),
+                "the plan source names {word}: {task}"
+            );
+        }
+    }
+    assert!(
+        !crate::review_reply::projections(&world, name).contains("not-private-destination"),
+        "a write was refused for want of a private destination"
+    );
+    world.run(&["stop", name]).exited(0);
 }

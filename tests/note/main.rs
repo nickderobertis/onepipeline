@@ -268,7 +268,7 @@ fn release_once_admitted(world: &World, run: &str, gates: &[&str]) -> std::threa
             admissions_in(&journal) > admitted_before || note_records_in(&journal) > recorded_before
         };
         while Instant::now() < deadline && !arrived() {
-            std::thread::sleep(Duration::from_millis(20));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(20));
         }
         let arrived = arrived();
         for gate in &gates {
@@ -634,7 +634,11 @@ fn held_heartbeating_conversation(world: &World, run: &str, nodes: Vec<Value>) {
 /// — so the submitter runs beside the journey rather than in front of it, and a
 /// journey reads the answer with [`answered`] once it has arranged what it reads
 /// it against. The wait is long enough to outlast any hold.
-fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
+fn submitted(
+    world: &World,
+    run: &str,
+    envelope: &str,
+) -> onepipeline_testfakes::profile::process::Child {
     use std::io::Write;
     let mut reply = world.agentgraph_cmd(&["reply", run]);
     reply
@@ -652,7 +656,7 @@ fn submitted(world: &World, run: &str, envelope: &str) -> std::process::Child {
     child
 }
 
-fn answered(child: std::process::Child) -> String {
+fn answered(child: onepipeline_testfakes::profile::process::Child) -> String {
     let output = child.wait_with_output().expect("the binary runs");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
@@ -665,7 +669,7 @@ fn answered(child: std::process::Child) -> String {
 }
 
 /// The receipt `reply` printed, read as the JSON object entry 64 states.
-fn receipt(child: std::process::Child) -> Value {
+fn receipt(child: onepipeline_testfakes::profile::process::Child) -> Value {
     let stdout = answered(child);
     serde_json::from_str(stdout.trim())
         .unwrap_or_else(|error| panic!("the receipt is not one JSON object: {error}: {stdout}"))
@@ -1771,7 +1775,7 @@ fn a_cancel_preempts_the_unanswered_note_to_its_node_and_what_waits_behind_it() 
 
     // The preempted delivery's member has been reaped, so its conversation has
     // said whatever it will; `lint`'s held turn keeps the writer there to read it.
-    std::thread::sleep(Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(5));
     assert!(
         world
             .events_of(run, "node-settled")
