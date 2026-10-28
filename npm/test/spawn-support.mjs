@@ -40,6 +40,10 @@ export function spawnable(command, args = [], options = {}, platform = process.p
   ];
 }
 
+/// `NODE_OPTIONS` preloading `file`. Node reads a backslash inside its quotes as
+/// an escape, so a Windows path is quoted as JSON is, not as it is written.
+export const preloading = (file) => `--require ${JSON.stringify(file)}`;
+
 /// The file cmd.exe runs for `command`: a name with a directory in it is taken
 /// from that directory, a bare one from the first PATH entry that holds it, and
 /// either with each PATHEXT extension in turn appended — the name as given only

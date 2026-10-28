@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, win32 } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resolveWindows, spawnable } from "./spawn-support.mjs";
+import { preloading, resolveWindows, spawnable } from "./spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 
@@ -151,5 +151,21 @@ describe("on this host, a command started through it", () => {
     assert.equal(ran.error, undefined);
     assert.equal(ran.status, 3, ran.stderr);
     assert.deepEqual(JSON.parse(ran.stdout), sent);
+  });
+
+  // A Windows temporary directory's path: backslashes, and a short name such as
+  // RUNNER~1. Elsewhere a backslash is a character of the file's name, so the
+  // same path is one file there.
+  it("preloads a file whose path holds backslashes and a short name, as NODE_OPTIONS names it", () => {
+    const dir = WINDOWS ? join(work, "RUNNER~1", "AppData") : work;
+    mkdirSync(dir, { recursive: true });
+    const preload = join(dir, WINDOWS ? "preload.cjs" : "RUNNER~1\\AppData\\preload.cjs");
+    writeFileSync(preload, 'process.stdout.write("preloaded");\n');
+    const ran = spawnSync(process.execPath, ["-e", ""], {
+      encoding: "utf8",
+      env: { ...process.env, NODE_OPTIONS: preloading(preload) },
+    });
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(ran.stdout, "preloaded");
   });
 });

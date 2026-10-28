@@ -16,13 +16,21 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { chmodSync, closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { STAGED_TARGET_DIR, hostTarget, installInto, pack, run } from "./install-support.mjs";
-import { spawnable } from "./spawn-support.mjs";
+import { preloading, spawnable } from "./spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 const EXE = WINDOWS ? "onepipeline.exe" : "onepipeline";
@@ -80,10 +88,6 @@ childProcess.spawn = function (...args) {
 /// The caller's environment without this host's own onepipeline settings, and
 /// with a runs root of the test's own: `flow run` with no session registers
 /// nothing, but it must not be able to reach a real one.
-/// `NODE_OPTIONS` preloading `file`. Node reads a backslash inside its quotes as
-/// an escape, so a Windows path is quoted as JSON is, not as it is written.
-const preloading = (file) => `--require ${JSON.stringify(file)}`;
-
 function engineEnv(work, extra = {}) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("ONEPIPELINE_")),
@@ -343,10 +347,12 @@ describe("the process the npm-installed command runs as", () => {
       // The command npm put on PATH, started the way any caller starts it.
       const start = (ready, env) =>
         track(
-          spawn(join(project, "node_modules", ".bin", "onepipeline"), flowRun(ready), {
-            cwd: project,
-            env: engineEnv(work, env),
-          }),
+          spawn(
+            ...spawnable(join(project, "node_modules", ".bin", "onepipeline"), flowRun(ready), {
+              cwd: project,
+              env: engineEnv(work, env),
+            }),
+          ),
           ready,
         );
 
@@ -405,13 +411,11 @@ describe("the process the npm-installed command runs as", () => {
         const withoutExec = join(work, "without-execve.cjs");
         writeFileSync(withoutExec, "delete process.execve;\n");
         const refused = spawnSync(
-          join(project, "node_modules", ".bin", "onepipeline"),
-          ["--version"],
-          {
+          ...spawnable(join(project, "node_modules", ".bin", "onepipeline"), ["--version"], {
             cwd: project,
             encoding: "utf8",
             env: engineEnv(work, { NODE_OPTIONS: preloading(withoutExec) }),
-          },
+          }),
         );
         assert.equal(refused.status, 1, refused.stderr);
         assert.equal(refused.stdout, "", "the engine ran");
@@ -439,11 +443,13 @@ describe("the process the npm-installed command runs as", () => {
           EXE,
         );
         const refuse = () =>
-          spawnSync(join(damaged, "node_modules", ".bin", "onepipeline"), ["--version"], {
-            cwd: damaged,
-            encoding: "utf8",
-            env: engineEnv(work),
-          });
+          spawnSync(
+            ...spawnable(join(damaged, "node_modules", ".bin", "onepipeline"), ["--version"], {
+              cwd: damaged,
+              encoding: "utf8",
+              env: engineEnv(work),
+            }),
+          );
 
         rmSync(engine);
         const missing = refuse();
@@ -702,6 +708,38 @@ describe("the process the npm-installed command runs as", () => {
         assert.match(refused.stderr, /^onepipeline: failed to launch the onepipeline binary: /);
       }
     });
+
+    if (!WINDOWS) {
+      // On Windows Node throws, rather than emitting "error", for a binary that
+      // is not a program (`spawn UNKNOWN`). Here it throws for a symlink that
+      // resolves to itself, so the keeper meets the same thrown start.
+      it("says it could not start the engine, and exits 1, when starting the binary throws", () => {
+        const looping = join(work, "looping");
+        installInto(looping, packages);
+        keeperFixture(looping);
+        const engine = join(
+          looping,
+          "node_modules",
+          "onepipeline-cli-win32-x64",
+          "bin",
+          "onepipeline.exe",
+        );
+        rmSync(engine);
+        symlinkSync(engine, engine);
+        const launcher = join(looping, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+        const refused = spawnSync(process.execPath, [...asWindows, launcher, "--version"], {
+          cwd: looping,
+          encoding: "utf8",
+          env: engineEnv(work),
+        });
+        assert.equal(refused.status, 1, refused.stderr);
+        assert.equal(refused.stdout, "");
+        assert.match(
+          refused.stderr,
+          /^onepipeline: failed to launch the onepipeline binary: spawn ELOOP\n$/,
+        );
+      });
+    }
 
     if (WINDOWS) {
       // A console's Ctrl+C and Ctrl+Break, delivered the way a terminal delivers
