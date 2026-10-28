@@ -1493,7 +1493,7 @@ fn private_on_routed(id: &str) -> Value {
 /// plan whole and a plan holding a private task is private as a whole, so no canonical item of
 /// either add reaches the plan source. That source holds only the store's public views the home
 /// records, and no private item. Whether a public view of the live public add reaches it is
-/// measured rather than held: against the linked store none does.
+/// measured rather than held.
 #[test]
 fn a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source() {
     let plan = |name: &str| {
@@ -1581,6 +1581,10 @@ fn a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_privat
         .collect();
     let canonical = |node: &str| members[node]["id"].as_str().expect("an id").to_owned();
     assert!(views.contains_key(&canonical("core")), "{views:?}");
+    eprintln!(
+        "live public add has a recorded public view: {}",
+        views.contains_key(&canonical("shown"))
+    );
     // Both live adds are canonical beside the home, and the plan source holds neither.
     let in_plans = world.on_onevcs(|| source_nodes(&world, STORE_SOURCE));
     for node in ["hidden", "shown"] {
