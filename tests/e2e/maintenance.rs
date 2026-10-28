@@ -2255,9 +2255,14 @@ fn a_closing_driver_journals_the_cut_of_a_sweep_over_identities_that_declare_not
     // the real linked sibling, and every outcome is asserted on the binary's own records.
     let inside = crate::harness::Rendezvous::failpoint();
     let stopping = crate::harness::Rendezvous::failpoint();
+    let relayed = crate::harness::Rendezvous::failpoint();
     let world = pooled_world("maintenance-undeclared-cut", Some(FAST_PACE))
         .with_env(IDENTITY_GATE, &inside.address())
-        .with_env(STOP_GATE, &stopping.address());
+        .with_env(STOP_GATE, &stopping.address())
+        .with_env(
+            "ONEPIPELINE_TEST_SETTLEMENT_RELAYED_GATE",
+            &relayed.address(),
+        );
     // llmlint: ignore-end[tests_mirror_real_usage]
     let service = world.repository("local-direct", &[]);
     let other = world.extra_repository("other");
@@ -2270,12 +2275,17 @@ fn a_closing_driver_journals_the_cut_of_a_sweep_over_identities_that_declare_not
     let held = inside.arrived();
     assert!(sweeping(&world, "cut"), "{}", world.dump());
     world.release("cut-build.go");
+    // The loop has its settlement, but the relay cannot forward the sweep's
+    // reports. Joining the sweep must suffice to put those reports on the
+    // loop's receiver before close-out drains it.
+    let relay_held = relayed.arrived();
     stopping.arrived().release();
     held.release();
     world.until("the cut run's result", |world| {
         world.run_file("cut", "result.json").is_file()
     });
 
+    relay_held.release();
     let recorded = records(&world, "cut");
     assert_eq!(recorded.len(), 1, "{}", world.dump());
     let payload = &recorded[0]["payload"];

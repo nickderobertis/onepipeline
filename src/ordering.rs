@@ -97,6 +97,13 @@ pub(crate) fn settlement_before_queue(node: &str) -> Result<()> {
     Ok(())
 }
 
+/// Hold the relay after the loop has received a settlement, so a journey can
+/// let the driver close while the relay cannot forward another message.
+pub(crate) fn settlement_relayed() -> Result<()> {
+    meet("ONEPIPELINE_TEST_SETTLEMENT_RELAYED_GATE")?;
+    Ok(())
+}
+
 pub(crate) fn settlement_queued(node: &str) -> Result<()> {
     if settlement_target(node) {
         meet("ONEPIPELINE_TEST_SETTLEMENT_QUEUED_GATE")?;
