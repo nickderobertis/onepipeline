@@ -574,3 +574,55 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("graph CLI discovers composition declarations and direct/grouped diagnostic aliases", () => {
+  const root = scratch();
+  try {
+    put(root, "src/lib.rs", "pub mod direct;\nmod grouped;\npub mod error;\n");
+    put(root, "src/direct.rs", "fn run() -> crate::Result<()> { let _: crate::Error; }");
+    put(root, "src/grouped.rs", "use crate::{Error, Result};\nfn run() -> Result<()> {}");
+    put(root, "src/error.rs", "pub struct Error;\npub type Result<T> = T;");
+    const expected = [
+      "direct->error",
+      "grouped->error",
+      "lib->direct",
+      "lib->error",
+      "lib->grouped",
+    ];
+    assert.deepEqual(
+      moduleGraph(root).edges.map(({ from, to }) => `${from}->${to}`),
+      expected,
+    );
+    const layout = {
+      schema: 1,
+      crates: {
+        lib: { files: ["src/lib.rs"], deps: ["direct", "grouped", "error"] },
+        direct: { files: ["src/direct.rs"], deps: ["error"] },
+        grouped: { files: ["src/grouped.rs"], deps: ["error"] },
+        error: { files: ["src/error.rs"], deps: [] },
+      },
+      edges: Object.fromEntries(
+        expected.map((edge) => [
+          edge,
+          { kind: "shared", fix: "Explicit composition or shared diagnostic type." },
+        ]),
+      ),
+    };
+    put(root, "layout.json", layout);
+    const cli = resolve("scripts/modularization/graph.mjs");
+    const run = () =>
+      spawnSync(process.execPath, [cli, "layout.json", "graph.json"], {
+        cwd: root,
+        encoding: "utf8",
+      });
+    assert.equal(run().status, 0);
+    assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 5);
+    delete layout.edges["direct->error"];
+    put(root, "layout.json", layout);
+    const refused = run();
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /unclassified edge direct->error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
