@@ -6,7 +6,7 @@ The records come from `onepipeline_testfakes::profile` (`crates/testfakes/src/pr
 
 ## This branch, and the branch it replaces
 
-This branch, `nick/959/onepipeline-test-profile-r9`, replaces `nick/959/onepipeline-test-profile-r2` and its pull request, onepipeline [#978](https://github.com/nickderobertis/onepipeline/pull/978). Every commit hash named in the sections after this one is a commit of r2. r2 cannot be published: its history carries merges of main, and onevcs's boundary check refuses one of them. This branch is cut from main at 6212751 (#1256) and carries no merge of main. Its outgoing commits:
+This branch, `nick/959/onepipeline-test-profile-r9`, replaces `nick/959/onepipeline-test-profile-r2` and its pull request, onepipeline [#978](https://github.com/nickderobertis/onepipeline/pull/978). The historical measurements and Checks sections name commits of r2; the resumed verification and lint-correction sections explicitly describe this replacement branch. r2 cannot be published: its history carries merges of main, and onevcs's boundary check refuses one of them. This branch is cut from main at 6212751 (#1256) and carries no merge of main. Its outgoing commits:
 - **eff0ef2** carries r2's net change (`git merge --squash` of r2's head bd81161 over its merge base c962121) as one commit. 79 of its 82 files are byte-identical to bd81161. The other three, `.github/workflows/ci.yml`, `tests/ci_workflows.rs` and `tests/e2e/linear_writeback.rs`, were also changed by main after c962121. In each, r2's added and removed lines are exactly the ones this branch applies over main's.
 - **652235d** is lockfile-only. It moves `pulldown-cmark` from 0.13.4 to 0.13.5, past [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414), so that the required `deny` check passes. Nothing else in `Cargo.lock` moves, so the lock is otherwise main's at 6212751.
 - **d907f7c** adds this section and changes only this document.
@@ -1572,6 +1572,6 @@ The only added directive pair is `tests/e2e/main.rs`'s `profiling` declaration. 
 | `tests/e2e/harness.rs:4976` | `expensive_tests_stay_behind_their_own_edge` | The hold proves World teardown names a descendant it cannot wait out; as for the preceding journey, the harness itself is under test. |
 
 
-## Lint-required recorder comment correction
+## Lint-required recorder comment correction (34c6f537)
 
 The resumed `just lint-llm-diff origin/main` reported one `comments_earn_their_place` finding at `crates/testfakes/src/profile.rs:429`: “The stale summary says the record is written once; provisional records are rewritten every heartbeat. Describe the once-only finalization instead.” The comment now says “Replace the provisional record until this process's record is finalized once.” The manager authorized this exception over planner correlation `c-716be573daeef575f6a3344e2a1485b7` and amended the byte-identity requirement to permit lint-required comment-only edits. This is the recorder's only difference from 7a017fa; its code is unchanged. The earlier profile remains a snapshot at 7a017fa, with no new timing claim about this head. No analysis script or profiled test changed.
