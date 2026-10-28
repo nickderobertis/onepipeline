@@ -50,23 +50,36 @@ export function suiteInputs(modules, root = ".") {
 /** Conservative command roots named literally by test modules and borrowed helpers. */
 export function commandCrates(modules, available, root = ".") {
   const roots = new Set();
-  const families = {
-    template: ["cmd-template", "cmd-template-list", "cmd-template-resolve", "cmd-template-check"],
-    boundary: ["cmd-boundary-guidance", "cmd-boundary-validate-envelope"],
-    channel: ["cmd-channel-queue"],
-    plan: ["cmd-plan-check"],
-    scratch: ["cmd-scratch-discard"],
-  };
+  const cli = readFileSync(join(root, "src/cli.rs"), "utf8");
+  const kebab = (word) =>
+    word.replace(/[a-z0-9][A-Z]/g, (pair) => `${pair[0]}-${pair[1]}`).toLowerCase();
+  const enums = new Map(
+    [...cli.matchAll(/pub enum (\w+Command|Command) \{([\s\S]*?)^\}/gm)].map((match) => [
+      match[1],
+      match[2],
+    ]),
+  );
+  if (!enums.has("Command")) throw new Error("src/cli.rs has no Command enum");
+  const families = new Map();
+  for (const variant of enums.get("Command").matchAll(/^    ([A-Z]\w*)(?:\((\w+)\))?[, ]/gm)) {
+    const parent = kebab(variant[1]);
+    const children = enums.get(variant[2]);
+    families.set(
+      parent,
+      children
+        ? [...children.matchAll(/^    ([A-Z]\w*)(?:\(| \{)/gm)].map(
+            (child) => `cmd-${parent}-${kebab(child[1])}`,
+          )
+        : [],
+    );
+  }
   for (const file of suiteInputs(modules, root).filter(
     (path) =>
       path.startsWith("tests/e2e/") && path.endsWith(".rs") && !path.endsWith("/harness.rs"),
   )) {
     const source = readFileSync(join(root, file), "utf8");
     for (const match of source.matchAll(/"([a-z][a-z-]*)"/g)) {
-      for (const name of [
-        `cmd-${match[1]}`,
-        ...(Object.hasOwn(families, match[1]) ? families[match[1]] : []),
-      ])
+      for (const name of [`cmd-${match[1]}`, ...(families.get(match[1]) ?? [])])
         if (available.has(name)) roots.add(name);
     }
   }

@@ -6,7 +6,8 @@ import { mergedChanges, replay, todaysMapping } from "../crate-split-replay.mjs"
 import { moduleGraph, validate } from "./graph.mjs";
 
 /** Use existing source paths as a conservative attribution of historical edits. */
-export function replayMapping(layout, extracted = new Set(Object.keys(layout.crates))) {
+export function replayMapping(layout, extracted = new Set(Object.keys(layout.crates)), root = ".") {
+  const today = todaysMapping(root);
   const residual = Object.entries(layout.crates).filter(([name]) => !extracted.has(name));
   const crates = Object.fromEntries(
     Object.entries(layout.crates)
@@ -27,19 +28,11 @@ export function replayMapping(layout, extracted = new Set(Object.keys(layout.cra
   crates.testfakes = { paths: ["crates/testfakes/**"], deps: [] };
   return {
     shared: [
-      "Cargo.toml",
-      "Cargo.lock",
-      "rust-toolchain.toml",
-      ".cargo/config.toml",
-      ".config/nextest.toml",
-      "nx.json",
-      "package.json",
-      "package-lock.json",
-      "justfile",
-      "schemas/**",
+      ...today.shared,
+      ...today.sources.filter((path) => path.startsWith("schemas/")),
       "src/AGENTS.md",
     ],
-    sources: ["src/**", "crates/**"],
+    sources: today.sources.filter((path) => !path.startsWith("schemas/")),
     fallback: residual.length ? "residual" : "onepipeline",
     crates,
     suites: Object.fromEntries(
@@ -92,8 +85,8 @@ export function profileTable(text) {
   return platforms;
 }
 
-export function buildReport(layout, changes, weights) {
-  const mapping = replayMapping(layout);
+export function buildReport(layout, changes, weights, root = ".") {
+  const mapping = replayMapping(layout, undefined, root);
   const full = Object.fromEntries(
     Object.entries(weights).map(([platform, seconds]) => {
       const result = replay(mapping, changes, seconds);
@@ -111,7 +104,7 @@ export function buildReport(layout, changes, weights) {
     );
     if (!next) throw new Error("migration cannot advance: dependency cycle");
     extracted.add(next);
-    const stage = replay(replayMapping(layout, extracted), changes);
+    const stage = replay(replayMapping(layout, extracted, root), changes);
     order.push({ crate: next, skippedSuiteFraction: stage.summary.skippedSuiteFraction });
   }
   return {
@@ -139,7 +132,7 @@ export function evidence(
   });
   if (changes.length !== 144) throw new Error(`expected 144 PRs, found ${changes.length}`);
   const weights = profileTable(readFileSync(join(root, "docs/test-profile-report.md"), "utf8"));
-  const report = buildReport(layout, changes, weights);
+  const report = buildReport(layout, changes, weights, root);
   const old = JSON.parse(readFileSync(join(root, "scripts/crate-split/proposed.json"), "utf8"));
   report.comparisons = Object.fromEntries(
     Object.entries(weights).map(([platform, seconds]) => [

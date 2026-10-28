@@ -37,6 +37,7 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
       });
     assert.equal(run("graph.json").status, 0);
     assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).files, 2);
+    assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 1);
     const surplus = spawnSync(process.execPath, [cli, "layout.json", "graph.json", "extra"], {
       cwd: root,
       encoding: "utf8",
@@ -89,6 +90,26 @@ test("source graph ignores literal/comment dependencies and sees grouped imports
       moduleGraph(root).edges.map(({ from, to }) => `${from}->${to}`),
       ["a->b", "a->c"],
     );
+    put(root, "layout.json", {
+      schema: 1,
+      crates: {
+        a: { files: ["src/a.rs"], deps: ["b", "c"] },
+        b: { files: ["src/b.rs"], deps: [] },
+        c: { files: ["src/c.rs"], deps: [] },
+        d: { files: ["src/d.rs"], deps: [] },
+      },
+      edges: {
+        "a->b": { kind: "shared", fix: "Shared B." },
+        "a->c": { kind: "shared", fix: "Shared C." },
+      },
+    });
+    const result = spawnSync(
+      process.execPath,
+      [resolve("scripts/modularization/graph.mjs"), "layout.json", "graph.json"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -110,10 +131,15 @@ test("replay selection matches real Nx for command, transitive shared, lock and 
     symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
     put(root, ".gitignore", "node_modules\n.nx\n");
     put(root, "package.json", { private: true });
-    const shared = ["Cargo.lock", "rust-toolchain.toml"];
+    const shared = ["Cargo.lock", "rust-toolchain.toml", "custom-build-input.txt"];
     put(root, "nx.json", {
-      namedInputs: { globals: shared.map((path) => `{workspaceRoot}/${path}`) },
+      namedInputs: {
+        globals: shared.map((path) => `{workspaceRoot}/${path}`),
+        rustBuild: ["globals", "{workspaceRoot}/src/**"],
+        e2eSource: ["rustBuild", "{workspaceRoot}/tests/e2e/**"],
+      },
     });
+    put(root, "tests/e2e/main.rs", "mod harness;\n");
     const crates = {
       record: { paths: ["record/**"], deps: [] },
       reader: { paths: ["reader/**"], deps: ["record"] },
@@ -142,18 +168,22 @@ test("replay selection matches real Nx for command, transitive shared, lock and 
     git("add", ".");
     git("commit", "-m", "test: initial graph");
     const mapping = compileMapping(
-      replayMapping({
-        crates: {
-          ...Object.fromEntries(
-            Object.entries(crates).map(([name, crate]) => [
-              name,
-              { files: crate.paths, deps: crate.deps },
-            ]),
-          ),
-          onepipeline: { files: [], deps: [] },
+      replayMapping(
+        {
+          crates: {
+            ...Object.fromEntries(
+              Object.entries(crates).map(([name, crate]) => [
+                name,
+                { files: crate.paths, deps: crate.deps },
+              ]),
+            ),
+            onepipeline: { files: [], deps: [] },
+          },
+          suites,
         },
-        suites,
-      }),
+        undefined,
+        root,
+      ),
     );
     for (const path of ["status/source.txt", "record/source.txt", ...shared]) {
       put(root, path, `${readFileSync(join(root, path), "utf8")}changed\n`);
@@ -237,11 +267,16 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     assert.equal(run().status, 0);
     assert.equal(readFileSync(join(root, "layout.json"), "utf8"), first);
     put(root, "src/main.rs", "fn main() {} ");
+    put(
+      root,
+      "src/cli.rs",
+      "pub enum Command {\n    Template(TemplateCommand),\n}\npub enum TemplateCommand {\n    List(Args),\n    Resolve(Args),\n    Check(Args),\n}\n",
+    );
     put(root, "tests/e2e/a.rs", 'fn x() { crate::b::helper(); run(&["template", "list"]); }');
     const modular = {
       schema: 1,
       crates: {
-        onepipeline: { files: ["src/main.rs"], deps: [] },
+        onepipeline: { files: ["src/main.rs", "src/cli.rs"], deps: [] },
         "cmd-template": { files: [], deps: [] },
         "cmd-template-list": { files: [], deps: [] },
         "cmd-template-resolve": { files: [], deps: [] },
@@ -260,6 +295,22 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
       "cmd-template-check",
     ])
       assert.ok(roots.includes(name), name);
+    put(
+      root,
+      "src/cli.rs",
+      readFileSync(join(root, "src/cli.rs"), "utf8").replace(
+        "    Check(Args),",
+        "    Check(Args),\n    Inspect(Args),",
+      ),
+    );
+    modular.crates["cmd-template-inspect"] = { files: [], deps: [] };
+    put(root, "layout.json", modular);
+    assert.equal(run().status, 0);
+    assert.ok(
+      JSON.parse(readFileSync(join(root, "layout.json"), "utf8")).suites.a.crates.includes(
+        "cmd-template-inspect",
+      ),
+    );
     modular.suites.a.modules = ["missing"];
     put(root, "layout.json", modular);
     const failed = run();
@@ -370,4 +421,68 @@ test("suite mappings cover transitive source inputs and generated design tables 
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
+});
+
+test("CLI replay weights, malformed profile recovery, and render write/freshness journeys", {
+  timeout: 180000,
+}, () => {
+  const root = scratch();
+  const run = (script, ...args) =>
+    spawnSync(process.execPath, [resolve(`scripts/modularization/${script}.mjs`), ...args], {
+      cwd: root,
+      encoding: "utf8",
+    });
+  try {
+    // The real historical corpus is reused, while all induced edits stay in this private clone.
+    execFileSync("git", ["clone", "--shared", "--quiet", process.cwd(), root], { stdio: "pipe" });
+    const base = execFileSync("git", ["rev-parse", "origin/main"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["update-ref", "refs/remotes/origin/main", base], { cwd: root });
+    const layout = JSON.parse(
+      readFileSync(join(root, "scripts/modularization/layout.json"), "utf8"),
+    );
+    const modules = Object.values(layout.suites).flatMap((suite) => suite.modules);
+    const profile =
+      "### Every e2e module, on the current records\n" +
+      modules.map((name) => `| ${name} | 1 | 2 | 1 | 3 | – | x | x | x | x |`).join("\n");
+    put(root, "docs/test-profile-report.md", profile);
+    const result = run("replay", "scripts/modularization/layout.json", "report.json");
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(readFileSync(join(root, "report.json"), "utf8"));
+    assert.equal(report.platforms.linux.summary.skippedSuiteRuns, 519);
+    assert.equal(report.platforms.linux.summary.testSecondsPerRun, 88);
+    assert.equal(report.platforms.linux.summary.testSecondsSkipped, 519);
+    assert.equal(report.platforms.local.summary.testSecondsSkipped, 1038);
+    assert.equal(report.platforms.macos.summary.testSecondsSkipped, 1557);
+    assert.deepEqual(report.platforms.windows.missingModules.sort(), modules.sort());
+    assert.equal(report.migration[0].crate, "render-cost");
+    assert.equal(report.migration[0].skippedSuiteFraction, 519 / (144 * 88));
+    assert.equal(report.migration.length, 73);
+    assert.equal(report.migration.at(-1).skippedSuiteFraction, 519 / (144 * 88));
+    put(
+      root,
+      "docs/test-profile-report.md",
+      profile.replace("| 2 | 1 | 3 |", "| 2 | broken | 3 |"),
+    );
+    const malformed = run("replay", "scripts/modularization/layout.json", "refused.json");
+    assert.equal(malformed.status, 1);
+    assert.match(malformed.stderr, /invalid linux seconds/);
+    put(root, "docs/test-profile-report.md", profile);
+    const stale = run("render");
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /design tables are stale/);
+    const written = run("render", "--write");
+    assert.equal(written.status, 0, written.stderr);
+    assert.match(readFileSync(join(root, "docs/modularization-design.md"), "utf8"), /519/);
+    assert.equal(run("render").status, 0);
+    put(
+      root,
+      "docs/modularization-design.md",
+      readFileSync(join(root, "docs/modularization-design.md"), "utf8") + "stale\n",
+    );
+    assert.equal(run("render").status, 1);
+    assert.equal(run("render", "--write").status, 0);
+    assert.equal(run("render").status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
