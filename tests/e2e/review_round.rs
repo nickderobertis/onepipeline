@@ -561,8 +561,9 @@ fn round_command_capturing(
     let stderr = world.root.join("round-command.stderr");
     let errors = File::create(&stderr).expect("the stderr capture opens");
     command.stdout(File::create(&stdout).expect("the stdout capture opens"));
-    // A regular-file spool cannot backpressure the child or wait for inherited
-    // pipe handles to close. Only publication to the observed capture is delayed.
+    // A withheld pipe reader can fill the Windows pipe before the second store
+    // hold releases it; joining its copier can also wait on inherited write handles.
+    // A regular-file spool has neither dependency: only publication is delayed.
     let spool = world.root.join("round-command.stderr-spool");
     command.stderr(if stderr_release.is_some() {
         File::create(&spool).expect("the stderr spool opens")
@@ -708,6 +709,8 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
 
 /// Store progress does not promise that a caller has observed the command's stderr.
 /// A file spool stages a delayed pipe reader without pipe capacity or EOF dependencies.
+/// To check the regression, restore the original immediate output assertion after
+/// `later.arrived()` in place of the output wait below, keeping this delayed capture.
 #[test]
 fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
     progressing_round(true);
@@ -754,14 +757,14 @@ fn progressing_round(delay_reader: bool) {
                 before,
                 "stderr was captured before its pipe reader was released"
             );
-        }
-        if delay_reader {
             world.until("the child to write while its output is unobserved", |_| {
                 written("round-command.stderr-spool") > before
             });
             assert_eq!(written("round-command.stderr"), before);
             release.send(()).expect("the output observer is released");
         }
+        // The attached driver's engine thread can reach update_task while its rendering
+        // loop is still asleep (driver::attach, ATTACH_POLL) or has not been scheduled.
         // Neither a store arrival nor a child's write promises its output was observed.
         // Wait for the capture before spending the next interval of diagnostic time.
         world.until("the command to write between the two held calls", |_| {
