@@ -1240,8 +1240,11 @@ onevcs-testing = "0.19.22"
 # (`tests/e2e/publication_boundary.rs`'s
 # `a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store`).
 # 0.12.8 retains a private Linear home's public projection map across the
-# stored-content follow-up write (onetaskgraph #3781). The live-add journey in
-# tests/e2e/linear_writeback.rs exercises the engine's own creation path.
+# stored-content follow-up write (onetaskgraph #3781). The engine's own write-back
+# never hands Linear a home it has not read back as Linear stored it, so it does not
+# reach that write; `tests/e2e/linear_writeback.rs`'s
+# `a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections`
+# drives the linked store's full copy, which does, and fails on 0.12.7.
 onetaskgraph-core = "=0.12.8"
 onetaskgraph-plugin-api = "=0.12.8"
 onetaskgraph-local-md = "=0.12.8"
