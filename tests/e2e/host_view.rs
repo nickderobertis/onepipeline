@@ -150,6 +150,69 @@ fn generator(world: &World, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("UTF-8")
 }
 
+/// Dead fixture entries share one reaped process; live entries still name the
+/// caller's real processes. Observe execve so this holds the generator's cost,
+/// and exercise a missing executable followed by recovery in the same process.
+#[test]
+fn the_generator_reaps_once_and_does_not_cache_a_failed_spawn() {
+    let world = World::new("fixture-reaped-pid");
+    let module = crate::harness::repo_file(GENERATOR);
+    let script = r#"
+        import {pathToFileURL} from 'node:url';
+        const {reapedPid} = await import(pathToFileURL(process.argv[2]));
+        console.log(JSON.stringify({node: process.execPath, pids: [reapedPid(), reapedPid(), reapedPid()]}));
+    "#;
+    let trace = world.root.join("generator.strace");
+    let output = Command::new("strace")
+        .args(["-f", "-e", "trace=execve", "-o"])
+        .arg(&trace)
+        .args(["node", "--input-type=module", "-e", script])
+        .arg("fixture-probe")
+        .arg(&module)
+        .output()
+        .expect("the generator runs under strace");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let held: Value = serde_json::from_slice(&output.stdout).expect("the reaped pids");
+    let pids = held["pids"].as_array().expect("three pids");
+    assert!(pids[0].as_u64().is_some_and(|pid| pid > 0));
+    assert!(pids.iter().all(|pid| pid == &pids[0]), "{held}");
+    let trace = std::fs::read_to_string(trace).expect("the exec trace");
+    assert_eq!(
+        trace
+            .lines()
+            .filter(|line| line.contains("/true\",") && line.ends_with("= 0"))
+            .count(),
+        1,
+        "{trace}"
+    );
+
+    let recovery = r#"
+        import {pathToFileURL} from 'node:url';
+        import assert from 'node:assert/strict';
+        const {reapedPid} = await import(pathToFileURL(process.argv[2]));
+        const path = process.env.PATH;
+        process.env.PATH = '';
+        assert.throws(() => reapedPid(), /could not reap/);
+        process.env.PATH = path;
+        assert.ok(reapedPid() > 0);
+    "#;
+    let recovered = Command::new(held["node"].as_str().expect("node's executable"))
+        .args(["--input-type=module", "-e", recovery])
+        .arg("fixture-probe")
+        .arg(module)
+        .output()
+        .expect("the generator retries after PATH is restored");
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+}
+
 fn pairs(value: &Value) -> BTreeSet<(String, String)> {
     value
         .as_array()

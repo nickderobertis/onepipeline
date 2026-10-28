@@ -240,9 +240,19 @@ export function dispatched(run, node, at) {
   return ["node-ready", "node-dispatched"].map((kind) => pipeline(run, kind, node, at));
 }
 
-/** A pid this host has just reaped, so a probe of it answers gone. */
+// Every dead entry also carries an impossible start token, so even PID reuse
+// cannot turn it into a live dispatch. Reaping once keeps a 100-run fixture from
+// spawning a process for each dead driver and registry entry.
+let reaped;
+/** A pid this generator reaped, so a probe cannot prove the fixture's dead token. */
 export function reapedPid() {
-  return spawnSync("true").pid;
+  if (reaped !== undefined) return reaped;
+  const child = spawnSync("true");
+  if (child.status !== 0 || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
+    throw new Error(`could not reap a fixture process: ${child.error?.message ?? child.stderr}`);
+  }
+  reaped = child.pid;
+  return reaped;
 }
 
 /** The procfs start token of a live process, as the engine records one. */

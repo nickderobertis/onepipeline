@@ -1721,21 +1721,7 @@ impl World {
         for dir in [&origin, &home] {
             profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
-        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
-        git(
-            self,
-            &self.root,
-            &["clone", &origin.to_string_lossy(), "service"],
-        );
-        profile::fs::write(checkout.join("README.md"), "the repository under test\n")
-            .expect("the seed file is written");
-        git(self, &checkout, &["add", "-A"]);
-        git(
-            self,
-            &checkout,
-            &["commit", "-m", "chore: seed the repository"],
-        );
-        git(self, &checkout, &["push", "-u", "origin", "main"]);
+        seed_repository(self, &origin, &checkout, "the repository under test\n");
 
         // Version 4: no `gate:` in it at all — what verifies a change is the
         // repository's own merge path, so the rules file says how the change is
@@ -1787,25 +1773,12 @@ impl World {
         let _fixture = profile::span(profile::Category::Fixture);
         let origin = self.root.join(format!("{alias}.git"));
         let checkout = self.root.join(alias);
-        profile::fs::create_dir_all(&origin).expect("a scratch directory");
-        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
-        git(
+        seed_repository(
             self,
-            &self.root,
-            &["clone", &origin.to_string_lossy(), alias],
-        );
-        profile::fs::write(
-            checkout.join("README.md"),
-            format!("the {alias} repository\n"),
-        )
-        .expect("the seed file is written");
-        git(self, &checkout, &["add", "-A"]);
-        git(
-            self,
+            &origin,
             &checkout,
-            &["commit", "-m", "chore: seed the repository"],
+            &format!("the {alias} repository\n"),
         );
-        git(self, &checkout, &["push", "-u", "origin", "main"]);
         self.register(
             &checkout,
             Some(&format!("https://github.com/owner/{alias}.git")),
@@ -5458,6 +5431,123 @@ impl Repository {
     }
 }
 
+/// Seed the bare origin in one plumbing transaction before cloning it. Clone
+/// then establishes the worktree, remote tracking ref and upstream together;
+/// there is no empty checkout to add, commit and push separately.
+fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) {
+    profile::fs::create_dir_all(origin).expect("a scratch origin");
+    git(world, origin, &["init", "--bare", "--initial-branch=main"]);
+    let message = "chore: seed the repository";
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs();
+    let stream = format!(
+        "blob\nmark :1\ndata {}\n{readme}\ncommit refs/heads/main\n\
+         committer {GIT_WHO} <{GIT_EMAIL}> {timestamp} +0000\ndata {}\n{message}\n\
+         M 100644 :1 README.md\n\ndone\n",
+        readme.len(),
+        message.len(),
+    );
+    let mut import = Command::new("git")
+        .args(["fast-import", "--quiet", "--done"])
+        .current_dir(origin)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git imports the seed commit");
+    std::io::Write::write_all(
+        &mut import.stdin.take().expect("the import stream"),
+        stream.as_bytes(),
+    )
+    .expect("the seed stream is written");
+    let imported = import.wait_with_output().expect("git finishes importing");
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    git(
+        world,
+        &world.root,
+        &[
+            "clone",
+            &origin.to_string_lossy(),
+            &checkout.to_string_lossy(),
+        ],
+    );
+}
+
+#[test]
+fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
+    let world = World::new("seed-repositories");
+    let starts = || {
+        profile::snapshot()
+            .programs
+            .get("git")
+            .map_or(0, |entry| entry.0)
+    };
+    let before = starts();
+    let first = world.repository("local-direct", &["exit 1"]);
+    let second = world.extra_repository("dependency");
+    assert_eq!(
+        starts() - before,
+        9,
+        "two seeds use three git starts each, plus a hook configuration and two remote lookups"
+    );
+    for (repository, readme) in [
+        (&first, "the repository under test\n"),
+        (&second, "the dependency repository\n"),
+    ] {
+        assert_eq!(
+            git(&world, &repository.checkout, &["show", "HEAD:README.md"]),
+            readme
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["log", "-1", "--format=%s"]).trim(),
+            "chore: seed the repository"
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["status", "--porcelain"]),
+            ""
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["rev-parse", "HEAD"]),
+            git(&world, &repository.origin, &["rev-parse", "main"])
+        );
+        assert_eq!(
+            git(
+                &world,
+                &repository.checkout,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            )
+            .trim(),
+            "origin/main"
+        );
+    }
+    git(
+        &world,
+        &first.checkout,
+        &["commit", "--allow-empty", "-m", "fix: exercise the hook"],
+    );
+    let pushed = Command::new("git")
+        .arg("push")
+        .current_dir(&first.checkout)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .output()
+        .unwrap();
+    assert!(
+        !pushed.status.success(),
+        "the installed pre-push hook must still refuse"
+    );
+    assert_ne!(
+        git(&world, &first.checkout, &["rev-parse", "HEAD"]),
+        git(&world, &first.origin, &["rev-parse", "main"])
+    );
+}
+
 /// Run git in a repository, refusing to continue on anything it rejects.
 ///
 /// Through the world's own git config, like every git `onevcs` runs from here:
@@ -5629,26 +5719,11 @@ pub fn rows(stdout: &str) -> Vec<&str> {
 
 /// One of the sibling doubles, pinned to a name only this process holds.
 ///
-/// The doubles live in a separate workspace member so they can never ship, and a
-/// package-scoped build — `cargo llvm-cov` runs one — does not build another
-/// member's binaries. So the fixture builds itself.
-///
-/// Cargo is the freshness check, not the file's existence: a double whose source
-/// changed has to be rebuilt, and a harness that stopped at "the binary is
-/// there" would silently run last week's fixture against this week's test. The
-/// build happens once per process; `.config/nextest.toml` bounds how many run at
-/// a time, and cargo's own lock serialises those.
-///
-/// The path handed back is **never** the one cargo publishes. Every test runs in
-/// its own process and each builds the doubles, so several cargo invocations
-/// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
-/// a replacement, so that name is briefly absent. A test that had already looked
-/// would then spawn a binary that vanished under it: on macOS that surfaced both
-/// as a missing double and, worse, as a whole run stuck at `run-started` because
-/// the launcher could not start its driver. Giving each process its own name for
-/// the binary closes the window, because a later uplift replaces the *name* it
-/// published and never touches this one. See [`held_alias`] for why that name is
-/// a link rather than a copy wherever the filesystem allows one.
+/// The doubles live in a separate workspace member so they can never ship. The
+/// first test needing a package builds it; the rest of that nextest run reuse
+/// that freshness check. Direct test-binary runs still ask cargo each time.
+/// Each process holds its own alias, so another build's uplift cannot remove a
+/// binary from underneath a running journey (see [`held_alias`]).
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
@@ -6380,17 +6455,118 @@ fn held_dir() -> PathBuf {
 /// Build one package's binaries into the target directory this test's own binary
 /// came out of, and return the per-process directory they are held in.
 ///
-/// The one wait in this harness that is deliberately left unbounded. Every test
-/// process needing a double runs this, so several of them queue on cargo's lock
-/// over the shared target directory and cargo says so — `Blocking waiting for
-/// file lock on build directory` — and then waits as long as it takes. A
-/// deadline here would end whichever process drew the short straw, on a host
-/// that was working the whole time, and it would do it more often the more
-/// parallel the runner is. What bounds it instead is the runner: `slow-timeout`
-/// in `.config/nextest.toml` names the test that is waiting and then ends it, so
-/// a lock nothing is going to release reads as one named test rather than as a
-/// suite that stopped.
+/// Cargo and the per-run file lock may wait for another builder. The runner's
+/// slow-timeout bounds that wait, as it bounds the subprocess journeys.
 fn build(selection: &[&str]) -> PathBuf {
+    if let Ok(run) = std::env::var("NEXTEST_RUN_ID") {
+        assert!(
+            !run.is_empty()
+                && run
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
+            "nextest's run id must be a safe path component"
+        );
+        let key = selection.join("_").replace('-', "");
+        let cache = binary()
+            .parent()
+            .expect("the binary's directory")
+            .join("double-builds")
+            .join(run)
+            .join(key);
+        build_once(&cache, || build_package(selection));
+    } else {
+        build_package(selection);
+    }
+    let held = held_dir();
+    profile::fs::create_dir_all(&held).expect("a directory for this process's doubles");
+    held
+}
+
+/// A failed or interrupted builder leaves no success marker; dropping its OS
+/// lock lets the next process retry. Only small markers are shared, never a
+/// mutable executable or a process's aliases.
+fn build_once(cache: &Path, build: impl FnOnce()) {
+    let ready = cache.join("ready");
+    if ready.is_file() {
+        return;
+    }
+    profile::fs::create_dir_all(cache).expect("a directory for the run's build marker");
+    let lock = profile::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cache.join("lock"))
+        .expect("a build lock");
+    {
+        let _wait = profile::span(profile::Category::Wait);
+        fs4::fs_std::FileExt::lock_exclusive(&lock).expect("the run's build lock");
+    }
+    if !ready.is_file() {
+        build();
+        profile::fs::write(ready, b"").expect("the completed build marker");
+    }
+}
+
+/// Exercise the lock through independent processes, including a failed builder:
+/// waiters must retry that build, then share exactly one successful result.
+#[test]
+fn concurrent_builders_share_success_and_retry_failure() {
+    const CHILD: &str = "ONEPIPELINE_BUILD_CACHE_CHILD";
+    if let Some(cache) = std::env::var_os(CHILD) {
+        let cache = PathBuf::from(cache);
+        build_once(&cache, || {
+            if std::env::var_os("ONEPIPELINE_BUILD_CACHE_FAIL").is_some() {
+                panic!("the first builder failed");
+            }
+            let mut log = profile::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(cache.join("built"))
+                .expect("the build's output");
+            std::io::Write::write_all(&mut log, b"built\n").expect("the build completes");
+        });
+        return;
+    }
+    let world = World::new("build-cache");
+    let cache = world.root.join("cache");
+    let child = |cache: &Path| {
+        let mut command = Command::new(std::env::current_exe().expect("the test executable"));
+        command
+            .args([
+                "--exact",
+                "harness::concurrent_builders_share_success_and_retry_failure",
+            ])
+            .env(CHILD, cache)
+            .env_remove("ONEPIPELINE_BUILD_CACHE_FAIL");
+        command
+    };
+    let failed = child(&cache)
+        .env("ONEPIPELINE_BUILD_CACHE_FAIL", "1")
+        .output()
+        .expect("a builder starts");
+    assert!(!failed.status.success(), "the failing build must fail");
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("the first builder failed"));
+    assert!(!cache.join("ready").exists(), "failure cannot be cached");
+    let children: Vec<_> = (0..4)
+        .map(|_| child(&cache).spawn().expect("a waiting builder starts"))
+        .collect();
+    for mut child in children {
+        assert!(child.wait().expect("a builder exits").success());
+    }
+    assert_eq!(
+        profile::fs::read_to_string(cache.join("built")).unwrap(),
+        "built\n"
+    );
+    // A new run must perform its own freshness check.
+    let next_run = world.root.join("next-run");
+    assert!(child(&next_run).status().unwrap().success());
+    assert_eq!(
+        profile::fs::read_to_string(next_run.join("built")).unwrap(),
+        "built\n"
+    );
+}
+
+fn build_package(selection: &[&str]) {
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
@@ -6440,9 +6616,6 @@ fn build(selection: &[&str]) -> PathBuf {
         "{selection:?} did not build: {}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let held = held_dir();
-    profile::fs::create_dir_all(&held).expect("a directory for this process's doubles");
-    held
 }
 
 /// This process's own name for a built binary, made once and kept.
