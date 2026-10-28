@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.4](https://github.com/nickderobertis/onepipeline/compare/v0.95.3...v0.95.4) - 2026-10-28
+
+### Fixed
+
+- *(npm)* make the npm-installed onepipeline command become the engine process instead of running it as a child ([#1240](https://github.com/nickderobertis/onepipeline/pull/1240))
+
 ## [0.95.3](https://github.com/nickderobertis/onepipeline/compare/v0.95.2...v0.95.3) - 2026-10-27
 
 ### Fixed
