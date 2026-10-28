@@ -8932,6 +8932,10 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         ))
         .out_has(&format!("onevcs pool status {SERVICE_IDENTITY}"));
 
+    // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this existing pool-admission
+    // journey changes only its synchronization here. Splitting the e2e project and
+    // its inherited inputs is outside this regression fix; the engine source must
+    // continue selecting this journey to catch admission regressions.
     // The overflow session proves placement while the slot is occupied, but
     // must finish publishing before the slot's owner publishes. onevcs's
     // publish_locally checks checkout readiness before queue::turn; a check
@@ -8957,6 +8961,7 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
             event["labels"]["node"] == "first" && event["payload"]["returned"]["slot"].is_u64()
         })
     });
+    // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
