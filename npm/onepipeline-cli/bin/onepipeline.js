@@ -110,22 +110,33 @@ const CONSOLE_EVENTS = ["SIGINT", "SIGBREAK"];
 // at which the engine runs and nothing that would end it knows it, however
 // early in its start this process is ended. A message the keeper cannot
 // deliver is the same break, seen first: this process ended before the keeper
-// ran, and the failed send ends the engine rather than the keeper alone.
+// ran, and the failed send ends the engine rather than the keeper alone. Node
+// reports only some failures to start a program as an "error" event and throws
+// the rest — on Windows, a binary that is not a program — so both are reported
+// as the one envelope.
 const KEEPER = `
 const { spawn } = require("node:child_process");
 const [binary, ...args] = JSON.parse(process.argv[1]);
 for (const signal of ${JSON.stringify(CONSOLE_EVENTS)}) process.on(signal, () => {});
-const engine = spawn(binary, args, { stdio: "inherit" });
+let engine = null;
 const end = () => {
-  engine.kill("SIGKILL");
+  engine?.kill("SIGKILL");
   process.exit(0);
 };
 process.on("disconnect", end);
 const send = (message, then = () => {}) =>
   process.send(message, (error) => (error ? end() : then()));
-if (engine.pid !== undefined) send({ engine: engine.pid });
-engine.on("error", (error) => send({ error: error.message }, () => process.exit(0)));
-engine.on("exit", (code) => send({ status: code ?? 1 }, () => process.exit(0)));
+const failed = (error) => send({ error: error.message }, () => process.exit(0));
+try {
+  engine = spawn(binary, args, { stdio: "inherit" });
+} catch (error) {
+  failed(error);
+}
+if (engine !== null) {
+  if (engine.pid !== undefined) send({ engine: engine.pid });
+  engine.on("error", failed);
+  engine.on("exit", (code) => send({ status: code ?? 1 }, () => process.exit(0)));
+}
 `;
 
 function supervise(binary, args) {

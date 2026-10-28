@@ -80,6 +80,10 @@ childProcess.spawn = function (...args) {
 /// The caller's environment without this host's own onepipeline settings, and
 /// with a runs root of the test's own: `flow run` with no session registers
 /// nothing, but it must not be able to reach a real one.
+/// `NODE_OPTIONS` preloading `file`. Node reads a backslash inside its quotes as
+/// an escape, so a Windows path is quoted as JSON is, not as it is written.
+const preloading = (file) => `--require ${JSON.stringify(file)}`;
+
 function engineEnv(work, extra = {}) {
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !key.startsWith("ONEPIPELINE_")),
@@ -232,6 +236,8 @@ public static class ConsoleEvent {
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FreeConsole();
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(Handler handler, bool add);
+  [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetConsoleCtrlHandler")]
+  static extern bool SetConsoleCtrlIgnored(IntPtr none, bool ignored);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GenerateConsoleCtrlEvent(uint ev, uint group);
   [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
@@ -243,6 +249,10 @@ public static class ConsoleEvent {
     si.dwFlags = 1; // STARTF_USESHOWWINDOW
     si.wShowWindow = 0; // SW_HIDE
     PROCESS_INFORMATION pi;
+    // Whether Ctrl+C is ignored is inherited, and a CI runner starts its steps
+    // ignoring it: the launcher is given the handling a terminal gives instead.
+    if (!SetConsoleCtrlIgnored(IntPtr.Zero, false))
+      throw new Exception("SetConsoleCtrlHandler failed: " + Marshal.GetLastWin32Error());
     // CREATE_NEW_CONSOLE
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, 0x10,
         IntPtr.Zero, null, ref si, out pi))
@@ -400,7 +410,7 @@ describe("the process the npm-installed command runs as", () => {
           {
             cwd: project,
             encoding: "utf8",
-            env: engineEnv(work, { NODE_OPTIONS: `--require "${withoutExec}"` }),
+            env: engineEnv(work, { NODE_OPTIONS: preloading(withoutExec) }),
           },
         );
         assert.equal(refused.status, 1, refused.stderr);
@@ -582,7 +592,7 @@ describe("the process the npm-installed command runs as", () => {
         const stderrFile = openSync(log, "w");
         const child = start(ready, {
           stdio: ["ignore", "ignore", stderrFile],
-          env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: `--require "${lies}"` },
+          env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: preloading(lies) },
         });
         closeSync(stderrFile);
         const code = await exited(child);
@@ -654,7 +664,7 @@ describe("the process the npm-installed command runs as", () => {
         ...spawnable(bin, ["--version"], {
           cwd: project,
           encoding: "utf8",
-          env: engineEnv(work, { NODE_OPTIONS: `--require "${preload}"` }),
+          env: engineEnv(work, { NODE_OPTIONS: preloading(preload) }),
         }),
       );
       assert.equal(refused.status, 1, refused.stderr);
