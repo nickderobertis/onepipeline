@@ -1,8 +1,8 @@
 //! Where each test's wall clock goes.
 //!
-//! Every test process records what it spent its time on and writes one JSON
-//! record when the test ends, so any run of the suite — a laptop's, a CI
-//! leg's — leaves a per-test breakdown behind at no cost beyond the clock reads.
+//! Every test process records what it spent its time on, periodically replaces
+//! a provisional JSON record, and finalizes it when the test ends. Each run
+//! leaves a per-test breakdown, including any unfinished test's last heartbeat.
 //! `scripts/test-profile-report.mjs` folds the records into the per-test,
 //! per-module and per-platform tables.
 //!
