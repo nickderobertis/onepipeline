@@ -1900,4 +1900,122 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
         .out_has(&format!("home {project} — written: Completed"));
 }
 
+/// A live edit creates a public view from a private Linear home. Linear rewrites the
+/// home's Markdown, so the store's follow-up write must retain the newly recorded map.
+#[test]
+fn a_private_linear_home_keeps_public_projections_after_a_live_add() {
+    let name = "linear-private-projections";
+    let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(KEY_ENV, "a-loopback-key")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.script("anchor.wait", "hold");
+    let linear = Linear::serve(
+        &every_mapped_state(),
+        STATUSES,
+        name,
+        &described(
+            "## Plan\n- Keep this home private.",
+            &json!({
+                "onetaskgraph.classification": "private",
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": "Deliver the plan"},
+            }),
+        ),
+        "Planned",
+    );
+    linear.file(
+        "chore: anchor",
+        &described(
+            &task_text("anchor"),
+            &json!({"onepipeline.id": "anchor", "onepipeline.persona": "engineer",
+            "onetaskgraph.classification": "private"}),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("launch-directory");
+    let views = world.root.join("views-store");
+    std::fs::create_dir_all(&launch).unwrap();
+    std::fs::create_dir_all(&views).unwrap();
+    let config = configuration(&linear).replacen("    plugin: linear", "    visibility: private\n    routes:\n      - to: views\n        repositories: [github.com/owner/library]\n    plugin: linear", 1);
+    std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+        "{config}  views:\n    plugin: local-md\n    visibility: public\n    config:\n      root: {views:?}\n"
+    )).unwrap();
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--detach"]);
+    world.run_on(start, "start private Linear home").exited(0);
+    world.until("the anchor to dispatch", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    let mut node = crate::harness::agent("examples", &[]);
+    node["repo"] = json!("github.com/owner/library");
+    node["classification"] = json!("public");
+    node["parked"] = json!(true);
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3,
+        "commands": [{"op": "add", "node": node}]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the live addition's write-back to finish", |world| {
+        projection_records(world, name).iter().any(|record| {
+            record["outcome"] == "projected" && record.to_string().contains("examples")
+        })
+    });
+    let home = linear.project_content();
+    let metadata = metadata_of(&home);
+    let map = metadata
+        .get("onetaskgraph.public_projections")
+        .unwrap_or_else(|| {
+            panic!(
+                "no public projections in {home}; records: {:?}; requests: {:?}",
+                projection_records(&world, name),
+                linear.log()
+            )
+        });
+    assert_eq!(map["schema_version"], 1, "{home}");
+    let tasks = map["tasks"]
+        .as_array()
+        .expect("the private home's public projections");
+    assert_eq!(tasks.len(), 1, "{home}");
+    assert!(
+        tasks[0]["task"].as_str().unwrap().starts_with("tracker:"),
+        "{home}"
+    );
+    let projection = tasks[0]["projection"].as_str().unwrap();
+    let native = projection
+        .strip_prefix("views:")
+        .expect("a public view in views");
+    let view = std::fs::read_to_string(views.join("tasks").join(format!("{native}.md")))
+        .expect("the recorded public projection exists");
+    assert!(view.contains("examples"), "{view}");
+    let canonical = linear
+        .issues()
+        .into_iter()
+        .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == "examples")
+        .expect("the new task exists canonically in Linear");
+    assert_eq!(
+        tasks[0]["task"],
+        format!("{SOURCE}:{}", canonical.0),
+        "{home}"
+    );
+    assert!(home.contains("* Keep this home private."), "{home}");
+    let held = world.run_json(name, "writeback-landed.json");
+    assert!(held["items"].get("examples").is_some(), "{held}");
+    world.release("anchor.go");
+}
+
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
