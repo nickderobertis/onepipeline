@@ -73,6 +73,16 @@ export function commandCrates(modules, available, root = ".") {
         : [],
     );
   }
+  for (const [parent, children] of families) {
+    const parentCrate = `cmd-${parent}`;
+    if (
+      !available.has(parentCrate) &&
+      (children.length === 0 || children.some((child) => !available.has(child)))
+    )
+      throw new Error(
+        `missing command mapping: ${parentCrate} (map the parent or all its subcommands)`,
+      );
+  }
   for (const file of suiteInputs(modules, root).filter(
     (path) =>
       path.startsWith("tests/e2e/") && path.endsWith(".rs") && !path.endsWith("/harness.rs"),

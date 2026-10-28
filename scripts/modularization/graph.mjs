@@ -234,6 +234,18 @@ export function validate(mapping, graph, root = ".") {
         }
       }
     }
+    if (field === "suites" && mapping.suites !== undefined) {
+      const declared = [
+        ...readFileSync(join(root, "tests/e2e/main.rs"), "utf8").matchAll(/^mod (\w+);/gm),
+      ].map((match) => match[1]);
+      const missing = declared.filter(
+        (module) =>
+          /#\s*\[\s*test\s*\]/.test(
+            codeOnly(readFileSync(join(root, `tests/e2e/${module}.rs`), "utf8")),
+          ) && !owned.has(module),
+      );
+      if (missing.length) throw new Error(`unowned test modules: ${missing.join(", ")}`);
+    }
   }
   const assets = mapping.assets ?? {};
   if (!assets || typeof assets !== "object" || Array.isArray(assets))

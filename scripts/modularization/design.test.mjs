@@ -4,9 +4,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { affectedSuites, compileMapping } from "../../scripts/crate-split-replay.mjs";
-import { moduleGraph } from "../../scripts/modularization/graph.mjs";
-import { replayMapping, buildReport } from "../../scripts/modularization/replay.mjs";
+import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
+import { moduleGraph, codeOnly } from "./graph.mjs";
+import { replayMapping, buildReport } from "./replay.mjs";
 
 const timingHeader =
   "| module | tests | local Linux s (7a017fa) | CI Linux s | macOS s | Windows s | spawn | wait | build | proposal |";
@@ -78,11 +78,17 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
     layout.suites = { status: { paths: [], crates: ["command"] } };
     put(root, "layout.json", layout);
     assert.match(run().stderr, /modules is required/);
-    put(root, "tests/e2e/main.rs", "mod harness;\nmod status;\n");
+    put(root, "tests/e2e/main.rs", "mod harness;\nmod status;\nmod support;\n");
+    put(root, "tests/e2e/harness.rs", "#[test] fn helper_test() {} ");
+    put(root, "tests/e2e/status.rs", "#[test] fn status_test() {} ");
+    put(root, "tests/e2e/support.rs", "fn support() {} ");
     layout.suites.status.modules = ["unknown"];
     put(root, "layout.json", layout);
     assert.match(run().stderr, /unknown test module unknown/);
     layout.suites.status.modules = ["status"];
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /unowned test modules: harness/);
+    layout.suites.status.modules = ["status", "harness"];
     layout.edges = { "command->record": { kind: "shared", fix: "Shared record." } };
     layout.auxiliarySuites = {
       contract: {
@@ -258,7 +264,7 @@ test("replay selection matches real Nx for command, transitive shared, lock and 
 });
 
 test("profile weights use only current records and preserve missing platform evidence", async () => {
-  const { profileTable } = await import("../../scripts/modularization/replay.mjs");
+  const { profileTable } = await import("./replay.mjs");
   const fixture = `### Every e2e module, on the current records\n${timingHeader}\n| x | 1 | 10 | 20 | 30 | – | 0% | 0% | 0% | A |\n<details>\n| x | 1 | 99 | 99 | 99 | 99 |`;
   const weights = profileTable(fixture);
   assert.equal(weights.local.get("x"), 10);
@@ -277,12 +283,14 @@ test("profile weights use only current records and preserve missing platform evi
 });
 
 test("finished layout accounts for current source edges and each e2e module once", async () => {
-  const { validate } = await import("../../scripts/modularization/graph.mjs");
+  const { validate } = await import("./graph.mjs");
   const layout = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
   assert.ok(validate(layout, moduleGraph()).files > 0);
-  const declared = JSON.parse(readFileSync("scripts/crate-split/proposed.json", "utf8"));
-  const expected = Object.values(declared.suites)
-    .flatMap((suite) => suite.modules)
+  const expected = [...readFileSync("tests/e2e/main.rs", "utf8").matchAll(/^mod (\w+);/gm)]
+    .map((match) => match[1])
+    .filter((module) =>
+      /#\s*\[\s*test\s*\]/.test(codeOnly(readFileSync(`tests/e2e/${module}.rs`, "utf8"))),
+    )
     .sort();
   const actual = Object.values(layout.suites)
     .flatMap((suite) => suite.modules)
@@ -337,7 +345,7 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
         "cmd-template-check": { files: [], deps: [] },
       },
       edges: {},
-      suites: { a: { modules: ["a"], paths: [], crates: ["onepipeline"] } },
+      suites: { a: { modules: ["a", "b", "harness"], paths: [], crates: ["onepipeline"] } },
     };
     put(root, "layout.json", modular);
     assert.equal(run().status, 0);
@@ -365,6 +373,19 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
         "cmd-template-inspect",
       ),
     );
+    put(
+      root,
+      "src/cli.rs",
+      readFileSync(join(root, "src/cli.rs"), "utf8").replace(
+        "    Template(TemplateCommand),",
+        "    Template(TemplateCommand),\n    Fresh(Args),",
+      ),
+    );
+    put(root, "layout.json", modular);
+    assert.match(run().stderr, /missing command mapping: cmd-fresh/);
+    modular.crates["cmd-fresh"] = { files: [], deps: [] };
+    put(root, "layout.json", modular);
+    assert.equal(run().status, 0);
     modular.suites.a.modules = ["missing"];
     put(root, "layout.json", modular);
     const failed = run();
@@ -454,9 +475,7 @@ test("replay CLI writes the 144-PR artifact and refuses a different history", {
 test("suite mappings cover transitive source inputs and generated design tables are current", {
   timeout: 120000,
 }, async () => {
-  const { suiteInputs, commandCrates } = await import(
-    "../../scripts/modularization/suite-inputs.mjs"
-  );
+  const { suiteInputs, commandCrates } = await import("./suite-inputs.mjs");
   const layout = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
   const compiled = compileMapping(replayMapping(layout));
   for (const [name, suite] of Object.entries(layout.suites)) {

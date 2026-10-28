@@ -1,0 +1,49 @@
+{
+  "name": "onepipeline-modularization",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "scripts/modularization",
+  "tags": [
+    "scope:research",
+    "lang:js"
+  ],
+  "targets": {
+    "test": {
+      "command": "node --test scripts/modularization/design.test.mjs",
+      "inputs": [
+        "default",
+        "rustBuild",
+        "{workspaceRoot}/tests/e2e/**/*",
+        "{workspaceRoot}/scripts/crate-split-replay.mjs",
+        "{workspaceRoot}/scripts/crate-split/**/*",
+        "{workspaceRoot}/docs/test-profile-report.md",
+        "{workspaceRoot}/docs/modularization-design.md",
+        {
+          "runtime": "git rev-parse origin/main HEAD"
+        }
+      ]
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint scripts/modularization",
+      "inputs": [
+        "default",
+        "{workspaceRoot}/biome.json"
+      ]
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format scripts/modularization",
+      "inputs": [
+        "default",
+        "{workspaceRoot}/biome.json"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    }
+  }
+}
