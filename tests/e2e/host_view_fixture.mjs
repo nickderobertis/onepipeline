@@ -275,20 +275,43 @@ const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 export function writeRun(runs, seed, { run, journal: text, registry = null, driver = GONE, nodes = [] }) {
   const dir = join(runs, run);
   mkdirSync(dir, { recursive: true });
-  writeJson(join(dir, "launch.json"), {
-    ...seed.launch,
-    run_id: run,
-    project: `authoring:${run}`,
-    host: HOST,
-    pid: driver.pid || reapedPid(),
-    started: driver.token,
-  });
+  writeJson(join(dir, "launch.json"), launchOf(seed, run, driver));
   writeJson(join(dir, "plan.json"), planWith(seed, nodes));
   writeFileSync(join(dir, "events.jsonl"), text);
   if (registry !== null) {
     mkdirSync(join(dir, "dispatches"));
     registry.forEach((entry, n) => writeJson(join(dir, "dispatches", `${entry.pid}-${n}.json`), entry));
   }
+}
+
+function launchOf(seed, run, driver) {
+  return {
+    ...seed.launch,
+    run_id: run,
+    project: `authoring:${run}`,
+    host: HOST,
+    pid: driver.pid || reapedPid(),
+    started: driver.token,
+  };
+}
+
+// Cache records must be exactly the shape this generator writes. Derive keys
+// and fixed fields from its writers, rather than copying the engine's schema.
+function fixtureRecord(value, expected, varying, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) refuse(`${label} must be an object`);
+  for (const key of Object.keys(value)) {
+    if (!Object.hasOwn(expected, key)) refuse(`${label} has unknown field ${key}`);
+  }
+  for (const key of Object.keys(expected)) {
+    if (!Object.hasOwn(value, key)) refuse(`${label} is missing ${key}`);
+    if (varying.includes(key)) {
+      if (typeof value[key] !== typeof expected[key]) refuse(`${label}.${key} has the wrong type`);
+    } else if (JSON.stringify(value[key]) !== JSON.stringify(expected[key])) {
+      refuse(`${label}.${key} differs from the generated fixture`);
+    }
+  }
+  processOf({pid: value.pid, token: value.started}, label);
+  return value;
 }
 
 /** A registry entry, stamped just after the run recorded the dispatch it names. */
@@ -408,6 +431,7 @@ export function cloneFixture(runs, live, cache) {
   processes(live);
   const manifest = manifestOf(readJson(join(cache, "manifest.json")));
   const template = join(cache, "runs");
+  const seed = readSeed();
   const copy = (from, to) => {
     mkdirSync(to, { recursive: true });
     for (const item of readdirSync(from, { withFileTypes: true })) {
@@ -438,16 +462,21 @@ export function cloneFixture(runs, live, cache) {
   manifest.live_runs.forEach((run, i) => {
     const directory = join(runs, run);
     if (live.drivers[i]) {
-      const launch = readJson(join(directory, "launch.json"));
+      const launch = fixtureRecord(readJson(join(directory, "launch.json")), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
       writeJson(join(directory, "launch.json"), { ...launch, pid: live.drivers[i].pid, started: live.drivers[i].token });
     }
     const registry = join(directory, "dispatches");
     const entries = readdirSync(registry).map((file) => ({
       index: Number(file.match(/-(\d+)\.json$/)?.[1]),
-      value: readJson(join(registry, file)),
+      value: fixtureRecord(readJson(join(registry, file)), entry("plan", GONE, 0), ["node", "pid", "started", "dispatched_at"], "cached dispatch"),
     })).sort((a, b) => a.index - b.index);
     if (entries.length !== live.entries[i].length || entries.some((entry, n) => entry.index !== n)) {
       throw new Error(`the template's registry for ${run} differs from the process shape`);
+    }
+    for (const {value} of entries) {
+      runName(value.node, "cached dispatch.node");
+      const time = Date.parse(value.dispatched_at);
+      if (!Number.isFinite(time) || stamp(time) !== value.dispatched_at) refuse("cached dispatch.dispatched_at must be a timestamp");
     }
     rmSync(registry, { recursive: true });
     mkdirSync(registry);

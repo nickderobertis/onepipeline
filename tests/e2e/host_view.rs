@@ -311,15 +311,57 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
         "a clone cannot mutate its template"
     );
 
+    let refused_clone = |name: &str| {
+        Command::new("node")
+            .arg(crate::harness::repo_file(GENERATOR))
+            .arg("clone")
+            .arg(world.root.join(name))
+            .arg(&processes)
+            .arg(&cache)
+            .output()
+            .unwrap()
+    };
+    let launch = cache.join("runs/live-0/launch.json");
+    let original = read_json(&launch);
+    let dispatch = cache
+        .join("runs/live-0/dispatches")
+        .join(format!("{old_pid}-0.json"));
+    let original_dispatch = read_json(&dispatch);
+    let mut unknown = original.clone();
+    unknown["typo"] = json!(true);
+    let mut wrong_type = original_dispatch.clone();
+    wrong_type["pid"] = json!([]);
+    let mut wrong_time = original_dispatch.clone();
+    wrong_time["dispatched_at"] = json!("yesterday");
+    for (nth, (file, bad, message)) in [
+        (&launch, unknown, "cached launch has unknown field typo"),
+        (
+            &dispatch,
+            wrong_type,
+            "cached dispatch.pid has the wrong type",
+        ),
+        (
+            &dispatch,
+            wrong_time,
+            "cached dispatch.dispatched_at must be a timestamp",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write(file, &bad);
+        let refused = refused_clone(&format!("bad-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        write(&launch, &original);
+        write(&dispatch, &original_dispatch);
+    }
     std::fs::write(cache.join("runs/sparse/events.jsonl"), "").unwrap();
-    let refused = Command::new("node")
-        .arg(crate::harness::repo_file(GENERATOR))
-        .arg("clone")
-        .arg(world.root.join("refused"))
-        .arg(processes)
-        .arg(cache)
-        .output()
-        .unwrap();
+    let refused = refused_clone("refused");
     assert_eq!(refused.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&refused.stderr)
         .contains("the sparse fixture's recorded prefix is truncated"));
