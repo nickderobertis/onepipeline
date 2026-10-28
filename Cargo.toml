@@ -1247,9 +1247,9 @@ onevcs-testing = "0.19.22"
 # as before. `tests/e2e/multi_source.rs`'s
 # `a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source`
 # drives one through a run.
-# It also adds `task locate`, whose two refusals `src/writeback.rs` names in the store's words,
-# and `TaskSource::creation_repository`, a defaulted method no source of this repository
-# overrides, since it implements none.
+# It also adds `task locate`, whose two refusals `src/writeback.rs`'s exhaustive match must
+# name, in the store's words; and `TaskSource::creation_repository` with a default body, so a
+# source implementing the trait builds against this release unchanged.
 onetaskgraph-core = "=0.12.9"
 onetaskgraph-plugin-api = "=0.12.9"
 onetaskgraph-local-md = "=0.12.9"
