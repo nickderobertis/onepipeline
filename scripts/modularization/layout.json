@@ -5022,12 +5022,22 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-goals",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-surface",
+        "cmd-transcript",
+        "cmd-watch"
       ],
       "modules": [
         "lifecycle"
       ],
-      "reason": "Retain all lifecycle assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all lifecycle assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-draft_lifecycle": {
       "paths": [
@@ -5093,12 +5103,17 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "draft_lifecycle"
       ],
-      "reason": "Retain all draft_lifecycle assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all draft_lifecycle assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-landing": {
       "paths": [
@@ -5164,12 +5179,15 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-goals",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "landing"
       ],
-      "reason": "Retain all landing assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all landing assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-manager_landings": {
       "paths": [
@@ -5235,12 +5253,24 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-flow",
+        "cmd-integrate",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-plan-check",
+        "cmd-repo-recover",
+        "cmd-runs",
+        "cmd-stop-guard",
+        "cmd-surface",
+        "cmd-unpublished",
+        "cmd-unwatched",
+        "cmd-watch"
       ],
       "modules": [
         "manager_landings"
       ],
-      "reason": "Retain all manager_landings assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all manager_landings assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-readjust": {
       "paths": [
@@ -5306,12 +5336,32 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "readjust"
       ],
-      "reason": "Retain all readjust assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all readjust assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-rework": {
       "paths": [
@@ -5377,12 +5427,18 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-host",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "rework"
       ],
-      "reason": "Retain all rework assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all rework assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-stacked_drafts": {
       "paths": [
@@ -5448,12 +5504,17 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "stacked_drafts"
       ],
-      "reason": "Retain all stacked_drafts assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all stacked_drafts assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-publish_preserve": {
       "paths": [
@@ -5519,12 +5580,18 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-plan-check",
+        "cmd-results",
+        "cmd-telemetry",
+        "cmd-watch"
       ],
       "modules": [
         "publish_preserve"
       ],
-      "reason": "Retain all publish_preserve assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all publish_preserve assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-publication_boundary": {
       "paths": [
@@ -5590,12 +5657,32 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "publication_boundary"
       ],
-      "reason": "Retain all publication_boundary assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all publication_boundary assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-real_vcs": {
       "paths": [
@@ -5661,12 +5748,14 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-monitor",
+        "cmd-results"
       ],
       "modules": [
         "real_vcs"
       ],
-      "reason": "Retain all real_vcs assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all real_vcs assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-amend": {
       "paths": [
@@ -5732,12 +5821,14 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-monitor",
+        "cmd-results"
       ],
       "modules": [
         "amend"
       ],
-      "reason": "Retain all amend assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all amend assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-retirement": {
       "paths": [
@@ -5804,12 +5895,28 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-supersessions",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "retirement"
       ],
-      "reason": "Retain all retirement assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all retirement assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-adoption": {
       "paths": [
@@ -5875,12 +5982,24 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-unpublished"
       ],
       "modules": [
         "adoption"
       ],
-      "reason": "Retain all adoption assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all adoption assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-session": {
       "paths": [
@@ -5951,7 +6070,7 @@
       "modules": [
         "session"
       ],
-      "reason": "Retain all session assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all session assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-session_reuse": {
       "paths": [
@@ -6022,7 +6141,7 @@
       "modules": [
         "session_reuse"
       ],
-      "reason": "Retain all session_reuse assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all session_reuse assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-branch_template": {
       "paths": [
@@ -6088,12 +6207,15 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-note",
+        "cmd-plan-check"
       ],
       "modules": [
         "branch_template"
       ],
-      "reason": "Retain all branch_template assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all branch_template assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-destination": {
       "paths": [
@@ -6159,12 +6281,13 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-plan-check"
       ],
       "modules": [
         "destination"
       ],
-      "reason": "Retain all destination assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all destination assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-review": {
       "paths": [
@@ -6230,12 +6353,21 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "review"
       ],
-      "reason": "Retain all review assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all review assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-review_reply": {
       "paths": [
@@ -6301,12 +6433,21 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "review_reply"
       ],
-      "reason": "Retain all review_reply assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all review_reply assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-review_round": {
       "paths": [
@@ -6373,12 +6514,21 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "review_round"
       ],
-      "reason": "Retain all review_round assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all review_round assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-closures": {
       "paths": [
@@ -6444,12 +6594,33 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-integrate",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "closures"
       ],
-      "reason": "Retain all closures assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all closures assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-public_id": {
       "paths": [
@@ -6516,12 +6687,32 @@
         "cmd-publish-branch",
         "cmd-stop",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "public_id"
       ],
-      "reason": "Retain all public_id assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all public_id assertions; conservatively include run launch/stop/status and every command in its existing e2e-landing area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-store": {
       "paths": [
@@ -6587,12 +6778,37 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-ask",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-goals",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript",
+        "cmd-watch"
       ],
       "modules": [
         "store"
       ],
-      "reason": "Retain all store assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all store assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-writeback_budget": {
       "paths": [
@@ -6658,12 +6874,14 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-next",
+        "cmd-note"
       ],
       "modules": [
         "writeback_budget"
       ],
-      "reason": "Retain all writeback_budget assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all writeback_budget assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-writeback_cost": {
       "paths": [
@@ -6729,12 +6947,13 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-stop"
       ],
       "modules": [
         "writeback_cost"
       ],
-      "reason": "Retain all writeback_cost assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all writeback_cost assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-writeback_projections": {
       "paths": [
@@ -6800,12 +7019,15 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-next",
+        "cmd-note",
+        "cmd-stop"
       ],
       "modules": [
         "writeback_projections"
       ],
-      "reason": "Retain all writeback_projections assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all writeback_projections assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-delivers": {
       "paths": [
@@ -6871,12 +7093,13 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-stop"
       ],
       "modules": [
         "delivers"
       ],
-      "reason": "Retain all delivers assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all delivers assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-multi_source": {
       "paths": [
@@ -6942,12 +7165,34 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "multi_source"
       ],
-      "reason": "Retain all multi_source assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all multi_source assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-linear_writeback": {
       "paths": [
@@ -7013,12 +7258,34 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "linear_writeback"
       ],
-      "reason": "Retain all linear_writeback assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all linear_writeback assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-holds": {
       "paths": [
@@ -7084,12 +7351,13 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest"
       ],
       "modules": [
         "holds"
       ],
-      "reason": "Retain all holds assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all holds assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-continuation": {
       "paths": [
@@ -7155,12 +7423,22 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-host",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-shutdown",
+        "cmd-stop",
+        "cmd-surface"
       ],
       "modules": [
         "continuation"
       ],
-      "reason": "Retain all continuation assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all continuation assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-crossdag": {
       "paths": [
@@ -7226,12 +7504,17 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-results",
+        "cmd-stop"
       ],
       "modules": [
         "crossdag"
       ],
-      "reason": "Retain all crossdag assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all crossdag assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-plan": {
       "paths": [
@@ -7297,12 +7580,14 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review"
       ],
       "modules": [
         "plan"
       ],
-      "reason": "Retain all plan assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all plan assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-plan_check": {
       "paths": [
@@ -7368,12 +7653,13 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-review"
       ],
       "modules": [
         "plan_check"
       ],
-      "reason": "Retain all plan_check assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all plan_check assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-live_edit": {
       "paths": [
@@ -7439,12 +7725,23 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-ask",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-results",
+        "cmd-review",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-watch"
       ],
       "modules": [
         "live_edit"
       ],
-      "reason": "Retain all live_edit assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all live_edit assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-templates": {
       "paths": [
@@ -7510,12 +7807,18 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-host",
+        "cmd-template",
+        "cmd-template-check",
+        "cmd-template-list",
+        "cmd-template-resolve"
       ],
       "modules": [
         "templates"
       ],
-      "reason": "Retain all templates assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all templates assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-shipped": {
       "paths": [
@@ -7581,12 +7884,14 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-monitor"
       ],
       "modules": [
         "shipped"
       ],
-      "reason": "Retain all shipped assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all shipped assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-criteria": {
       "paths": [
@@ -7652,12 +7957,14 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-note"
       ],
       "modules": [
         "criteria"
       ],
-      "reason": "Retain all criteria assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all criteria assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-criteria_rule": {
       "paths": [
@@ -7723,12 +8030,13 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest"
       ],
       "modules": [
         "criteria_rule"
       ],
-      "reason": "Retain all criteria_rule assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all criteria_rule assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-filter": {
       "paths": [
@@ -7794,12 +8102,17 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-surface"
       ],
       "modules": [
         "filter"
       ],
-      "reason": "Retain all filter assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all filter assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-linear_loopback": {
       "paths": [
@@ -7870,7 +8183,7 @@
       "modules": [
         "linear_loopback"
       ],
-      "reason": "Retain all linear_loopback assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all linear_loopback assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-linear_launch": {
       "paths": [
@@ -7936,12 +8249,38 @@
         "cmd-adopt",
         "cmd-plan-check",
         "cmd-status",
-        "cmd-reply"
+        "cmd-reply",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-template",
+        "cmd-template-check",
+        "cmd-template-list",
+        "cmd-template-resolve",
+        "cmd-transcript"
       ],
       "modules": [
         "linear_launch"
       ],
-      "reason": "Retain all linear_launch assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all linear_launch assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-withdrawn": {
       "paths": [
@@ -8012,7 +8351,7 @@
       "modules": [
         "withdrawn"
       ],
-      "reason": "Retain all withdrawn assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all withdrawn assertions; conservatively include run launch/stop/status and every command in its existing e2e-store area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-views": {
       "paths": [
@@ -8057,12 +8396,20 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-channel-queue",
+        "cmd-goals",
+        "cmd-monitor",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-surface",
+        "cmd-watch"
       ],
       "modules": [
         "views"
       ],
-      "reason": "Retain all views assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all views assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-listing": {
       "paths": [
@@ -8107,12 +8454,16 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-goals",
+        "cmd-results",
+        "cmd-surface"
       ],
       "modules": [
         "listing"
       ],
-      "reason": "Retain all listing assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all listing assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-host_view": {
       "paths": [
@@ -8157,12 +8508,15 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-plan-check",
+        "cmd-results"
       ],
       "modules": [
         "host_view"
       ],
-      "reason": "Retain all host_view assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all host_view assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-summary": {
       "paths": [
@@ -8207,12 +8561,13 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-channel-queue"
       ],
       "modules": [
         "summary"
       ],
-      "reason": "Retain all summary assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all summary assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-surface": {
       "paths": [
@@ -8257,12 +8612,22 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-goals",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-shutdown",
+        "cmd-surface"
       ],
       "modules": [
         "surface"
       ],
-      "reason": "Retain all surface assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all surface assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-journal": {
       "paths": [
@@ -8307,12 +8672,20 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-scratch-discard",
+        "cmd-surface"
       ],
       "modules": [
         "journal"
       ],
-      "reason": "Retain all journal assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all journal assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-checkpoint": {
       "paths": [
@@ -8357,12 +8730,13 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-results"
       ],
       "modules": [
         "checkpoint"
       ],
-      "reason": "Retain all checkpoint assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all checkpoint assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-change_telemetry": {
       "paths": [
@@ -8407,12 +8781,19 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review"
       ],
       "modules": [
         "change_telemetry"
       ],
-      "reason": "Retain all change_telemetry assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all change_telemetry assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-compatibility": {
       "paths": [
@@ -8457,12 +8838,18 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-watch"
       ],
       "modules": [
         "compatibility"
       ],
-      "reason": "Retain all compatibility assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all compatibility assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-layout_document": {
       "paths": [
@@ -8507,12 +8894,15 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-channel-queue",
+        "cmd-next",
+        "cmd-surface"
       ],
       "modules": [
         "layout_document"
       ],
-      "reason": "Retain all layout_document assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all layout_document assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-transcript_refs": {
       "paths": [
@@ -8557,12 +8947,15 @@
         "cmd-host",
         "cmd-transcript",
         "cmd-agents",
-        "cmd-telemetry"
+        "cmd-telemetry",
+        "cmd-monitor",
+        "cmd-scratch-discard",
+        "cmd-watch"
       ],
       "modules": [
         "transcript_refs"
       ],
-      "reason": "Retain all transcript_refs assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all transcript_refs assertions; conservatively include run launch/stop/status and every command in its existing e2e-views area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-dispatch": {
       "paths": [
@@ -8605,12 +8998,30 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "dispatch"
       ],
-      "reason": "Retain all dispatch assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all dispatch assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-agents": {
       "paths": [
@@ -8653,12 +9064,25 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-agents",
+        "cmd-attest",
+        "cmd-boundary-guidance",
+        "cmd-boundary-validate-envelope",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs"
       ],
       "modules": [
         "agents"
       ],
-      "reason": "Retain all agents assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all agents assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-dispatch_env_hook": {
       "paths": [
@@ -8701,12 +9125,18 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-monitor",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "dispatch_env_hook"
       ],
-      "reason": "Retain all dispatch_env_hook assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all dispatch_env_hook assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-envelope_reviewer": {
       "paths": [
@@ -8749,12 +9179,19 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results"
       ],
       "modules": [
         "envelope_reviewer"
       ],
-      "reason": "Retain all envelope_reviewer assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all envelope_reviewer assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-node_validator": {
       "paths": [
@@ -8797,12 +9234,17 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results"
       ],
       "modules": [
         "node_validator"
       ],
-      "reason": "Retain all node_validator assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all node_validator assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-turns": {
       "paths": [
@@ -8845,12 +9287,14 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-results",
+        "cmd-transcript"
       ],
       "modules": [
         "turns"
       ],
-      "reason": "Retain all turns assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all turns assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-malformed_envelopes": {
       "paths": [
@@ -8893,12 +9337,31 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "malformed_envelopes"
       ],
-      "reason": "Retain all malformed_envelopes assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all malformed_envelopes assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-bus_config": {
       "paths": [
@@ -8941,12 +9404,18 @@
       "crates": [
         "cmd-start",
         "cmd-stop",
-        "cmd-status"
+        "cmd-status",
+        "cmd-channel-queue",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-reply",
+        "cmd-shutdown",
+        "cmd-surface"
       ],
       "modules": [
         "bus_config"
       ],
-      "reason": "Retain all bus_config assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all bus_config assertions; conservatively include run launch/stop/status and every command in its existing e2e-dispatch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-channel": {
       "paths": [
@@ -8984,12 +9453,18 @@
         "cmd-next",
         "cmd-surface",
         "cmd-attest",
-        "cmd-ask"
+        "cmd-ask",
+        "cmd-adopt",
+        "cmd-monitor",
+        "cmd-note",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-unwatched"
       ],
       "modules": [
         "channel"
       ],
-      "reason": "Retain all channel assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all channel assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-ask": {
       "paths": [
@@ -9027,12 +9502,16 @@
         "cmd-next",
         "cmd-surface",
         "cmd-attest",
-        "cmd-ask"
+        "cmd-ask",
+        "cmd-stop-guard",
+        "cmd-unpublished",
+        "cmd-unwatched",
+        "cmd-watch"
       ],
       "modules": [
         "ask"
       ],
-      "reason": "Retain all ask assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all ask assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-boundary": {
       "paths": [
@@ -9070,12 +9549,13 @@
         "cmd-next",
         "cmd-surface",
         "cmd-attest",
-        "cmd-ask"
+        "cmd-ask",
+        "cmd-results"
       ],
       "modules": [
         "boundary"
       ],
-      "reason": "Retain all boundary assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all boundary assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-recorded_channel": {
       "paths": [
@@ -9113,12 +9593,15 @@
         "cmd-next",
         "cmd-surface",
         "cmd-attest",
-        "cmd-ask"
+        "cmd-ask",
+        "cmd-host",
+        "cmd-results",
+        "cmd-runs"
       ],
       "modules": [
         "recorded_channel"
       ],
-      "reason": "Retain all recorded_channel assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all recorded_channel assertions; conservatively include run launch/stop/status and every command in its existing e2e-channel area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-driver": {
       "paths": [
@@ -9163,12 +9646,27 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "driver"
       ],
-      "reason": "Retain all driver assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all driver assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-driver_exit": {
       "paths": [
@@ -9213,12 +9711,29 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript",
+        "cmd-watch"
       ],
       "modules": [
         "driver_exit"
       ],
-      "reason": "Retain all driver_exit assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all driver_exit assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-shutdown": {
       "paths": [
@@ -9263,12 +9778,28 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-shutdown",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "shutdown"
       ],
-      "reason": "Retain all shutdown assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all shutdown assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-cancellation": {
       "paths": [
@@ -9313,12 +9844,14 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-reply",
+        "cmd-results"
       ],
       "modules": [
         "cancellation"
       ],
-      "reason": "Retain all cancellation assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all cancellation assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-run_ending": {
       "paths": [
@@ -9363,12 +9896,17 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-unwatched"
       ],
       "modules": [
         "run_ending"
       ],
-      "reason": "Retain all run_ending assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all run_ending assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-run_end_hooks": {
       "paths": [
@@ -9413,12 +9951,16 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results"
       ],
       "modules": [
         "run_end_hooks"
       ],
-      "reason": "Retain all run_end_hooks assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all run_end_hooks assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-concurrency": {
       "paths": [
@@ -9468,7 +10010,7 @@
       "modules": [
         "concurrency"
       ],
-      "reason": "Retain all concurrency assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all concurrency assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-out_of_band": {
       "paths": [
@@ -9513,12 +10055,15 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-publish-branch",
+        "cmd-reply",
+        "cmd-repo-recover"
       ],
       "modules": [
         "out_of_band"
       ],
-      "reason": "Retain all out_of_band assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all out_of_band assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-unreadable_sessions": {
       "paths": [
@@ -9563,12 +10108,14 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-shutdown"
       ],
       "modules": [
         "unreadable_sessions"
       ],
-      "reason": "Retain all unreadable_sessions assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all unreadable_sessions assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-older_launch_record": {
       "paths": [
@@ -9613,12 +10160,18 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-host",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results"
       ],
       "modules": [
         "older_launch_record"
       ],
-      "reason": "Retain all older_launch_record assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all older_launch_record assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-flow": {
       "paths": [
@@ -9663,12 +10216,25 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-ask",
+        "cmd-attest",
+        "cmd-channel-queue",
+        "cmd-flow",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-review",
+        "cmd-stop-guard",
+        "cmd-surface",
+        "cmd-unwatched",
+        "cmd-watch"
       ],
       "modules": [
         "flow"
       ],
-      "reason": "Retain all flow assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all flow assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-journal_scaling": {
       "paths": [
@@ -9713,12 +10279,20 @@
         "cmd-stop",
         "cmd-runs",
         "cmd-status",
-        "cmd-scratch-discard"
+        "cmd-scratch-discard",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-surface",
+        "cmd-transcript",
+        "cmd-watch"
       ],
       "modules": [
         "journal_scaling"
       ],
-      "reason": "Retain all journal_scaling assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all journal_scaling assertions; conservatively include run launch/stop/status and every command in its existing e2e-runs area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-watch": {
       "paths": [
@@ -9756,12 +10330,31 @@
         "cmd-unwatched",
         "cmd-unpublished",
         "cmd-stop-guard",
-        "cmd-flow"
+        "cmd-flow",
+        "cmd-adopt",
+        "cmd-ask",
+        "cmd-attest",
+        "cmd-drive",
+        "cmd-drive-run",
+        "cmd-host",
+        "cmd-label",
+        "cmd-monitor",
+        "cmd-next",
+        "cmd-note",
+        "cmd-plan-check",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-runs",
+        "cmd-scratch-discard",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
       ],
       "modules": [
         "watch"
       ],
-      "reason": "Retain all watch assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all watch assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-unwatched": {
       "paths": [
@@ -9799,12 +10392,18 @@
         "cmd-unwatched",
         "cmd-unpublished",
         "cmd-stop-guard",
-        "cmd-flow"
+        "cmd-flow",
+        "cmd-adopt",
+        "cmd-host",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-surface"
       ],
       "modules": [
         "unwatched"
       ],
-      "reason": "Retain all unwatched assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all unwatched assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-stop_guard": {
       "paths": [
@@ -9847,7 +10446,7 @@
       "modules": [
         "stop_guard"
       ],
-      "reason": "Retain all stop_guard assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all stop_guard assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-wake_budget": {
       "paths": [
@@ -9885,12 +10484,21 @@
         "cmd-unwatched",
         "cmd-unpublished",
         "cmd-stop-guard",
-        "cmd-flow"
+        "cmd-flow",
+        "cmd-adopt",
+        "cmd-channel-queue",
+        "cmd-host",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-runs",
+        "cmd-shutdown",
+        "cmd-surface"
       ],
       "modules": [
         "wake_budget"
       ],
-      "reason": "Retain all wake_budget assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all wake_budget assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-loopcost": {
       "paths": [
@@ -9928,12 +10536,13 @@
         "cmd-unwatched",
         "cmd-unpublished",
         "cmd-stop-guard",
-        "cmd-flow"
+        "cmd-flow",
+        "cmd-attest"
       ],
       "modules": [
         "loopcost"
       ],
-      "reason": "Retain all loopcost assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all loopcost assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-unpublished": {
       "paths": [
@@ -9971,12 +10580,20 @@
         "cmd-unwatched",
         "cmd-unpublished",
         "cmd-stop-guard",
-        "cmd-flow"
+        "cmd-flow",
+        "cmd-adopt",
+        "cmd-host",
+        "cmd-publish-branch",
+        "cmd-reply",
+        "cmd-repo-recover",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-surface"
       ],
       "modules": [
         "unpublished"
       ],
-      "reason": "Retain all unpublished assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all unpublished assertions; conservatively include run launch/stop/status and every command in its existing e2e-watch area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-maintenance": {
       "paths": [
@@ -10003,12 +10620,20 @@
         "cmd-start",
         "cmd-stop",
         "cmd-status",
-        "agent-execution"
+        "agent-execution",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-host",
+        "cmd-next",
+        "cmd-note",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-scratch-discard"
       ],
       "modules": [
         "maintenance"
       ],
-      "reason": "Retain all maintenance assertions; conservatively include run launch/stop/status and every command in its existing e2e-maintenance area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all maintenance assertions; conservatively include run launch/stop/status and every command in its existing e2e-maintenance area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-scratch": {
       "paths": [
@@ -10034,12 +10659,20 @@
         "cmd-start",
         "cmd-stop",
         "cmd-status",
-        "agent-execution"
+        "agent-execution",
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-host",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-scratch-discard",
+        "cmd-shutdown",
+        "cmd-telemetry"
       ],
       "modules": [
         "scratch"
       ],
-      "reason": "Retain all scratch assertions; conservatively include run launch/stop/status and every command in its existing e2e-maintenance area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all scratch assertions; conservatively include run launch/stop/status and every command in its existing e2e-maintenance area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-harness": {
       "paths": [
@@ -10064,7 +10697,7 @@
       "modules": [
         "harness"
       ],
-      "reason": "Retain all harness assertions; conservatively include run launch/stop/status and every command in its existing e2e-harness area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all harness assertions; conservatively include run launch/stop/status and every command in its existing e2e-harness area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     },
     "e2e-profiling": {
       "paths": [
@@ -10084,12 +10717,13 @@
         "justfile"
       ],
       "crates": [
-        "onepipeline"
+        "onepipeline",
+        "cmd-status"
       ],
       "modules": [
         "profiling"
       ],
-      "reason": "Retain all profiling assertions; conservatively include run launch/stop/status and every command in its existing e2e-harness area. Borrowed test files and runtime fixtures remain inputs from the profile mapping."
+      "reason": "Retain all profiling assertions; conservatively include run launch/stop/status and every command in its existing e2e-harness area. Borrowed test files and runtime fixtures remain inputs from the profile mapping. Also include command families named literally by this module and its borrowed helpers; this can over-select, never justify removing a known command root."
     }
   },
   "assets": {
@@ -10106,25 +10740,18 @@
         "tests/note/**"
       ],
       "crates": [
-        "cmd-start",
-        "cmd-note",
-        "cmd-stop",
-        "cmd-status"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "stop_verdict": {
       "paths": [
         "tests/stop_verdict/**"
       ],
       "crates": [
-        "cmd-start",
-        "cmd-stop-guard",
-        "cmd-unpublished",
-        "cmd-stop",
-        "cmd-status"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "smoke": {
       "paths": [
@@ -10133,7 +10760,7 @@
       "crates": [
         "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "contract": {
       "paths": [
@@ -10142,7 +10769,7 @@
       "crates": [
         "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "release_channel": {
       "paths": [
@@ -10151,7 +10778,7 @@
       "crates": [
         "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "release_journeys": {
       "paths": [
@@ -10160,46 +10787,43 @@
       "crates": [
         "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "codex_server": {
       "paths": [
         "tests/codex_server/**"
       ],
       "crates": [
-        "agent-execution"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "journal_workload": {
       "paths": [
         "tests/journal_workload/**"
       ],
       "crates": [
-        "cmd-start",
-        "cmd-status"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "pool_workload": {
       "paths": [
         "tests/pool_workload/**"
       ],
       "crates": [
-        "cmd-start",
-        "agent-execution"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     },
     "scratch_workload": {
       "paths": [
         "tests/scratch_workload/**"
       ],
       "crates": [
-        "cmd-start",
-        "cmd-scratch-discard"
+        "onepipeline"
       ],
-      "reason": "Retain the current tier and all assertions; use production command composition for release/contract proofs and the real command entry points for isolated journeys. Not weighted: the cited profile records only binary(e2e)."
+      "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     }
   }
 }

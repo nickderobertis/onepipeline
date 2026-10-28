@@ -47,6 +47,32 @@ export function suiteInputs(modules, root = ".") {
   return [...paths].sort();
 }
 
+/** Conservative command roots named literally by test modules and borrowed helpers. */
+export function commandCrates(modules, available, root = ".") {
+  const roots = new Set();
+  const families = {
+    template: ["cmd-template", "cmd-template-list", "cmd-template-resolve", "cmd-template-check"],
+    boundary: ["cmd-boundary-guidance", "cmd-boundary-validate-envelope"],
+    channel: ["cmd-channel-queue"],
+    plan: ["cmd-plan-check"],
+    scratch: ["cmd-scratch-discard"],
+  };
+  for (const file of suiteInputs(modules, root).filter(
+    (path) =>
+      path.startsWith("tests/e2e/") && path.endsWith(".rs") && !path.endsWith("/harness.rs"),
+  )) {
+    const source = readFileSync(join(root, file), "utf8");
+    for (const match of source.matchAll(/"([a-z][a-z-]*)"/g)) {
+      for (const name of [
+        `cmd-${match[1]}`,
+        ...(Object.hasOwn(families, match[1]) ? families[match[1]] : []),
+      ])
+        if (available.has(name)) roots.add(name);
+    }
+  }
+  return [...roots].sort();
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv.length !== 3)
@@ -56,6 +82,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (Object.hasOwn(mapping, "schema")) validate(mapping, moduleGraph());
     else compileMapping(mapping);
     for (const suite of Object.values(mapping.suites)) {
+      if (mapping.schema === 1)
+        suite.crates = [
+          ...new Set([
+            ...suite.crates,
+            ...commandCrates(suite.modules, new Set(Object.keys(mapping.crates))),
+          ]),
+        ];
       const covered = (path) =>
         [
           ...suite.paths,

@@ -236,8 +236,32 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     const first = readFileSync(join(root, "layout.json"), "utf8");
     assert.equal(run().status, 0);
     assert.equal(readFileSync(join(root, "layout.json"), "utf8"), first);
-    result.suites.a.modules = ["missing"];
-    put(root, "layout.json", result);
+    put(root, "src/main.rs", "fn main() {} ");
+    put(root, "tests/e2e/a.rs", 'fn x() { crate::b::helper(); run(&["template", "list"]); }');
+    const modular = {
+      schema: 1,
+      crates: {
+        onepipeline: { files: ["src/main.rs"], deps: [] },
+        "cmd-template": { files: [], deps: [] },
+        "cmd-template-list": { files: [], deps: [] },
+        "cmd-template-resolve": { files: [], deps: [] },
+        "cmd-template-check": { files: [], deps: [] },
+      },
+      edges: {},
+      suites: { a: { modules: ["a"], paths: [], crates: ["onepipeline"] } },
+    };
+    put(root, "layout.json", modular);
+    assert.equal(run().status, 0);
+    const roots = JSON.parse(readFileSync(join(root, "layout.json"), "utf8")).suites.a.crates;
+    for (const name of [
+      "cmd-template",
+      "cmd-template-list",
+      "cmd-template-resolve",
+      "cmd-template-check",
+    ])
+      assert.ok(roots.includes(name), name);
+    modular.suites.a.modules = ["missing"];
+    put(root, "layout.json", modular);
     const failed = run();
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /undeclared test module: missing/);
@@ -325,10 +349,14 @@ test("replay CLI writes the 144-PR artifact and refuses a different history", {
 test("suite mappings cover transitive source inputs and generated design tables are current", {
   timeout: 120000,
 }, async () => {
-  const { suiteInputs } = await import("../../scripts/modularization/suite-inputs.mjs");
+  const { suiteInputs, commandCrates } = await import(
+    "../../scripts/modularization/suite-inputs.mjs"
+  );
   const layout = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
   const compiled = compileMapping(replayMapping(layout));
   for (const [name, suite] of Object.entries(layout.suites)) {
+    for (const crate of commandCrates(suite.modules, new Set(Object.keys(layout.crates))))
+      assert.ok(suite.crates.includes(crate), `${name} omits literal command root ${crate}`);
     for (const path of suiteInputs(suite.modules).filter((path) => !path.includes("*"))) {
       const covered =
         compiled.shared(path) ||
