@@ -696,6 +696,12 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::TargetTaskMissing { .. } => decided("target-task-missing"),
         EngineError::TargetTaskOrigin { .. } => decided("target-task-origin"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back: only
+        // `task locate` raises these, and a write-back copies and updates but never locates a
+        // counterpart; `writeback::tests` holds each word.
+        EngineError::TargetNativeNeedsOne { .. } => decided("target-native-needs-one"),
+        EngineError::NotATask { .. } => decided("not-a-task"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         EngineError::AssetNotReferenced { .. } => decided("asset-not-referenced"),
         EngineError::AssetNotGiven { .. } => decided("asset-not-given"),
         EngineError::AssetGivenTwice { .. } => decided("asset-given-twice"),
@@ -6456,6 +6462,12 @@ mod tests {
             EngineError::TargetTaskOrigin {
                 target: id(),
                 item: id(),
+            },
+            // The `task locate` refusals 0.12.9 added: a write-back never locates.
+            EngineError::TargetNativeNeedsOne { count: 2 },
+            EngineError::NotATask {
+                id: id(),
+                kind: onetaskgraph_core::NotATask::Project,
             },
             // The asset failures 0.3.3 added: a copied record whose content references an
             // asset it does not hold, or one bound for a plugin that stores none, and the

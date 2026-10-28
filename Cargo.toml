@@ -1245,9 +1245,19 @@ onevcs-testing = "0.19.22"
 # reach that write; `tests/e2e/linear_writeback.rs`'s
 # `a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections`
 # drives the linked store's full copy, which does, and fails on 0.12.7.
-onetaskgraph-core = "=0.12.8"
-onetaskgraph-plugin-api = "=0.12.8"
-onetaskgraph-local-md = "=0.12.8"
+# **0.12.9 is the floor for a host that routes by owner and privacy together**
+# (`otg-org-classification-routes`, `otg-task-locate`). A route entry may hold `repositories`
+# and `classification` at once, tried before classification-only and repository-only entries,
+# and a combined private entry is refused at load unless its `to` is declared private; an
+# earlier store refuses the whole configuration holding one. Configurations without one place
+# as before. `tests/e2e/multi_source.rs`'s
+# `a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source`
+# drives one through a run.
+# It also adds `task locate`, whose two refusals `src/writeback.rs`'s exhaustive match must
+# name, in the store's words.
+onetaskgraph-core = "=0.12.9"
+onetaskgraph-plugin-api = "=0.12.9"
+onetaskgraph-local-md = "=0.12.9"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
