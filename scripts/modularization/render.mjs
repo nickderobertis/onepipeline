@@ -98,6 +98,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       throw new Error("usage: node scripts/modularization/render.mjs [--write]");
     const file = "docs/modularization-design.md";
     const current = readFileSync(file, "utf8");
+    if (current.split(MARKER).length !== 2)
+      throw new Error("expected exactly one generation marker in design document");
     const expected = `${current.split(MARKER)[0].trimEnd()}\n\n${appendix(evidence())}`;
     if (process.argv[2] === "--write") writeFileSync(file, expected);
     else if (current !== expected) throw new Error("design tables are stale");

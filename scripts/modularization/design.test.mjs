@@ -314,9 +314,10 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     put(
       root,
       "tests/e2e/b.rs",
-      'const RECORD: &str = "fixtures/constant.json";\nconst DIRECTORY: &str = "fixtures/runtime";\nfn helper() { repo_file("fixtures/record.json"); repo_file(RECORD); Path::new(env!("CARGO_MANIFEST_DIR")).join(DIRECTORY); }',
+      'const RECORD: &str = "fixtures/constant.json";\nconst DIRECTORY: &str = "fixtures/runtime";\nconst INCLUDED: &str = include_str!("../../fixtures/included.json");\nfn helper() { repo_file("fixtures/record.json"); repo_file(RECORD); Path::new(env!("CARGO_MANIFEST_DIR")).join(DIRECTORY); }',
     );
     put(root, "fixtures/runtime/data.json", "{}");
+    put(root, "fixtures/included.json", "{}");
     put(root, "layout.json", {
       crates: { binary: { paths: ["src/**"], deps: [] } },
       suites: { a: { modules: ["a"], paths: [], crates: ["binary"] } },
@@ -329,6 +330,7 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     assert.ok(result.suites.a.paths.includes("tests/e2e/b.rs"));
     assert.ok(result.suites.a.paths.includes("fixtures/record.json"));
     assert.ok(result.suites.a.paths.includes("fixtures/constant.json"));
+    assert.ok(result.suites.a.paths.includes("fixtures/included.json"));
     assert.ok(result.suites.a.paths.includes("fixtures/runtime"));
     assert.ok(result.suites.a.paths.includes("fixtures/runtime/**"));
     const first = readFileSync(join(root, "layout.json"), "utf8");
@@ -584,6 +586,18 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     const badHeader = run("replay", "scripts/modularization/layout.json", "refused-header.json");
     assert.equal(badHeader.status, 1);
     assert.match(badHeader.stderr, /invalid timing header/);
+    for (const [invalid, diagnostic] of [
+      [
+        `${profile}\n| ${modules[0]} | 1 | 2 | 1 | 3 | – | x | x | x | x |`,
+        /duplicate timing module/,
+      ],
+      [`### Every e2e module, on the current records\n${timingHeader}\n`, /no timing rows/],
+    ]) {
+      put(root, "docs/test-profile-report.md", invalid);
+      const refused = run("replay", "scripts/modularization/layout.json", "refused-table.json");
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, diagnostic);
+    }
     put(root, "docs/test-profile-report.md", profile);
     const stale = run("render");
     assert.equal(stale.status, 1);
@@ -754,6 +768,30 @@ test("graph CLI refuses source-asset and auxiliary project drift, then accepts r
     delete layout.auxiliarySuites.journey;
     save();
     assert.equal(run().status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("render CLI refuses missing or repeated generation markers without writing", () => {
+  const root = scratch();
+  try {
+    for (const document of [
+      "Design without marker\n",
+      "<!-- BEGIN GENERATED MODULARIZATION -->\ntext\n<!-- BEGIN GENERATED MODULARIZATION -->\n",
+    ]) {
+      put(root, "docs/modularization-design.md", document);
+      for (const args of [[], ["--write"]]) {
+        const result = spawnSync(
+          process.execPath,
+          [resolve("scripts/modularization/render.mjs"), ...args],
+          { cwd: root, encoding: "utf8" },
+        );
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /expected exactly one generation marker/);
+        assert.equal(readFileSync(join(root, "docs/modularization-design.md"), "utf8"), document);
+      }
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
