@@ -78,15 +78,22 @@ describe("on Windows, a command is", () => {
     assert.deepEqual(spawnable("nowhere", [], { env }, "win32"), ["nowhere", [], { env }]);
   });
 
-  it("taken from its own directory when named by path, an npm bin shim's arguments escaped twice", () => {
-    const bins = directory(join("project", "node_modules", ".bin"), ["onepipeline.cmd"]);
-    const shim = join(bins, "onepipeline.cmd");
-    const [file, args] = spawnable(shim, ["a&b"], { env: { PATH: "" } }, "win32");
-    assert.equal(file, "cmd.exe");
-    assert.ok(args[3].endsWith(' ^^^"a^^^&b^^^""'), args[3]);
-    // Without its extension, PATHEXT finds it there too.
-    assert.equal(resolveWindows(join(bins, "onepipeline"), { PATH: "" }), shim);
-  });
+  for (const command of ["onepipeline", "onebudgetspec", "nx"]) {
+    it(`resolves an extensionless installed ${command} bin and preserves Windows paths`, () => {
+      const bins = directory(join(command, "node_modules", ".bin"), [`${command}.cmd`]);
+      const shim = join(bins, `${command}.cmd`);
+      const path = "C:\\Users\\RUNNER~1\\AppData\\program.cjs";
+      const [file, args] = spawnable(
+        join(bins, command),
+        [path, "a&b"],
+        { env: { PATH: "" } },
+        "win32",
+      );
+      assert.equal(file, "cmd.exe");
+      assert.ok(args[3].endsWith(` ^^^"${path}^^^" ^^^"a^^^&b^^^""`), args[3]);
+      assert.equal(resolveWindows(join(bins, command), { PATH: "" }), shim);
+    });
+  }
 
   it("given each argument quoted so the program behind the batch file reads it back intact", () => {
     const dir = directory("quoting", ["echo.cmd"]);
@@ -122,36 +129,53 @@ describe("on this host, a command started through it", () => {
 
   // A command installed the way npm installs one on this platform — a batch file
   // on Windows, an executable script elsewhere — that prints what reached it.
-  it("receives every argument intact, and its exit status comes back", () => {
-    const bin = join(work, "installed");
-    mkdirSync(bin, { recursive: true });
-    writeFileSync(
-      join(work, "echo-args.cjs"),
-      "process.stdout.write(JSON.stringify(process.argv.slice(2))); process.exit(3);\n",
-    );
-    const script = join(work, "echo-args.cjs");
-    if (WINDOWS) {
-      writeFileSync(join(bin, "echo-args.cmd"), `@"${process.execPath}" "${script}" %*\r\n`);
-    } else {
+  for (const layout of ["installed", join("node_modules", ".bin")]) {
+    it(`receives every argument intact through ${layout}, and its exit status comes back`, () => {
+      const bin = join(work, layout);
+      mkdirSync(bin, { recursive: true });
       writeFileSync(
-        join(bin, "echo-args"),
-        `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`,
-        { mode: 0o755 },
+        join(work, "echo-args.cjs"),
+        "process.stdout.write(JSON.stringify(process.argv.slice(2))); process.exit(3);\n",
       );
-    }
-    // Windows' environment names are case-insensitive: replace the one it has.
-    const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-    const sent = ["two words", 'say "hi"', "trailing\\", "a&b|c", "(parens)", "^caret", ""];
-    const ran = spawnSync(
-      ...spawnable("echo-args", sent, {
-        encoding: "utf8",
-        env: { ...process.env, [pathKey]: `${bin}${delimiter}${process.env[pathKey]}` },
-      }),
-    );
-    assert.equal(ran.error, undefined);
-    assert.equal(ran.status, 3, ran.stderr);
-    assert.deepEqual(JSON.parse(ran.stdout), sent);
-  });
+      const script = join(work, "echo-args.cjs");
+      if (WINDOWS) {
+        // npm's bin shim uses this compound line, which cmd.exe parses again.
+        const invoke = `"${process.execPath}" "${script}" %*`;
+        const line =
+          layout === "installed"
+            ? `@${invoke}`
+            : `@setlocal\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ${invoke}`;
+        writeFileSync(join(bin, "echo-args.cmd"), `${line}\r\n`);
+      } else {
+        writeFileSync(
+          join(bin, "echo-args"),
+          `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`,
+          { mode: 0o755 },
+        );
+      }
+      // Windows' environment names are case-insensitive: replace the one it has.
+      const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
+      const sent = [
+        "two words",
+        'say "hi"',
+        "trailing\\",
+        "a&b|c",
+        "(parens)",
+        "^caret",
+        "",
+        "C:\\Users\\RUNNER~1\\AppData\\program.cjs",
+      ];
+      const ran = spawnSync(
+        ...spawnable("echo-args", sent, {
+          encoding: "utf8",
+          env: { ...process.env, [pathKey]: `${bin}${delimiter}${process.env[pathKey]}` },
+        }),
+      );
+      assert.equal(ran.error, undefined);
+      assert.equal(ran.status, 3, ran.stderr);
+      assert.deepEqual(JSON.parse(ran.stdout), sent);
+    });
+  }
 
   // A Windows temporary directory's path: backslashes, and a short name such as
   // RUNNER~1. Elsewhere a backslash is a character of the file's name, so the
