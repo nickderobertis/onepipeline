@@ -524,9 +524,19 @@ fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what:
 /// host lengthens it without failing it, while one that goes silent for a step fails.
 fn round_command(
     world: &World,
+    command: std::process::Command,
+    input: Option<&str>,
+    clock: &dyn crate::harness::Clock,
+) -> crate::harness::Run {
+    round_command_capturing(world, command, input, clock, None)
+}
+
+fn round_command_capturing(
+    world: &World,
     mut command: std::process::Command,
     input: Option<&str>,
     clock: &dyn crate::harness::Clock,
+    stderr_release: Option<std::sync::mpsc::Receiver<()>>,
 ) -> crate::harness::Run {
     use std::fs::File;
     use std::process::Stdio;
@@ -549,9 +559,13 @@ fn round_command(
         .join(" ");
     let stdout = world.root.join("round-command.stdout");
     let stderr = world.root.join("round-command.stderr");
-    command
-        .stdout(File::create(&stdout).expect("the stdout capture opens"))
-        .stderr(File::create(&stderr).expect("the stderr capture opens"));
+    let errors = File::create(&stderr).expect("the stderr capture opens");
+    command.stdout(File::create(&stdout).expect("the stdout capture opens"));
+    if stderr_release.is_some() {
+        command.stderr(Stdio::piped());
+    } else {
+        command.stderr(errors.try_clone().expect("the stderr capture is cloned"));
+    }
     if let Some(input) = input {
         let path = world.root.join("round-command.stdin");
         std::fs::write(&path, input).expect("the command's input is written");
@@ -559,6 +573,16 @@ fn round_command(
     }
     eprintln!("busy round: starting {args}");
     let mut child = Child(command.spawn().expect("the round's command starts"));
+    // A caller may read a subprocess pipe later than the child writes it. Stage that
+    // ordering at the descriptor boundary, without controlling the CLI's internals.
+    let captured = stderr_release.map(|release| {
+        let mut pipe = child.0.stderr.take().expect("the stderr pipe opens");
+        std::thread::spawn(move || {
+            let _ = release.recv();
+            let mut errors = errors;
+            std::io::copy(&mut pipe, &mut errors).expect("the command's stderr is captured");
+        })
+    });
     let written = || {
         [&stdout, &stderr]
             .map(|capture| std::fs::metadata(capture).map_or(0, |capture| capture.len()))
@@ -586,6 +610,9 @@ fn round_command(
         );
         clock.pause(std::time::Duration::from_millis(20));
     };
+    if let Some(captured) = captured {
+        captured.join().expect("the stderr capture finishes");
+    }
     eprintln!("busy round: finished {args}: {status}");
     crate::harness::Run {
         code: status.code().unwrap_or(-1),
@@ -668,14 +695,13 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
     progressing_round(false);
 }
 
-/// The store can reach its second hold before the independent renderer gets CPU time.
+/// Store progress does not promise that a caller has read the command's stderr pipe.
 #[test]
-fn a_round_command_waits_for_output_when_the_store_outruns_the_renderer() {
+fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
     progressing_round(true);
 }
 
-fn progressing_round(delay_renderer: bool) {
-    let render = delay_renderer.then(crate::harness::Rendezvous::failpoint);
+fn progressing_round(delay_reader: bool) {
     let world = World::new("round-command-progress").through_scripted_source();
     let project = world.plan(
         "progressing-round",
@@ -687,19 +713,16 @@ fn progressing_round(delay_renderer: bool) {
     let almost = crate::harness::ONE_STEP - std::time::Duration::from_secs(1);
     let finished = std::thread::scope(|scope| {
         let _expires = clock.expiring();
-        let waiting = scope.spawn(|| {
-            round_command(
-                &world,
-                {
-                    let mut command = world.cmd(&["start", &project, "--attach"]);
-                    if let Some(render) = &render {
-                        // llmlint: ignore[tests_mirror_real_usage] delay only the real CLI's renderer to deterministically reproduce the scheduler race; output and exit still come through the subprocess boundary.
-                        command.env("ONEPIPELINE_TEST_ATTACH_RENDER_GATE", render.address());
-                    }
-                    command
-                },
+        let (release, released) = std::sync::mpsc::channel();
+        let world = &world;
+        let clock = &clock;
+        let waiting = scope.spawn(move || {
+            round_command_capturing(
+                world,
+                world.cmd(&["start", &project, "--attach"]),
                 None,
-                &clock,
+                clock,
+                delay_reader.then_some(released),
             )
         });
         let held = first.arrived();
@@ -713,19 +736,18 @@ fn progressing_round(delay_renderer: bool) {
         clock.advance(almost);
         held.release();
         let held = later.arrived();
-        // llmlint: ignore-block[tests_mirror_real_usage] the gate stages the renderer losing CPU time while the engine reaches its store call; no CLI command can force that ordering, and the journey still requires actual captured output and successful subprocess exit.
-        if let Some(render) = &render {
-            let rendering = render.arrived_within_a_step(&world, "the attached renderer");
+        if delay_reader {
             assert_eq!(
                 written("round-command.stderr"),
                 before,
-                "the delayed renderer wrote before it was released"
+                "stderr was captured before its pipe reader was released"
             );
-            rendering.release();
         }
-        // llmlint: ignore-end[tests_mirror_real_usage]
-        // A store arrival orders the engine, not the independently polled renderer.
-        // Observe its write before spending the next interval of diagnostic time.
+        if delay_reader {
+            release.send(()).expect("the pipe reader is released");
+        }
+        // Neither a store arrival nor a child's write promises its output was observed.
+        // Wait for the capture before spending the next interval of diagnostic time.
         world.until("the command to write between the two held calls", |_| {
             written("round-command.stderr") > before
         });

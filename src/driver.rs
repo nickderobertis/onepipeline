@@ -3057,9 +3057,6 @@ fn attach(
         })
         .map_err(|e| Error::Invalid(format!("cannot start the engine loop: {e}")))?;
 
-    // Let a subprocess journey delay rendering while the engine keeps progressing.
-    crate::ordering::meet("ONEPIPELINE_TEST_ATTACH_RENDER_GATE")?;
-
     loop {
         // Everything the observer emits joins the merged store, so an attach and
         // a later replay see the same stream.
