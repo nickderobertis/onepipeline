@@ -693,6 +693,7 @@ fn progressing_round(delay_renderer: bool) {
                 {
                     let mut command = world.cmd(&["start", &project, "--attach"]);
                     if let Some(render) = &render {
+                        // llmlint: ignore[tests_mirror_real_usage] delay only the real CLI's renderer to deterministically reproduce the scheduler race; output and exit still come through the subprocess boundary.
                         command.env("ONEPIPELINE_TEST_ATTACH_RENDER_GATE", render.address());
                     }
                     command
@@ -712,6 +713,7 @@ fn progressing_round(delay_renderer: bool) {
         clock.advance(almost);
         held.release();
         let held = later.arrived();
+        // llmlint: ignore-block[tests_mirror_real_usage] the gate stages the renderer losing CPU time while the engine reaches its store call; no CLI command can force that ordering, and the journey still requires actual captured output and successful subprocess exit.
         if let Some(render) = &render {
             let rendering = render.arrived_within_a_step(&world, "the attached renderer");
             assert_eq!(
@@ -721,6 +723,7 @@ fn progressing_round(delay_renderer: bool) {
             );
             rendering.release();
         }
+        // llmlint: ignore-end[tests_mirror_real_usage]
         // A store arrival orders the engine, not the independently polled renderer.
         // Observe its write before spending the next interval of diagnostic time.
         world.until("the command to write between the two held calls", |_| {
