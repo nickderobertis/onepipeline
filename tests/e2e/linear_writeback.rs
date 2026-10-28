@@ -1900,4 +1900,260 @@ fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
         .out_has(&format!("home {project} — written: Completed"));
 }
 
+/// A live edit creates a public view from a private Linear home, and the home records it in
+/// its public projection map. The home is read back as Linear stored it, so this path writes
+/// no rewritten content and does not reach onetaskgraph #3781's follow-up write; the copy
+/// journey after it does.
+#[test]
+fn a_private_linear_home_keeps_public_projections_after_a_live_add() {
+    let name = "linear-private-projections";
+    let (world, _private, _public) = crate::publication_boundary::mixed_world(name);
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = world
+        .with_env(KEY_ENV, "a-loopback-key")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    world.script("anchor.wait", "hold");
+    let linear = Linear::serve(
+        &every_mapped_state(),
+        STATUSES,
+        name,
+        &described(
+            "## Plan\n- Keep this home private.",
+            &json!({
+                "onetaskgraph.classification": "private",
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": "Deliver the plan"},
+            }),
+        ),
+        "Planned",
+    );
+    linear.file(
+        "chore: anchor",
+        &described(
+            &task_text("anchor"),
+            &json!({"onepipeline.id": "anchor", "onepipeline.persona": "engineer",
+            "onetaskgraph.classification": "private"}),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("launch-directory");
+    let views = world.root.join("views-store");
+    std::fs::create_dir_all(&launch).unwrap();
+    std::fs::create_dir_all(&views).unwrap();
+    let config = configuration(&linear).replacen("    plugin: linear", "    visibility: private\n    routes:\n      - to: views\n        repositories: [github.com/owner/library]\n    plugin: linear", 1);
+    std::fs::write(launch.join("onetaskgraph.yaml"), format!(
+        "{config}  views:\n    plugin: local-md\n    visibility: public\n    config:\n      root: {views:?}\n"
+    )).unwrap();
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--detach"]);
+    world.run_on(start, "start private Linear home").exited(0);
+    world.until("the anchor to dispatch", |world| {
+        !world.events_of(name, "node-dispatched").is_empty()
+    });
+    let mut node = crate::harness::agent("examples", &[]);
+    node["repo"] = json!("github.com/owner/library");
+    node["classification"] = json!("public");
+    node["parked"] = json!(true);
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3,
+        "commands": [{"op": "add", "node": node}]})
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the live addition's write-back to finish", |world| {
+        projection_records(world, name).iter().any(|record| {
+            record["outcome"] == "projected" && record.to_string().contains("examples")
+        })
+    });
+    let home = linear.project_content();
+    let metadata = metadata_of(&home);
+    let map = metadata
+        .get("onetaskgraph.public_projections")
+        .unwrap_or_else(|| {
+            panic!(
+                "no public projections in {home}; records: {:?}; requests: {:?}",
+                projection_records(&world, name),
+                linear.log()
+            )
+        });
+    assert_eq!(map["schema_version"], 1, "{home}");
+    let tasks = map["tasks"]
+        .as_array()
+        .expect("the private home's public projections");
+    assert_eq!(tasks.len(), 1, "{home}");
+    assert!(
+        tasks[0]["task"].as_str().unwrap().starts_with("tracker:"),
+        "{home}"
+    );
+    let projection = tasks[0]["projection"].as_str().unwrap();
+    let native = projection
+        .strip_prefix("views:")
+        .expect("a public view in views");
+    let view = std::fs::read_to_string(views.join("tasks").join(format!("{native}.md")))
+        .expect("the recorded public projection exists");
+    assert!(view.contains("examples"), "{view}");
+    let canonical = linear
+        .issues()
+        .into_iter()
+        .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == "examples")
+        .expect("the new task exists canonically in Linear");
+    assert_eq!(
+        tasks[0]["task"],
+        format!("{SOURCE}:{}", canonical.0),
+        "{home}"
+    );
+    assert!(home.contains("* Keep this home private."), "{home}");
+    let held = world.run_json(name, "writeback-landed.json");
+    assert!(held["items"].get("examples").is_some(), "{held}");
+    world.release("anchor.go");
+}
+
+/// A mixed plan whose private home's Markdown Linear rewrites is copied into a private Linear
+/// source through the full copy of the store this crate links — the entry point the engine's own
+/// copies call. Its public task is projected into a public view while the home is filed, so the
+/// home's projection map is written after the home was created, and Linear's rewrite of the home
+/// makes the store write it once more to record what Linear holds: that follow-up write keeps the
+/// map (onetaskgraph #3781). The engine's own write-back never hands Linear a home it has not
+/// already read back as Linear stored it, so this seam stands in for its path.
+#[test]
+fn a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections() {
+    let (world, _private, _public) =
+        crate::publication_boundary::mixed_world("linear-private-projections-copy");
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let draft = world.root.join("draft-store");
+    let views = world.root.join("views-store");
+    std::fs::create_dir_all(&views).unwrap();
+    let world = world
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__PLUGIN", "local-md")
+        .with_env("ONETASKGRAPH_SOURCES__DRAFT__VISIBILITY", "private")
+        .with_env(
+            "ONETASKGRAPH_SOURCES__DRAFT__CONFIG__ROOT",
+            &draft.to_string_lossy(),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let linear = Linear::serve_empty(&every_mapped_state(), STATUSES);
+    let config = configuration(&linear).replacen(
+        "    plugin: linear",
+        "    visibility: private\n    routes:\n      - to: views\n        repositories: \
+         [github.com/owner/library]\n    plugin: linear",
+        1,
+    );
+    std::fs::write(
+        world.root.join("onetaskgraph.yaml"),
+        format!(
+            "{config}  views:\n    plugin: local-md\n    visibility: public\n    config:\n      \
+             root: {views:?}\n"
+        ),
+    )
+    .unwrap();
+
+    // The draft: a parked private task in the private repository homes the plan privately, and
+    // a public task in the public repository is routed to the public view. The home's body is a
+    // bullet list, which Linear stores as `* ` bullets.
+    let mut inner = crate::publication_boundary::producer("inner", &[]);
+    inner["repo"] = json!("github.com/owner/service");
+    inner["classification"] = json!("private");
+    inner["parked"] = json!(true);
+    let mut examples = crate::publication_boundary::public("examples", &[]);
+    examples["repo"] = json!("github.com/owner/library");
+    let plan = crate::publication_boundary::mixed_plan("copied", vec![inner, examples], vec![]);
+    let drafted = world.plan_in(&draft, "copied", &plan);
+    let identifier = drafted
+        .strip_prefix(&format!("{STORE_SOURCE}:"))
+        .expect("a project of the draft root")
+        .to_owned();
+    let home = draft.join("projects").join(format!("{identifier}.md"));
+    let mut held = std::fs::read_to_string(&home).unwrap();
+    held.push_str("## Plan\n- Keep this home private.\n");
+    std::fs::write(&home, held).unwrap();
+
+    let item = crate::harness::global(&format!("draft:{identifier}"));
+    let report = world.on_onevcs(|| {
+        world.store_call_with(&[(KEY_ENV, "a-loopback-key")], |engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: true },
+                    destination: onetaskgraph_plugin_api::SourceName::new(SOURCE)
+                        .expect("a source name"),
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: None,
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("the linked store copies the plan: {error}"))
+        })
+    });
+    assert!(!report.items.is_empty(), "{report:?}");
+
+    // Linear rewrote the home, so the store wrote it again after the map was recorded.
+    let home = linear.project_content();
+    assert!(home.contains("* Keep this home private."), "{home}");
+    let updates = linear
+        .log()
+        .iter()
+        .filter(|request| request.operation == Operation::ProjectUpdate)
+        .count();
+    assert!(updates >= 2, "{:#?}", linear.log());
+    let map = metadata_of(&home)
+        .get("onetaskgraph.public_projections")
+        .cloned()
+        .unwrap_or_else(|| {
+            panic!(
+                "no public projections in {home}; requests: {:#?}",
+                linear.log()
+            )
+        });
+    assert_eq!(map["schema_version"], 1, "{home}");
+    let tasks = map["tasks"]
+        .as_array()
+        .expect("the home's public projections");
+    assert_eq!(tasks.len(), 1, "{home}");
+    let canonical = linear
+        .issues()
+        .into_iter()
+        .find(|(_, _, description)| metadata_of(description)["onepipeline.id"] == "examples")
+        .expect("the public task is canonical in Linear");
+    assert_eq!(
+        tasks[0]["task"],
+        format!("{SOURCE}:{}", canonical.0),
+        "{home}"
+    );
+    let native = tasks[0]["projection"]
+        .as_str()
+        .and_then(|projection| projection.strip_prefix("views:"))
+        .expect("a public view in views");
+    let view = std::fs::read_to_string(views.join("tasks").join(format!("{native}.md")))
+        .expect("the recorded public projection exists");
+    assert!(view.contains("examples"), "{view}");
+}
+
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
