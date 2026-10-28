@@ -8827,6 +8827,11 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
     // itself begins `{workspaceRoot}/src/**/*`, so a narrower edge would drop it out of
     // `nx affected` for the changes it exists to catch.
     world.until("the second node to be held for its workspace", |world| {
+        assert!(
+            dispatches_of(world, &run, "second").is_empty(),
+            "the second node was dispatched before the first handed its slot back\n{}",
+            why(world, &run)
+        );
         first_workspace_hold_of(world, &run, "second").is_some()
     });
     let hold = first_workspace_hold_of(&world, &run, "second").expect("held");
@@ -8927,8 +8932,31 @@ fn a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back()
         ))
         .out_has(&format!("onevcs pool status {SERVICE_IDENTITY}"));
 
-    // The first hands its slot back, and the second takes it.
+    // The overflow session proves placement while the slot is occupied, but
+    // must finish publishing before the slot's owner publishes. onevcs's
+    // publish_locally checks checkout readiness before queue::turn; a check
+    // during another publication's fast-forward can see a transient dirty tree.
+    // This journey tests pool admission, independently of that publication race.
+    world.until("the overflow node to finish publishing", |world| {
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["labels"]["node"] == "unbounded")
+    });
+    assert!(
+        dispatches_of(&world, &run, "second").is_empty(),
+        "the second node was dispatched before the first handed its slot back\n{}",
+        why(&world, &run)
+    );
+
+    // The first hands its slot back, and the second takes it. Wait for the
+    // session's close on the record, rather than allowing time for its return.
     world.release("first.go");
+    world.until("the first session to return its pool slot", |world| {
+        world.events_of(&run, "session-closed").iter().any(|event| {
+            event["labels"]["node"] == "first" && event["payload"]["returned"]["slot"].is_u64()
+        })
+    });
     world.until("the run to settle", |world| {
         world.run_file(&run, "result.json").is_file()
     });
