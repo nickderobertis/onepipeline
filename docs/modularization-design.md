@@ -8,7 +8,7 @@ The executable inputs are `scripts/modularization/layout.json` and the current s
 node scripts/modularization/graph.mjs
 node scripts/modularization/replay.mjs scripts/modularization/layout.json target/modularization.json
 node scripts/modularization/render.mjs
-just nx run onepipeline-npm:test
+just nx run onepipeline-modularization:check
 ```
 
 `layout.json` is research data, schema 1. It assigns each Rust file exactly once, names dependencies and the disposition of every discovered source edge, and maps test modules to suites. Empty `files` on a command crate means its adapter must be extracted from today's `driver::dispatch`/`verbs`, not that an implementation already exists. `assets` assigns the two non-Rust inputs under `src/`. `auxiliarySuites` inventories the other journey projects without pretending their timing is present in the e2e profile.
