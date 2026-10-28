@@ -5270,16 +5270,7 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
     // only routed to, until the stream shows the turn that rode the decision.
     assert_eq!(operation["shown_to"], json!(["supervisor"]), "{operation}");
     assert_eq!(operation["routed_to"], json!(["worker"]), "{operation}");
-    let shown = presentations_of(&world, run, "build");
-    assert_eq!(
-        shown
-            .iter()
-            .map(|event| event["payload"]["party"].clone())
-            .collect::<Vec<_>>(),
-        vec![json!("worker")],
-        "the worker's presentation of a note that rode the judge's decision was not \
-         recorded once and alone:\n{shown:#?}"
-    );
+    assert_judge_note_worker_presentation(&world, run);
 
     // The judge read it as its own, addressed to it...
     let judge = judged(&world);
@@ -5300,6 +5291,80 @@ fn a_note_reaching_the_live_judge_re_takes_its_decision_and_rides_it_to_the_work
             && prompt.contains(NOTE)),
         "the note never rode the judge's response to the worker:\n{worker:#?}"
     );
+}
+
+/// Read the final presentation count only after the driver has finished writing.
+/// Settlement may precede the delivery answer; that answer commits the note and
+/// then replays witnessed turns into separate `note-shown` appends.
+fn assert_judge_note_worker_presentation(world: &World, run: &str) {
+    let shown = presentations_of(world, run, "build");
+    assert_eq!(
+        shown
+            .iter()
+            .map(|event| event["payload"]["party"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("worker")],
+        "the worker's presentation of a note that rode the judge's decision was not \
+         recorded once and alone:\n{shown:#?}"
+    );
+}
+
+/// Hold the actual presentation append after the note's commit. Reading that
+/// commit is not a barrier for the presentation that follows it.
+#[test]
+fn a_live_judge_notes_committed_delivery_is_not_yet_its_worker_presentation() {
+    // llmlint: ignore-block[tests_mirror_real_usage] the existing journal failpoint orders
+    // the real driver's writes; the note travels through the real reply and conversation.
+    let appending = harness::Rendezvous::failpoint();
+    let world = World::new("note-judge-presentation")
+        .with_env("ONEPIPELINE_TEST_JOURNAL_HELD_KIND", "note-shown")
+        .with_env("ONEPIPELINE_TEST_JOURNAL_HELD_GATE", &appending.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let run = "judgepresentation";
+    world.script(
+        "judge.asks-again",
+        "Run the check again and report what it said.",
+    );
+    world.script("judge.asks-again-times", "2");
+    held_judge(&world, run, vec![agent("build", &[])]);
+    let releasing = release_once_admitted(&world, run, &["judge.go"]);
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op("build", "supervisor", NOTE, None)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    releasing.join().expect("the judge is released");
+    let held = appending.arrived_within_a_step(&world, "the worker presentation append");
+    let operation = recorded(&world, run);
+    assert_eq!(operation["reached"], json!("supervisor"), "{operation}");
+    assert!(presentations_of(&world, run, "build").is_empty());
+
+    std::thread::scope(|scope| {
+        let (finished, completion) = std::sync::mpsc::channel();
+        let (started, starting) = std::sync::mpsc::sync_channel(0);
+        let world = &world;
+        let reading = scope.spawn(move || {
+            started.send(()).expect("the reader announces its attempt");
+            let result = std::panic::catch_unwind(|| {
+                assert_judge_note_worker_presentation(world, run);
+            });
+            finished.send(()).expect("the reader reports completion");
+            result
+        });
+        // Keep the append held throughout the read attempt. A premature assertion
+        // fails against an empty journal, even on a host that usually writes fast.
+        starting.recv().expect("the reader starts its assertion");
+        let premature = completion.recv_timeout(Duration::from_secs(1));
+        held.release();
+        let result = reading.join().expect("the reader finishes");
+        assert!(
+            matches!(premature, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "the presentation assertion finished before its append was released"
+        );
+        result.expect("the finished record contains exactly one worker presentation");
+    });
 }
 
 /// A note to the supervisor that reaches the conversation only once the judge's
