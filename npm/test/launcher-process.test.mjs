@@ -447,9 +447,11 @@ describe("the process the npm-installed command runs as", () => {
         const directory = refuse();
         assert.equal(directory.status, 1, directory.stderr);
         assert.equal(directory.stdout, "");
+        // The launcher names the resolved path: on macOS the temp directory
+        // sits under `/var`, a symlink to `/private/var`.
         assert.equal(
           directory.stderr,
-          `onepipeline: failed to launch the onepipeline binary: ${engine} is not a file\n`,
+          `onepipeline: failed to launch the onepipeline binary: ${realpathSync(engine)} is not a file\n`,
         );
       });
     });
