@@ -15,14 +15,46 @@ export function sourceAssets(root = ".") {
     .sort();
 }
 
+const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const text = (value) => typeof value === "string" && value.trim().length > 0;
+
+function inputShape(input, file) {
+  if (text(input)) return;
+  if (record(input)) {
+    const keys = Object.keys(input);
+    if (keys.length === 1 && ["env", "runtime"].includes(keys[0]) && text(input[keys[0]])) return;
+  }
+  throw new Error(`unsupported auxiliary file input in ${file}`);
+}
+
 /** Auxiliary Rust and live journeys come from their actual Nx projects, including live/workload tiers. */
 export function auxiliaryInputs(root = ".") {
-  const named = JSON.parse(readFileSync(join(root, "nx.json"), "utf8")).namedInputs;
+  const config = JSON.parse(readFileSync(join(root, "nx.json"), "utf8"));
+  if (!record(config) || !record(config.namedInputs))
+    throw new Error("invalid namedInputs in nx.json");
+  const named = config.namedInputs;
+  for (const [name, inputs] of Object.entries(named)) {
+    if (!text(name) || !Array.isArray(inputs))
+      throw new Error(`invalid namedInputs entry: ${name}`);
+    for (const input of inputs) inputShape(input, "nx.json");
+  }
   const result = {};
   for (const file of files(join(root, "tests")).filter(
     (path) => path.endsWith("/project.json") || path.endsWith("\\project.json"),
   )) {
     const project = JSON.parse(readFileSync(file, "utf8"));
+    if (
+      !record(project) ||
+      (project.tags !== undefined && (!Array.isArray(project.tags) || !project.tags.every(text))) ||
+      (project.sourceRoot !== undefined && !text(project.sourceRoot)) ||
+      (project.targets !== undefined && !record(project.targets))
+    )
+      throw new Error(`invalid auxiliary project in ${file}`);
+    for (const target of Object.values(project.targets ?? {})) {
+      if (!record(target) || (target.inputs !== undefined && !Array.isArray(target.inputs)))
+        throw new Error(`invalid auxiliary project target in ${file}`);
+      for (const input of target.inputs ?? []) inputShape(input, file);
+    }
     if (
       (!project.tags?.includes("lang:rust") && !project.tags?.includes("tier:live")) ||
       project.sourceRoot === "tests/e2e"
@@ -31,10 +63,7 @@ export function auxiliaryInputs(root = ".") {
     if (!/^tests\/[a-z][a-z0-9_]*$/.test(project.sourceRoot))
       throw new Error(`unsupported journey sourceRoot: ${project.sourceRoot}`);
     const expand = (input, stack = []) => {
-      if (typeof input !== "string") {
-        if (input && (Object.hasOwn(input, "env") || Object.hasOwn(input, "runtime"))) return [];
-        throw new Error(`unsupported auxiliary file input in ${file}`);
-      }
+      if (typeof input !== "string") return [];
       if (Object.hasOwn(named, input)) {
         if (stack.includes(input))
           throw new Error(`auxiliary input cycle: ${[...stack, input].join(" -> ")}`);
@@ -50,7 +79,7 @@ export function auxiliaryInputs(root = ".") {
     result[project.sourceRoot.slice(6)] = [
       ...new Set([
         `${project.sourceRoot}/**/*`,
-        ...Object.values(project.targets).flatMap((target) =>
+        ...Object.values(project.targets ?? {}).flatMap((target) =>
           (target.inputs ?? []).flatMap((input) => expand(input)),
         ),
       ]),

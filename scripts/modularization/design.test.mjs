@@ -719,6 +719,27 @@ test("graph CLI refuses source-asset and auxiliary project drift, then accepts r
     layout.auxiliarySuites.journey.paths = ["tests/changed.rs", "tests/journey/**/*"];
     save();
     assert.equal(run().status, 0);
+    for (const input of [{ env: 7 }, { env: "X", fileset: "tests/data/**" }]) {
+      put(root, "nx.json", { namedInputs: { journey: [input] } });
+      assert.match(run().stderr, /unsupported auxiliary file input/);
+    }
+    for (const namedInputs of [null, [], { journey: "tests/fixture.rs" }]) {
+      put(root, "nx.json", { namedInputs });
+      assert.match(run().stderr, /invalid namedInputs/);
+    }
+    put(root, "nx.json", { namedInputs: { journey: ["{workspaceRoot}/tests/changed.rs"] } });
+    for (const patch of [
+      { tags: "lang:rust" },
+      { sourceRoot: 7 },
+      { targets: [] },
+      { targets: { test: null } },
+      { targets: { test: { inputs: "journey" } } },
+    ]) {
+      put(root, "tests/journey/project.json", { ...project, ...patch });
+      assert.match(run().stderr, /invalid auxiliary project/);
+    }
+    put(root, "tests/journey/project.json", project);
+    assert.equal(run().status, 0);
     project.targets.test.inputs.push("journey");
     put(root, "tests/journey/project.json", project);
     assert.equal(run().status, 0, "duplicated inputs do not change the fileset");
