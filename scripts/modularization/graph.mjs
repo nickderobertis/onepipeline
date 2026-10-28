@@ -2,6 +2,7 @@
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { sourceAssets, auxiliaryInputs } from "./inventory.mjs";
 
 /** All Rust source files, including nested modules and test-only modules. */
 export function rustFiles(root = "src") {
@@ -253,6 +254,26 @@ export function validate(mapping, graph, root = ".") {
   for (const [name, paths] of Object.entries(assets)) {
     if (!Object.hasOwn(mapping.crates, name)) throw new Error(`asset owner is unknown: ${name}`);
     strings(paths, `assets.${name}`);
+  }
+  const actualAssets = sourceAssets(root);
+  const mappedAssets = Object.values(assets)
+    .flat()
+    .filter((path) => path.startsWith("src/"));
+  for (const path of actualAssets)
+    if (mappedAssets.filter((mapped) => mapped === path).length !== 1)
+      throw new Error(`source asset ${path}: expected one owner`);
+  for (const path of mappedAssets)
+    if (!actualAssets.includes(path)) throw new Error(`stale source asset: ${path}`);
+  if (mapping.auxiliarySuites !== undefined) {
+    const actual = auxiliaryInputs(root);
+    if (
+      Object.keys(actual).sort().join("\n") !==
+      Object.keys(mapping.auxiliarySuites).sort().join("\n")
+    )
+      throw new Error("auxiliary suite membership differs from Rust journey projects");
+    for (const [name, paths] of Object.entries(actual))
+      if ([...mapping.auxiliarySuites[name].paths].sort().join("\n") !== paths.join("\n"))
+        throw new Error(`auxiliary suite ${name}: inputs differ from its Nx project`);
   }
   assertAcyclic(mapping.crates);
   for (const file of Object.keys(graph.files)) {

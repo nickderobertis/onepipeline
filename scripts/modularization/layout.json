@@ -10737,7 +10737,24 @@
   "auxiliarySuites": {
     "note": {
       "paths": [
-        "tests/note/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/note/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10746,7 +10763,25 @@
     },
     "stop_verdict": {
       "paths": [
-        "tests/stop_verdict/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "scripts/stop-guard-unpublished-*",
+        "src/**/*",
+        "tests/golden/**/*",
+        "tests/recorded/registry/**/*",
+        "tests/recorded/run-root/onemessagebus-repair-2/**/*",
+        "tests/stop_verdict/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10755,7 +10790,25 @@
     },
     "smoke": {
       "paths": [
-        "tests/smoke/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "scripts/release-probe.sh",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/smoke/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10764,7 +10817,33 @@
     },
     "contract": {
       "paths": [
-        "tests/contract/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "README.md",
+        "clippy.toml",
+        "crates/**/*",
+        "docs/**/*",
+        "examples/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "scripts/check-node.sh",
+        "scripts/review-envelope.sh",
+        "scripts/smoke-published.sh",
+        "src/**/*",
+        "tests/contract.rs",
+        "tests/contract/**/*",
+        "tests/e2e/channel.rs",
+        "tests/golden/**/*",
+        "tests/recorded/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10773,7 +10852,26 @@
     },
     "release_channel": {
       "paths": [
-        "tests/release_channel/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/e2e/recorded_support.rs",
+        "tests/recorded/**/*",
+        "tests/release_channel/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10782,7 +10880,38 @@
     },
     "release_journeys": {
       "paths": [
-        "tests/release_journeys/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        ".github/fixtures/release-v0.74.1-published.json",
+        ".github/tests/support/**/*",
+        ".github/workflow-graph.mjs",
+        ".github/workflows/release-plz.yml",
+        ".github/workflows/release.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/**/*",
+        "justfile",
+        "npm/onepipeline-cli/**/*",
+        "npm/test/registry-support.mjs",
+        "npm/test/sbom-support.mjs",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "release-plz.toml",
+        "release/release-pr-auto-merge.sh",
+        "release/release.py",
+        "rust-toolchain.toml",
+        "schemas/**/*",
+        "scripts/build-linux-wheel.sh",
+        "scripts/build-staged-release.py",
+        "scripts/linked-engines.sh",
+        "scripts/npm-build.mjs",
+        "scripts/publish-npm.sh",
+        "scripts/release-outcome.mjs",
+        "scripts/retry-install.sh",
+        "scripts/smoke-published.sh",
+        "src/**/*",
+        "tests/release_journeys/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10791,7 +10920,22 @@
     },
     "codex_server": {
       "paths": [
-        "tests/codex_server/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/testfakes/Cargo.toml",
+        "crates/testfakes/src/bin/fake-codex.rs",
+        "crates/testfakes/src/codex_app_server.rs",
+        "crates/testfakes/src/lib.rs",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "tests/codex_server/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10800,7 +10944,24 @@
     },
     "journal_workload": {
       "paths": [
-        "tests/journal_workload/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/golden/**/*",
+        "tests/journal_workload/**/*",
+        "tests/recorded/registry/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10809,7 +10970,24 @@
     },
     "pool_workload": {
       "paths": [
-        "tests/pool_workload/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/pool_workload/**/*"
       ],
       "crates": [
         "onepipeline"
@@ -10818,7 +10996,24 @@
     },
     "scratch_workload": {
       "paths": [
-        "tests/scratch_workload/**"
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "justfile",
+        "nx.json",
+        "package-lock.json",
+        "package.json",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/golden/**/*",
+        "tests/recorded/registry/**/*",
+        "tests/scratch_workload/**/*"
       ],
       "crates": [
         "onepipeline"

@@ -90,9 +90,15 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
     assert.match(run().stderr, /unowned test modules: harness/);
     layout.suites.status.modules = ["status", "harness"];
     layout.edges = { "command->record": { kind: "shared", fix: "Shared record." } };
+    put(root, "nx.json", { namedInputs: {} });
+    put(root, "tests/contract/project.json", {
+      sourceRoot: "tests/contract",
+      tags: ["lang:rust"],
+      targets: { test: { inputs: ["{workspaceRoot}/tests/contract/assertions.rs"] } },
+    });
     layout.auxiliarySuites = {
       contract: {
-        paths: ["tests/contract/**"],
+        paths: ["tests/contract/**/*", "tests/contract/assertions.rs"],
         crates: ["command"],
         reason: "Full facade assertions.",
       },
@@ -508,6 +514,11 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
   try {
     // The real historical corpus is reused, while all induced edits stay in this private clone.
     execFileSync("git", ["clone", "--shared", "--quiet", process.cwd(), root], { stdio: "pipe" });
+    put(
+      root,
+      "scripts/modularization/layout.json",
+      readFileSync("scripts/modularization/layout.json", "utf8"),
+    );
     const base = execFileSync("git", ["rev-parse", "origin/main"], { encoding: "utf8" }).trim();
     execFileSync("git", ["update-ref", "refs/remotes/origin/main", base], { cwd: root });
     const layout = JSON.parse(
@@ -622,6 +633,87 @@ test("graph CLI discovers composition declarations and direct/grouped diagnostic
     const refused = run();
     assert.equal(refused.status, 1);
     assert.match(refused.stderr, /unclassified edge direct->error/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("graph CLI refuses source-asset and auxiliary project drift, then accepts repaired ownership", () => {
+  const root = scratch();
+  const cli = resolve("scripts/modularization/graph.mjs");
+  const run = () =>
+    spawnSync(process.execPath, [cli, "layout.json"], { cwd: root, encoding: "utf8" });
+  const layout = {
+    schema: 1,
+    crates: { onepipeline: { files: ["src/main.rs"], deps: [] } },
+    edges: {},
+    assets: { onepipeline: ["src/message.txt"] },
+    auxiliarySuites: {},
+  };
+  const save = () => put(root, "layout.json", layout);
+  try {
+    put(root, "src/main.rs", "fn main() {}");
+    put(root, "src/message.txt", "hello");
+    put(root, "tests/support.txt", "support");
+    put(root, "nx.json", { namedInputs: { journey: ["{workspaceRoot}/tests/fixture.rs"] } });
+    save();
+    assert.equal(run().status, 0);
+    put(root, "src/new.txt", "new asset");
+    assert.match(run().stderr, /source asset src\/new.txt: expected one owner/);
+    layout.assets.onepipeline.push("src/new.txt");
+    save();
+    assert.equal(run().status, 0);
+    rmSync(join(root, "src/message.txt"));
+    assert.match(run().stderr, /stale source asset: src\/message.txt/);
+    layout.assets.onepipeline = ["src/new.txt"];
+    save();
+    const project = {
+      sourceRoot: "tests/journey",
+      tags: ["lang:rust"],
+      targets: { test: { inputs: ["journey"] } },
+    };
+    put(root, "tests/journey/project.json", project);
+    assert.match(run().stderr, /auxiliary suite membership differs/);
+    layout.auxiliarySuites.journey = {
+      paths: ["tests/fixture.rs", "tests/journey/**/*"],
+      crates: ["onepipeline"],
+    };
+    save();
+    assert.equal(run().status, 0);
+    put(root, "nx.json", { namedInputs: { journey: ["{workspaceRoot}/tests/changed.rs"] } });
+    assert.match(run().stderr, /auxiliary suite journey: inputs differ/);
+    put(root, "nx.json", { namedInputs: { journey: ["journey"] } });
+    assert.match(run().stderr, /auxiliary input cycle: journey -> journey/);
+    put(root, "nx.json", { namedInputs: { journey: [{ fileset: "tests/bad.rs" }] } });
+    assert.match(run().stderr, /unsupported auxiliary file input/);
+    put(root, "nx.json", { namedInputs: { journey: ["^default"] } });
+    assert.match(run().stderr, /unsupported auxiliary file input/);
+    put(root, "nx.json", {
+      namedInputs: {
+        journey: [
+          "{workspaceRoot}/tests/changed.rs",
+          { env: "PARTITION" },
+          { runtime: "node --version" },
+        ],
+      },
+    });
+    layout.auxiliarySuites.journey.paths = ["tests/changed.rs", "tests/journey/**/*"];
+    save();
+    assert.equal(run().status, 0);
+    project.targets.test.inputs.push("journey");
+    put(root, "tests/journey/project.json", project);
+    assert.equal(run().status, 0, "duplicated inputs do not change the fileset");
+    project.targets.test.inputs = ["{workspaceRoot}/tests/other.rs"];
+    put(root, "tests/journey/project.json", project);
+    assert.match(run().stderr, /auxiliary suite journey: inputs differ/);
+    layout.auxiliarySuites.journey.paths = ["tests/journey/**/*", "tests/other.rs"];
+    save();
+    assert.equal(run().status, 0);
+    rmSync(join(root, "tests/journey/project.json"));
+    assert.match(run().stderr, /auxiliary suite membership differs/);
+    delete layout.auxiliarySuites.journey;
+    save();
+    assert.equal(run().status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
