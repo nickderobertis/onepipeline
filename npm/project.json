@@ -41,6 +41,8 @@
         "{workspaceRoot}/scripts/crate-split-replay.mjs",
         "{workspaceRoot}/scripts/crate-split/**/*",
         "{workspaceRoot}/scripts/modularization/**/*",
+        "{workspaceRoot}/docs/modularization-design.md",
+        "{workspaceRoot}/docs/test-profile-report.md",
         "{workspaceRoot}/tests/golden/test-profile-record-v2.json",
         "{workspaceRoot}/tests/e2e/*.rs",
         "{workspaceRoot}/budgets.yaml",

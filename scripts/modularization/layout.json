@@ -741,6 +741,7 @@
       "deps": [
         "agent-execution",
         "cli-schema",
+        "cmd-drive-run",
         "run-control",
         "run-views",
         "scheduler",
@@ -785,6 +786,7 @@
       "files": [],
       "deps": [
         "cli-schema",
+        "cmd-drive-run",
         "run-control",
         "run-views",
         "scheduler",
@@ -1092,7 +1094,7 @@
     },
     "boundary->edits": {
       "kind": "seam",
-      "fix": "publication-boundary owns a edits provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with plan-edits. Move any referenced shared DTO into publication-boundary and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a edits provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with plan-edits. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "boundary->error": {
       "kind": "shared",
@@ -1120,11 +1122,11 @@
     },
     "boundary->vcs": {
       "kind": "seam",
-      "fix": "publication-boundary owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into publication-boundary and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "boundary->views": {
       "kind": "seam",
-      "fix": "publication-boundary owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into publication-boundary and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "boundary->yaml": {
       "kind": "shared",
@@ -1132,7 +1134,7 @@
     },
     "branchname->boundary": {
       "kind": "seam",
-      "fix": "plan-model owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Move any referenced shared DTO into plan-model and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-model owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "branchname->error": {
       "kind": "shared",
@@ -1148,7 +1150,7 @@
     },
     "branchname->publicid": {
       "kind": "seam",
-      "fix": "plan-model owns a publicid provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Move any referenced shared DTO into plan-model and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-model owns a publicid provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "changes->event": {
       "kind": "shared",
@@ -1172,7 +1174,7 @@
     },
     "changes->telemetry": {
       "kind": "seam",
-      "fix": "task-store owns a telemetry provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-telemetry. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a telemetry provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-telemetry. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "changes->vcs": {
       "kind": "seam",
@@ -1220,7 +1222,7 @@
     },
     "checkpoint->channel": {
       "kind": "seam",
-      "fix": "run-record owns a channel provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with planner-channel. Move any referenced shared DTO into run-record and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-record owns a channel provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with planner-channel. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "checkpoint->edits": {
       "kind": "seam",
@@ -1292,7 +1294,7 @@
     },
     "cli->agentgraph": {
       "kind": "seam",
-      "fix": "cli-schema owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Move any referenced shared DTO into cli-schema and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cli-schema owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "cli->channel": {
       "kind": "seam",
@@ -1300,7 +1302,7 @@
     },
     "cli->engine": {
       "kind": "seam",
-      "fix": "cli-schema owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into cli-schema and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cli-schema owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "closures->event": {
       "kind": "shared",
@@ -1340,7 +1342,7 @@
     },
     "closures->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into publication and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "closures->writeback": {
       "kind": "shared",
@@ -1444,7 +1446,7 @@
     },
     "crossdag->engine": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "crossdag->error": {
       "kind": "shared",
@@ -1464,7 +1466,7 @@
     },
     "crossdag->loopstats": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "crossdag->projection": {
       "kind": "shared",
@@ -1740,11 +1742,11 @@
     },
     "driver->verbs": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Move any shared DTO to run-control and re-export its current path."
+      "fix": "run-control owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
     },
     "driver->views": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to run-control and re-export its current path."
+      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
     },
     "driver->watch": {
       "kind": "move",
@@ -1768,7 +1770,7 @@
     },
     "edits->driver": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "edits->error": {
       "kind": "shared",
@@ -1784,7 +1786,7 @@
     },
     "edits->note": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "edits->plan": {
       "kind": "shared",
@@ -1792,23 +1794,23 @@
     },
     "edits->storeops": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "edits->taskgraph": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "edits->telemetry": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "edits->vcs": {
       "kind": "seam",
-      "fix": "plan-edits owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into plan-edits and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-edits owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "edits->views": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to plan-edits and re-export its current path."
+      "fix": "plan-edits owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
     },
     "engine->agentgraph": {
       "kind": "shared",
@@ -1840,7 +1842,7 @@
     },
     "engine->continuation": {
       "kind": "seam",
-      "fix": "scheduler owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Move any referenced shared DTO into scheduler and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "scheduler owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "engine->controls": {
       "kind": "shared",
@@ -1860,7 +1862,7 @@
     },
     "engine->driver": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "engine->edits": {
       "kind": "shared",
@@ -1916,7 +1918,7 @@
     },
     "engine->note": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "engine->ordering": {
       "kind": "shared",
@@ -1948,7 +1950,7 @@
     },
     "engine->reply": {
       "kind": "seam",
-      "fix": "scheduler owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Move any referenced shared DTO into scheduler and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "scheduler owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "engine->review": {
       "kind": "shared",
@@ -1960,11 +1962,11 @@
     },
     "engine->scratch": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the scratch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-scratch-discard adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the scratch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-scratch-discard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "engine->shutdown": {
       "kind": "seam",
-      "fix": "scheduler owns a shutdown provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Move any referenced shared DTO into scheduler and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "scheduler owns a shutdown provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "engine->stack": {
       "kind": "shared",
@@ -2000,7 +2002,7 @@
     },
     "engine->views": {
       "kind": "seam",
-      "fix": "scheduler owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into scheduler and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "scheduler owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "engine->withdrawal": {
       "kind": "shared",
@@ -2104,7 +2106,7 @@
     },
     "filter->dispatchenv": {
       "kind": "seam",
-      "fix": "event-filter owns a dispatchenv provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Move any referenced shared DTO into event-filter and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "event-filter owns a dispatchenv provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "filter->error": {
       "kind": "shared",
@@ -2116,15 +2118,15 @@
     },
     "filter->hooks": {
       "kind": "seam",
-      "fix": "event-filter owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Move any referenced shared DTO into event-filter and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "event-filter owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "filter->maintenance": {
       "kind": "seam",
-      "fix": "event-filter owns a provider for the maintenance operation: accept input DTOs and return result DTOs; the facade supplies the real pool-maintenance adapter. Move any shared DTO to event-filter and re-export its current path."
+      "fix": "event-filter owns a provider for the maintenance operation: accept input DTOs and return result DTOs; the facade supplies the real pool-maintenance adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths."
     },
     "filter->templates": {
       "kind": "seam",
-      "fix": "event-filter owns a provider for the templates operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-template adapter. Move any shared DTO to event-filter and re-export its current path."
+      "fix": "event-filter owns a provider for the templates operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-template adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths."
     },
     "filter->vocabulary": {
       "kind": "shared",
@@ -2132,7 +2134,7 @@
     },
     "filter->writeback": {
       "kind": "seam",
-      "fix": "event-filter owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Move any referenced shared DTO into event-filter and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "event-filter owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "filter->yaml": {
       "kind": "shared",
@@ -2160,7 +2162,7 @@
     },
     "findings->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into publication and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "flow->channel": {
       "kind": "shared",
@@ -2200,11 +2202,11 @@
     },
     "flow->verbs": {
       "kind": "seam",
-      "fix": "cmd-flow owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Move any referenced shared DTO into cmd-flow and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cmd-flow owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "flow->watchers": {
       "kind": "seam",
-      "fix": "cmd-flow owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Move any shared DTO to cmd-flow and re-export its current path."
+      "fix": "cmd-flow owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths."
     },
     "flowwatch->channel": {
       "kind": "shared",
@@ -2236,7 +2238,7 @@
     },
     "flowwatch->land": {
       "kind": "seam",
-      "fix": "cmd-flow owns a land provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-publish-branch. Move any referenced shared DTO into cmd-flow and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cmd-flow owns a land provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-publish-branch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "flowwatch->ledger": {
       "kind": "shared",
@@ -2248,7 +2250,7 @@
     },
     "flowwatch->watch": {
       "kind": "seam",
-      "fix": "cmd-flow owns a provider for the watch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Move any shared DTO to cmd-flow and re-export its current path."
+      "fix": "cmd-flow owns a provider for the watch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths."
     },
     "flowwatch->watchers": {
       "kind": "shared",
@@ -2256,11 +2258,11 @@
     },
     "freespace->views": {
       "kind": "seam",
-      "fix": "free-space owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into free-space and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "free-space owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in free-space while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->boundary": {
       "kind": "seam",
-      "fix": "plan-validation owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->controls": {
       "kind": "shared",
@@ -2272,7 +2274,7 @@
     },
     "graph->engine": {
       "kind": "seam",
-      "fix": "plan-validation owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->error": {
       "kind": "shared",
@@ -2280,7 +2282,7 @@
     },
     "graph->lifecycle": {
       "kind": "seam",
-      "fix": "plan-validation owns a lifecycle provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a lifecycle provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->plan": {
       "kind": "shared",
@@ -2292,7 +2294,7 @@
     },
     "graph->reply": {
       "kind": "seam",
-      "fix": "plan-validation owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->taskgraph": {
       "kind": "seam",
@@ -2300,11 +2302,11 @@
     },
     "graph->vcs": {
       "kind": "seam",
-      "fix": "plan-validation owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->views": {
       "kind": "seam",
-      "fix": "plan-validation owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into plan-validation and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-validation owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "graph->yaml": {
       "kind": "shared",
@@ -2324,35 +2326,35 @@
     },
     "home->checkpoint": {
       "kind": "seam",
-      "fix": "home owns a provider for the checkpoint operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the checkpoint operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->journal": {
       "kind": "seam",
-      "fix": "home owns a provider for the journal operation: accept input DTOs and return result DTOs; the facade supplies the real journal adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the journal operation: accept input DTOs and return result DTOs; the facade supplies the real journal adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->ledger": {
       "kind": "seam",
-      "fix": "home owns a provider for the ledger operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the ledger operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->payload": {
       "kind": "seam",
-      "fix": "home owns a provider for the payload operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the payload operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->storeops": {
       "kind": "seam",
-      "fix": "home owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->taskgraph": {
       "kind": "seam",
-      "fix": "home owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->views": {
       "kind": "seam",
-      "fix": "home owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "home->writeback": {
       "kind": "seam",
-      "fix": "home owns a provider for the writeback operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Move any shared DTO to home and re-export its current path."
+      "fix": "home owns a provider for the writeback operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
     },
     "hooks->cli": {
       "kind": "shared",
@@ -2652,7 +2654,7 @@
     },
     "ledger->readprobe": {
       "kind": "seam",
-      "fix": "run-record owns a readprobe provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with journal. Move any referenced shared DTO into run-record and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-record owns a readprobe provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with journal. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "ledger->rendercost": {
       "kind": "shared",
@@ -3004,7 +3006,7 @@
     },
     "lifecycle->agentgraph": {
       "kind": "seam",
-      "fix": "publication owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Move any referenced shared DTO into publication and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "lifecycle->boundary": {
       "kind": "shared",
@@ -3104,7 +3106,7 @@
     },
     "lifecycle->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into publication and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "loopstats->error": {
       "kind": "shared",
@@ -3124,7 +3126,7 @@
     },
     "maintenance->engine": {
       "kind": "seam",
-      "fix": "pool-maintenance owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Move any shared DTO to pool-maintenance and re-export its current path."
+      "fix": "pool-maintenance owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths."
     },
     "maintenance->error": {
       "kind": "shared",
@@ -3184,7 +3186,7 @@
     },
     "maintenance->views": {
       "kind": "seam",
-      "fix": "pool-maintenance owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Move any referenced shared DTO into pool-maintenance and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "pool-maintenance owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "maintenance->yaml": {
       "kind": "shared",
@@ -3268,7 +3270,7 @@
     },
     "payload->flow": {
       "kind": "seam",
-      "fix": "event-payloads owns a flow provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-flow. Move any referenced shared DTO into event-payloads and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "event-payloads owns a flow provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-flow. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "payload->graph": {
       "kind": "seam",
@@ -3304,15 +3306,15 @@
     },
     "payload->writeback": {
       "kind": "seam",
-      "fix": "event-payloads owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Move any referenced shared DTO into event-payloads and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "event-payloads owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "plan->ledger": {
       "kind": "seam",
-      "fix": "plan-model owns a ledger provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Move any referenced shared DTO into plan-model and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-model owns a ledger provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "plan->note": {
       "kind": "seam",
-      "fix": "plan-model owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Move any referenced shared DTO into plan-model and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "plan-model owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "plancheck->cli": {
       "kind": "shared",
@@ -3404,7 +3406,7 @@
     },
     "projection->boundary": {
       "kind": "seam",
-      "fix": "run-projection owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "projection->channel": {
       "kind": "seam",
@@ -3416,7 +3418,7 @@
     },
     "projection->engine": {
       "kind": "seam",
-      "fix": "run-projection owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "projection->event": {
       "kind": "shared",
@@ -3440,7 +3442,7 @@
     },
     "projection->note": {
       "kind": "seam",
-      "fix": "run-projection owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "projection->payload": {
       "kind": "shared",
@@ -3452,7 +3454,7 @@
     },
     "projection->readjust": {
       "kind": "seam",
-      "fix": "run-projection owns a readjust provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a readjust provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "projection->readprobe": {
       "kind": "shared",
@@ -3460,7 +3462,7 @@
     },
     "projection->release": {
       "kind": "seam",
-      "fix": "run-projection owns a release provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with release-watch. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a release provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with release-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "projection->report": {
       "kind": "shared",
@@ -3540,7 +3542,7 @@
     },
     "readjust->views": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "readprobe->event": {
       "kind": "shared",
@@ -3572,7 +3574,7 @@
     },
     "release->engine": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "release->error": {
       "kind": "shared",
@@ -3600,11 +3602,11 @@
     },
     "release->lifecycle": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the lifecycle operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the lifecycle operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "release->loopstats": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "release->payload": {
       "kind": "shared",
@@ -3624,11 +3626,11 @@
     },
     "release->telemetry": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "release->vcs": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the vcs operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Move any shared DTO to release-watch and re-export its current path."
+      "fix": "release-watch owns a provider for the vcs operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
     },
     "reply->boundary": {
       "kind": "shared",
@@ -3776,7 +3778,7 @@
     },
     "review->reply": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the reply operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-reply adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the reply operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-reply adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "review->sys": {
       "kind": "shared",
@@ -3792,11 +3794,11 @@
     },
     "rules->event": {
       "kind": "seam",
-      "fix": "executor-rules owns a provider for the event operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Move any shared DTO to executor-rules and re-export its current path."
+      "fix": "executor-rules owns a provider for the event operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths."
     },
     "rules->executor": {
       "kind": "seam",
-      "fix": "executor-rules owns a provider for the executor operation: accept input DTOs and return result DTOs; the facade supplies the real agent-execution adapter. Move any shared DTO to executor-rules and re-export its current path."
+      "fix": "executor-rules owns a provider for the executor operation: accept input DTOs and return result DTOs; the facade supplies the real agent-execution adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths."
     },
     "rules->yaml": {
       "kind": "shared",
@@ -3896,11 +3898,11 @@
     },
     "shutdown->verbs": {
       "kind": "seam",
-      "fix": "run-control owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Move any referenced shared DTO into run-control and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-control owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "shutdown->views": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to run-control and re-export its current path."
+      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
     },
     "stack->graph": {
       "kind": "shared",
@@ -3944,7 +3946,7 @@
     },
     "stopguard->verbs": {
       "kind": "seam",
-      "fix": "cmd-stop-guard owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Move any referenced shared DTO into cmd-stop-guard and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cmd-stop-guard owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-stop-guard while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "storeops->sys": {
       "kind": "shared",
@@ -4016,7 +4018,7 @@
     },
     "summary->verbs": {
       "kind": "seam",
-      "fix": "run-projection owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Move any referenced shared DTO into run-projection and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-projection owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "summary->views": {
       "kind": "seam",
@@ -4032,7 +4034,7 @@
     },
     "supersession->engine": {
       "kind": "seam",
-      "fix": "publication owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into publication and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "publication owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "supersession->error": {
       "kind": "shared",
@@ -4080,7 +4082,7 @@
     },
     "taskgraph->continuation": {
       "kind": "seam",
-      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "taskgraph->crossdag": {
       "kind": "shared",
@@ -4180,7 +4182,7 @@
     },
     "templates->verbs": {
       "kind": "seam",
-      "fix": "cmd-template owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Move any shared DTO to cmd-template and re-export its current path."
+      "fix": "cmd-template owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-template while facade re-exports preserve the public type paths."
     },
     "templates->yaml": {
       "kind": "shared",
@@ -4224,7 +4226,7 @@
     },
     "trigger->views": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Move any shared DTO to scheduler and re-export its current path."
+      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
     },
     "unanswered->channel": {
       "kind": "shared",
@@ -4232,7 +4234,7 @@
     },
     "unanswered->engine": {
       "kind": "seam",
-      "fix": "task-store owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "unanswered->error": {
       "kind": "shared",
@@ -4264,7 +4266,7 @@
     },
     "unanswered->vcs": {
       "kind": "seam",
-      "fix": "task-store owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "unpublished->error": {
       "kind": "shared",
@@ -4280,7 +4282,7 @@
     },
     "unpublished->land": {
       "kind": "seam",
-      "fix": "cmd-unpublished owns a provider for the land operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-publish-branch adapter. Move any shared DTO to cmd-unpublished and re-export its current path."
+      "fix": "cmd-unpublished owns a provider for the land operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-publish-branch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths."
     },
     "unpublished->ledger": {
       "kind": "shared",
@@ -4288,7 +4290,7 @@
     },
     "unpublished->stopguard": {
       "kind": "seam",
-      "fix": "cmd-unpublished owns a provider for the stopguard operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-stop-guard adapter. Move any shared DTO to cmd-unpublished and re-export its current path."
+      "fix": "cmd-unpublished owns a provider for the stopguard operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-stop-guard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths."
     },
     "unpublished->sys": {
       "kind": "shared",
@@ -4536,7 +4538,7 @@
     },
     "views_refresh_tests->verbs": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Move any shared DTO to run-views and re-export its current path."
+      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
     },
     "views_transcript->event": {
       "kind": "shared",
@@ -4608,7 +4610,7 @@
     },
     "views->hostview": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the hostview operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-host adapter. Move any shared DTO to run-views and re-export its current path."
+      "fix": "run-views owns a provider for the hostview operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-host adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
     },
     "views->journal": {
       "kind": "shared",
@@ -4656,7 +4658,7 @@
     },
     "views->scratch": {
       "kind": "seam",
-      "fix": "run-views owns a scratch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-scratch-discard. Move any referenced shared DTO into run-views and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-views owns a scratch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-scratch-discard. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "views->summary": {
       "kind": "shared",
@@ -4668,7 +4670,7 @@
     },
     "views->telemetry": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Move any shared DTO to run-views and re-export its current path."
+      "fix": "run-views owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
     },
     "views->unanswered": {
       "kind": "shared",
@@ -4680,15 +4682,15 @@
     },
     "views->verbs": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Move any shared DTO to run-views and re-export its current path."
+      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
     },
     "views->watch": {
       "kind": "seam",
-      "fix": "run-views owns a watch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Move any referenced shared DTO into run-views and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "run-views owns a watch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "views->watchers": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Move any shared DTO to run-views and re-export its current path."
+      "fix": "run-views owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
     },
     "views->withdrawal": {
       "kind": "shared",
@@ -4756,7 +4758,7 @@
     },
     "watch->telemetry": {
       "kind": "seam",
-      "fix": "cmd-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Move any shared DTO to cmd-watch and re-export its current path."
+      "fix": "cmd-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths."
     },
     "watch->views": {
       "kind": "shared",
@@ -4780,7 +4782,7 @@
     },
     "watchers->unwatched": {
       "kind": "seam",
-      "fix": "cmd-watch owns a unwatched provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-unwatched. Move any referenced shared DTO into cmd-watch and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "cmd-watch owns a unwatched provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-unwatched. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "withdrawal->channel": {
       "kind": "shared",
@@ -4840,11 +4842,11 @@
     },
     "writeback->closures": {
       "kind": "seam",
-      "fix": "task-store owns a closures provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a closures provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "writeback->continuation": {
       "kind": "seam",
-      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "writeback->edits": {
       "kind": "shared",
@@ -4864,7 +4866,7 @@
     },
     "writeback->hooks": {
       "kind": "seam",
-      "fix": "task-store owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "writeback->ledger": {
       "kind": "shared",
@@ -4896,7 +4898,7 @@
     },
     "writeback->reply": {
       "kind": "seam",
-      "fix": "task-store owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "writeback->storeops": {
       "kind": "shared",
@@ -4916,7 +4918,7 @@
     },
     "writeback->watchers": {
       "kind": "seam",
-      "fix": "task-store owns a watchers provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Move any referenced shared DTO into task-store and re-export its old path, so this edge no longer imports the implementation."
+      "fix": "task-store owns a watchers provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
     },
     "writeback->yaml": {
       "kind": "shared",

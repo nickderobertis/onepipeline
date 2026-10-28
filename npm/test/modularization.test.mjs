@@ -37,6 +37,13 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
       });
     assert.equal(run("graph.json").status, 0);
     assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).files, 2);
+    const surplus = spawnSync(process.execPath, [cli, "layout.json", "graph.json", "extra"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(surplus.status, 1);
+    assert.match(surplus.stderr, /usage: node scripts\/modularization\/graph.mjs/);
+
     layout.crates.record.deps.push("command");
     put(root, "layout.json", layout);
     const failed = run();
@@ -100,7 +107,7 @@ test("replay selection matches real Nx for command, transitive shared, lock and 
       stdio: ["ignore", "pipe", "pipe"],
     });
   try {
-    symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir");
+    symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
     put(root, ".gitignore", "node_modules\n.nx\n");
     put(root, "package.json", { private: true });
     const shared = ["Cargo.lock", "rust-toolchain.toml"];

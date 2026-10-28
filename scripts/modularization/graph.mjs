@@ -67,12 +67,18 @@ export function codeOnly(text) {
 export function moduleGraph(root = ".") {
   const files = rustFiles(join(root, "src"));
   const names = new Set(
-    files.map((file) => file.slice(join(root, "src").length + 1).split(/[/.]/)[0]),
+    files.map(
+      (file) =>
+        file
+          .slice(join(root, "src").length + 1)
+          .replaceAll("\\", "/")
+          .split(/[/.]/)[0],
+    ),
   );
   const edges = new Map();
   const owners = {};
   for (const file of files) {
-    const relative = file.slice(root === "." ? 0 : root.length + 1);
+    const relative = file.slice(root === "." ? 0 : root.length + 1).replaceAll("\\", "/");
     const from = relative.slice(4).split(/[/.]/)[0];
     owners[relative] = from;
     const code = codeOnly(readFileSync(file, "utf8"));
@@ -253,6 +259,8 @@ export function validate(mapping, graph) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
+    if (process.argv.length > 4)
+      throw new Error("usage: node scripts/modularization/graph.mjs [MAPPING.json [REPORT.json]]");
     const mapping = JSON.parse(
       readFileSync(process.argv[2] ?? "scripts/modularization/layout.json", "utf8"),
     );
