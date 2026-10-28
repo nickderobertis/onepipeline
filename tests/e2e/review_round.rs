@@ -536,7 +536,7 @@ fn round_command_capturing(
     mut command: onepipeline_testfakes::profile::process::Command,
     input: Option<&str>,
     clock: &dyn crate::harness::Clock,
-    stderr_release: Option<std::sync::mpsc::Receiver<()>>,
+    mut stderr_release: Option<std::sync::mpsc::Receiver<()>>,
 ) -> crate::harness::Run {
     use std::fs::File;
     use std::process::Stdio;
@@ -561,11 +561,14 @@ fn round_command_capturing(
     let stderr = world.root.join("round-command.stderr");
     let errors = File::create(&stderr).expect("the stderr capture opens");
     command.stdout(File::create(&stdout).expect("the stdout capture opens"));
-    if stderr_release.is_some() {
-        command.stderr(Stdio::piped());
+    // A regular-file spool cannot backpressure the child or wait for inherited
+    // pipe handles to close. Only publication to the observed capture is delayed.
+    let spool = world.root.join("round-command.stderr-spool");
+    command.stderr(if stderr_release.is_some() {
+        File::create(&spool).expect("the stderr spool opens")
     } else {
-        command.stderr(errors.try_clone().expect("the stderr capture is cloned"));
-    }
+        errors.try_clone().expect("the stderr capture is cloned")
+    });
     if let Some(input) = input {
         let path = world.root.join("round-command.stdin");
         std::fs::write(&path, input).expect("the command's input is written");
@@ -573,16 +576,25 @@ fn round_command_capturing(
     }
     eprintln!("busy round: starting {args}");
     let mut child = Child(command.spawn().expect("the round's command starts"));
-    // A caller may read a subprocess pipe later than the child writes it. Stage that
-    // ordering at the descriptor boundary, without controlling the CLI's internals.
-    let captured = stderr_release.map(|release| {
-        let mut pipe = child.0.stderr.take().expect("the stderr pipe opens");
-        std::thread::spawn(move || {
-            let _ = release.recv();
-            let mut errors = errors;
-            std::io::copy(&mut pipe, &mut errors).expect("the command's stderr is captured");
-        })
-    });
+    let mut spooled = stderr_release
+        .as_ref()
+        .map(|_| File::open(&spool).expect("the stderr spool is readable"));
+    let mut errors = errors;
+    let mut publish = || {
+        if stderr_release.as_ref().is_some_and(|release| {
+            !matches!(
+                release.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }) {
+            stderr_release = None;
+        }
+        if stderr_release.is_none() {
+            if let Some(spooled) = &mut spooled {
+                std::io::copy(spooled, &mut errors).expect("the command's stderr is captured");
+            }
+        }
+    };
     let written = || {
         [&stdout, &stderr]
             .map(|capture| std::fs::metadata(capture).map_or(0, |capture| capture.len()))
@@ -590,6 +602,7 @@ fn round_command_capturing(
     let mut seen = written();
     let mut deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
     let status = loop {
+        publish();
         if let Some(status) = child.0.try_wait().expect("the command can be observed") {
             break status;
         }
@@ -610,9 +623,7 @@ fn round_command_capturing(
         );
         clock.pause(std::time::Duration::from_millis(20));
     };
-    if let Some(captured) = captured {
-        captured.join().expect("the stderr capture finishes");
-    }
+    publish();
     eprintln!("busy round: finished {args}: {status}");
     crate::harness::Run {
         code: status.code().unwrap_or(-1),
@@ -695,7 +706,8 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
     progressing_round(false);
 }
 
-/// Store progress does not promise that a caller has read the command's stderr pipe.
+/// Store progress does not promise that a caller has observed the command's stderr.
+/// A file spool stages a delayed pipe reader without pipe capacity or EOF dependencies.
 #[test]
 fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
     progressing_round(true);
@@ -744,7 +756,11 @@ fn progressing_round(delay_reader: bool) {
             );
         }
         if delay_reader {
-            release.send(()).expect("the pipe reader is released");
+            world.until("the child to write while its output is unobserved", |_| {
+                written("round-command.stderr-spool") > before
+            });
+            assert_eq!(written("round-command.stderr"), before);
+            release.send(()).expect("the output observer is released");
         }
         // Neither a store arrival nor a child's write promises its output was observed.
         // Wait for the capture before spending the next interval of diagnostic time.
