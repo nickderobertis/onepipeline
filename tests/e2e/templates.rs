@@ -2468,7 +2468,7 @@ fn nothing_in_this_repository_ships_a_template_but_the_plan_task_base() {
     // The tree, and what `cargo package` publishes from it — the crate every other
     // distribution builds its binary from, and so embeds from.
     let listed = |program: &str, args: &[&str]| {
-        let output = std::process::Command::new(program)
+        let output = onepipeline_testfakes::profile::process::Command::new(program)
             .args(args)
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .output()

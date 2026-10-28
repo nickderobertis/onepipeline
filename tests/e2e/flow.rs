@@ -21,8 +21,8 @@
 
 #![cfg(unix)]
 
+use onepipeline_testfakes::profile::process::{Child, Stdio};
 use std::path::PathBuf;
-use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -647,7 +647,7 @@ fn a_flow_that_launches_no_run_reports_and_asks_on_its_own_channel() {
                 Instant::now() < deadline,
                 "the program's question never arrived"
             );
-            std::thread::sleep(Duration::from_millis(50));
+            onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
         }
     };
     let correlation = question["correlation"]
@@ -946,7 +946,7 @@ fn flow_run_forwards_signals_mints_free_ids_and_registers_nothing_without_a_sess
             ],
         );
         flow.reached(&world, &id);
-        let signalled = std::process::Command::new("kill")
+        let signalled = onepipeline_testfakes::profile::process::Command::new("kill")
             .args([&format!("-{signal}"), &flow.child.id().to_string()])
             .status()
             .expect("kill runs");
@@ -2126,12 +2126,12 @@ fn a_flow_is_named_from_its_program_and_an_ignored_signal_stays_ignored() {
         .spawn()
         .expect("flow run starts");
     world.until("the program to start", |_| steps.join("ignoring").is_file());
-    let signalled = std::process::Command::new("kill")
+    let signalled = onepipeline_testfakes::profile::process::Command::new("kill")
         .args(["-TERM", &holder.id().to_string()])
         .status()
         .expect("kill runs");
     assert!(signalled.success());
-    std::thread::sleep(Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(500));
     assert!(
         holder.try_wait().expect("a status read").is_none(),
         "an ignored SIGTERM ended `flow run`"

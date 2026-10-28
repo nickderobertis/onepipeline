@@ -4033,7 +4033,12 @@ fn a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does() {
 /// A question `onepipeline ask --about NODE` raised, as a worker raises one, and
 /// left waiting on its answer: the process is returned so the journey can read
 /// what it was answered with.
-fn asking_about(world: &World, run: &str, node: &str, question: &str) -> std::process::Child {
+fn asking_about(
+    world: &World,
+    run: &str,
+    node: &str,
+    question: &str,
+) -> onepipeline_testfakes::profile::process::Child {
     let mut command = world.cmd(&["ask", "--about", node, "--timeout", "600", question]);
     command
         .env("ONEPIPELINE_RUN_ID", run)

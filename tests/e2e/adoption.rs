@@ -235,7 +235,9 @@ fn releases_at(answer: &Path, version: &str) {
                 "the probe's answer {} could not replace the one before it: {failure}",
                 answer.display()
             ),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => {
+                onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(20))
+            }
         }
     }
 }
@@ -3645,7 +3647,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
     // window allows exactly the asks its own length does.
     let opened = std::time::Instant::now();
     let before: Vec<Counts> = runs.iter().map(|run| counts(&world, run)).collect();
-    std::thread::sleep(PACING_WINDOW);
+    onepipeline_testfakes::profile::thread::sleep(PACING_WINDOW);
     let (did, span, ceiling, premised) = loop {
         let did: Vec<Counts> = runs
             .iter()
@@ -3663,7 +3665,7 @@ fn a_held_release_is_asked_about_on_its_own_interval_however_fast_the_loop_runs(
         if premised || span >= PACING_PATIENCE {
             break (did, span, ceiling, premised);
         }
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(1));
     };
 
     if !premised {
@@ -3951,14 +3953,15 @@ fn the_two_release_styles_take_one_scheduling_path_and_are_reported_apart() {
 /// Refused unless it succeeded, naming what it said: a verb that failed would
 /// otherwise reach a journey as a release nobody recorded.
 fn onevcs_release(world: &World, args: &[&str]) -> String {
-    let output = std::process::Command::new(crate::harness::onevcs_binary())
-        .arg("release")
-        .args(args)
-        .env("ONEVCS_HOME", world.onevcs_home())
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("the onevcs binary runs");
+    let output =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary())
+            .arg("release")
+            .args(args)
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the onevcs binary runs");
     assert!(
         output.status.success(),
         "`onevcs release {}` failed: {}{}",
@@ -4765,7 +4768,7 @@ fn bring_the_branch_here(world: &World, checkout: &Path, branch: &str) {
             !crate::harness::git(world, checkout, &["branch", "--list", branch])
                 .trim()
                 .is_empty()
-                || std::process::Command::new("git")
+                || onepipeline_testfakes::profile::process::Command::new("git")
                     .args([
                         "fetch",
                         "--force",
@@ -5011,7 +5014,9 @@ fn stops_answering(answer: &Path) {
                 "the probe's answer {} could not be replaced: {failure}",
                 answer.display()
             ),
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(_) => {
+                onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(20))
+            }
         }
     }
 }
@@ -5362,13 +5367,14 @@ fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseSt
 
 /// The same read, saying what `onevcs` printed where it printed no answer.
 fn release_status(world: &World, reference: &str) -> Result<onevcs::ReleaseStatus, String> {
-    let output = std::process::Command::new(crate::harness::onevcs_binary())
-        .args(["release", "status", reference, "--json"])
-        .env("ONEVCS_HOME", world.onevcs_home())
-        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("the onevcs binary runs");
+    let output =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary())
+            .args(["release", "status", reference, "--json"])
+            .env("ONEVCS_HOME", world.onevcs_home())
+            .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the onevcs binary runs");
     serde_json::from_slice(&output.stdout).map_err(|_| {
         format!(
             "exit {:?}, stderr: {}",
@@ -5465,7 +5471,7 @@ fn paste_into_a_shell(world: &World, line: &str) {
         .strip_prefix("onevcs ")
         .unwrap_or_else(|| panic!("not an onevcs command: {line}"));
     let binary = crate::harness::onevcs_binary();
-    let output = std::process::Command::new("sh")
+    let output = onepipeline_testfakes::profile::process::Command::new("sh")
         .arg("-c")
         .arg(format!("'{}' {rest}", binary.display()))
         .env("ONEVCS_HOME", world.onevcs_home())
@@ -6675,7 +6681,7 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     });
 
     // Unread, an unchanged wait is not queued again, however long it waits.
-    std::thread::sleep(std::time::Duration::from_secs(4));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(4));
     assert_eq!(
         settled_consumer_waits(&world, &run).len(),
         1,

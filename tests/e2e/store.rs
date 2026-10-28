@@ -174,7 +174,7 @@ fn configured_by_document(
     world: &World,
     dir: &std::path::Path,
     args: &[&str],
-) -> std::process::Command {
+) -> onepipeline_testfakes::profile::process::Command {
     let mut command = world.cmd(args);
     command
         .current_dir(dir)
@@ -3705,7 +3705,7 @@ fn unasked_across(world: &World, run: &str, asked: usize, span: Duration) {
         if watched.elapsed() >= span {
             return;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -4078,7 +4078,7 @@ fn a_rate_limit_naming_a_wait_is_waited_out_with_no_store_call_inside_it() {
             failed_at.elapsed(),
             &world.store_calls()[calls..]
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 
     world.until_store("both changes to reach the board", |world| {
@@ -4172,7 +4172,7 @@ fn a_closeout_inside_a_rate_limit_wait_asks_the_store_nothing() {
     let result = world.run_json(run, "result.json");
     assert_eq!(result["state"], "complete", "{result}");
     // The driver has ended by now, closeout included; a little longer still asks nothing.
-    std::thread::sleep(Duration::from_secs(3));
+    onepipeline_testfakes::profile::thread::sleep(Duration::from_secs(3));
     assert_eq!(
         world.store_calls().len(),
         calls,
@@ -4251,7 +4251,7 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                     failed_at.elapsed(),
                     &world.store_calls()[calls..]
                 );
-                std::thread::sleep(Duration::from_millis(50));
+                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
             }
         }
         let stopped = stop.wait_with_output().expect("the stop ends");
@@ -4290,7 +4290,7 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                     adopted.elapsed(),
                     &world.store_calls()[calls..]
                 );
-                std::thread::sleep(Duration::from_millis(50));
+                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
             }
             world.until_run_file_holds(
                 &run,
@@ -4348,7 +4348,7 @@ fn a_stop_inside_a_rate_limit_wait_releases_only_once_the_wait_has_passed() {
                     adopted.elapsed(),
                     &world.store_calls()[calls..]
                 );
-                std::thread::sleep(Duration::from_millis(50));
+                onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
             }
         }
     }
@@ -4574,7 +4574,7 @@ fn a_projection_the_real_store_refuses_is_not_asked_again_until_the_graph_change
             "the store was asked again {:?} after it refused the projection:\n{log}",
             watched.elapsed()
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
     assert!(put_back, "the item was never put back");
 
@@ -5166,7 +5166,10 @@ fn a_creation_paused_before_reading_its_author(
     author: &str,
     image: bool,
     gate: &crate::harness::Rendezvous,
-) -> (crate::harness::Arrival, std::process::Child) {
+) -> (
+    crate::harness::Arrival,
+    onepipeline_testfakes::profile::process::Child,
+) {
     use std::io::Write;
     use std::process::Stdio;
     let mut node = agent("drawn", &["work"]);
@@ -5510,7 +5513,7 @@ struct Outage {
     /// has even exited. A count taken afterwards would be waiting for a second streak that
     /// this outage is never going to produce.
     streaks_before: usize,
-    reply: std::process::Child,
+    reply: onepipeline_testfakes::profile::process::Child,
 }
 
 impl Outage {
@@ -5633,7 +5636,7 @@ fn retry_intervals(
             Instant::now() < deadline,
             "no failing projection was reported within {budget:?}"
         );
-        std::thread::sleep(Duration::from_millis(5));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(5));
     }
     at.push(Instant::now());
     // Seeded at the failure rather than before it, so whatever the attempt that failed had
@@ -5646,7 +5649,7 @@ fn retry_intervals(
              this journey reads its intervals off",
             at.len() - 1
         );
-        std::thread::sleep(Duration::from_millis(10));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(10));
         let now = attempts_asked(world);
         if now > asked {
             assert_eq!(
@@ -5940,7 +5943,7 @@ fn a_stop_during_a_long_retry_interval_is_not_made_to_wait_it_out() {
     let asked_by_the_stopped_run = attempts_asked(&world);
     let watched = Instant::now();
     while watched.elapsed() < Duration::from_secs(3) {
-        std::thread::sleep(Duration::from_millis(20));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(20));
         assert_eq!(
             attempts_asked(&world),
             asked_by_the_stopped_run,
@@ -7500,7 +7503,7 @@ fn a_project_document_being_rewritten_underneath_the_rule_is_not_a_fixture_defec
                 std::fs::write(&rewritten, "").expect("the truncate half of a replacement");
                 std::fs::write(&rewritten, &whole).expect("the write half of a replacement");
                 // Whole for at least as long as it was not; see above.
-                std::thread::sleep(replacing.elapsed());
+                onepipeline_testfakes::profile::thread::sleep(replacing.elapsed());
             }
         })
     };

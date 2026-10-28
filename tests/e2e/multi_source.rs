@@ -584,7 +584,7 @@ fn a_routed_first_add_reports_a_refused_home_read_without_retrying_it() {
         log.contains("home read denied") && log.contains("class: refused, kind: refused"),
         "{log}"
     );
-    std::thread::sleep(std::time::Duration::from_secs(8));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(8));
     assert_eq!(world.store_asked("get_project"), reads + 1);
     assert_eq!(world.store_asked("write_project"), writes);
     assert!(!landed_words(&world, &home).unwrap().contains_key("extra"));

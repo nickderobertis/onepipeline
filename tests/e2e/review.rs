@@ -4,12 +4,12 @@
 
 use crate::harness::{lifecycle, plan_of, World};
 use crate::stacked_drafts::{settled, team_world};
+use onepipeline_testfakes::profile::process::{Child, Output, Stdio};
 use onevcs::{ChangeId, CommentId, CommentKind};
 use onevcs_testing::{FileHost, HostComment, HostState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
-use std::process::{Child, Output, Stdio};
 
 // Every held subprocess belongs to this test and is reaped even on an assertion
 // failure. The captured Child identifies it; no process pattern is signalled.
@@ -915,7 +915,7 @@ fn discovery_is_explicit_and_a_live_driver_answers_the_durable_request() {
     });
     let host = host(&world, "live", &["a"]);
     add(&host, 1, comment("401", CommentKind::Conversation, 1));
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(250));
     assert!(world.events_of("live", "review-comments-read").is_empty());
     assert!(surfaces(&world, "live").is_empty());
     review(&world, "live");

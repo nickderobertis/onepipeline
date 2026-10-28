@@ -886,7 +886,7 @@ fn an_appender_waits_for_the_writer_ahead_of_it_rather_than_healing_under_it() {
     // None of them may touch the store while somebody else holds it. An appender
     // that healed here would truncate the fragment away under a writer that is
     // in the middle of appending, which is how a whole record is destroyed.
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(500));
     for appender in &mut racing {
         assert!(
             appender

@@ -727,7 +727,7 @@ fn a_plan_persona_reaches_the_member_that_actually_runs() {
     // file at all, is the sibling's to change.
     let state = world.graph_state();
     let sibling = |args: &[&str]| -> std::process::Output {
-        std::process::Command::new(crate::harness::oneagentgraph_binary())
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::oneagentgraph_binary())
             .args(args)
             .env("ONEAGENTGRAPH_STATE_DIR", &state)
             .output()
@@ -1210,7 +1210,7 @@ fn a_dispatch_settles_on_its_terminal_event_while_the_graphs_final_reaper_runs()
         .trim()
         .parse()
         .expect("the process recorded a pid");
-    let still_running = std::process::Command::new("kill")
+    let still_running = onepipeline_testfakes::profile::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
         .status()
         .expect("the host answers about the fixture process")
@@ -2221,14 +2221,16 @@ fn the_run_state_this_crate_places_is_where_the_sibling_looks_for_it() {
         .exited(0)
         .settled();
 
-    let history = std::process::Command::new(crate::harness::oneagentgraph_binary())
-        .arg("history")
-        // The one variable under test. Everything else is left alone, so a
-        // listing that comes back empty is this directory being empty rather
-        // than the sibling being pointed elsewhere.
-        .env("ONEAGENTGRAPH_STATE_DIR", &state)
-        .output()
-        .expect("the real oneagentgraph runs");
+    let history = onepipeline_testfakes::profile::process::Command::new(
+        crate::harness::oneagentgraph_binary(),
+    )
+    .arg("history")
+    // The one variable under test. Everything else is left alone, so a
+    // listing that comes back empty is this directory being empty rather
+    // than the sibling being pointed elsewhere.
+    .env("ONEAGENTGRAPH_STATE_DIR", &state)
+    .output()
+    .expect("the real oneagentgraph runs");
     // A refusal also prints nothing to stdout, so reading only stdout would report
     // a sibling that *answered* "no runs here" when it never answered at all — the
     // drift this gate names would be the one thing the failure did not say. Asked
@@ -2309,11 +2311,13 @@ fn placed(state: &std::path::Path) -> String {
 fn the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto() {
     let world = World::new("exit-code-drift");
     let missing = world.root.join("no-such-graph.yaml");
-    let refused = std::process::Command::new(crate::harness::oneagentgraph_binary())
-        .args(["run", &missing.to_string_lossy(), "--task", "anything"])
-        .env("ONEAGENTGRAPH_STATE_DIR", world.root.join("graph-state"))
-        .output()
-        .expect("the real oneagentgraph runs");
+    let refused = onepipeline_testfakes::profile::process::Command::new(
+        crate::harness::oneagentgraph_binary(),
+    )
+    .args(["run", &missing.to_string_lossy(), "--task", "anything"])
+    .env("ONEAGENTGRAPH_STATE_DIR", world.root.join("graph-state"))
+    .output()
+    .expect("the real oneagentgraph runs");
     assert_eq!(
         refused.status.code(),
         Some(oneagentgraph::error::EXIT_INVALID_CONFIG),
@@ -2351,7 +2355,7 @@ fn the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take() {
             "json",
         ];
         args.extend_from_slice(extra);
-        std::process::Command::new(crate::harness::double("fake-claude"))
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("fake-claude"))
             .args(&args)
             .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
             .output()
@@ -4250,7 +4254,7 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
         )
         .expect("the dispatch ending is recorded");
         // Keep the embedding host alive while the graph's final reap runs.
-        std::thread::sleep(std::time::Duration::from_secs(30));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(30));
         return;
     }
 
@@ -4370,7 +4374,7 @@ fn a_judged_codex_dispatch_retires_its_shared_server_and_sweeper() {
         assert!(frames.contains(expected), "{tag}: no {expected}: {frames}");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(17);
         while pids.iter().any(|pid| !process_ended(*pid)) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
         }
         let survivors: Vec<_> = pids
             .into_iter()
@@ -4435,11 +4439,12 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
     };
 
     let world = World::new("codex-wire");
-    let answered = std::process::Command::new(crate::harness::double("fake-codex"))
-        .args(["exec", "--json", "Do build."])
-        .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
-        .output()
-        .expect("the double runs");
+    let answered =
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("fake-codex"))
+            .args(["exec", "--json", "Do build."])
+            .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
+            .output()
+            .expect("the double runs");
     let said = String::from_utf8_lossy(&answered.stdout).to_string();
     assert!(
         answered.status.success(),
@@ -4484,7 +4489,7 @@ fn the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads() {
 fn the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not() {
     let world = World::new("codex-argv");
     let sent = |argv: &[&str]| {
-        std::process::Command::new(crate::harness::double("fake-codex"))
+        onepipeline_testfakes::profile::process::Command::new(crate::harness::double("fake-codex"))
             .args(argv)
             .env(onepipeline_testfakes::SCRIPT_DIR_ENV, &world.fakes)
             .stdin(std::process::Stdio::null())
@@ -6101,7 +6106,7 @@ fn an_observer_records_its_ending_before_anything_reads_that_it_has_gone() {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < until && said.is_none() {
         said = gone(&world);
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
     }
 
     // Let the ending through, whatever the window read: opening the FIFO for
@@ -6267,7 +6272,7 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < until && !settled_early {
         settled_early = settled_inside(&world);
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(20));
     }
 
     // Let the ending through, whatever the window read: opening the FIFO for
@@ -6331,11 +6336,13 @@ fn a_dispatch_records_its_ending_before_its_launch_can_exit() {
     // And put back where the sibling reads it, the run is listed there — which
     // is what an exit inside the write took away.
     std::fs::write(&record, &written).expect("the record is put back where the sibling reads it");
-    let history = std::process::Command::new(crate::harness::oneagentgraph_binary())
-        .arg("history")
-        .env("ONEAGENTGRAPH_STATE_DIR", world.graph_state())
-        .output()
-        .expect("the real oneagentgraph runs");
+    let history = onepipeline_testfakes::profile::process::Command::new(
+        crate::harness::oneagentgraph_binary(),
+    )
+    .arg("history")
+    .env("ONEAGENTGRAPH_STATE_DIR", world.graph_state())
+    .output()
+    .expect("the real oneagentgraph runs");
     let listed = String::from_utf8_lossy(&history.stdout);
     assert!(
         history.status.success() && listed.lines().any(|line| line.contains(&graph_run)),
@@ -6885,7 +6892,7 @@ fn end_judges_surviving_the_stop(judges: &std::path::Path) -> Vec<u32> {
         .any(|pid| !process_ended(pid))
         && std::time::Instant::now() < deadline
     {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
     }
     let surviving: Vec<u32> = judges_started(judges)
         .into_iter()
