@@ -103,7 +103,11 @@
         "tests/e2e/malformed_envelopes.rs",
         "tests/e2e/run_end_hooks.rs",
         "tests/e2e/run_end_hook.sh",
-        "tests/e2e/run_end_hook.bat"
+        "tests/e2e/run_end_hook.bat",
+        "tests/e2e/closures.rs",
+        "tests/e2e/public_id.rs",
+        "tests/recorded/run-root/run-labels",
+        "tests/recorded/run-root/run-labels/**"
       ],
       "crates": [
         "onepipeline"
@@ -128,7 +132,9 @@
         "destination",
         "review",
         "review_reply",
-        "review_round"
+        "review_round",
+        "closures",
+        "public_id"
       ]
     },
     "e2e-store": {
@@ -172,7 +178,11 @@
         "tests/e2e/draft_lifecycle.rs",
         "tests/e2e/run_end_hooks.rs",
         "tests/e2e/run_end_hook.sh",
-        "tests/e2e/run_end_hook.bat"
+        "tests/e2e/run_end_hook.bat",
+        "tests/e2e/linear_launch.rs",
+        "tests/e2e/withdrawn.rs",
+        "tests/recorded/run-root",
+        "tests/recorded/run-root/source-hold-before-cause/**"
       ],
       "crates": [
         "onepipeline"
@@ -196,7 +206,9 @@
         "criteria",
         "criteria_rule",
         "filter",
-        "linear_loopback"
+        "linear_loopback",
+        "linear_launch",
+        "withdrawn"
       ]
     },
     "e2e-views": {
@@ -230,7 +242,8 @@
         "tests/e2e/run_end_hooks.rs",
         "docs/contract.md",
         "tests/e2e/run_end_hook.sh",
-        "tests/e2e/run_end_hook.bat"
+        "tests/e2e/run_end_hook.bat",
+        "tests/e2e/transcript_refs.rs"
       ],
       "crates": [
         "onepipeline"
@@ -245,7 +258,8 @@
         "checkpoint",
         "change_telemetry",
         "compatibility",
-        "layout_document"
+        "layout_document",
+        "transcript_refs"
       ]
     },
     "e2e-dispatch": {
@@ -281,7 +295,9 @@
         "tests/e2e/review_reply.rs",
         "tests/e2e/review.rs",
         "tests/golden/review-results-v2.json",
-        "tests/e2e/draft_lifecycle.rs"
+        "tests/e2e/draft_lifecycle.rs",
+        "tests/recorded/run-root/run-labels",
+        "tests/recorded/run-root/run-labels/**"
       ],
       "crates": [
         "onepipeline"
@@ -364,7 +380,8 @@
         "graphs/node-scope.yaml",
         "tests/e2e/malformed_envelopes.rs",
         "tests/e2e/recorded_support.rs",
-        "tests/recorded/**"
+        "tests/recorded/**",
+        "tests/e2e/journal_scaling.rs"
       ],
       "crates": [
         "onepipeline"
@@ -380,7 +397,8 @@
         "out_of_band",
         "unreadable_sessions",
         "older_launch_record",
-        "flow"
+        "flow",
+        "journal_scaling"
       ]
     },
     "e2e-watch": {
@@ -406,7 +424,9 @@
         "docs/contract-divergences.md",
         "tests/e2e/budget_result.rs",
         "tests/e2e/dispatch.rs",
-        "graphs/node-scope.yaml"
+        "graphs/node-scope.yaml",
+        "tests/recorded/run-root/run-labels",
+        "tests/recorded/run-root/run-labels/**"
       ],
       "crates": [
         "onepipeline"

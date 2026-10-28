@@ -42,6 +42,12 @@ Commits after dd2e5d6:
 - **4023bfb** merges main at c71ceec, with no conflict. It brings #1026 (live notes held per receiver: `src/channel/deliveries.rs`, `tests/note`, and 72 lines of `tests/e2e/harness.rs`), #1030 (the plan store that tolerates a source no layer defines: `src/unanswered.rs`, five new `store` journeys, and the `onetaskgraph` tool at 0.7.3), #1033 (the Windows npm publish path) and the v0.77.0 release. The new journeys spawn and sleep through `profile::process` and `profile::thread`, like the rest of the suite.
 - **28a4ce2** links oneharness-core 0.28.4 (from 0.28.3), which `just engines-current` asked for after the merge. Only that entry's version and checksum move. `cargo update -p` would also have re-pointed `errno` and `winapi-util` from `windows-sys` 0.61.2 to 0.52.0, so the entry was edited alone, and `cargo metadata --locked` accepts the lock.
 
+Commits after 28a4ce2, none of them in run E's tree:
+- **5dc0c06**, **f670a11** and the other commits after 28a4ce2 that touch only this document change nothing the e2e tier compiles or runs.
+- **4d41113** merges main at 53c0649 (#1031). It resolves `tests/e2e/review_round.rs` to main's `reporter` building the profiled `Command`, and routes the spawn and sleep of main's new `draft_lifecycle` journey through the profiled wrappers. It changes no assertion and nothing in `crates/testfakes/src/profile.rs` or the analysis scripts.
+- **a834bb3** merges main at c962121 (v0.95.3). `Cargo.lock`, `package.json` and `package-lock.json` take main's, so they match main exactly: oneagentgraph 0.9.0, onevcs 0.57.0, onevcs-testing 0.19.22, oneharness-core 0.29.1 and onemessagebus 0.9.4 (bus CLI 0.9.4), and `just engines-current` passes on it. The conflicted test hunks take main's logic, including its removal of two lease-lapse takeover journeys in `tests/e2e/continuation.rs` that main's #1116 superseded, with this branch's profiled `Command`, `fs` and `sleep` wrappers. Main's newly merged test code sleeps through `profile::thread::sleep`. Where that code meets the harness's profiled types (`review_round`, `publication_boundary`, `store`, `tests/note`), it builds the profiled `Command` and `Child` too. `World::at` (main's new root-taking constructor) and `World::probe_at` carry the fixture span that `World::new` and `probe_in` carried. It changes no assertion, and nothing in `crates/testfakes/src/profile.rs` or the analysis scripts. It brings main's #1116, #1152, #1200, #1214 and #1230, among others, which change driver timing and add e2e journeys, so no figure here holds for that tree.
+- **The commit after a834bb3** places main's six new e2e modules in `scripts/crate-split/proposed.json`. Until then the mapping test (`npm/test/crate-split-replay.test.mjs`) refused the proposal with `closures is in no suite's modules`. `closures` and `public_id` join `e2e-landing`, `linear_launch` and `withdrawn` join `e2e-store`, `transcript_refs` joins `e2e-views`, and `journal_scaling` joins `e2e-runs`. Each suite lists their files. `e2e-store` also lists the recorded run `store` now reads (`tests/recorded/run-root/source-hold-before-cause/**`). `e2e-landing`, `e2e-dispatch` and `e2e-watch`, which compile `dispatch`, also list the recorded runs `dispatch` now reads (`tests/recorded/run-root/run-labels/**`). It only adds paths and modules. None of the 144 window pull requests touches a path it adds, and none of the added modules has a record in any set here. So every replay figure below holds for the mapping as it now stands, as it did for fc3c597's.
+
 The hosted dd2e5d6 records therefore predate the lock refresh and the fence fix. The local runs show neither moved the harness. The c551671 counts match the a94701b run: spawn 13,686 vs 13,575, git 9,048 vs 9,048, build 3,261 vs 3,259, fixture 7,766 vs 7,765. The 7574f2f counts are spawn 13,822, git 9,055, build 3,263 and fixture 7,773. The difference from c551671 is mostly the one added test and run-to-run variation in retries and polls.
 
 Every local figure below uses **run E** (`3bc62a25`) on **28a4ce2**, the tree after every commit above. The run ran 1,716 tests in 8,670.0 s, at a load average of 42 to 72 at the samples taken on this shared host:
@@ -60,7 +66,7 @@ The counts are spawn 13,717, git 9,397, build 3,371, fixture 8,165 and wait 149,
 
 ### The local profile is a snapshot at 28a4ce2
 
-Every local Linux figure in this document comes from run E (`3bc62a25`) on **28a4ce2**. It is a snapshot of that commit. 28a4ce2 comes after every code, test, mapping and dependency change on this branch, including the last merge of main. The commits after it change only `docs/test-profile-report.md`. They change nothing the e2e tier compiles or runs, and nothing the analysis scripts read. This document makes no claim that those timings hold on another host or at another load.
+Every local Linux figure in this document comes from run E (`3bc62a25`) on **28a4ce2**. It is a snapshot of that commit. 28a4ce2 comes after every change this branch makes to the harness's recording, the analysis scripts, the mapping and the tests it profiles. The commits after it either change only `docs/test-profile-report.md` or merge main and resolve its conflicts (4d41113 and a834bb3, listed above). The merges bring main's own product, test and dependency changes and move main's new test code onto the profiled wrappers, so the e2e tier at the final head is not the tree run E timed. This document makes no claim that those timings hold for the final head, on another host, or at another load.
 
 ## Linux breakdown on 28a4ce2 (local)
 
@@ -920,12 +926,12 @@ Both affect every suite under the proposed mapping. With them back in, the regen
 
 | suite | own modules |
 | --- | --- |
-| e2e-landing | lifecycle, draft_lifecycle, landing, manager_landings, readjust, rework, stacked_drafts, publish_preserve, publication_boundary, real_vcs, amend, retirement, adoption, session, session_reuse, branch_template, destination, review |
-| e2e-store | store, writeback_budget, writeback_cost, writeback_projections, delivers, multi_source, linear_writeback, holds, continuation, crossdag, plan, plan_check, live_edit, templates, shipped, criteria, criteria_rule, filter, linear_loopback |
-| e2e-views | views, listing, host_view, summary, surface, journal, checkpoint, change_telemetry, compatibility, layout_document |
+| e2e-landing | lifecycle, draft_lifecycle, landing, manager_landings, readjust, rework, stacked_drafts, publish_preserve, publication_boundary, real_vcs, amend, retirement, adoption, session, session_reuse, branch_template, destination, review, review_reply, review_round, closures, public_id |
+| e2e-store | store, writeback_budget, writeback_cost, writeback_projections, delivers, multi_source, linear_writeback, holds, continuation, crossdag, plan, plan_check, live_edit, templates, shipped, criteria, criteria_rule, filter, linear_loopback, linear_launch, withdrawn |
+| e2e-views | views, listing, host_view, summary, surface, journal, checkpoint, change_telemetry, compatibility, layout_document, transcript_refs |
 | e2e-dispatch | dispatch, agents, dispatch_env_hook, envelope_reviewer, node_validator, turns, malformed_envelopes, bus_config |
 | e2e-channel | channel, ask, boundary, recorded_channel |
-| e2e-runs | driver, driver_exit, shutdown, cancellation, run_ending, run_end_hooks, concurrency, out_of_band, unreadable_sessions, older_launch_record, flow |
+| e2e-runs | driver, driver_exit, shutdown, cancellation, run_ending, run_end_hooks, concurrency, out_of_band, unreadable_sessions, older_launch_record, flow, journal_scaling |
 | e2e-watch | watch, unwatched, stop_guard, wake_budget, loopcost, unpublished |
 | e2e-maintenance | maintenance, scratch |
 | e2e-harness | harness, profiling |
@@ -1312,6 +1318,14 @@ The `cross (windows-latest)` carrier failed because shard 1 did. That flake is d
 Five other journeys in `tests/e2e/maintenance.rs` assert an empty journal after a `release` under the same pace. None of them is named here, so they are left as a follow-up.
 
 ## Checks
+
+**On a834bb3** (the merge of main at c962121) **and the mapping commit after it:**
+- `cargo test --locked --no-run --test e2e --test note --test smoke --test journal_workload`, `cargo fmt --all -- --check` and `cargo clippy --locked --test e2e --test note --test smoke --test journal_workload -- -D warnings`: clean on a834bb3.
+- `cargo nextest run --locked --test e2e -E 'test(/adoption::a_change_request_settled_with_no_release_baseline|adoption::a_squash_merge_commit|continuation::a_takeover_waits_until_a_fence|continuation::a_takeover_over_a_claim_stating_no_lease|^writeback_cost::|^profiling::/)'`: **27 of 27 passed** on a834bb3's tree. That covers every resolved e2e hunk and the harness's own profiling journeys.
+- `cargo nextest run --locked --test note --test journal_workload --no-fail-fast`: 144 of 145 passed. The one failure is `journal_workload`, which panics with *JOURNAL_WORKLOAD_BINARY names the release-built driver; run `just workload`* unless it is run through its recipe. Run through `just _journal-workload-run`, which is the only caller of `World::at`, it measured its 1, 20, 80 and 160 MB sizes and was stopped at a 58-minute cap before its last size. It reported no failure before the stop.
+- `just engines-current`: passed. oneagentgraph 0.9.0, onevcs 0.57.0, onevcs-testing 0.19.22, onejudge 0.22.0, oneharness-core 0.29.1, the onetaskgraph crates at 0.12.7, onemessagebus 0.9.4 and onebudgetspec-core 0.1.5 are each the newest their own requirement permits. `Cargo.lock` is main's at c962121.
+- `node --test npm/test/crate-split-replay.test.mjs npm/test/test-profile-report.test.mjs`: 42 of 42 passed with the updated mapping. On a834bb3 alone, before the mapping commit, it failed 1 (`closures is in no suite's modules`).
+- Not run on a834bb3: the full e2e tier, the smoke tier (it needs credentials) and the hosted CI.
 
 **On 28a4ce2** (the merge of main at c71ceec, the bus and oneharness-core refreshes, and the bus CLI pin):
 - **The full e2e tier**, instrumented as `gate` runs it (`cargo llvm-cov --no-report nextest --locked -E 'binary(e2e)' --final-status-level fail --no-fail-fast`), ran as run E (`3bc62a25`) at load 42-72. **1,711 of 1,716 passed in 8,670.0 s.** The five that did not are described under **Evidence revisions**. `host_view`'s cold read is the known host-only failure. The budget measurement, `loopcost` and the teardown test fail the same way on main at c71ceec, run at the same moment at the same load. `loopcost`, the teardown test and `channel` passed in run D on this commit, and `channel` passed again in a targeted re-run.
