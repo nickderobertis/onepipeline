@@ -6485,7 +6485,7 @@ fn build(selection: &[&str]) -> PathBuf {
 /// A failed or interrupted builder leaves no success marker; dropping its OS
 /// lock lets the next process retry. Only small markers are shared, never a
 /// mutable executable or a process's aliases.
-fn build_once(cache: &Path, build: impl FnOnce()) {
+pub(crate) fn build_once(cache: &Path, build: impl FnOnce()) {
     let ready = cache.join("ready");
     if ready.is_file() {
         return;
@@ -6507,62 +6507,89 @@ fn build_once(cache: &Path, build: impl FnOnce()) {
     }
 }
 
-/// Exercise the lock through independent processes, including a failed builder:
-/// waiters must retry that build, then share exactly one successful result.
+/// Ask for real doubles from independent test processes. A recording forwarder
+/// observes Cargo starts; a missing compiler exercises Cargo's actual refusal.
 #[test]
 fn concurrent_builders_share_success_and_retry_failure() {
     const CHILD: &str = "ONEPIPELINE_BUILD_CACHE_CHILD";
-    if let Some(cache) = std::env::var_os(CHILD) {
-        let cache = PathBuf::from(cache);
-        build_once(&cache, || {
-            if std::env::var_os("ONEPIPELINE_BUILD_CACHE_FAIL").is_some() {
-                panic!("the first builder failed");
-            }
-            let mut log = profile::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(cache.join("built"))
-                .expect("the build's output");
-            std::io::Write::write_all(&mut log, b"built\n").expect("the build completes");
-        });
+    if let Some(scripts) = std::env::var_os(CHILD) {
+        let _world = World::new("build-cache-child");
+        let output = Command::new(double("reviewer-bar"))
+            .env(SCRIPT_DIR_ENV, scripts)
+            .output()
+            .expect("the built double runs");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"fixture built\n");
         return;
     }
     let world = World::new("build-cache");
-    let cache = world.root.join("cache");
-    let child = |cache: &Path| {
+    world.script("reviewer-bar.fingerprint", "fixture built");
+    let recorder = double("cargo-record");
+    let log = world.root.join("cargo-starts");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let run = |nth: u32| {
+        let hex = format!("{:032x}", stamp + u128::from(nth));
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    };
+    let child = |run: &str| {
         let mut command = Command::new(std::env::current_exe().expect("the test executable"));
         command
             .args([
                 "--exact",
                 "harness::concurrent_builders_share_success_and_retry_failure",
             ])
-            .env(CHILD, cache)
-            .env_remove("ONEPIPELINE_BUILD_CACHE_FAIL");
+            .env(CHILD, &world.fakes)
+            .env("NEXTEST_RUN_ID", run)
+            .env("CARGO", &recorder)
+            .env(
+                "ONEPIPELINE_REAL_CARGO",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .env("ONEPIPELINE_CARGO_STARTS", &log);
         command
     };
-    let failed = child(&cache)
-        .env("ONEPIPELINE_BUILD_CACHE_FAIL", "1")
+    let failed = child(&run(0))
+        .env("RUSTC", world.root.join("missing-rustc"))
         .output()
         .expect("a builder starts");
-    assert!(!failed.status.success(), "the failing build must fail");
-    assert!(String::from_utf8_lossy(&failed.stdout).contains("the first builder failed"));
-    assert!(!cache.join("ready").exists(), "failure cannot be cached");
+    assert!(
+        !failed.status.success(),
+        "the missing compiler must refuse the build"
+    );
+    let refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(refusal.contains("missing-rustc"), "{refusal}");
+    let starts = || profile::fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(starts(), 1, "Cargo was asked and refused");
     let children: Vec<_> = (0..4)
-        .map(|_| child(&cache).spawn().expect("a waiting builder starts"))
+        .map(|_| child(&run(0)).spawn().expect("a waiting builder starts"))
         .collect();
     for mut child in children {
         assert!(child.wait().expect("a builder exits").success());
     }
     assert_eq!(
-        profile::fs::read_to_string(cache.join("built")).unwrap(),
-        "built\n"
+        starts(),
+        2,
+        "one successful build after the refusal, reused by every waiter"
     );
-    // A new run must perform its own freshness check.
-    let next_run = world.root.join("next-run");
-    assert!(child(&next_run).status().unwrap().success());
+    assert!(child(&run(1)).status().unwrap().success());
     assert_eq!(
-        profile::fs::read_to_string(next_run.join("built")).unwrap(),
-        "built\n"
+        starts(),
+        3,
+        "a new run must ask Cargo about freshness again"
     );
 }
 

@@ -221,3 +221,10 @@ path = "src/bin/review-read.rs"
 [lib]
 name = "onepipeline_testfakes"
 path = "src/lib.rs"
+
+# llmlint: ignore[new_command_or_client_gets_its_own_project] a test-only Cargo
+# recorder, owned and exercised by the e2e fixture project like the bins above;
+# it forwards to the real compiler and is never a published command.
+[[bin]]
+name = "cargo-record"
+path = "src/bin/cargo-record.rs"

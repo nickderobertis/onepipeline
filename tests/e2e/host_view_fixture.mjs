@@ -26,6 +26,7 @@
 //
 // As a command:
 //   host_view_fixture.mjs generate RUNS PROCESSES.json   writes the 100-run root, prints its manifest
+//   host_view_fixture.mjs clone RUNS PROCESSES.json CACHE  copies a raw fixture and rebinds its live processes
 //   host_view_fixture.mjs grow RUNS MANIFEST.json TOTAL    grows it with ended history, prints the manifest
 //   host_view_fixture.mjs cold RUNS MANIFEST.json          forgets every ended run's derived documents
 //   host_view_fixture.mjs stamp-sparse RUNS MANIFEST.json BINARY   the sparse run's summary, as its writer keeps it
@@ -35,11 +36,16 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  closeSync,
+  constants,
+  copyFileSync,
   chmodSync,
   linkSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
   truncateSync,
@@ -392,6 +398,67 @@ export function generate(runs, processes, now = Date.now()) {
   return manifest;
 }
 
+/** Copy a raw CLI-generated fixture, rebinding its live processes to this caller.
+ * Journals are independent copies: cold reads chmod and truncate them, so links
+ * would let one journey change the template another journey reads.
+ */
+export function cloneFixture(runs, live, cache) {
+  root(runs);
+  root(cache);
+  processes(live);
+  const manifest = manifestOf(readJson(join(cache, "manifest.json")));
+  const template = join(cache, "runs");
+  const copy = (from, to) => {
+    mkdirSync(to, { recursive: true });
+    for (const item of readdirSync(from, { withFileTypes: true })) {
+      const source = join(from, item.name);
+      const destination = join(to, item.name);
+      if (item.isDirectory()) copy(source, destination);
+      else if (source === join(template, manifest.sparse_run, "events.jsonl")) {
+        // Copy only the sparse file's real prefix, never materialize its holes.
+        const file = openSync(source, "r");
+        try {
+          const bytes = Buffer.alloc(manifest.sparse_record_bytes);
+          let read = 0;
+          while (read < bytes.length) {
+            const got = readSync(file, bytes, read, bytes.length - read, read);
+            if (got === 0) throw new Error("the sparse fixture's recorded prefix is truncated");
+            read += got;
+          }
+          writeFileSync(destination, bytes);
+          truncateSync(destination, statSync(source).size);
+        } finally {
+          closeSync(file);
+        }
+      } else copyFileSync(source, destination, constants.COPYFILE_FICLONE);
+    }
+  };
+  if (manifest.live_runs.length !== live.entries.length) throw new Error("the template's live runs differ from the process shape");
+  copy(template, runs);
+  manifest.live_runs.forEach((run, i) => {
+    const directory = join(runs, run);
+    if (live.drivers[i]) {
+      const launch = readJson(join(directory, "launch.json"));
+      writeJson(join(directory, "launch.json"), { ...launch, pid: live.drivers[i].pid, started: live.drivers[i].token });
+    }
+    const registry = join(directory, "dispatches");
+    const entries = readdirSync(registry).map((file) => ({
+      index: Number(file.match(/-(\d+)\.json$/)?.[1]),
+      value: readJson(join(registry, file)),
+    })).sort((a, b) => a.index - b.index);
+    if (entries.length !== live.entries[i].length || entries.some((entry, n) => entry.index !== n)) {
+      throw new Error(`the template's registry for ${run} differs from the process shape`);
+    }
+    rmSync(registry, { recursive: true });
+    mkdirSync(registry);
+    entries.forEach(({ value }, n) => {
+      const process = live.entries[i][n];
+      writeJson(join(registry, `${process.pid}-${n}.json`), { ...value, pid: process.pid, started: process.token });
+    });
+  });
+  return manifest;
+}
+
 /**
  * Grow the root with ended, settled runs — and launch-less roots, at 9% — to
  * `total` run roots. Each added run is one of the 100-run fixture's own settled
@@ -630,6 +697,8 @@ function command(argv) {
   switch (verb) {
     case "generate":
       return out(generate(root(args[0]), processes(readJson(args[1]))));
+    case "clone":
+      return out(cloneFixture(root(args[0]), processes(readJson(args[1])), root(args[2])));
     case "grow": {
       const total = Number(args[2]);
       if (!Number.isSafeInteger(total) || total < 100) refuse(`grow wants a total of at least 100 run roots, not ${args[2]}`);
@@ -649,7 +718,7 @@ function command(argv) {
       return append(root(args[0]), spec);
     }
     default:
-      throw new Error(`unknown verb ${verb}: generate, grow, cold, stamp-sparse, run or append`);
+      throw new Error(`unknown verb ${verb}: generate, clone, grow, cold, stamp-sparse, run or append`);
   }
 }
 

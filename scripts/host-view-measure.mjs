@@ -35,6 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cloneFixture,
   cold,
   generate,
   grow,
@@ -306,7 +307,9 @@ try {
     entries: [[sleeper(), sleeper()], [sleeper(), sleeper()], [sleeper()]],
   };
   const generating = process.hrtime.bigint();
-  const manifest = generate(runs, processes);
+  const template = process.env.ONEPIPELINE_TEST_HOST_FIXTURE;
+  const manifest =
+    template === undefined ? generate(runs, processes) : cloneFixture(runs, processes, template);
   const generatedMs = Number(process.hrtime.bigint() - generating) / 1e6;
 
   cold(runs, manifest);

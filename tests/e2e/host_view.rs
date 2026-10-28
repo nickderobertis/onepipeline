@@ -213,6 +213,181 @@ fn the_generator_reaps_once_and_does_not_cache_a_failed_spawn() {
     );
 }
 
+/// Copies retain the CLI's records, but their live entries belong to the new
+/// caller and their journals can be changed without touching the shared source.
+#[test]
+fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
+    let world = World::new("host-fixture-copies");
+    let mut fixture = Fixture::empty(&world);
+    let (old_pid, old_token) = fixture.sleeper();
+    let (new_pid, new_token) = fixture.sleeper();
+    let started = now_millis();
+    for (run, nodes) in [
+        ("live-0", vec!["plan", "build"]),
+        ("live-1", vec!["plan", "review"]),
+        ("live-2", vec!["plan"]),
+    ] {
+        let mut spec = json!({
+            "run": run, "started_ms": started, "nodes": &nodes[1..],
+            "registry": nodes.iter().map(|node| json!({"node": node, "pid": old_pid, "token": old_token, "recorded_ms": started})).collect::<Vec<_>>()
+        });
+        if run != "live-2" {
+            spec["driver"] = json!({"pid": old_pid, "token": old_token});
+        }
+        fixture.run(&world, &spec);
+    }
+    fixture.run(
+        &world,
+        &json!({"run": "sparse", "started_ms": started, "settled": true, "registry": []}),
+    );
+    let sparse = fixture.runs.join("sparse/events.jsonl");
+    let prefix = std::fs::metadata(&sparse).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sparse)
+        .unwrap()
+        .set_len(8 * 1024 * 1024)
+        .unwrap();
+    let cache = world.root.join("template");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::rename(&fixture.runs, cache.join("runs")).unwrap();
+    write(
+        &cache.join("manifest.json"),
+        &json!({
+            "expected": {"held": [], "unproven": [], "stale": [], "stopped": [], "skipped": []},
+            "live_runs": ["live-0", "live-1", "live-2"], "ended": ["sparse"], "settled": ["sparse"],
+            "sparse_run": "sparse", "sparse_record_bytes": prefix
+        }),
+    );
+    let process = json!({"pid": new_pid, "token": new_token});
+    let processes = world.root.join("processes.json");
+    write(
+        &processes,
+        &json!({"drivers": [process, process], "entries": [[process, process], [process, process], [process]]}),
+    );
+    let copied = world.root.join("copy");
+    generator(
+        &world,
+        &["clone", path(&copied), path(&processes), path(&cache)],
+    );
+    for run in ["live-0", "live-1", "live-2"] {
+        let source = cache.join("runs").join(run);
+        let target = copied.join(run);
+        if run != "live-2" {
+            assert_eq!(read_json(&source.join("launch.json"))["pid"], old_pid);
+            assert_eq!(read_json(&target.join("launch.json"))["pid"], new_pid);
+        } else {
+            assert_eq!(
+                read_json(&source.join("launch.json")),
+                read_json(&target.join("launch.json"))
+            );
+        }
+        let entries: Vec<_> = std::fs::read_dir(target.join("dispatches"))
+            .unwrap()
+            .collect();
+        assert_eq!(entries.len(), if run == "live-2" { 1 } else { 2 });
+        for entry in entries {
+            let entry = read_json(&entry.unwrap().path());
+            assert_eq!(entry["pid"], new_pid);
+            assert_eq!(entry["started"], new_token);
+        }
+        assert_eq!(
+            std::fs::read(source.join("events.jsonl")).unwrap(),
+            std::fs::read(target.join("events.jsonl")).unwrap()
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(copied.join("sparse/events.jsonl"))
+            .unwrap()
+            .len(),
+        8 * 1024 * 1024
+    );
+    let source = cache.join("runs/live-0/events.jsonl");
+    let bytes = std::fs::read(&source).unwrap();
+    std::fs::write(copied.join("live-0/events.jsonl"), "the copy changes").unwrap();
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        bytes,
+        "a clone cannot mutate its template"
+    );
+
+    std::fs::write(cache.join("runs/sparse/events.jsonl"), "").unwrap();
+    let refused = Command::new("node")
+        .arg(crate::harness::repo_file(GENERATOR))
+        .arg("clone")
+        .arg(world.root.join("refused"))
+        .arg(processes)
+        .arg(cache)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("the sparse fixture's recorded prefix is truncated"));
+}
+
+fn fixture_cache(world: &World) -> PathBuf {
+    match std::env::var("NEXTEST_RUN_ID") {
+        Ok(run) => {
+            assert!(
+                !run.is_empty()
+                    && run
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            );
+            crate::harness::binary()
+                .parent()
+                .unwrap()
+                .join("host-fixtures")
+                .join(run)
+        }
+        Err(_) => world.root.join("host-fixture-template"),
+    }
+}
+
+/// Compare the raw CLI fixture with its first copy, including sparse prefixes
+/// and file lengths. No host read has yet written summaries or checkpoints.
+fn same_fixture(template: &Path, copied: &Path, sparse: &Path, sparse_prefix: u64) {
+    use std::io::Read;
+    let names = |root| {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let entries = names(template);
+    assert_eq!(entries, names(copied), "{}", template.display());
+    for name in entries {
+        let source = template.join(&name);
+        let destination = copied.join(&name);
+        if source.is_dir() {
+            same_fixture(&source, &destination, sparse, sparse_prefix);
+        } else {
+            let length = std::fs::metadata(&source).unwrap().len();
+            assert_eq!(
+                length,
+                std::fs::metadata(&destination).unwrap().len(),
+                "{}",
+                source.display()
+            );
+            let prefix = if destination == sparse {
+                sparse_prefix
+            } else {
+                length
+            };
+            let bytes = |path| {
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .unwrap()
+                    .take(prefix)
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                bytes
+            };
+            assert_eq!(bytes(&source), bytes(&destination), "{}", source.display());
+        }
+    }
+}
+
 fn pairs(value: &Value) -> BTreeSet<(String, String)> {
     value
         .as_array()
@@ -266,7 +441,34 @@ impl Fixture {
         });
         let file = world.root.join("processes.json");
         write(&file, &processes);
-        let manifest = generator(world, &["generate", path(&fixture.runs), path(&file)]);
+        let cache = fixture_cache(world);
+        let mut generated = false;
+        crate::harness::build_once(&cache, || {
+            let template = cache.join("runs");
+            let _ = std::fs::remove_dir_all(&template);
+            let manifest = generator(world, &["generate", path(&template), path(&file)]);
+            std::fs::write(cache.join("manifest.json"), manifest)
+                .expect("the raw fixture's manifest");
+            generated = true;
+        });
+        let manifest = generator(
+            world,
+            &["clone", path(&fixture.runs), path(&file), path(&cache)],
+        );
+        if generated {
+            // The first copy uses the very processes the CLI-generated template
+            // names, so every byte must agree before later copies rebind them.
+            let parsed: Value = serde_json::from_str(&manifest).unwrap();
+            same_fixture(
+                &cache.join("runs"),
+                &fixture.runs,
+                &fixture
+                    .runs
+                    .join(parsed["sparse_run"].as_str().unwrap())
+                    .join("events.jsonl"),
+                parsed["sparse_record_bytes"].as_u64().unwrap(),
+            );
+        }
         fixture.adopt(&manifest);
         fixture
     }
@@ -2042,6 +2244,8 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
 #[test]
 fn the_budget_measurement_records_what_each_scaling_read_opened() {
     let world = World::new("host-view-measure");
+    let _fixture = Fixture::generate(&world);
+    let cache = fixture_cache(&world);
     let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join("strace"))
         .find(|strace| strace.is_file())
@@ -2088,6 +2292,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
                 "tests/e2e/host_view.rs: a stripped copy of the suite's build",
             )
             .env("PATH", &path)
+            .env("ONEPIPELINE_TEST_HOST_FIXTURE", &cache)
             .stdin(Stdio::null());
         if let Some(refuse) = refuse {
             command.env("REFUSE_TRACE", refuse);
