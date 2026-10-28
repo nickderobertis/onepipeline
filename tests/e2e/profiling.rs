@@ -145,15 +145,24 @@ fn a_profiled_journey_that_fails() {
 /// Run this suite's own binary the way nextest runs one test — alone, in a
 /// process of its own — with its record redirected into `records`.
 fn run_alone(args: &[&str], records: &std::path::Path) -> std::process::Output {
-    Command::new(std::env::current_exe().expect("this suite's own binary"))
+    let mut command = Command::new(std::env::current_exe().expect("this suite's own binary"));
+    command
         .args(args)
         .arg("--nocapture")
         .env(profile::DIR_ENV, records)
         // The name nextest gave *this* test, which the child would otherwise read
         // as its own: what it runs is what `args` names.
-        .env_remove("NEXTEST_TEST_NAME")
-        .output()
-        .expect("the suite runs")
+        .env_remove("NEXTEST_TEST_NAME");
+    if args.contains(&BUSY) {
+        // This probe must observe Cargo even when the enclosing run already
+        // built the doubles. Its independent run still uses the real builder.
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        command.env("NEXTEST_RUN_ID", format!("{run:x}"));
+    }
+    command.output().expect("the suite runs")
 }
 
 fn passed(test: &str, ran: &std::process::Output) {
@@ -444,9 +453,9 @@ fn a_fixtures_nested_git_and_file_work_is_its_own_and_not_the_fixtures() {
         whole,
         "the fixture's time and its nested work: {after:?}"
     );
-    // `init`, `clone`, `add`, `commit` and `push`; the registration through the
-    // linked `onevcs`; and the `remote get-url` that registration runs.
-    assert_eq!(delta(Category::Git).0, 7, "git operations: {after:?}");
+    // `init`, `fast-import` and `clone`; the registration through the linked
+    // `onevcs`; and the `remote get-url` that registration runs.
+    assert_eq!(delta(Category::Git).0, 5, "git operations: {after:?}");
 }
 
 /// A poll inside a poll is one polling wait, and every sleep in either counts.
@@ -681,7 +690,7 @@ fn nested_work_on_a_thread_the_test_started_is_counted_once() {
     assert!(fixture_time > std::time::Duration::ZERO, "{after:?}");
     let (gits, git_time) = delta(Category::Git);
     assert_eq!(
-        gits, 7,
+        gits, 5,
         "the same git operations as on the test thread: {after:?}"
     );
     assert_eq!(

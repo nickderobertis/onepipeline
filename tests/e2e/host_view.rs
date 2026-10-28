@@ -323,18 +323,32 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
     };
     let launch = cache.join("runs/live-0/launch.json");
     let original = read_json(&launch);
+    let dead_launch = cache.join("runs/live-2/launch.json");
+    let original_dead_launch = read_json(&dead_launch);
+    let plan = cache.join("runs/live-2/plan.json");
+    let original_plan = read_json(&plan);
     let dispatch = cache
         .join("runs/live-0/dispatches")
         .join(format!("{old_pid}-0.json"));
     let original_dispatch = read_json(&dispatch);
     let mut unknown = original.clone();
     unknown["typo"] = json!(true);
+    let mut unknown_dead = original_dead_launch.clone();
+    unknown_dead["typo"] = json!(true);
+    let mut unknown_plan = original_plan.clone();
+    unknown_plan["typo"] = json!(true);
     let mut wrong_type = original_dispatch.clone();
     wrong_type["pid"] = json!([]);
     let mut wrong_time = original_dispatch.clone();
     wrong_time["dispatched_at"] = json!("yesterday");
     for (nth, (file, bad, message)) in [
         (&launch, unknown, "cached launch has unknown field typo"),
+        (
+            &dead_launch,
+            unknown_dead,
+            "cached launch has unknown field typo",
+        ),
+        (&plan, unknown_plan, "cached plan has unknown field typo"),
         (
             &dispatch,
             wrong_type,
@@ -358,6 +372,8 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
             String::from_utf8_lossy(&refused.stderr)
         );
         write(&launch, &original);
+        write(&dead_launch, &original_dead_launch);
+        write(&plan, &original_plan);
         write(&dispatch, &original_dispatch);
     }
     std::fs::write(cache.join("runs/sparse/events.jsonl"), "").unwrap();

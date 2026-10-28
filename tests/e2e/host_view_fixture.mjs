@@ -51,7 +51,7 @@ import {
   truncateSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -310,7 +310,7 @@ function fixtureRecord(value, expected, varying, label) {
       refuse(`${label}.${key} differs from the generated fixture`);
     }
   }
-  processOf({pid: value.pid, token: value.started}, label);
+  if (Object.hasOwn(expected, "pid")) processOf({pid: value.pid, token: value.started}, label);
   return value;
 }
 
@@ -432,6 +432,27 @@ export function cloneFixture(runs, live, cache) {
   const manifest = manifestOf(readJson(join(cache, "manifest.json")));
   const template = join(cache, "runs");
   const seed = readSeed();
+  const cachedDispatch = (file) => {
+    const value = fixtureRecord(readJson(file), entry("plan", GONE, 0), ["node", "pid", "started", "dispatched_at"], "cached dispatch");
+    runName(value.node, "cached dispatch.node");
+    const time = Date.parse(value.dispatched_at);
+    if (!Number.isFinite(time) || stamp(time) !== value.dispatched_at) refuse("cached dispatch.dispatched_at must be a timestamp");
+    return value;
+  };
+  const validateMetadata = (file) => {
+    const run = basename(dirname(file));
+    if (basename(file) === "launch.json") {
+      fixtureRecord(readJson(file), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
+    } else if (basename(file) === "plan.json") {
+      const value = readJson(file);
+      if (!Array.isArray(value?.tasks) || value.tasks.length === 0) refuse("cached plan.tasks must be a nonempty array");
+      const nodes = value.tasks.slice(1).map((task) => {
+        runName(task?.id, "cached plan task.id");
+        return task.id;
+      });
+      fixtureRecord(value, planWith(seed, nodes), [], "cached plan");
+    } else if (basename(dirname(file)) === "dispatches") cachedDispatch(file);
+  };
   const copy = (from, to) => {
     mkdirSync(to, { recursive: true });
     for (const item of readdirSync(from, { withFileTypes: true })) {
@@ -454,29 +475,27 @@ export function cloneFixture(runs, live, cache) {
         } finally {
           closeSync(file);
         }
-      } else copyFileSync(source, destination, constants.COPYFILE_FICLONE);
+      } else {
+        validateMetadata(source);
+        copyFileSync(source, destination, constants.COPYFILE_FICLONE);
+      }
     }
   };
   if (manifest.live_runs.length !== live.entries.length) throw new Error("the template's live runs differ from the process shape");
   copy(template, runs);
   manifest.live_runs.forEach((run, i) => {
     const directory = join(runs, run);
+    const launch = fixtureRecord(readJson(join(directory, "launch.json")), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
     if (live.drivers[i]) {
-      const launch = fixtureRecord(readJson(join(directory, "launch.json")), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
       writeJson(join(directory, "launch.json"), { ...launch, pid: live.drivers[i].pid, started: live.drivers[i].token });
     }
     const registry = join(directory, "dispatches");
     const entries = readdirSync(registry).map((file) => ({
       index: Number(file.match(/-(\d+)\.json$/)?.[1]),
-      value: fixtureRecord(readJson(join(registry, file)), entry("plan", GONE, 0), ["node", "pid", "started", "dispatched_at"], "cached dispatch"),
+      value: cachedDispatch(join(registry, file)),
     })).sort((a, b) => a.index - b.index);
     if (entries.length !== live.entries[i].length || entries.some((entry, n) => entry.index !== n)) {
       throw new Error(`the template's registry for ${run} differs from the process shape`);
-    }
-    for (const {value} of entries) {
-      runName(value.node, "cached dispatch.node");
-      const time = Date.parse(value.dispatched_at);
-      if (!Number.isFinite(time) || stamp(time) !== value.dispatched_at) refuse("cached dispatch.dispatched_at must be a timestamp");
     }
     rmSync(registry, { recursive: true });
     mkdirSync(registry);

@@ -973,6 +973,10 @@ impl World {
     /// reads as one statement of what this world is.
     #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        assert!(
+            !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0'),
+            "a fixture environment assignment must be valid for a child process"
+        );
         self.environment.push((key.to_owned(), value.to_owned()));
         self
     }
@@ -1931,7 +1935,6 @@ impl World {
     /// launch then met as `"engine" is not a registered repository`, naming the
     /// repository whichever thread had lost the race.
     fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
-        static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
         std::env::set_var("ONEVCS_HOME", self.onevcs_home());
         std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
@@ -4615,6 +4618,49 @@ fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
 /// [`as_session`](World::as_session) makes a real case.
 static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+// The same environment lock covers repository registration and native cleanup.
+static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply a world's command environment to one synchronous library call, then
+/// restore every value, including removed variables, even while unwinding.
+struct WorldEnvironment {
+    _held: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+}
+
+impl WorldEnvironment {
+    fn enter(command: &Command) -> Self {
+        let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
+        let changes: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+            .collect();
+        let saved = changes
+            .iter()
+            .map(|(key, _)| (key.clone(), std::env::var_os(key)))
+            .collect();
+        let environment = Self { _held: held, saved };
+        for (key, value) in changes {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        environment
+    }
+}
+
+impl Drop for WorldEnvironment {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 impl World {
     /// Stop the runs this world started that can be stopped, before it goes.
     ///
@@ -4626,11 +4672,10 @@ impl World {
     /// the pipe `cargo nextest` reads this test's output from: the test exits,
     /// the pipe never reaches EOF, and the test is reported `LEAK`.
     ///
-    /// Through the binary's own `stop`, which on either platform walks the run's
-    /// descendants and waits until they are gone, rather than a second teardown
-    /// here that would walk the tree differently. `--force` because a world seen
-    /// through [`as_session`](World::as_session) is ending a run another
-    /// session's label owns.
+    /// Through the approved `verbs::stop` API, whose body the CLI calls too.
+    /// Cleanup has no stdout or exit-code assertion; explicit stop journeys
+    /// still drive the compiled binary. `force` stops a run another session's
+    /// label owns, as a world seen through [`as_session`](World::as_session) may.
     ///
     /// What it cannot stop it leaves, which is why it promises only the runs it
     /// can: `stop` refuses a run whose dispatch registry it cannot read, and
@@ -4640,18 +4685,25 @@ impl World {
         let Ok(entries) = profile::fs::read_dir(&self.runs) else {
             return;
         };
-        for entry in entries.flatten() {
-            // A directory with no launch record is not a run anything is
-            // driving — a plan that was refused before it started, or a run
-            // whose record a journey removed to see what the views make of it.
-            if !entry.path().join("launch.json").is_file() {
-                continue;
-            }
-            let run = entry.file_name();
-            let Some(run) = run.to_str() else {
-                continue;
-            };
-            let _ = self.cmd(&["stop", run, "--force"]).output();
+        let runs: Vec<_> = entries
+            .flatten()
+            .filter(|entry| entry.path().join("launch.json").is_file())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        let command = self.cmd(&[]);
+        let _environment = WorldEnvironment::enter(&command);
+        for run in runs {
+            let paths = onepipeline::views::RunPaths::under(&self.runs, &run);
+            let _ = onepipeline::verbs::stop(
+                &paths,
+                onepipeline::verbs::StopRequest {
+                    session: &self.session,
+                    force: true,
+                },
+            );
         }
     }
 }
@@ -4735,6 +4787,104 @@ fn a_worlds_teardown_ends_a_run_that_is_still_working() {
         stopped[0]
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Keep another world alive so containment cannot hide a missed stop. Both
+/// drivers must be gone after Drop, before the final world reaps descendants.
+#[test]
+fn teardown_stops_every_driver_without_spawning_the_cli() {
+    let world = World::new("teardown-library");
+    let mut drivers = Vec::new();
+    for run in ["first", "second"] {
+        let node = format!("{run}-work");
+        world.script(&format!("{node}.wait"), "hold");
+        let project = world.plan(run, &plan_of(run, vec![agent(&node, &[])]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the driver to dispatch its held worker", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+        });
+        let pid =
+            u32::try_from(world.run_json(run, "launch.json")["pid"].as_u64().unwrap()).unwrap();
+        assert!(
+            !process_ended(pid),
+            "the driver must be alive before cleanup"
+        );
+        drivers.push(pid);
+    }
+    let holder = world.as_session("keep-containment-owned");
+    let environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let starts = || {
+        profile::snapshot()
+            .programs
+            .get("onepipeline")
+            .map_or(0, |entry| entry.0)
+    };
+    let before = starts();
+    let began = std::time::Instant::now();
+    drop(world);
+    println!(
+        "teardown of two live runs: {:.6}s; CLI starts: {}",
+        began.elapsed().as_secs_f64(),
+        starts() - before
+    );
+    for pid in drivers {
+        assert!(
+            process_ended(pid),
+            "cleanup left driver {pid} alive before containment"
+        );
+    }
+    assert_eq!(
+        starts(),
+        before,
+        "fixture cleanup does not need another CLI process"
+    );
+    assert_eq!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>(),
+        environment,
+        "cleanup restores the caller's environment"
+    );
+    drop(holder);
+}
+
+/// Reject invalid child settings before they enter a world. Unwinding that
+/// constructor still stops its live driver and restores the caller's environment.
+#[test]
+fn teardown_with_invalid_child_settings_restores_the_environment() {
+    let world = World::new("teardown-invalid-environment");
+    world.script("work.wait", "hold");
+    let project = world.plan("invalid", &plan_of("invalid", vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to dispatch", |world| {
+        !world.events_of("invalid", "node-dispatched").is_empty()
+    });
+    let pid = u32::try_from(
+        world.run_json("invalid", "launch.json")["pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
+    let holder = world.as_session("keep-the-cleanup-owner");
+    let before = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.with_env("ONEPIPELINE_TEST_INVALID_ENV", "bad\0value")
+    }));
+    if let Ok(mut world) = refused {
+        // A broken validator must fail this test without leaking its driver.
+        world
+            .environment
+            .retain(|(key, _)| key != "ONEPIPELINE_TEST_INVALID_ENV");
+        drop(world);
+        panic!("an invalid child setting must be rejected");
+    }
+    assert_eq!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>(),
+        before
+    );
+    assert!(
+        process_ended(pid),
+        "invalid configuration left driver {pid} alive before containment"
+    );
+    drop(holder);
+}
 
 /// A dump carries what the run directory holds, including a file nothing in
 /// this suite names.
