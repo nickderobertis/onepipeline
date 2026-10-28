@@ -4,6 +4,17 @@ This is the measurement step of the onepipeline 30-minute CI chain: profile, the
 
 The records come from `onepipeline_testfakes::profile` (`crates/testfakes/src/profile.rs`, schema 2, golden `tests/golden/test-profile-record-v2.json`). Every test process writes one, at `target/test-profile/<binary>/<test>.json`. The breakdowns below come from `scripts/test-profile-report.mjs`. The replays come from `scripts/crate-split-replay.mjs` over `scripts/crate-split/proposed.json`.
 
+## This branch, and the branch it replaces
+
+This branch, `nick/959/onepipeline-test-profile-r9`, replaces `nick/959/onepipeline-test-profile-r2` and its pull request, onepipeline [#978](https://github.com/nickderobertis/onepipeline/pull/978). Every commit hash named in the sections after this one is a commit of r2. r2 cannot be published: its history carries merges of main, and onevcs's boundary check refuses one of them. This branch is cut from main at 6212751 (#1256) and carries no merge of main. Its outgoing commits:
+- **eff0ef2** carries r2's net change (`git merge --squash` of r2's head bd81161 over its merge base c962121) as one commit. 79 of its 82 files are byte-identical to bd81161. The other three, `.github/workflows/ci.yml`, `tests/ci_workflows.rs` and `tests/e2e/linear_writeback.rs`, were also changed by main after c962121. In each, r2's added and removed lines are exactly the ones this branch applies over main's.
+- **652235d** is lockfile-only. It moves `pulldown-cmark` from 0.13.4 to 0.13.5, past [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414), so that the required `deny` check passes. Nothing else in `Cargo.lock` moves, so the lock is otherwise main's at 6212751.
+- The commit that adds this section changes only this document.
+
+**The profile stands at r2's 7a017fa.** Between 7a017fa and this branch's head, nothing differs in the harness's recording, the analysis scripts, the mapping or the golden: `crates/testfakes/`, `scripts/test-profile-report.mjs`, `scripts/crate-split-replay.mjs`, `scripts/crate-split/proposed.json`, `tests/e2e/profiling.rs` and `tests/golden/test-profile-record-v2.json` are byte-identical. Outside this document and `Cargo.lock`, every file that differs is one main changed between c962121 and 6212751, and each differs by exactly main's lines: `tests/e2e/linear_writeback.rs` (+256), `tests/e2e/linear_loopback.rs`, `tests/ci_workflows.rs`, the npm launcher, its tests and `scripts/npm-build.mjs`, `.github/workflows/`, `Cargo.toml`, `README.md`, `AGENTS.md`, `CHANGELOG.md` and `justfile`. `Cargo.lock` is main's plus 652235d. So the profile is a snapshot of 7a017fa, as described below. Main's #1240 and #1256 change `linear_writeback`'s and `linear_loopback`'s journeys, and no figure here holds for those tests on this head.
+
+**Engines.** On this head, `just engines-current` passes: oneagentgraph 0.9.0, onevcs 0.57.0, onevcs-testing 0.19.22, onejudge 0.22.0, oneharness-core 0.29.1, the onetaskgraph crates at 0.12.8, onemessagebus 0.9.4 and onebudgetspec-core 0.1.5 are each the newest their own requirement permits. Main already links them, so this branch adds no engine refresh.
+
 ## Evidence revisions
 
 | record set | where | commit | tests | e2e test-s |
