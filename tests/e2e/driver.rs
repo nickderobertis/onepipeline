@@ -1500,6 +1500,12 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
         .exited(REFUSED)
         .err_has("still being driven");
 
+    let foreign = world.as_session("foreign-label-session");
+    foreign
+        .run(&["label", run, "--label", "kind=spikes"])
+        .exited(REFUSED)
+        .err_has("belongs to");
+
     // Released, it is let go of — while the driver is still running, on its way out.
     held.release();
     world.until("the driver to release the run", |world| {
@@ -1509,6 +1515,9 @@ fn a_run_reads_let_go_only_once_its_driver_has_released_it() {
         .run(&["status", run, "--json"])
         .exited(0)
         .out_has("\"driven\":false");
+    foreign
+        .run(&["label", run, "--label", "kind=spikes"])
+        .exited(0);
 }
 
 /// The run a refused or dead adoption leaves: the record still names the driver
@@ -1656,7 +1665,10 @@ fn a_detached_adoption_reports_its_driver_dying_on_either_side_of_its_first_read
 /// exit alone reported as a driver that never claimed the run.
 ///
 /// The driver is told apart from the one it displaced by its pid **and** its
-/// start: a host may hand the displaced driver's freed pid straight on.
+/// start: a host may hand the displaced driver's freed pid straight on. Held
+/// before its first reading, the launcher reads that start only once the driver
+/// has exited, so it is stamped through the child it holds rather than by a pid
+/// a host may no longer describe.
 #[test]
 fn a_detached_adoption_announces_its_driver_claiming_on_either_side_of_its_first_reading() {
     for side in [Side::BeforeTheFirstReading, Side::AfterTheFirstReading] {
@@ -1821,6 +1833,328 @@ fn a_restart_finishing_after_its_driver_let_go_over_an_error_writes_nothing_to_t
             .any(|exited| exited["payload"]["settlement"] == "error")
     });
     the_departed_driver_writes_nothing(&world, held);
+}
+
+/// A stop that meets a restart already under way waits for it, says so, and
+/// then ends the run with the observer that restart started — which is
+/// recorded on the run before the stop reads which observer to cancel, rather
+/// than started behind it.
+#[cfg(unix)]
+#[test]
+fn a_stop_waits_out_an_observer_restart_under_way_and_ends_what_it_started() {
+    let world = World::new("driver-stop-waits-restart");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "stop-waits", vec![agent("build", &[])]);
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
+    let observer = restart.pid;
+    let said = world.root.join("stop.err");
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&said).expect("the stop's log is made"));
+    let mut stopping = stop.spawn().expect("the stop starts");
+    world.until("the stop to wait for the restart under way", |_| {
+        std::fs::read_to_string(&said)
+            .unwrap_or_default()
+            .contains("waiting up to")
+    });
+    restart.release();
+    let status = stopping.wait().expect("the stop returns");
+    let said = std::fs::read_to_string(&said).expect("the stop's log");
+    assert!(status.success(), "the stop was not clean: {status}\n{said}");
+    assert!(
+        said.contains("for the observer its driver is restarting before the driver is stopped"),
+        "{said}"
+    );
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "the stop answered before the restart it waited for was recorded:\n{}",
+        world.dump()
+    );
+    world.until("the driver to be ended", |_| process_ended(driver));
+    world.until("the observer the restart started to be ended", |_| {
+        process_ended(observer)
+    });
+    drop(dispatch);
+}
+
+/// A stop that refused lets go of its run's observer restarts. The observer
+/// that stopped while it held them is not replaced under it; once it has
+/// refused, the run it left running is still being driven, and is watched
+/// again.
+///
+/// Linux only: the refusal is a stop with no `ps` to list the tree with, and
+/// only Linux proves the driver without one — from `/proc` — so only there does
+/// that stop reach the hold at all. macOS reads the driver's start through `ps`,
+/// and a stop that cannot prove its driver holds nothing.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_that_refused_leaves_its_runs_observer_restarted() {
+    let world = World::new("driver-stop-refused-restart");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "refused-restart", vec![agent("build", &[])]);
+    world.until("the observer to watch", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains(needle)
+    };
+    // llmlint: ignore-block[tests_mirror_real_usage] that the observer stops while the stop
+    // holds its restarts is the property, and no user-facing input can place it there. The
+    // failpoint only orders the real binary; the run, its driver, the refused stop and every
+    // outcome asserted are the binary's own.
+    let cancelled = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.env("PATH", world.empty_path()).env(
+        "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE",
+        cancelled.address(),
+    );
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let refused = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop with no ps to spawn"));
+        let held = cancelled.arrived();
+        world.release("observer.go.1");
+        world.until("the driver to start no observer under the stop", |_| {
+            said("while the run is being stopped; no other is started")
+        });
+        assert!(
+            !said("started another observer graph"),
+            "the driver restarted its observer under a stop holding its restarts"
+        );
+        held.release();
+        stopping.join().expect("the stop returns")
+    });
+    refused.exited(REFUSED).err_has("was not stopped");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph")
+    });
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "{}",
+        world.dump()
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// Make the run's observer restart lock a directory, which no process can open
+/// as the file it locks.
+fn the_restart_lock_cannot_be_opened(world: &World, run: &str) -> PathBuf {
+    let lock = world.run_file(run, "observer-restart.lock");
+    // llmlint: ignore-block[tests_mirror_real_usage] no CLI command makes a run's lock
+    // unopenable; a filesystem fault is the failure these journeys must report, so only that
+    // premise is arranged directly, the way
+    // `a_detached_adoption_refuses_when_the_prior_launch_record_cannot_be_preserved` arranges
+    // its own. The driver, the stop and every outcome asserted are the binary's.
+    // The driver made the lock as it opened its watch.
+    std::fs::remove_file(&lock).expect("the driver made its restart lock");
+    std::fs::create_dir(&lock).expect("the restart lock is replaced by a directory");
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    lock
+}
+
+/// A stop that cannot hold its run's observer restarts signals nothing and
+/// refuses, naming the lock: going on unheld is the race the lock closes. The
+/// run is untouched, so the same stop works once the lock can be opened.
+#[test]
+fn a_stop_that_cannot_hold_its_runs_observer_restarts_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-restart-lock-unopenable");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "lock-unopenable", vec![agent("build", &[])]);
+    world.until(
+        "the observer to watch and a node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty() && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    let driver = world.run_json(&run, "launch.json")["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the record names no driver:\n{}", world.dump()));
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+
+    let refused = world.run(&["stop", &run]);
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("observer-restart.lock")
+        .err_has("nothing was signalled");
+    assert!(
+        !process_ended(driver),
+        "a stop that held nothing signalled the driver anyway"
+    );
+    assert!(
+        world.events_of(&run, "run-stopped").is_empty(),
+        "a stop that signalled nothing recorded a stop"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.run(&["stop", &run]).exited(0);
+    world.until("the driver to be ended", |_| process_ended(driver));
+}
+
+/// A stop whose wait for a restart under way runs out refuses rather than
+/// stopping the driver unheld, and leaves it running: the restart is still
+/// the driver's, and a stop asked once it is recorded ends the run and the
+/// observer that restart started.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_outwaits_its_bound_for_a_restart_refuses_and_signals_nothing() {
+    let world = World::new("driver-stop-restart-outwaited");
+    let (held, dispatch) =
+        a_restart_held_inside_its_launch(&world, "restart-outwaited", vec![agent("build", &[])]);
+    let HeldRestart {
+        run,
+        driver,
+        restart,
+    } = held;
+    let observer = restart.pid;
+    // The bound is the graph's startup backstop and five seconds; one second of
+    // backstop is this stop's alone, so the driver's restart outlasts it.
+    let mut stop = world.cmd(&["stop", &run]);
+    stop.env(crate::harness::STARTUP_TIMEOUT_ENV, "1");
+    let refused = world.run_on(stop, "stop with a one-second startup backstop");
+    refused
+        .exited(REFUSED)
+        .err_has("was not stopped")
+        .err_has("observer restart still holds it after 6 seconds")
+        .err_has("nothing was signalled");
+    assert!(
+        !process_ended(driver),
+        "a stop that held nothing signalled the driver anyway"
+    );
+    assert!(world.events_of(&run, "run-stopped").is_empty());
+
+    restart.release();
+    world.until("the restart to be recorded", |world| {
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len)
+            == Some(2)
+    });
+    world.run(&["stop", &run]).exited(0);
+    world.until("the driver to be ended", |_| process_ended(driver));
+    world.until("the observer the restart started to be ended", |_| {
+        process_ended(observer)
+    });
+    drop(dispatch);
+}
+
+/// A driver that cannot take its run's restart lock restarts no observer —
+/// nothing then says a stop is not under way — says why once, and restarts it
+/// once the lock can be taken again.
+#[test]
+fn a_driver_that_cannot_take_its_restart_lock_restarts_no_observer_until_it_can() {
+    let world = World::new("driver-restart-lock-unopenable");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "restart-unopenable", vec![agent("build", &[])]);
+    world.until("the observer to watch", |world| {
+        !world.observer_saw().is_empty()
+    });
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(needle)
+            .count()
+    };
+
+    world.release("observer.go.1");
+    world.until("the driver to say it restarts nothing", |_| {
+        said("cannot be taken") > 0
+    });
+    // Long enough for the watch to look again many times over.
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(said("cannot be taken"), 1, "the reason was not said once");
+    assert_eq!(
+        said("started another observer graph"),
+        0,
+        "the driver restarted its observer without its restart lock"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph") > 0
+    });
+    assert_eq!(
+        world.run_json(&run, "launch.json")["observer_runs"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "{}",
+        world.dump()
+    );
+    world.run(&["stop", &run]).exited(0);
+}
+
+/// A driver that cannot make its run's restart lock as it starts watching says
+/// so and drives the run all the same; the observer that then stops is not
+/// restarted while the lock cannot be taken, and is once it can.
+///
+/// Met through an adoption, which is what starts a fresh driver's watch over a
+/// run that already exists: the run's first driver is ended mid-flight, the
+/// state an adoption recovers from.
+#[test]
+fn a_driver_that_cannot_make_its_restart_lock_drives_on_and_restarts_once_it_can() {
+    let world = World::new("driver-restart-lock-unmade");
+    world.script("observer.wait", "hold");
+    world.script("build.wait", "hold");
+    let run = start_detached_observed(&world, "restart-unmade", vec![agent("build", &[])]);
+    world.until(
+        "the observer to watch and a node to be in flight",
+        |world| {
+            !world.observer_saw().is_empty() && !world.events_of(&run, "node-dispatched").is_empty()
+        },
+    );
+    end_driver(&world, &run);
+    let lock = the_restart_lock_cannot_be_opened(&world, &run);
+    let log = world.run_file(&run, "driver.log");
+    let said = |needle: &str| {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches(needle)
+            .count()
+    };
+
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    world.until("the adopted driver to say it cannot make its lock", |_| {
+        said("observer-restart.lock cannot be made") > 0
+    });
+    // Every observer of this world stops once released, the adopted driver's
+    // own among them.
+    world.release("observer.go");
+    world.until("the driver to say it restarts nothing", |_| {
+        said("cannot be taken") > 0
+    });
+    assert_eq!(
+        said("started another observer graph"),
+        0,
+        "the driver restarted its observer without its restart lock"
+    );
+
+    std::fs::remove_dir(&lock).expect("the lock's directory is removed");
+    world.until("the driver to watch the run again", |_| {
+        said("started another observer graph") > 0
+    });
+    world.run(&["stop", &run]).exited(0);
 }
 
 #[test]
@@ -3618,7 +3952,8 @@ fn started_at_of(pid: u32) -> String {
 /// through the crate, which is the reader under test. Compared against the
 /// `lstart` rendering instead, no stamp could ever match and a stand-in started
 /// in the dispatch's own tick would pass for a stranger. Elsewhere a record
-/// carries `lstart`, so that is what is compared.
+/// carries `lstart` — on macOS followed by the kernel's microseconds of it — and
+/// that is what is compared.
 #[cfg(target_os = "linux")]
 fn recorded_start_of(pid: u32) -> String {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
@@ -3632,7 +3967,7 @@ fn recorded_start_of(pid: u32) -> String {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn recorded_start_of(pid: u32) -> String {
-    started_at_of(pid)
+    crate::harness::start_stamp(pid).expect("this host describes a process it just started")
 }
 
 /// The Windows stand-in for the stranger below.
@@ -3773,6 +4108,583 @@ fn a_forced_stop_ends_the_whole_dispatch_tree_of_another_sessions_run() {
         tree.iter().all(|pid| !still_listed(*pid))
     });
     world.release("build.go");
+}
+
+/// A stop ends a process its run's dispatch starts **after** the stop has
+/// listed the tree, and leaves the run beside it running.
+///
+/// The race a stop run under load meets: its listing is a moment old by the
+/// time its signals go out, and a dispatch that starts its next provider turn
+/// inside that moment starts a process no walk found. The dispatch dies of its
+/// signal, the turn is handed to `init`, and it runs on, spending what the stop
+/// was asked to stop. Held rather than raced: the stop at the point it has
+/// listed the tree, and the dispatch's turn released to start its child only
+/// then, so the child falls on the far side of the listing on any host.
+///
+/// The run beside it is held mid-turn through the whole stop and then finishes,
+/// so it was neither ended nor left frozen by a teardown aimed elsewhere.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_a_process_its_dispatch_starts_after_the_stop_has_listed_the_tree() {
+    let world = World::new("driver-stop-late-child");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    let (run, beside) = ("latechild", "besidelate");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // dispatch starts its process on is the property, and no user-facing input can place
+    // it. The failpoint only orders the real binaries; the launch, the stop, the dispatch
+    // and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop latechild"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.go");
+        world.until("the dispatch to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up: this is
+    // the process the stop missed, by the pid it recorded itself, and nothing
+    // reaches it once its parents are gone.
+    let survived = !process_ended(child);
+    if survived {
+        end_process(child);
+    }
+    stopped.exited(0);
+    assert!(
+        !survived,
+        "pid {child}, started by the run's dispatch after the stop listed the tree, was still \
+         running once the stop reported success"
+    );
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
+}
+
+/// A stop ends what a member of its run starts after the stop has listed the
+/// tree, even where that member's parent exited in between and handed it to
+/// `init`.
+///
+/// The member is in the tree the stop listed, so it is aimed at; but by the
+/// time the stop lists again, no walk from the run's roots reaches it any more,
+/// and a teardown that walked only from the roots would miss what it started.
+/// Held rather than raced, at the stop's listing, so the parent's exit and the
+/// member's new process both fall between the listing and the signals on any
+/// host.
+#[cfg(unix)]
+#[test]
+fn a_stop_ends_what_a_member_starts_after_its_parent_exits_mid_stop() {
+    let world = World::new("driver-stop-late-orphan");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-orphan", "Do late.");
+    let run = "lateorphan";
+    let path = world.plan(run, &plan_of(run, vec![agent("late", &[])]));
+    world
+        .run_on_agentgraph(&["start", &path, "--detach"])
+        .exited(0);
+    let pid_in = |name: &str| -> u32 {
+        std::fs::read_to_string(world.fakes.join(name))
+            .unwrap_or_else(|error| panic!("{name}: {error}"))
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} holds no pid: {error}"))
+    };
+    world.until("the member to be running under its parent", |world| {
+        world.fakes.join("turn.late-spawner.pid").is_file()
+    });
+    let (parent, member) = (
+        pid_in("turn.late-parent.pid"),
+        pid_in("turn.late-spawner.pid"),
+    );
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // parent exits and the member starts its process on is the property, and no user-facing
+    // input can place it. The failpoint only orders the real binaries; the launch, the stop,
+    // the dispatch and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop lateorphan"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.late-parent.exit");
+        world.until("the member's parent to exit", |_| process_ended(parent));
+        world.release("turn.late-spawn");
+        world.until("the member to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let started = [member, pid_in("turn.late-child.pid")];
+    let left: Vec<u32> = started
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    // Ended here by the pids they recorded, before anything is asserted: once
+    // their parents are gone nothing else on this host reaches them.
+    for pid in &left {
+        end_process(*pid);
+    }
+    stopped.exited(0);
+    assert!(
+        left.is_empty(),
+        "pids {left:?} of {started:?} — the member handed to `init` and what it started after \
+         the stop listed the tree — were still running once the stop reported success"
+    );
+}
+
+/// A stop whose host stops listing once it has frozen the tree still ends that
+/// tree and leaves none of it frozen — and refuses to call that a clean stop.
+///
+/// The teardown freezes what its first listing found before it lists again,
+/// so a listing refused after that is met with a frozen tree in hand: it is
+/// signalled and let go as it stands. A teardown that gave up there would leave
+/// every process of the run stopped, which reads as running to every view and
+/// ends nothing. What it cannot say is that the tree it signalled was all of
+/// the run, so the answer is the partial one.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_stops_listing_once_the_tree_is_frozen_still_ends_it() {
+    let world = World::new("driver-stop-relist-fails");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "relistfails", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+    world.until("the dispatch to be a process below the driver", |_| {
+        !dispatches(driver).is_empty()
+    });
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+
+    let mut command = world.cmd(&["stop", &run]);
+    command.env("PATH", world.path_whose_ps_fails_after_its_first_listing());
+    let stopped = world.run_on(command, "stop with a ps that lists once");
+    let left: Vec<u32> = tree
+        .iter()
+        .copied()
+        .filter(|pid| !process_ended(*pid))
+        .collect();
+    // Ended here, by the pids read before the stop, before anything is
+    // asserted: a tree left frozen is one nothing else on this host ends.
+    for pid in &left {
+        end_process(*pid);
+    }
+    stopped.exited(REFUSED).err_has("only partly stopped");
+    assert!(
+        left.is_empty(),
+        "pids {left:?} of the run's tree {tree:?} were still there once the stop answered"
+    );
+    world.release("build.go");
+}
+
+/// A stop whose host will not show the tree it froze as stopped still ends that
+/// tree and leaves none of it frozen — and refuses to call that a clean stop.
+///
+/// A listing is complete only once every process it descends from is shown
+/// stopped, so each answer here that is not that — a failed `ps`, bytes that are
+/// not text, a row that is not a pid and a state, an answer that leaves a live
+/// target out — keeps the teardown asking until its bound, where it signals what
+/// it found and says its discovery did not finish. A teardown that took any of
+/// them as settled would call the stop clean. Every answer but the last also
+/// shows each target stopped, and the last shows all of them but the first, so
+/// the one fault in it is all that stands between the teardown and that.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_host_never_shows_its_frozen_tree_stopped_still_ends_it() {
+    // The targets are the comma-separated ids of `ps`'s last argument, split by
+    // the shell alone: the `PATH` this stop is given holds nothing but `ps`.
+    let shown_stopped = |skipped: &str| {
+        format!(
+            "for last; do :; done; IFS=,; set -- $last; {skipped}for id; do echo \"$id T\"; done"
+        )
+    };
+    let all = shown_stopped("");
+    for (fault, answer) in [
+        ("fails", format!("{all}; exit 1")),
+        ("undecodable", format!("{all}; printf '\\377\\n'; exit 0")),
+        ("malformed", format!("{all}; echo 'not a row'; exit 0")),
+        ("omits", format!("{}; exit 0", shown_stopped("shift; "))),
+    ] {
+        let world = World::new(&format!("driver-stop-unshown-{fault}"));
+        world.script("build.wait", "hold");
+        let (run, driver) = start_detached_announcing(
+            &world,
+            &format!("unshown{fault}"),
+            vec![agent("build", &[])],
+        );
+        world.until("a node to be in flight", |world| {
+            !world.events_of(&run, "node-dispatched").is_empty()
+        });
+        world.until("the dispatch to be a process below the driver", |_| {
+            !dispatches(driver).is_empty()
+        });
+        let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+
+        let mut command = world.cmd(&["stop", &run]);
+        command.env(
+            "PATH",
+            world.path_whose_ps_answers_whether_stopped_with(&format!("{fault}-ps"), &answer),
+        );
+        let stopped = world.run_on(command, &format!("stop with a ps whose answer {fault}"));
+        let left: Vec<u32> = tree
+            .iter()
+            .copied()
+            .filter(|pid| !process_ended(*pid))
+            .collect();
+        // Ended here, by the pids read before the stop, before anything is
+        // asserted: a tree left frozen is one nothing else on this host ends.
+        for pid in &left {
+            end_process(*pid);
+        }
+        assert_eq!(stopped.code, REFUSED, "{fault}: {}", stopped.stderr);
+        stopped.err_has("only partly stopped");
+        assert!(
+            left.is_empty(),
+            "{fault}: pids {left:?} of the run's tree {tree:?} were still there once the stop \
+             answered"
+        );
+        world.release("build.go");
+    }
+}
+
+/// A stop whose host refuses the listing that would have found a process the
+/// run's dispatch started after the first one never reports success while that
+/// process is running — and leaves the run beside it running.
+///
+/// The two faults together: the stop's first listing is read, the dispatch
+/// starts a child after it, and every listing after that is refused. What the
+/// stop found is signalled and gone within its patience, so a confirmation that
+/// watched only that would call the stop clean beside a child nobody found.
+/// Held at the stop's listing, so the child falls after it on any host.
+#[cfg(unix)]
+#[test]
+fn a_stop_whose_relisting_fails_never_reports_success_beside_a_child_it_missed() {
+    let world = World::new("driver-stop-relist-late-child");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    let (run, beside) = ("relistlate", "besiderelist");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] which side of the stop's listing the
+    // dispatch starts its process on is the property, and no user-facing input can place
+    // it. The failpoint only orders the real binaries; the launch, the stop, the dispatch
+    // and every outcome asserted are the binaries' own.
+    let listed = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    // Ahead of the `PATH` the stop is otherwise given, so only `ps` is replaced.
+    let inherited = stop
+        .get_envs()
+        .find(|(name, _)| *name == "PATH")
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_os_string))
+        .unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(world.path_whose_ps_fails_after_its_first_listing())
+            .chain(std::env::split_paths(&inherited)),
+    )
+    .expect("a PATH");
+    stop.env("PATH", path)
+        .env("ONEPIPELINE_TEST_STOP_LISTED_GATE", listed.address());
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop relistlate"));
+        let at_the_listing = listed.arrived();
+        world.release("turn.go");
+        world.until("the dispatch to start a process after the listing", |_| {
+            late_child.is_file()
+        });
+        at_the_listing.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up, by the
+    // pid the child recorded itself.
+    let survived = !process_ended(child);
+    if survived {
+        end_process(child);
+    }
+    assert!(
+        !(stopped.code == 0 && survived),
+        "the stop reported success while pid {child}, started by the run's dispatch after the \
+         stop listed the tree, was still running:\n{}",
+        stopped.stdout
+    );
+    stopped.exited(REFUSED).err_has("only partly stopped");
+    let recorded = world.events_of(run, "run-stopped");
+    assert_eq!(
+        recorded
+            .last()
+            .map(|stopped| stopped["payload"]["teardown"].clone()),
+        Some(json!("partly-signalled")),
+        "{recorded:?}"
+    );
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
+}
+
+/// A stop never reports success while a child is running that was started by a
+/// process its stop signal reached and did not stop — and leaves the run beside
+/// it running.
+///
+/// A stop signal that was delivered is not a stopped process: it takes effect
+/// when its target next runs, and until then the target can start another. A
+/// teardown that took the delivery as the stop would list a tree that was still
+/// growing and call it settled. The turn here is traced by this test, which
+/// swallows every stop signal it is sent, so the turn takes the signal and runs
+/// on for as long as the journey needs; the stop is held once its discovery has
+/// answered, and the turn starts its child only then, after the last listing on
+/// any host.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stop_never_reports_success_beside_a_child_of_a_process_its_stop_signal_did_not_stop() {
+    let world = World::new("driver-stop-unstopped");
+    world.write_graphs();
+    world.script("turn.hold", "hold");
+    world.script("turn.late-child", "Do late.");
+    world.script("turn.ptracer", &std::process::id().to_string());
+    let (run, beside) = ("unstopped", "besideunstopped");
+    for (name, node) in [(run, "late"), (beside, "beside")] {
+        let path = world.plan(name, &plan_of(name, vec![agent(node, &[])]));
+        world
+            .run_on_agentgraph(&["start", &path, "--detach"])
+            .exited(0);
+        world.until("the run's worker turn to open", |world| {
+            !world.events_of(name, "turn-started").is_empty()
+        });
+    }
+    let traceable = world.fakes.join("turn.traceable.pid");
+    world.until("the turn to name its tracer", |_| traceable.is_file());
+    let turn: u32 = std::fs::read_to_string(&traceable)
+        .expect("the turn recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    let swallowed = world.fakes.join("turn.stop-swallowed");
+    let late_child = world.fakes.join("turn.late-child.pid");
+    // llmlint: ignore-block[tests_mirror_real_usage] a process that takes a stop signal and
+    // runs on is the property, and only a tracer can keep one running on demand; which side
+    // of the stop's last listing it starts its child on cannot be placed by any user-facing
+    // input either. The tracer and the failpoint only order the real binaries; the launch,
+    // the stop, the dispatch and every outcome asserted are the binaries' own.
+    let tracer = {
+        let (swallowed, attached) = (swallowed.clone(), world.fakes.join("turn.traced"));
+        std::thread::spawn(move || keep_running_through_stops(turn, &swallowed, &attached))
+    };
+    let discovered = crate::harness::Rendezvous::failpoint();
+    let mut stop = world.agentgraph_cmd(&["stop", run]);
+    stop.env(
+        "ONEPIPELINE_TEST_STOP_DISCOVERED_GATE",
+        discovered.address(),
+    );
+    let stopped = std::thread::scope(|scope| {
+        let stopping = scope.spawn(|| world.run_on(stop, "stop unstopped"));
+        let at_the_signals = discovered.arrived_within_a_step(&world, "the stop's discovery");
+        assert!(
+            swallowed.is_file(),
+            "the stop's discovery answered without sending the turn a stop signal"
+        );
+        world.release("turn.go");
+        world.until(
+            "the turn to start a process after the stop's last listing",
+            |_| late_child.is_file(),
+        );
+        at_the_signals.release();
+        stopping.join().expect("the stop returns")
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    let child: u32 = std::fs::read_to_string(&late_child)
+        .expect("the late child recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read the instant the stop has answered, and only then cleaned up, by the
+    // pids the processes recorded themselves.
+    let survived = !process_ended(child);
+    for pid in [child, turn] {
+        if !process_ended(pid) {
+            end_process(pid);
+        }
+    }
+    tracer.join().expect("the tracer lets the turn go");
+    assert!(
+        !(stopped.code == 0 && survived),
+        "the stop reported success while pid {child}, started by a turn its stop signal did \
+         not stop, was still running:\n{}",
+        stopped.stdout
+    );
+    stopped.exited(REFUSED).err_has("only partly stopped");
+
+    world.release("turn.settle");
+    world.until("the run beside it to settle", |world| {
+        world.run_file(beside, "result.json").is_file()
+    });
+    assert_eq!(
+        world.run_json(beside, "result.json")["state"],
+        "complete",
+        "{}",
+        world.dump()
+    );
+}
+
+/// Trace `pid` from this thread and keep it running through every stop signal
+/// it is sent, writing `swallowed` the first time one is; every other signal is
+/// passed on as it came. `attached` is written once the trace has begun.
+///
+/// What a stop is at its target's end — a signal it acts on when it next runs
+/// — held open for as long as the target lives. Returns once it has ended.
+#[cfg(target_os = "linux")]
+fn keep_running_through_stops(pid: u32, swallowed: &std::path::Path, attached: &std::path::Path) {
+    let raw = libc::pid_t::try_from(pid).expect("a pid");
+    let none = std::ptr::null_mut::<libc::c_void>();
+    // SAFETY: `PTRACE_SEIZE` takes a pid and two unused pointers, and the turn
+    // has named this process as its tracer.
+    let seized = unsafe { libc::ptrace(libc::PTRACE_SEIZE, raw, none, none) };
+    assert_eq!(
+        seized,
+        0,
+        "cannot trace the turn, pid {pid}: {}",
+        std::io::Error::last_os_error()
+    );
+    std::fs::write(attached, "go").expect("the turn is told it is traced");
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a live integer this call writes once.
+        if unsafe { libc::waitpid(raw, &mut status, libc::__WALL) } != raw
+            || libc::WIFEXITED(status)
+            || libc::WIFSIGNALED(status)
+        {
+            return;
+        }
+        if !libc::WIFSTOPPED(status) {
+            continue;
+        }
+        // Only a signal on its way in is the tracer's to pass on or swallow;
+        // any other stop of the trace is resumed with nothing.
+        let signal = libc::WSTOPSIG(status);
+        let passed = if status >> 16 != 0 {
+            0
+        } else if signal == libc::SIGSTOP {
+            std::fs::write(swallowed, "swallowed").expect("the swallowed stop is recorded");
+            0
+        } else {
+            signal
+        };
+        // SAFETY: `PTRACE_CONT` takes the tracee and the signal to deliver in the
+        // data argument, and touches no memory this call owns.
+        unsafe {
+            libc::ptrace(
+                libc::PTRACE_CONT,
+                raw,
+                none,
+                passed as usize as *mut libc::c_void,
+            )
+        };
+    }
+}
+
+/// A stop run from **inside** the run it ends — an agent of the run stopping
+/// its own run — ends the run and answers, rather than freezing or ending
+/// itself on the way.
+///
+/// The stop is a descendant of the tree it aims at, so a teardown that aimed at
+/// every descendant would aim at the stop too: freezing it leaves the stop and
+/// the whole run stopped for good, and ending it leaves the rest of the tree
+/// unsignalled with nobody told.
+#[cfg(unix)]
+#[test]
+fn a_stop_run_from_inside_its_own_run_ends_the_run_and_answers() {
+    let world = World::new("driver-stop-from-inside");
+    world.script("build.stops-its-run", "");
+    world.script("build.wait", "hold");
+    let (_, driver) = start_detached_announcing(&world, "frominside", vec![agent("build", &[])]);
+    let recorded = world.fakes.join("build.stopper.pid");
+    world.until("the dispatch to start a stop of its own run", |_| {
+        recorded.is_file()
+    });
+    let stopper: u32 = std::fs::read_to_string(&recorded)
+        .expect("the stop recorded its pid")
+        .trim()
+        .parse()
+        .expect("a pid");
+    // Read now, while a stop that froze itself would still hold the dispatch
+    // under the driver, so a failure can end what it left by these pids.
+    let tree: Vec<u32> = std::iter::once(driver).chain(dispatches(driver)).collect();
+    let deadline = std::time::Instant::now() + crate::harness::ONE_STEP;
+    while !process_ended(stopper) && std::time::Instant::now() < deadline {
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let answered = process_ended(stopper);
+    if !answered {
+        for pid in std::iter::once(stopper).chain(tree.iter().copied()) {
+            end_process(pid);
+        }
+    }
+    assert!(
+        answered,
+        "a stop run from inside its own run had not answered within {:?}",
+        crate::harness::ONE_STEP
+    );
+    let said =
+        std::fs::read_to_string(world.fakes.join("build.stopper.out")).expect("what the stop said");
+    assert!(said.contains("\"stopped\":true"), "{said}");
+    assert!(
+        process_ended(driver),
+        "the run's driver, pid {driver}, outlived a stop that answered:\n{said}"
+    );
 }
 
 /// A stop that cannot see what it must end refuses, changes nothing, and works
@@ -4312,6 +5224,47 @@ fn a_linux_stop_accepts_an_active_runs_legacy_ps_identity() {
     let record = world.run_file(&run, "launch.json");
     let mut launch = world.run_json(&run, "launch.json");
     launch["started"] = json!(started_at_of(driver));
+    std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
+
+    world
+        .run(&["stop", &run])
+        .exited(0)
+        .out_has("\"stopped\":true")
+        .out_has("\"teardown\":\"signalled\"");
+    world.until("the legacy-recorded driver to end", |_| {
+        !still_listed(driver)
+    });
+    world.release("build.go");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A macOS run launched by a build whose start tokens were `ps lstart` alone,
+/// spelled to the second, remains stoppable once tokens carry the kernel's
+/// microseconds after that second.
+// llmlint: ignore-block[tests_mirror_real_usage] installing an older binary merely to
+// create its launch record would test packaging rather than this compatibility boundary;
+// replacing only the serialized token with the exact value that binary wrote is the
+// persisted pre-upgrade input the current public `stop` command must accept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macos_stop_accepts_an_active_runs_lstart_identity() {
+    let world = World::new("driver-stop-lstart-start-token");
+    world.script("build.wait", "hold");
+    let (run, driver) = start_detached_announcing(&world, "lstart", vec![agent("build", &[])]);
+    world.until("a node to be in flight", |world| {
+        !world.events_of(&run, "node-dispatched").is_empty()
+    });
+
+    let record = world.run_file(&run, "launch.json");
+    let mut launch = world.run_json(&run, "launch.json");
+    let legacy = started_at_of(driver);
+    assert_eq!(
+        launch["started"].as_str(),
+        Some(recorded_start_of(driver).as_str()),
+        "this build's launch record carries the second and its microseconds"
+    );
+    assert_ne!(launch["started"].as_str(), Some(legacy.as_str()));
+    launch["started"] = json!(legacy);
     std::fs::write(record, launch.to_string()).expect("the legacy launch record is installed");
 
     world

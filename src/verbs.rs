@@ -943,6 +943,14 @@ pub struct Receipt {
     /// What the person who sent it should know beside the receipt, each a
     /// sentence of its own, in the order the binary says them.
     pub advice: Vec<String>,
+    /// Each node a `note` of the envelope named, with what the envelope's answer
+    /// says of that note: [`CommandVerdict::Queued`](crate::channel::CommandVerdict::Queued) while it waits in its
+    /// receiver's inbox for that receiver's turn — any one of several notes to
+    /// one node waiting is that node's word — and otherwise that note's own
+    /// verdict. Empty, and absent from the wire, where the envelope carried no
+    /// note or its commands are not answered yet. Entry 64 of
+    /// `docs/contract-divergences.md` states the key.
+    pub notes: std::collections::BTreeMap<String, crate::channel::CommandVerdict>,
 }
 
 impl Receipt {
@@ -1012,6 +1020,9 @@ impl serde::Serialize for Receipt {
         }
         if let Some(commands) = self.commands() {
             receipt.serialize_entry("commands", commands)?;
+        }
+        if !self.notes.is_empty() {
+            receipt.serialize_entry("notes", &self.notes)?;
         }
         receipt.end()
     }
@@ -1146,7 +1157,7 @@ fn submit(
         // read in the instant after this process applied an edit to it is not a state an
         // invocation can put a run into; the read that succeeds is driven end to end by
         // `tests/e2e/adoption.rs`.
-        match RunView::open(paths) {
+        match RunView::open_current(paths) {
             Ok(view) => advice.extend(crate::release::hold_warnings_for_stated_landings(
                 &view.state,
                 &envelope.commands,
@@ -1157,7 +1168,49 @@ fn submit(
             )),
         } // llmlint: ignore-end[changed_behavior_has_e2e]
     }
-    Ok(Receipt { outcome, advice })
+    let notes = note_verdicts(paths, &envelope.commands, outcome);
+    Ok(Receipt {
+        outcome,
+        advice,
+        notes,
+    })
+}
+
+/// What a receipt says of each node a note of `commands` named — see
+/// [`Receipt::notes`]: read off the answer the run's reconciler gave the
+/// envelope, and `applied` for every note this process applied itself, which
+/// reached its node's conversation or was carried to its next dispatch before
+/// the receipt was written. Nothing for an envelope with no answer yet.
+fn note_verdicts(
+    paths: &RunPaths,
+    commands: &[Command],
+    outcome: ReplyOutcome,
+) -> std::collections::BTreeMap<String, crate::channel::CommandVerdict> {
+    use crate::channel::CommandVerdict;
+    let mut notes = std::collections::BTreeMap::new();
+    if !commands
+        .iter()
+        .any(|command| matches!(command, Command::Note { .. }))
+    {
+        return notes;
+    }
+    let verdicts: Vec<CommandVerdict> = match outcome {
+        ReplyOutcome::AppliedByRun { reply, .. } => crate::channel::ChannelState::new(paths)
+            .outcome_of(reply)
+            .map(|answer| answer.results.iter().map(|result| result.outcome).collect())
+            .unwrap_or_default(),
+        ReplyOutcome::AppliedHere { .. } => vec![CommandVerdict::Applied; commands.len()],
+        ReplyOutcome::Answered { .. } | ReplyOutcome::Queued { .. } => Vec::new(),
+    };
+    for (command, verdict) in commands.iter().zip(verdicts) {
+        if let Command::Note { id, .. } = command {
+            let word = notes.entry(id.clone()).or_insert(verdict);
+            if verdict == CommandVerdict::Queued {
+                *word = verdict;
+            }
+        }
+    }
+    notes
 }
 
 /// What `onepipeline surface` queued.
@@ -1478,14 +1531,35 @@ impl Adopted {
 /// Those refusals; a lock that cannot be taken; and, detached, a retained
 /// driver that did not claim the run, with what it said in its log.
 pub fn adopt(paths: &RunPaths, how: Adopt) -> Result<Adopted> {
+    adopt_with_writeback_item_budget(paths, how, None)
+}
+
+/// Adopt a run, optionally replacing its persisted per-item write-back budget.
+///
+/// Naming no budget keeps the recorded value. Zero is refused before any write.
+/// The environment is never consulted during adoption.
+///
+/// # Errors
+///
+/// The refusals of [`adopt`], and a zero budget.
+pub fn adopt_with_writeback_item_budget(
+    paths: &RunPaths,
+    how: Adopt,
+    budget: Option<u64>,
+) -> Result<Adopted> {
+    if budget == Some(0) {
+        return Err(Error::Refused(crate::writeback::refused_zero_budget(
+            "--writeback-item-budget",
+        )));
+    }
     Ok(match how {
         Adopt::Attached => Adopted::Attached {
             run: paths.run.clone(),
-            settlement: driver::adopt_attached(paths, &mut |_| {})?,
+            settlement: driver::adopt_attached(paths, budget, &mut |_| {})?,
         },
         Adopt::Detached(retain) => Adopted::Detached {
             run: paths.run.clone(),
-            pid: driver::adopt_detached(paths, &retain)?,
+            pid: driver::adopt_detached(paths, &retain, budget)?,
         },
     })
 }
@@ -1944,4 +2018,35 @@ impl ReadjustReceipt {
             _ => 0,
         }
     }
+}
+
+/// Validated label keys, values and groups, and the typed overlay document.
+pub use crate::labels::{
+    LabelAuthor, LabelGroup, LabelKey, LabelOverlay, LabelTimestamp, LabelValue, RunGroup,
+};
+
+/// A whole replacement of the run's label overlay; launch metadata is immutable.
+pub struct LabelRequest<'a> {
+    /// Validated labels to overlay.
+    pub labels: &'a std::collections::BTreeMap<LabelKey, LabelValue>,
+    /// Launch keys to remove before overlaying labels.
+    pub unlabel: &'a [LabelKey],
+    /// Preserve, override, or suppress the resolved launch group.
+    pub group: LabelGroup,
+    /// Override another driving session's ownership.
+    pub force: bool,
+    /// The calling launcher.
+    pub launcher: &'a str,
+    /// The calling session.
+    pub session: &'a str,
+}
+
+/// Replace `labels.json` without rewriting the launch or journalling.
+pub fn label(paths: &RunPaths, request: LabelRequest<'_>) -> Result<LabelOverlay> {
+    crate::labels::replace(paths, request)
+}
+
+/// The complete replacement overlay, rendered as one JSON object.
+pub fn render_labelled(overlay: &LabelOverlay) -> String {
+    serde_json::to_string(overlay).expect("an overlay contains only JSON-compatible fields")
 }

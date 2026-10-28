@@ -135,26 +135,23 @@ fn a_read_through_a_usable_checkpoint_reports_what_a_full_fold_reports() {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// **A covered record rewritten in place at identical length rejects the
-/// checkpoint**, and the read reports what a full fold of that store reports.
+/// **A covered record rewritten in place is never read again**: the read reports
+/// what the checkpoint folded, and only a reader with no checkpoint to resume from
+/// reads the rewritten store.
 ///
-/// The modification no count can see: the byte count, the record count and both
-/// ordering maxima are exactly what they were, so the digest of the covered bytes
-/// is the only thing that refuses it.
-///
-/// **The rewrite is its own discriminator**, which is why nothing is planted in the
-/// document here: taking a covered settlement out of the store leaves the honest
-/// marker claiming two nodes done where the store now folds to one, so a reader
-/// that accepted the document says `2/2 done` and one that refused it says
-/// `1/2 done`. A planted account would have had to differ from *both*, and the
-/// obvious one — the same node reported failed — reads identically to the store's
-/// own answer, so it would have passed whether the digest was asked or not.
+/// The journal is append-only, and what a checkpoint covers is history no view,
+/// pass or reply goes back over — on a long run it is hundreds of megabytes, and a
+/// reader that re-read it to check the document paid the whole run per read. So
+/// the discriminator runs the other way from a digest's: taking a covered
+/// settlement out of the store leaves the document claiming two nodes done where
+/// the store now folds to one, and a reader that resumed from the document — and
+/// read nothing it covers — says `2/2 done`.
 // llmlint: ignore-block[tests_mirror_real_usage] no verb rewrites a record inside a run's
 // own journal or edits the cache beside it; what this holds is that the journal outranks
 // the cache, which no user-facing surface reports and which shows otherwise only as a view
 // serving state the store no longer holds.
 #[test]
-fn a_covered_record_changed_at_identical_length_rejects_the_checkpoint() {
+fn a_covered_record_changed_in_place_is_never_read_again() {
     let world = a_settled_run("checkpoint-rewritten");
     let accounted = accounted_for(&world);
     let marker = counted(&world.run_json("tail", "checkpoint.json")["coverage"]);
@@ -195,13 +192,13 @@ fn a_covered_record_changed_at_identical_length_rejects_the_checkpoint() {
 
     let read = summary_line(&world);
     assert!(
-        read.contains("1/2 done"),
-        "a checkpoint over a rewritten prefix was folded from anyway: {read}"
+        read.contains("2/2 done"),
+        "a read went back over the history its checkpoint covers: {read}"
     );
-    assert_eq!(
-        read,
-        without_a_checkpoint(&world),
-        "the state after a rewritten prefix is not the state that store folds to"
+    let rebuilt = without_a_checkpoint(&world);
+    assert!(
+        rebuilt.contains("1/2 done"),
+        "a read with no checkpoint did not fold the store as it now stands: {rebuilt}"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
@@ -556,6 +553,78 @@ fn an_attached_launch_folds_nothing_while_its_run_records_nothing() {
         ended.status.success() && said.contains("\"complete\""),
         "the attached launch did not settle its run complete ({}): {said}",
         ended.status
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// **A checkpoint an earlier build wrote, over a store wider than several rebuild
+/// windows, is rebuilt to the whole store's fold, every record but the last instant
+/// covered once.**
+///
+/// A run this host's drivers adopt carries the document the build before them wrote,
+/// at a schema this one refuses, so adopting it rebuilds the fold from the journal's
+/// first byte, a window at a time. The windows are what bound that rebuild's memory;
+/// what has to hold across them is the fold: the state reads as a fold with no
+/// document at all reads, and the marker the rebuild writes accounts for exactly the
+/// records in front of the last instant — none dropped at a window's edge, none
+/// counted twice — ending on the byte that instant's line starts at.
+// llmlint: ignore-block[tests_mirror_real_usage] no verb writes an earlier build's
+// document or lengthens a settled run's journal; a store this wide stands in for a long
+// run's, which a journey cannot run in its time.
+#[test]
+fn an_earlier_builds_checkpoint_over_a_store_wider_than_its_windows_rebuilds_the_whole_fold() {
+    let world = a_settled_run("checkpoint-wide-rebuild");
+    let store = world.run_file("tail", "events.jsonl");
+    let mut held = std::fs::read_to_string(&store).expect("the run's journal");
+    // About five megabytes of another producer's records, each stamped after
+    // everything the store holds, so the file's order is the merge's.
+    let detail = "w".repeat(900);
+    for seq in 0..5_500u64 {
+        let record = json!({
+            "v": 1,
+            "ts": format!("2999-01-01T{:02}:{:02}:{:02}.{:03}Z",
+                seq / 3_600_000 % 24, seq / 60_000 % 60, seq / 1_000 % 60, seq % 1_000),
+            "stream": "graph-wide",
+            "seq": seq,
+            "source": "agentgraph",
+            "kind": "turn-activity",
+            "labels": {"run_id": "tail", "node": "build"},
+            "payload": {"tool": "Edit", "detail": detail},
+            "artifacts": [],
+        });
+        held.push_str(&format!("{record}\n"));
+    }
+    std::fs::write(&store, &held).expect("the journal is appended to");
+    let last_line = held.trim_end_matches('\n').rsplit('\n').next().unwrap();
+    let records = world.journal("tail").len();
+
+    let at = world.run_file("tail", "checkpoint.json");
+    let mut earlier = parsed(&std::fs::read(&at).expect("the run's checkpoint"));
+    earlier["schema_version"] = json!(13);
+    write_checkpoint(&world, &earlier);
+
+    let rebuilt = summary_line(&world);
+    assert!(rebuilt.contains("2/2 done"), "{rebuilt}");
+    let written = parsed(&std::fs::read(&at).expect("the rebuild's checkpoint"));
+    assert_ne!(
+        written["schema_version"],
+        json!(13),
+        "the earlier document was kept"
+    );
+    assert_eq!(
+        written["coverage"]["records"],
+        json!(records - 1),
+        "the rebuild did not cover every record but the last instant, once each"
+    );
+    assert_eq!(
+        written["coverage"]["bytes"],
+        json!(held.len() - last_line.len() - 1),
+        "the marker does not end where the last instant's line starts"
+    );
+    assert_eq!(
+        rebuilt,
+        without_a_checkpoint(&world),
+        "the rebuild and a fold with no document report different states"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]

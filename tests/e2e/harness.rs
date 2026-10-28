@@ -773,6 +773,26 @@ fn plain(path: &Path) -> PathBuf {
     }
 }
 
+/// Where every world's scratch root is made: the temporary directory, except on
+/// macOS, where it is `/tmp`.
+///
+/// A held turn's control socket is bound at
+/// `<state home>/oneharness/sessions/control/<session>.sock`, and a unix socket
+/// address is at most 104 bytes on macOS. The runner's temporary directory,
+/// resolved, is `/private/var/folders/<2>/<28>/T/`, and under it the control
+/// directory alone took 108: no session name fit, so no turn there could be
+/// interrupted, and the interrupt journeys in `tests/note` waited for an answer
+/// that never came. `/tmp` resolves to `/private/tmp`, which leaves the session
+/// name about 40 bytes. `a_worlds_control_socket_fits_this_platforms_address_limit`
+/// holds it.
+fn scratch_base() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    }
+}
+
 /// The environment variable the linked `oneharness-core` reads its per-user
 /// state directory from, by platform: `%LOCALAPPDATA%` on Windows and
 /// `$XDG_STATE_HOME` everywhere else — the library's own
@@ -838,16 +858,26 @@ impl World {
     /// names itself; its scratch directory does not have to.
     pub fn new(name: &str) -> Self {
         static NTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let _fixture = profile::span(profile::Category::Fixture);
-        // Before anything is started, so that everything this test starts is
-        // something its teardown can reach. See [`Drop for World`](World).
-        onepipeline_testfakes::containment::enrol();
-        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let root = std::env::temp_dir().join(format!(
+        // Enrolled in [`World::at`], before anything is started, so that everything
+        // this test starts is something its teardown can reach. See
+        // [`Drop for World`](World).
+        let root = scratch_base().join(format!(
             "op-{}-{}",
             std::process::id(),
             NTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
+        Self::at(&root, name)
+    }
+
+    /// A fresh world rooted at `root` rather than at a name only this process holds:
+    /// for `tests/journal_workload`, whose generated run names the world's paths, so a
+    /// world at one root twice is what makes one generation reproduce byte for byte.
+    /// Whatever `root` held is removed first, and the world removes it when dropped.
+    pub fn at(root: &Path, name: &str) -> Self {
+        let _fixture = profile::span(profile::Category::Fixture);
+        onepipeline_testfakes::containment::enrol();
+        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let root = root.to_path_buf();
         let _ = profile::fs::remove_dir_all(&root);
         // Created before it is resolved, because resolving a path asks the
         // filesystem about it, and in the one spelling the binary will report —
@@ -960,6 +990,55 @@ impl World {
     pub fn through_scripted_source(mut self) -> Self {
         self.scripted = true;
         self
+    }
+
+    /// The same world, with every `git` its commands start counted first and then run as
+    /// the real one: see [`World::git_starts`].
+    ///
+    /// The count is a two-line shell program placed ahead of everything on the world's
+    /// `PATH`: it appends one line to the world's count, and then `exec`s the real `git`
+    /// with its argv, environment and directory untouched — so a start counted is still
+    /// one process, and one it could not count is one it does not run. Unix alone, where
+    /// that `exec` is a replacement rather than a second process, and where `/bin/sh`
+    /// runs it.
+    #[cfg(unix)]
+    pub fn counting_git(self) -> Self {
+        let real = Self::resolved_on(&Command::new("git"), "git").expect("the host has a git");
+        let counted = self.root.join("counted-git");
+        std::fs::create_dir_all(&counted).expect("a directory for the counted git");
+        let quoted = |path: &Path| format!("'{}'", path_text(path).replace('\'', "'\\''"));
+        onepipeline_testfakes::executable(
+            &counted.join("git"),
+            format!(
+                "#!/bin/sh\nprintf 'start\\n' >> {} || exit 70\nexec {} \"$@\"\n",
+                quoted(&self.git_starts_log()),
+                quoted(&real),
+            ),
+        );
+        let path = path_leading_with(&[
+            counted,
+            onevcs_binary()
+                .parent()
+                .expect("onevcs has a directory")
+                .to_path_buf(),
+        ]);
+        self.with_env("PATH", path.to_str().expect("a PATH this host can spell"))
+    }
+
+    /// The file [`counting_git`](World::counting_git) counts each start into.
+    #[cfg(unix)]
+    pub fn git_starts_log(&self) -> PathBuf {
+        self.root.join("git-starts.log")
+    }
+
+    /// How many `git` processes this world's commands have started so far, where it
+    /// was made with [`counting_git`](World::counting_git).
+    #[cfg(unix)]
+    pub fn git_starts(&self) -> usize {
+        std::fs::read_to_string(self.git_starts_log())
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     /// The settings that declare this world's plans source to the binary under test.
@@ -1317,6 +1396,39 @@ impl World {
             .block_on(call(engine))
     }
 
+    /// Copy a project's metadata onto its same-titled local counterpart through the store.
+    pub fn copy_project_metadata(&self, project: &str, destination: &str) {
+        let project = global(project);
+        let destination = onetaskgraph_plugin_api::SourceName::new(destination).unwrap();
+        let report = self.store_call(|engine| async move {
+            engine
+                .copy(&onetaskgraph_core::CopyRequest {
+                    items: onetaskgraph_core::CopyItems::new(vec![project]).unwrap(),
+                    scope: onetaskgraph_core::CopyScope::Projects { tasks: false },
+                    destination,
+                    status_policy: onetaskgraph_core::StatusPolicy::Source,
+                    target_task: None,
+                    match_by: Some(onetaskgraph_core::MatchBy::Title),
+                    recreate: false,
+                    create: false,
+                    dry_run: false,
+                    comments: false,
+                    no_link: false,
+                    expect: None,
+                    statuses: Vec::new(),
+                })
+                .await
+                .expect("the real store copies the project")
+        });
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.action.destination().is_some()),
+            "{report:?}"
+        );
+    }
+
     /// Read this world's project back through the store the engine links, as the page a
     /// `show` of it answers.
     pub fn store_project(&self, project: &str) -> Value {
@@ -1446,7 +1558,15 @@ impl World {
     /// of its own must not be able to answer one. What a journey states about
     /// resolving *nothing* by name says so with [`World::empty_path`].
     pub fn agentgraph_cmd(&self, args: &[&str]) -> Command {
-        let mut command = self.cmd(args);
+        self.agentgraph_cmd_on(&binary(), args)
+    }
+
+    /// [`agentgraph_cmd`](World::agentgraph_cmd) for another `onepipeline`
+    /// executable, wired to this world and the real stack exactly as the build
+    /// under test is — for `tests/journal_workload`, which measures the release
+    /// build rather than this one.
+    pub fn agentgraph_cmd_on(&self, program: &Path, args: &[&str]) -> Command {
+        let mut command = self.cmd_on(program, args);
         command
             .env_remove("ONEPIPELINE_ONEAGENTGRAPH_BIN")
             .env(
@@ -1740,9 +1860,21 @@ impl World {
     /// the release-targets document names it by — and the file its answer is
     /// written to.
     pub fn probe_in(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        self.probe_at(repository, name, probe_script().0)
+    }
+
+    /// The same, committed under a script name of its own — `<name>-probe.sh`, or
+    /// `.bat` — so one repository can carry a probe per release target, each
+    /// answering from its own file.
+    pub fn probe_for_target(&self, repository: &Repository, name: &str) -> (String, PathBuf) {
+        let script = format!("{name}-{}", probe_script().0);
+        self.probe_at(repository, name, &script)
+    }
+
+    fn probe_at(&self, repository: &Repository, name: &str, script: &str) -> (String, PathBuf) {
         let _fixture = profile::span(profile::Category::Fixture);
         let answer = self.root.join(format!("{name}.version"));
-        let (script, body) = probe_script();
+        let (_, body) = probe_script();
         let path = repository.checkout.join(script);
         onepipeline_testfakes::executable(
             &path,
@@ -2160,6 +2292,45 @@ impl World {
         self.path_with_ps("failing-ps", "echo '1 0'\nexit 1")
     }
 
+    /// A `PATH` whose `ps` answers the **first** listing with the real one and
+    /// fails every listing after it.
+    ///
+    /// The fault a teardown meets once it has read its tree and frozen it, when
+    /// the host stops answering the listings it reads again: it has a tree to
+    /// end and processes it froze, and neither may be left as they are. Every
+    /// other question `ps` is asked is answered for real, as [`listing_plus`]
+    /// says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_fails_after_its_first_listing(&self) -> PathBuf {
+        let listed = self.root.join("once-listing-ps.listed");
+        self.path_with_ps(
+            "once-listing-ps",
+            &format!(
+                "case \" $* \" in\n  *\" -A \"*) [ -e '{}' ] && exit 1; : >'{}' ;;\nesac\nexec {} \"$@\"",
+                listed.display(),
+                listed.display(),
+                real_ps().display()
+            ),
+        )
+    }
+
+    /// A `PATH` whose `ps` runs `answer` in place of saying whether processes are
+    /// stopped, and answers every other question for real.
+    ///
+    /// The fault a teardown meets once it has frozen its tree and asks the host
+    /// whether it took: an answer it cannot trust is not a tree shown stopped.
+    /// Scoped to that one question, as [`listing_plus`] says why.
+    #[cfg(unix)]
+    pub fn path_whose_ps_answers_whether_stopped_with(&self, name: &str, answer: &str) -> PathBuf {
+        self.path_with_ps(
+            name,
+            &format!(
+                "case \" $* \" in\n  *stat=*) {answer} ;;\nesac\nexec {} \"$@\"",
+                real_ps().display()
+            ),
+        )
+    }
+
     /// A `PATH` whose `ps` answers with the **real** listing and one row nobody
     /// can read.
     ///
@@ -2514,6 +2685,82 @@ impl World {
         Run::of(command.output().expect("the binary runs"), &[args], self)
     }
 
+    /// [`run_on`](World::run_on), within `patience`: a command that has not answered by
+    /// then — or that exited while something it started still holds its output open — is
+    /// ended, and fails naming `args` and what it had printed, rather than leaving the
+    /// journey blocked until the runner's timeout names only the test.
+    pub fn run_on_within(
+        &self,
+        command: Command,
+        args: &str,
+        patience: std::time::Duration,
+    ) -> Run {
+        use std::io::Read;
+        let mut command = command;
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary runs");
+        let collect = |mut stream: Box<dyn Read + Send>| {
+            let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let into = std::sync::Arc::clone(&read);
+            let reading = std::thread::spawn(move || {
+                let mut chunk = [0_u8; 4096];
+                while let Ok(got @ 1..) = stream.read(&mut chunk) {
+                    into.lock()
+                        .expect("one reader")
+                        .extend_from_slice(&chunk[..got]);
+                }
+            });
+            (read, reading)
+        };
+        let (stdout, out_reading) =
+            collect(Box::new(child.stdout.take().expect("stdout is piped")));
+        let (stderr, err_reading) =
+            collect(Box::new(child.stderr.take().expect("stderr is piped")));
+        let deadline = std::time::Instant::now() + patience;
+        let mut status = None;
+        while std::time::Instant::now() < deadline {
+            status = child.try_wait().expect("the command can be waited on");
+            if status.is_some() && out_reading.is_finished() && err_reading.is_finished() {
+                break;
+            }
+            profile::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        let text = |held: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>| {
+            held.lock().expect("one reader").clone()
+        };
+        let finished = out_reading.is_finished() && err_reading.is_finished();
+        let Some(status) = status.filter(|_| finished) else {
+            // Ours, started above: ended so the journey's teardown has nothing of it to wait on.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "`onepipeline {args}` had not answered {patience:?} after it started{}\n\
+                 stdout: {}\nstderr: {}\nthe runs root held:\n{}",
+                if status.is_some() {
+                    " (it exited, and something it started still held its output open)"
+                } else {
+                    ""
+                },
+                String::from_utf8_lossy(&text(&stdout)),
+                String::from_utf8_lossy(&text(&stderr)),
+                self.dump()
+            );
+        };
+        Run::of(
+            Output {
+                status,
+                stdout: text(&stdout),
+                stderr: text(&stderr),
+            },
+            &[args],
+            self,
+        )
+    }
+
     /// The host's own channel server over one run's channel: the generic
     /// `host-channel-server` double, which speaks the bus's serving contract and
     /// nothing of this crate's — a JSON frame on its stdin is a surface of
@@ -2798,7 +3045,7 @@ impl World {
         if let Some(id) = id {
             metadata.insert("onepipeline.id".into(), json!(id));
         }
-        let mut edges: Vec<String> = Vec::new();
+        let mut edges: Vec<Value> = Vec::new();
         let mut crossdag: Vec<String> = Vec::new();
         for dep in node
             .get("deps")
@@ -2817,19 +3064,34 @@ impl World {
                 // project needs, and the one thing a plan document could not
                 // say.
                 Some(elsewhere) => match elsewhere.strip_prefix("store:") {
-                    Some(native) => edges.push(native.to_owned()),
+                    Some(native) => edges.push(json!(native)),
                     // By the far node's own file, which is not its node id: what
                     // an edge names is the store's id, and what the plan reads
                     // back off the far task is `onepipeline.id`. A dependency on
                     // a node this plan does not hold names it directly, which is
                     // what the dangling-reference journey states.
-                    None => edges.push(format!(
+                    None => edges.push(json!(format!(
                         "{project}/{}",
                         named.get(elsewhere).copied().unwrap_or(elsewhere)
-                    )),
+                    ))),
                 },
                 None => panic!("a dependency is a string"),
             }
+        }
+        // An edge into another tracker, named opaquely — `{"designator", "id"}` — as a copy
+        // onto a public destination records one: the store resolves the designator to
+        // whichever configured source that tracker is.
+        for opaque in node
+            .get("opaque_deps")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+        {
+            edges.push(json!({
+                "designator": opaque["designator"],
+                "id": opaque["id"],
+                "kind": "blocks",
+            }));
         }
         if !crossdag.is_empty() {
             metadata.insert("onepipeline.deps".into(), json!(crossdag));
@@ -2871,7 +3133,13 @@ impl World {
         for (key, value) in node {
             if matches!(
                 key.as_str(),
-                "id" | "title" | "task" | "deps" | "repo" | "delivers" | "classification"
+                "id" | "title"
+                    | "task"
+                    | "deps"
+                    | "opaque_deps"
+                    | "repo"
+                    | "delivers"
+                    | "classification"
             ) {
                 continue;
             }
@@ -2972,6 +3240,32 @@ impl World {
     /// [`through_scripted_source`](World::through_scripted_source) reaches it.
     pub fn store_keys_tasks(&self, key: &str) {
         self.script(&format!("{SCRIPTED_KEY}.task.key"), key);
+    }
+
+    /// The same, for every write of the project metadata `key` alone: writes of any other key
+    /// still reach the real store.
+    pub fn store_refuses_key(&self, key: &str, error: &Value) {
+        self.script(
+            &format!(
+                "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+                onepipeline_testfakes::segment(key)
+            ),
+            &error.to_string(),
+        );
+    }
+
+    /// The scripted store writes the project metadata `key` to the real store again.
+    pub fn store_stops_refusing_key(&self, key: &str) {
+        self.unscript(&format!(
+            "{SCRIPTED_KEY}.set_project_metadata#{}.refuse",
+            onepipeline_testfakes::segment(key)
+        ));
+    }
+
+    /// Have the scripted store answer every project read without the project metadata `key`,
+    /// which it still holds: a board that reads back without what was written to it.
+    pub fn store_reads_without_key(&self, key: &str) {
+        self.script(&format!("{SCRIPTED_KEY}.get_project.without"), key);
     }
 
     /// The same, for the next call of `method` alone.
@@ -3336,6 +3630,11 @@ impl World {
         })
     }
 
+    /// Every store operation `run` has asked for, as its `store-operations.jsonl` counted them.
+    pub fn store_operations(&self, run: &str) -> Vec<Value> {
+        read_jsonl(&self.runs.join(run).join("store-operations.jsonl"))
+    }
+
     /// One run's merged event store.
     pub fn journal(&self, run: &str) -> Vec<Value> {
         read_jsonl(&self.runs.join(run).join("events.jsonl"))
@@ -3517,20 +3816,129 @@ impl Rendezvous {
         let (stream, _) = self.listener.accept().expect("a dispatch connects");
         Arrival::of(stream)
     }
+
+    /// Let every later arrival go as it comes, for the rest of the test: a failpoint
+    /// met again past the ordering a journey drives — another identity, another
+    /// sweep, another run — holds nothing.
+    pub fn release_the_rest(self) {
+        std::thread::spawn(move || loop {
+            self.arrived().release();
+        });
+    }
+
+    /// [`arrived`](Self::arrived), within [`ONE_STEP`]: for a journey whose every wait has to
+    /// end, a process that never reaches the failpoint, or reaches it and never finishes
+    /// announcing itself, fails naming `what` it was waiting for, what it announced, and
+    /// `seen` — what the journey can say of where things stood — rather than blocking
+    /// until the runner's timeout names only the test.
+    pub fn arrived_within(&self, what: &str, seen: impl Fn() -> String) -> Arrival {
+        self.arrived_by(what, ONE_STEP, seen)
+    }
+
+    /// [`arrived_within`](Self::arrived_within), saying where things stood as
+    /// [`World::until`] does: by what the runs root held.
+    pub fn arrived_within_a_step(&self, world: &World, what: &str) -> Arrival {
+        self.arrived_within(what, || format!("the runs root held:\n{}", world.dump()))
+    }
+
+    /// [`arrived_within`](Self::arrived_within) with the step's deadline given: the
+    /// connection and the announcement after it share one.
+    fn arrived_by(
+        &self,
+        what: &str,
+        patience: std::time::Duration,
+        seen: impl Fn() -> String,
+    ) -> Arrival {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + patience;
+        self.listener
+            .set_nonblocking(true)
+            .expect("the listener can be polled");
+        let mut met = None;
+        let arrived = waited_for(
+            patience,
+            std::time::Duration::from_millis(20),
+            || match self.listener.accept() {
+                Ok((stream, _)) => {
+                    met = Some(stream);
+                    true
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(error) => panic!("waiting for {what}, the rendezvous failed: {error}"),
+            },
+        );
+        self.listener
+            .set_nonblocking(false)
+            .expect("the listener blocks again");
+        let Some(mut stream) = met.filter(|_| arrived) else {
+            panic!(
+                "timed out after {patience:?} waiting for {what}; {}",
+                seen()
+            );
+        };
+        // Windows hands an accepted socket the listener's mode.
+        stream
+            .set_nonblocking(false)
+            .expect("the arrival's connection blocks");
+        // The pid line, a byte at a time so what came of it is kept to report.
+        let mut announced = Vec::new();
+        let stalled = |announced: &[u8], why: &str| -> ! {
+            panic!(
+                "timed out after {patience:?} waiting for {what}: the process connected and \
+                 announced {:?} of its pid line, then {why}; {}",
+                String::from_utf8_lossy(announced),
+                seen()
+            )
+        };
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                stalled(&announced, "sent nothing more");
+            }
+            stream
+                .set_read_timeout(Some(left))
+                .expect("the connection takes a read timeout");
+            let mut byte = [0];
+            match stream.read(&mut byte) {
+                Ok(0) => stalled(&announced, "closed the connection"),
+                Ok(_) if byte[0] == b'\n' => break,
+                Ok(_) => announced.push(byte[0]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => stalled(&announced, &format!("failed: {error}")),
+            }
+        }
+        stream
+            .set_read_timeout(None)
+            .expect("the connection blocks again");
+        let announced = String::from_utf8_lossy(&announced).into_owned();
+        let pid = announced.trim().parse::<u32>().unwrap_or_else(|_| {
+            panic!("waiting for {what}, a process announced {announced:?} where a pid was due")
+        });
+        Arrival { pid, stream }
+    }
 }
 
 impl Arrival {
     fn of(stream: std::net::TcpStream) -> Self {
+        Self::announced(stream).expect("the dispatch announces itself")
+    }
+
+    /// The arrival on `stream` once it has announced its pid, or the read that failed.
+    fn announced(stream: std::net::TcpStream) -> std::io::Result<Self> {
         use std::io::BufRead;
         let mut announced = String::new();
-        std::io::BufReader::new(stream.try_clone().expect("the connection is shared"))
-            .read_line(&mut announced)
-            .expect("the dispatch announces itself");
+        std::io::BufReader::new(stream.try_clone()?).read_line(&mut announced)?;
         let pid = announced
             .trim()
             .parse::<u32>()
             .unwrap_or_else(|_| panic!("a dispatch announced {announced:?} where a pid was due"));
-        Arrival { pid, stream }
+        Ok(Arrival { pid, stream })
     }
 }
 
@@ -3545,6 +3953,85 @@ impl Arrival {
         let _ = self.stream.write_all(b"go");
     }
 }
+
+/// The bounded arrival ends on a peer that announces itself, and fails — naming
+/// the step and the part of the pid line it had — on one that connects and
+/// never finishes announcing, closes part-way through it, or never connects at
+/// all, rather than hanging.
+// llmlint: ignore-block[tests_mirror_real_usage] this holds the suite's own scaffolding,
+// not a journey: no failpoint in the binary can be paused between its connect and its
+// announcement, so the peer here is a socket this test drives byte by byte. The journeys
+// built on it are the `dispatch` and `note` window journeys, `retirement.rs`'s two
+// late-named-branch journeys and `maintenance.rs`'s closing-driver journey, and those
+// drive the binary.
+#[test]
+fn a_bounded_arrival_ends_on_an_announcement_and_fails_on_a_stalled_one() {
+    use std::io::{Read, Write};
+    let world = World::new("rendezvous-bounded");
+    let patience = std::time::Duration::from_secs(1);
+    let held = || format!("the runs root held:\n{}", world.dump());
+    let failure = |waited: Box<dyn FnOnce() + '_>| -> String {
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(waited))
+            .expect_err("the wait returned where it was due to fail");
+        panicked
+            .downcast_ref::<String>()
+            .cloned()
+            .unwrap_or_else(|| panic!("the wait failed with no message"))
+    };
+
+    let meeting = Rendezvous::failpoint();
+    let mut peer = std::net::TcpStream::connect(meeting.address()).expect("the peer connects");
+    peer.write_all(b"4242\n")
+        .expect("the peer announces itself");
+    let arrival = meeting.arrived_by("the peer to announce itself", patience, held);
+    assert_eq!(arrival.pid, 4242);
+    arrival.release();
+    let mut released = [0; 2];
+    peer.read_exact(&mut released)
+        .expect("the peer is released");
+    assert_eq!(&released, b"go");
+
+    let stalled = Rendezvous::failpoint();
+    let mut half = std::net::TcpStream::connect(stalled.address()).expect("the peer connects");
+    half.write_all(b"42")
+        .expect("the peer announces part of itself");
+    let said = failure(Box::new(|| {
+        stalled.arrived_by("the stalled peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the stalled peer to announce itself")
+            && said.contains("announced \"42\" of its pid line, then sent nothing more")
+            && said.contains("the runs root held"),
+        "the stalled announcement's failure does not name the step, its part, and the run: {said}"
+    );
+    drop(half);
+
+    let truncated = Rendezvous::failpoint();
+    let mut cut = std::net::TcpStream::connect(truncated.address()).expect("the peer connects");
+    cut.write_all(b"98")
+        .expect("the peer announces part of itself");
+    drop(cut);
+    let said = failure(Box::new(|| {
+        truncated.arrived_by("the truncated peer to announce itself", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for the truncated peer to announce itself")
+            && said.contains("announced \"98\" of its pid line, then closed the connection")
+            && said.contains("the runs root held"),
+        "the truncated announcement's failure does not name the step, its part, and the run: {said}"
+    );
+
+    let absent = Rendezvous::failpoint();
+    let said = failure(Box::new(|| {
+        absent.arrived_by("a peer that never connects", patience, held);
+    }));
+    assert!(
+        said.contains("waiting for a peer that never connects")
+            && said.contains("the runs root held"),
+        "the missing arrival's failure does not name the step and the run: {said}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A dispatch that met the test is inside its hold until the test lets it go,
 /// and the letting-go is what settles the run.
@@ -3582,6 +4069,18 @@ fn a_dispatch_that_met_the_test_holds_until_it_is_released() {
         world.run_file("met", "result.json").is_file()
     });
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Whether a node's projected planner context carries `text` as its **latest**
+/// carried note.
+///
+/// Notes carried to one node accumulate in carry order, one paragraph each, so
+/// the next dispatch is composed with every one of them; the latest is the
+/// context's last entry, and a context holding only one note is exactly it.
+pub fn carries_latest(context: &Value, text: &str) -> bool {
+    context
+        .as_str()
+        .is_some_and(|context| context == text || context.ends_with(&format!("\n\n{text}")))
+}
 
 /// Wait for a child this journey spawned with piped streams to end, draining
 /// them as it goes.
@@ -4907,10 +5406,11 @@ impl World {
 }
 
 /// Whether one recorded `gh` invocation is `onevcs`'s probe of a repository's
-/// visibility — `gh api repos/<owner>/<name>` and nothing more.
+/// visibility — `gh api repos/<owner>/<name> --include` and nothing more.
 ///
 /// `onevcs` 0.44.0 on asks it before every write that could reach a public
-/// destination, to decide what the public boundary screens. It reads the
+/// destination, to decide what the public boundary screens, and 0.56.0 on asks it
+/// with `--include`, so a host that did not answer is told from one that refused. It reads the
 /// repository's metadata and nothing of a change request, a merge path or a ref,
 /// so a journey counting what a run asked the host about its *work* leaves it out.
 pub fn is_visibility_probe(call: &Value) -> bool {
@@ -4918,7 +5418,7 @@ pub fn is_visibility_probe(call: &Value) -> bool {
         .as_array()
         .map(|args| args.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    matches!(args.as_slice(), ["api", path]
+    matches!(args.as_slice(), ["api", path, "--include"]
         if path.split('/').count() == 3 && path.starts_with("repos/"))
 }
 
@@ -5429,7 +5929,9 @@ fn title_of(path: &Path) -> Result<String, String> {
 /// journey about a key the mapping refuses has to be able to say — and one that
 /// names a plain field means that field.
 fn reserved(field: &str) -> String {
-    match field.starts_with("onepipeline.") {
+    // The store's own keys are written as the store spells them: a journey stating that a task
+    // is a copy says so under `onetaskgraph.`.
+    match field.starts_with("onepipeline.") || field.starts_with("onetaskgraph.") {
         true => field.to_owned(),
         false => format!("onepipeline.{field}"),
     }
@@ -5669,9 +6171,10 @@ fn start_stamp(pid: u32) -> Option<String> {
 }
 
 /// The other Unix hosts have no procfs, and the engine stamps `ps`'s `lstart`,
-/// read in UTC under the C locale so the spelling does not follow the reader's.
+/// read in UTC under the C locale so the spelling does not follow the reader's —
+/// on macOS followed by ` +0.` and the kernel's microseconds of that start.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn start_stamp(pid: u32) -> Option<String> {
+pub(crate) fn start_stamp(pid: u32) -> Option<String> {
     let listed = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("TZ", "UTC")
@@ -5680,7 +6183,29 @@ fn start_stamp(pid: u32) -> Option<String> {
         .output()
         .expect("this host answers about its processes");
     let answer = String::from_utf8_lossy(&listed.stdout).trim().to_string();
-    (listed.status.success() && !answer.is_empty()).then_some(answer)
+    let second = (listed.status.success() && !answer.is_empty()).then_some(answer)?;
+    #[cfg(target_os = "macos")]
+    let second = format!("{second} +0.{:06}", start_micros(pid)?);
+    Some(second)
+}
+
+/// The microseconds of `pid`'s start, as macOS's `proc_pidinfo` gives them.
+#[cfg(target_os = "macos")]
+fn start_micros(pid: u32) -> Option<u64> {
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is writable storage of the flavor's struct, `size` its size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::c_int::try_from(pid).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: a whole answer sets every field.
+    (written == size).then(|| unsafe { info.assume_init() }.pbi_start_tvusec)
 }
 
 /// Windows stamps the process's creation `FILETIME` as `high:low`.
@@ -6192,7 +6717,8 @@ impl HeldPublication {
     }
 
     /// Whether the merge path has started holding the push — git is running the
-    /// hook, so the push is under way and nothing interrupts it from here.
+    /// hook, so the push is under way. Held at the repository's `pre-push`, a
+    /// caller's cancellation still stops it (`onevcs` 0.56 on).
     ///
     /// Not the same moment as the publication's last record before the push:
     /// `onevcs` asks its caller's cancellation between the two, so a journey
@@ -7116,7 +7642,7 @@ fn dump_into(out: &mut String, dir: &Path, indent: &str) {
 /// may be an append still in flight and is skipped; a torn line with another
 /// line after it cannot be, so it is a record the writer lost, and reading past
 /// it would let a test assert against a gap and call it a pass.
-fn read_jsonl(path: &Path) -> Vec<Value> {
+pub(crate) fn read_jsonl(path: &Path) -> Vec<Value> {
     let text = profile::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<&str> = text
         .lines()
@@ -7185,6 +7711,9 @@ pub struct Counts {
     pub statuses: u64,
     pub publications: u64,
     pub upstream_reads: u64,
+    /// Rounds of upstream reads begun before the upstream interval since the
+    /// round before them had passed.
+    pub early_upstream_reads: u64,
     pub release_asks: u64,
     /// Pool-maintenance sweeps the driver started.
     pub maintenance_sweeps: u64,
@@ -7198,6 +7727,9 @@ pub struct Counts {
     pub records_folded: u64,
     /// Reads of the project's driver claim the driver asked its plan store for.
     pub claim_reads: u64,
+    /// Claims of the run's command queue the driver made, each of which takes the
+    /// queue's lock and reads its log from the cursor's offset.
+    pub queue_claims: u64,
 }
 
 impl Counts {
@@ -7208,11 +7740,13 @@ impl Counts {
             statuses: self.statuses - before.statuses,
             publications: self.publications - before.publications,
             upstream_reads: self.upstream_reads - before.upstream_reads,
+            early_upstream_reads: self.early_upstream_reads - before.early_upstream_reads,
             release_asks: self.release_asks - before.release_asks,
             maintenance_sweeps: self.maintenance_sweeps - before.maintenance_sweeps,
             store_bytes: self.store_bytes - before.store_bytes,
             records_folded: self.records_folded - before.records_folded,
             claim_reads: self.claim_reads - before.claim_reads,
+            queue_claims: self.queue_claims - before.queue_claims,
         }
     }
 }
@@ -7242,11 +7776,13 @@ pub fn counts(world: &World, run: &str) -> Counts {
         statuses: count("statuses"),
         publications: count("publications"),
         upstream_reads: count("upstream_reads"),
+        early_upstream_reads: count("early_upstream_reads"),
         release_asks: count("release_asks"),
         maintenance_sweeps: count("maintenance_sweeps"),
         store_bytes: count("store_bytes"),
         claim_reads: count("claim_reads"),
         records_folded: count("records_folded"),
+        queue_claims: count("queue_claims"),
     }
 }
 
@@ -7295,6 +7831,34 @@ pub fn lifecycle(id: &str, deps: &[&str]) -> Value {
         "task": format!("## What\nShip {id}.\n\n## Why\nUsers need it.\n\n## Acceptance criteria\n- {id} is published."),
         "deps": deps,
     })
+}
+
+/// Hold one node's every `node-settled` record and its `status <RUN> --json`
+/// entry to carrying **no** `awaiting`: the field is written only on a node held
+/// for a release it adopted early, and an older reader must never meet it on any
+/// other settlement.
+pub fn no_awaiting(world: &World, run: &str, node: &str) {
+    let settled = world.events_of(run, "node-settled");
+    let of_node: Vec<&Value> = settled
+        .iter()
+        .filter(|event| event["labels"]["node"] == node)
+        .collect();
+    assert!(!of_node.is_empty(), "{node} never settled in {run}");
+    for event in of_node {
+        assert!(
+            event["payload"].get("awaiting").is_none(),
+            "{node}'s settlement carries `awaiting`: {event}"
+        );
+    }
+    let reading = world.run(&["status", run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == node))
+        .unwrap_or_else(|| panic!("`status {run} --json` does not list {node}: {reading}"));
+    assert!(
+        entry.get("awaiting").is_none(),
+        "{node}'s reading carries `awaiting`: {entry}"
+    );
 }
 
 /// A plan holding these nodes.
@@ -7356,6 +7920,28 @@ fn a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain() {
 /// privilege no CI account is guaranteed to hold. What `resolved` has to get
 /// right on Windows is [`plain`]'s rule, and the test below holds that one on
 /// every platform.
+/// A world's state home leaves a held turn room to bind its control socket on
+/// this platform, at the address onejudge dials for a session name of the length
+/// a graph mints. See [`scratch_base`]: on macOS the temporary directory left
+/// none.
+#[cfg(unix)]
+#[test]
+fn a_worlds_control_socket_fits_this_platforms_address_limit() {
+    use oneharness_core::domain::control::{socket_address_within_limit, socket_path};
+    let world = World::new("control-socket");
+    let store = world.state_home().join("oneharness").join("sessions");
+    let socket = socket_path(&store, "node-scope-1760000000000-123456-worker-skill")
+        .unwrap_or_else(|too_long| {
+            panic!(
+                "no control socket fits under a world's state home: {} is past the limit",
+                too_long.path().display()
+            )
+        });
+    if let Err(too_long) = socket_address_within_limit(&socket) {
+        panic!("{} is past the limit", too_long.path().display());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_directory_reached_through_a_symlink_resolves_to_the_directory_itself() {

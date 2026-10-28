@@ -222,14 +222,26 @@ fn forward(
             return Ok(match supervision {
                 Some(supervision) => {
                     let identity = supervision.identity();
-                    report_integration(supervision.operate(
+                    let status = report_integration(supervision.operate(
                         onevcs::DirectOperation::Integrate {
                             repository: identity,
                         },
                         |handle| onevcs::integrate_in_operation(&request, handle),
-                    )?)
+                    )?);
+                    supervision.close_issues();
+                    status
                 }
-                None => report_integration(onevcs::integrate(&request)),
+                None => {
+                    let selector = identity_of(&cli.command)
+                        .map(|repository| onevcs::DirectOperation::Integrate { repository });
+                    let (integrated, landings) = unsupervised(selector, |handle| match handle {
+                        Some(handle) => onevcs::integrate_in_operation(&request, handle),
+                        None => onevcs::integrate(&request),
+                    });
+                    let status = report_integration(integrated);
+                    close_issues(&landings, |_| {});
+                    status
+                }
             });
         }
     }
@@ -255,9 +267,21 @@ fn forward(
         return Ok(match supervision {
             Some(supervision) => {
                 let selector = request.selector(supervision.identity());
-                report(supervision.operate(selector, |handle| request.land_in(handle))?)
+                let status =
+                    report(supervision.operate(selector, |handle| request.land_in(handle))?);
+                supervision.close_issues();
+                status
             }
-            None => report(request.land()),
+            None => {
+                let selector = identity_of(&cli.command).map(|identity| request.selector(identity));
+                let (landed, landings) = unsupervised(selector, |handle| match handle {
+                    Some(handle) => request.land_in(handle),
+                    None => request.land(),
+                });
+                let status = report(landed);
+                close_issues(&landings, |_| {});
+                status
+            }
         });
     }
     // A command line the verb would refuse as it stands: forwarded to it, so it is
@@ -270,6 +294,125 @@ fn forward(
         )?;
     }
     Ok(i32::from(onevcs::run(cli)))
+}
+
+/// The identity a landing's subjects resolve to, where they resolve: what an unsupervised
+/// landing prepares its own operation in.
+fn identity_of(command: &onevcs::cli::Command) -> Option<String> {
+    subjects_of(command)
+        .ok()?
+        .into_iter()
+        .next()
+        .map(|subject| subject.identity)
+}
+
+/// Make an unsupervised landing inside an operation of its own, so the landings it records
+/// can be read back for the issues they close — and, where none can be prepared, make it as
+/// it always was, reading none.
+fn unsupervised<T>(
+    selector: Option<onevcs::DirectOperation>,
+    call: impl FnOnce(Option<&onevcs::OperationHandle>) -> T,
+) -> (T, Vec<crate::closures::Landing>) {
+    let Some(handle) =
+        selector.and_then(|selector| onevcs::OperationHandle::prepare(&selector).ok())
+    // llmlint: ignore-block[changed_behavior_has_e2e] reached only where the subjects resolve to
+    // no identity or `onevcs` will not prepare an operation under its own state root — the
+    // first is the verb's own refusal, which `onevcs` then makes in its words, and the second a
+    // state root this process cannot write, where the landing itself fails before it lands.
+    // Either way nothing landed, so there is no issue to close.
+    else {
+        return (call(None), Vec::new());
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let out = call(Some(&handle));
+    let mut landings = Vec::new();
+    let read = onevcs::OperationEvents::open(&handle).and_then(|mut reader| loop {
+        let batch = reader.read()?;
+        if batch.is_empty() {
+            return Ok(());
+        }
+        for envelope in &batch {
+            gather(&mut landings, envelope);
+        }
+    });
+    // llmlint: ignore-block[changed_behavior_has_e2e] the stream read is one this process's own
+    // operation wrote an instant before, under the state root it prepared that operation in;
+    // failing to read it back is host I/O failing mid-command, which no journey through either
+    // CLI can stage. What it costs is said, and the landing stands.
+    if let Err(error) = read {
+        eprintln!(
+            "onepipeline: the landing's own operation record could not be read back ({error}), \
+             so the issues it closed were not handed to the store"
+        );
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    (out, landings)
+}
+
+/// Keep the landing one operation record reports, once per landing commit.
+fn gather(landings: &mut Vec<crate::closures::Landing>, envelope: &onevcs::Envelope) {
+    if let Some(landing) = crate::closures::Landing::of_operation(envelope) {
+        if !landings
+            .iter()
+            .any(|held| held.commit() == landing.commit())
+        {
+            landings.push(landing);
+        }
+    }
+}
+
+/// Hand the store the issues each of `landings` closed — one `complete_issues` call per
+/// landing, through the store configuration the current directory declares — printing what it
+/// answered and handing each record to `recorded`. Entry 132 of
+/// `docs/contract-divergences.md`.
+///
+/// Best effort: the landing has happened whatever the store answers, so nothing here changes
+/// the verb's exit status. A directory whose configuration declares no source is asked
+/// nothing, and said so.
+fn close_issues(
+    landings: &[crate::closures::Landing],
+    mut recorded: impl FnMut(&crate::payload::LandingClosures),
+) {
+    if landings.is_empty() {
+        return;
+    }
+    let dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        // llmlint: ignore[changed_behavior_has_e2e] a working directory removed under the
+        // running verb is host state no journey arranges; it is said, and nothing is asked.
+        Err(error) => {
+            eprintln!(
+                "onepipeline: the current directory cannot be read ({error}), so no store \
+                 configuration was found and the issues the landing closed were not handed \
+                 to the store"
+            );
+            return;
+        }
+    };
+    let store = crate::taskgraph::Store::at(dir);
+    for landing in landings {
+        let within = std::time::Duration::from_secs(
+            crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS
+                .get()
+                .saturating_mul(u64::try_from(landing.issue_count()).unwrap_or(u64::MAX))
+                .max(crate::cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS.get()),
+        );
+        let record = match crate::closures::complete(&store, landing, within) {
+            crate::closures::Answer::Unconfigured => {
+                eprintln!(
+                    "onepipeline: no store configuration here declares a source, so no closure \
+                     request was made for {}, which the landing at {} closes",
+                    landing.closes().join(", "),
+                    landing.commit()
+                );
+                return;
+            }
+            crate::closures::Answer::Finished(record)
+            | crate::closures::Answer::Transient(record) => record,
+        };
+        eprintln!("{}", crate::closures::said(&record));
+        recorded(&record);
+    }
 }
 
 /// Render what an integration train answered, exactly as `onevcs integrate`
@@ -1506,6 +1649,33 @@ impl Supervision {
         Ok(out)
     }
 
+    /// Hand the store the issues the landings this operation relayed closed, journalling each
+    /// call's `landing-closures` record beside the landing's own progress.
+    ///
+    /// Journalled through the landing's own [`Relay::transition`], so the record reaches the
+    /// landing's journal and every associated run's exactly as each of its transitions does.
+    fn close_issues(&mut self) {
+        let landings = std::mem::take(&mut lock_relay(&self.relay).landings);
+        let relay = Arc::clone(&self.relay);
+        close_issues(&landings, |record| {
+            let journalled = crate::journal::object(record).and_then(|payload| {
+                lock_relay(&relay).transition(PipelineKind::LandingClosures, payload)
+            });
+            // llmlint: ignore[changed_behavior_has_e2e] the fan-out into associated runs'
+            // journals is `Relay::transition`'s, unchanged, and driven by
+            // `manager_landings::a_landing_from_a_live_run_reaches_that_runs_observer`; a
+            // journal refusing an append is the failpoint `Supervision::register` documents no
+            // journey can stage.
+            if let Err(error) = journalled {
+                eprintln!(
+                    "onepipeline: the record of the closures of the landing at {} could not be \
+                     journalled: {error}",
+                    record.commit
+                );
+            }
+        });
+    }
+
     /// Record how the landing ended and end its flow where it holds one,
     /// answering what the forwarded verb answered.
     fn settle(mut self, forwarded: Result<i32>) -> Result<i32> {
@@ -1622,26 +1792,69 @@ fn pump(
     stop: &std::sync::atomic::AtomicBool,
 ) -> std::result::Result<(), String> {
     let mut reader = onevcs::OperationEvents::open(handle).map_err(|e| e.to_string())?;
+    drain(
+        || reader.read().map_err(|e| e.to_string()),
+        |envelope| lock_relay(relay).vcs(envelope).map_err(|e| e.to_string()),
+        stop,
+        RELAY_POLL,
+    )
+}
+
+/// Hand every record `read` returns to `deliver` until `stop` is set and a read
+/// finds nothing more.
+///
+/// A failed read is asked again, up to [`RELAY_READ_ATTEMPTS`] times in a row,
+/// before it ends the relay: on Windows the operation's writer locks the range
+/// it appends, so a read meeting that append fails with a lock violation (os
+/// error 33) that its next read does not, and `OperationEvents::read` keeps its
+/// place when it fails, so the retry reads what the failed one would have.
+fn drain(
+    mut read: impl FnMut() -> std::result::Result<Vec<onevcs::Envelope>, String>,
+    mut deliver: impl FnMut(&onevcs::Envelope) -> std::result::Result<(), String>,
+    stop: &std::sync::atomic::AtomicBool,
+    poll: std::time::Duration,
+) -> std::result::Result<(), String> {
+    let mut failed = 0;
     loop {
         let stopping = stop.load(std::sync::atomic::Ordering::SeqCst);
-        let batch = reader.read().map_err(|e| e.to_string())?;
+        let batch = match read() {
+            // llmlint: ignore[changed_behavior_has_e2e] the budget's reset needs more failed
+            // reads than RELAY_READ_ATTEMPTS, split by successful ones, which no journey can
+            // stage on a schedule: `a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now`
+            // drives the retry through the binary, and `budget_resets_at_every_read_that_succeeds`
+            // below holds the reset exactly.
+            Ok(batch) => {
+                failed = 0;
+                batch
+            }
+            Err(why) => {
+                failed += 1;
+                if failed >= RELAY_READ_ATTEMPTS {
+                    return Err(why);
+                }
+                std::thread::sleep(poll);
+                continue;
+            }
+        };
         let drained = batch.is_empty();
-        for envelope in batch {
-            lock_relay(relay)
-                .vcs(&envelope)
-                .map_err(|e| e.to_string())?;
+        for envelope in &batch {
+            deliver(envelope)?;
         }
         if stopping && drained {
             return Ok(());
         }
         if drained {
-            std::thread::sleep(RELAY_POLL);
+            std::thread::sleep(poll);
         }
     }
 }
 
 /// How often the relay asks the operation's stream for what was appended.
 const RELAY_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// How many reads of the operation's stream may fail in a row before the relay
+/// gives up: about a second at [`RELAY_POLL`], far past any one append's lock.
+const RELAY_READ_ATTEMPTS: u32 = 50;
 
 /// Where one landing's progress is written: its own journal and every
 /// associated run's, each appended through the store's locked writer and never
@@ -1655,6 +1868,8 @@ pub(crate) struct Relay {
     journal: LandingJournal,
     runs: Vec<(String, crate::journal::Journal, Seen)>,
     seen: Seen,
+    /// The landings the operation recorded whose `closes` names an issue, once each.
+    landings: Vec<crate::closures::Landing>,
 }
 
 // llmlint: ignore-end[invalid_states_unrepresentable]
@@ -1689,6 +1904,7 @@ impl Relay {
             operation_id,
             journal: LandingJournal::open(landing.journal()),
             runs,
+            landings: Vec::new(),
         })
     }
 
@@ -1716,6 +1932,7 @@ impl Relay {
     /// Relay one `onevcs` operation record, as its producer wrote it plus this
     /// landing's labels, into every journal that does not already hold it.
     fn vcs(&mut self, envelope: &onevcs::Envelope) -> Result<()> {
+        gather(&mut self.landings, envelope);
         let mut value = serde_json::to_value(envelope)
             .map_err(|e| Error::Invalid(format!("an operation event did not serialize: {e}")))?;
         let key = (envelope.stream.clone(), envelope.seq);
@@ -1989,6 +2206,86 @@ mod tests {
             .collect();
         assert_eq!(lineage_head(&superseded, "a"), "b");
         assert_eq!(lineage_head(&superseded, "c"), "c");
+    }
+
+    fn envelope(seq: u64) -> onevcs::Envelope {
+        serde_json::from_value(serde_json::json!({
+            "v": 2, "ts": "2026-10-19T00:00:00.000Z", "stream": "o", "seq": seq,
+            "source": "vcs", "kind": "merge-completed", "labels": {}, "payload": {},
+            "artifacts": [],
+        }))
+        .expect("an onevcs envelope")
+    }
+
+    /// A read that meets the writer's lock fails and the next one does not, as
+    /// git for Windows' locked append does: every record still reaches the
+    /// journal, once, in order, and the relay ends cleanly.
+    #[test]
+    fn a_read_that_fails_for_now_is_asked_again_and_loses_nothing() {
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let mut answers = vec![
+            Err("os error 33".to_owned()),
+            Ok(vec![envelope(0)]),
+            Err("os error 33".to_owned()),
+            Err("os error 33".to_owned()),
+            Ok(vec![envelope(1), envelope(2)]),
+            Ok(Vec::new()),
+        ]
+        .into_iter();
+        let mut delivered = Vec::new();
+        drain(
+            || answers.next().expect("asked past its end"),
+            |envelope| {
+                delivered.push(envelope.seq);
+                Ok(())
+            },
+            &stop,
+            std::time::Duration::ZERO,
+        )
+        .expect("the relay ends cleanly");
+        assert_eq!(delivered, [0, 1, 2]);
+    }
+
+    #[test]
+    fn budget_resets_at_every_read_that_succeeds() {
+        let stop = std::sync::atomic::AtomicBool::new(true);
+        let failing = || (1..RELAY_READ_ATTEMPTS).map(|_| Err("os error 33".to_owned()));
+        let mut answers = failing()
+            .chain([Ok(vec![envelope(0)])])
+            .chain(failing())
+            .chain([Ok(vec![envelope(1)]), Ok(Vec::new())]);
+        let mut delivered = Vec::new();
+        drain(
+            || answers.next().expect("asked past its end"),
+            |envelope| {
+                delivered.push(envelope.seq);
+                Ok(())
+            },
+            &stop,
+            std::time::Duration::ZERO,
+        )
+        .expect("no run of failures reached the budget");
+        assert_eq!(delivered, [0, 1]);
+    }
+
+    #[test]
+    fn a_read_that_keeps_failing_ends_the_relay_with_its_reason() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut asked = 0;
+        let ended = drain(
+            || {
+                asked += 1;
+                Err("event does not belong to its operation".to_owned())
+            },
+            |_| Ok(()),
+            &stop,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(
+            ended,
+            Err("event does not belong to its operation".to_owned())
+        );
+        assert_eq!(asked, RELAY_READ_ATTEMPTS);
     }
 
     fn words(args: &[&str]) -> Vec<OsString> {

@@ -52,7 +52,7 @@ function literalKeys(source, name) {
   return [...objectLiteral(source, name).matchAll(/^\s{2}"([^"]+)":/gm)].map((m) => m[1]);
 }
 
-const PLATFORMS = ["linux", "macos", "windows"];
+const PLATFORMS = ["linux", "linux-arm64", "macos", "windows"];
 
 /// One build job's plan: every file, package and target it builds and publishes.
 function plan(platform) {

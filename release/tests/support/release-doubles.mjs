@@ -360,7 +360,11 @@ export class PyPIDouble extends Double {
     if (req.method === "GET" && found) {
       const urls = [...this.files.entries()]
         .filter(([, held]) => held.version === found[1])
-        .map(([filename]) => ({ filename, url: `${this.url}/files/${filename}` }));
+        .map(([filename, { content }]) => ({
+          filename,
+          url: `${this.url}/files/${filename}`,
+          digests: { sha256: sha256(content) },
+        }));
       return urls.length ? answer(200, { urls }) : answer(404, { message: "Not Found" });
     }
     return answer(

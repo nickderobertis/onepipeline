@@ -119,8 +119,41 @@ pub enum Cause {
     Unauthenticated,
     /// The request never reached an answer from GitHub.
     Transport,
+    /// GitHub answered with a failure of its own — a 5xx, or GraphQL's "Something went
+    /// wrong while executing your query" — which says nothing about what was asked, and
+    /// may even have done it.
+    Upstream,
     /// Anything else, which is never taken to mean any of the above.
     Unrecognised,
+}
+
+impl Cause {
+    /// Whether the call failed before GitHub gave any answer about what was asked, so
+    /// asking again is the only way to learn it.
+    pub fn transient(self) -> bool {
+        matches!(self, Cause::Transport | Cause::Upstream)
+    }
+}
+
+/// How many times [`gh_read`] asks before taking a transient refusal as the answer.
+pub const READ_ATTEMPTS: u32 = 4;
+
+/// A `gh` call that only reads, asked again across a [`Cause::transient`] refusal: a read
+/// changes nothing, so a second asking cannot do what the first did twice. Anything that
+/// writes goes through [`gh_try`] once, and whoever made it reads the outcome back.
+pub fn gh_read(args: &[&str]) -> Result<String, Refusal> {
+    let mut attempt = 1;
+    loop {
+        match gh_try(args) {
+            Err(refusal) if refusal.cause.transient() && attempt < READ_ATTEMPTS => {
+                onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(
+                    u64::from(attempt),
+                ));
+                attempt += 1;
+            }
+            answered => return answered,
+        }
+    }
 }
 
 /// Classify a failed `gh` call. Outages are checked before answers, so a
@@ -150,6 +183,14 @@ pub fn classify(status: Option<i32>, stderr: &str) -> Cause {
         "context deadline exceeded",
     ]) {
         Cause::Transport
+    } else if says(&[
+        "something went wrong while executing your query",
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    ]) {
+        Cause::Upstream
     } else if says(&["could not resolve to a repository", "http 404"]) {
         Cause::NotFound
     } else if says(&["git repository is empty", "http 409"]) {
@@ -186,6 +227,9 @@ impl std::fmt::Display for Refusal {
             }
             Cause::Transport => {
                 "a transport failure before GitHub answered; rerun once it is reachable"
+            }
+            Cause::Upstream => {
+                "GitHub failed answering it, which says nothing about what was asked"
             }
             Cause::Unrecognised => "an error this smoke does not recognise",
         };

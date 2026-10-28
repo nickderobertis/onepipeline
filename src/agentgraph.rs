@@ -108,6 +108,10 @@ pub const DRIVE_VERB: &str = "drive";
 /// process goes.
 pub const AWAIT_ENDING_FLAG: &str = "--await-ending";
 
+/// The test failpoint a library graph's relay meets once it has been asked to
+/// cancel, before it hands the ask to the sibling. See [`GraphRun::stop`].
+const RELAYED_CANCEL_GATE_ENV: &str = "ONEPIPELINE_TEST_RELAYED_CANCEL_GATE";
+
 /// Where `oneagentgraph` keeps its runs.
 ///
 /// Restated rather than imported, and that is a duplicated configuration
@@ -210,7 +214,7 @@ pub const STARTUP_TIMEOUT_ENV: &str = "ONEPIPELINE_STARTUP_TIMEOUT_SECONDS";
 /// An unusable value falls back to the default rather than to zero: a `0` would
 /// make every launch time out before its graph could answer, which fails every
 /// run rather than the one the operator was configuring.
-fn startup_timeout() -> Duration {
+pub(crate) fn startup_timeout() -> Duration {
     let seconds = std::env::var(STARTUP_TIMEOUT_ENV)
         .ok()
         .and_then(|value| value.parse().ok())
@@ -403,6 +407,35 @@ pub fn graph_run_ended(recorded: &str, run: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Give a library observer's members time to cancel before its host is ended.
+/// A blocked command provider needs the graph's reaper, not just a signal to
+/// the hosting process. Executable overrides retain their process-tree teardown.
+pub(crate) fn stop_observer(recorded: &str, run: &str, patience: Duration) -> Result<bool> {
+    if recorded.trim().is_empty() || std::env::var_os(BINARY_ENV).is_some() {
+        return Ok(false);
+    }
+    let id = recorded_graph_run(recorded, run)?;
+    let state = state_dir(&process_env());
+    // A missing record belongs to another host or to a run already swept.
+    // Never manufacture a graph directory from a stale launch record.
+    if oneagentgraph::history::show(&state, id.as_str()).is_err() || graph_run_ended(recorded, run)
+    {
+        return Ok(false);
+    }
+    oneagentgraph::run::cancel(
+        &state.join(&id),
+        &id,
+        &oneagentgraph::run::CancelScope::run(),
+        oneagentgraph::run::CancelMode::Stop,
+    )
+    .map_err(|error| sibling(format!("cancel observer {id}: {error}")))?;
+    let deadline = Instant::now() + patience;
+    while !graph_run_ended(recorded, run) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(true)
+}
+
 /// Render the reserved label keys as the `k=v` pairs the CLI takes, each under
 /// [`LABEL_PREFIX`].
 ///
@@ -536,6 +569,9 @@ struct LibraryGraphRun {
     cancel: mpsc::Sender<()>,
     /// The graph run's own id, as the sibling minted it.
     run_id: GraphRunId,
+    /// The graph run's directory, which every member process it starts is
+    /// stamped with. See [`GraphRun::stop`].
+    root: PathBuf,
     exited: Arc<AtomicBool>,
 }
 
@@ -1757,6 +1793,7 @@ impl GraphRun {
         let running = oneagentgraph::run::start(&request, &run_env)
             .map_err(|error| sibling(error.to_string()))?;
         let run_id = running.started().run_id.clone();
+        let root = request.state_dir.join(&run_id);
         // Where the sibling keeps the record the relay below holds for. See
         // [`hold_until_ending_recorded`].
         let recorded_under = request.state_dir.clone();
@@ -1772,6 +1809,12 @@ impl GraphRun {
                 let mut graph_settled = None;
                 loop {
                     if cancel_rx.try_recv().is_ok() {
+                        // Test failpoint only, and nothing at all where its
+                        // variable is unset: a journey holds the relay here to
+                        // delay its cancel past a caller's patience.
+                        if let Err(error) = crate::ordering::meet(RELAYED_CANCEL_GATE_ENV) {
+                            eprintln!("onepipeline: {error}");
+                        }
                         let _ = running.cancel();
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
@@ -1828,6 +1871,7 @@ impl GraphRun {
                 settled: settled_rx,
                 cancel: cancel_tx,
                 run_id,
+                root,
                 exited,
             }),
         })
@@ -1948,6 +1992,55 @@ impl GraphRun {
                 // says how the run actually ended.
                 let _ = crate::sys::stop(run.pid(), crate::sys::Stop::Now);
             }
+        }
+    }
+
+    /// Stop the graph and end every process it started before returning —
+    /// answering whether the graph itself also ended within `patience`.
+    ///
+    /// What a caller about to exit needs instead of a [cancel](Self::cancel)
+    /// alone. The library backend's cancel is handed to a relay thread, so a
+    /// process that exits on it can end before the sibling has reaped a thing,
+    /// leaving a command provider running under init. So the graph's stop signal
+    /// is written here, on the caller's thread; the graph is given `patience` to
+    /// end and record its ending; and then the sibling's reaper is run against
+    /// the graph's directory, whose contract is that nothing stamped for it is
+    /// still running when it returns.
+    ///
+    /// Every process that reap ends is one the sibling stamped with this graph's
+    /// directory as it started it, signalled only after its pid and kernel start
+    /// token are re-checked: nothing is matched by name, and a run beside this
+    /// one, in a directory of its own, is never in reach. The stamp is read off
+    /// each process rather than off the directory, so a graph whose directory is
+    /// gone still has its processes ended.
+    pub fn stop(&mut self, patience: Duration) -> bool {
+        self.cancel();
+        let root = self.root();
+        if let (Some(root), Some(id)) = (&root, self.run_id()) {
+            if let Err(error) = oneagentgraph::run::cancel(
+                root,
+                id,
+                &oneagentgraph::run::CancelScope::run(),
+                oneagentgraph::run::CancelMode::Stop,
+            ) {
+                eprintln!("onepipeline: cancel observer {id}: {error}; ending its processes");
+            }
+        }
+        let deadline = Instant::now() + patience;
+        while !self.has_exited() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if let Some(root) = &root {
+            oneagentgraph::scratch::reap(root);
+        }
+        self.has_exited()
+    }
+
+    /// The directory the sibling keeps this graph run in, where it announced one.
+    fn root(&self) -> Option<PathBuf> {
+        match &self.backend {
+            GraphBackend::Library(run) => Some(run.root.clone()),
+            GraphBackend::Process(run) => run.run_id().map(|id| state_dir(&process_env()).join(id)),
         }
     }
 }
@@ -2203,6 +2296,43 @@ impl TurnAddress {
     }
 }
 
+/// How an address is written where a checkpoint keeps one: its two parts, by name.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WrittenAddress {
+    run: String,
+    member: String,
+}
+
+impl serde::Serialize for TurnAddress {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        WrittenAddress {
+            run: self.run.clone(),
+            member: self.member.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+/// Read back through [`TurnAddress::of`], so a written address holds the same
+/// invariant one read off a relayed record does.
+impl<'de> serde::Deserialize<'de> for TurnAddress {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let written = WrittenAddress::deserialize(deserializer)?;
+        Self::of(&written.run, &written.member).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "run '{}' and member '{}' are no turn address",
+                written.run, written.member
+            ))
+        })
+    }
+}
+
 /// What one `oneagentgraph interrupt` answered.
 ///
 /// The three outcomes are not interchangeable, which is the whole reason that
@@ -2329,13 +2459,16 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
     }
 }
 
-/// Hand one note to the conversation a member is having, and answer what became
-/// of it.
+/// Offer one note to the conversation a member is having, and hand back the offer
+/// its sender waits on.
 ///
 /// The whole routing is `oneagentgraph`'s and `onejudge`'s: which side of a
-/// two-party member is live, what a live turn does with a note, and how the other
-/// party receives it with that party's response are all decided there. This
-/// composes [`oneagentgraph::control::note`] and hands back what it answered.
+/// two-party member is live, whether that turn is interrupted or reached at its
+/// end, and how the other party receives the note with that party's response are
+/// all decided there. This composes [`oneagentgraph::control::offer_note`]: what
+/// comes back is either the admitted note's [`NoteOffer`] — the note is then in
+/// the conversation's inbox, untaken — or the conversation's reason it never
+/// will be.
 ///
 /// It is a **library** entry point with no verb behind it, which is the one place
 /// [`BINARY_ENV`] cannot be honoured: the sibling publishes this seam as a call and
@@ -2343,13 +2476,15 @@ pub fn interrupt(address: &TurnAddress, input: &str) -> Interrupt {
 /// told that rather than being quietly served by a different mechanism. A note is
 /// never half-delivered on a fall-back nobody asked for.
 ///
+/// [`NoteOffer`]: oneagentgraph::note::NoteOffer
+///
 /// # Errors
 ///
 /// [`Undelivered`], in the conversation's own words, for a note it will never read.
-pub fn note(
+pub fn offer_note(
     address: &TurnAddress,
     note: &oneagentgraph::note::Note,
-) -> std::result::Result<oneagentgraph::note::Accepted, oneagentgraph::note::Undelivered> {
+) -> std::result::Result<oneagentgraph::note::NoteOffer, oneagentgraph::note::Undelivered> {
     if let Some(named) = std::env::var_os(BINARY_ENV) {
         return Err(oneagentgraph::note::Undelivered::NoConversation {
             reason: format!(
@@ -2379,15 +2514,15 @@ pub fn note(
             })
         }
     };
-    match oneagentgraph::control::note(
+    match oneagentgraph::control::offer_note(
         &state_dir(&env),
         &run_id,
         &member,
         note,
         &oneharness_bin(&env),
     ) {
-        Ok(oneagentgraph::control::NoteDelivery::Accepted(accepted)) => Ok(accepted),
-        Ok(oneagentgraph::control::NoteDelivery::Undelivered(undelivered)) => Err(undelivered),
+        Ok(oneagentgraph::note::NoteOffered::Admitted(offer)) => Ok(offer),
+        Ok(oneagentgraph::note::NoteOffered::Undelivered(undelivered)) => Err(undelivered),
         // A run the sibling cannot find, or a member it does not have. Not a
         // disposition of the conversation — there is none — so it is reported as
         // the channel nothing ever read, which is what it is.
@@ -2433,6 +2568,11 @@ fn published(
         input_bytes,
         reason,
         truncated: false,
+        // An interrupt offers no note, so there is no offer to name and no
+        // acceptance to report.
+        offer: None,
+        accepted: None,
+        party: None,
     };
     emitter.emit(
         oneagentgraph::event::EventKind::TurnInterrupted,
@@ -2597,6 +2737,34 @@ pub fn health() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A written address reads back only as one [`TurnAddress::of`] accepts.** What
+    /// a checkpoint keeps of a node's last turn round-trips, and one holding a member
+    /// name that would name a path outside the run, or a blank run, is refused, so a
+    /// checkpoint carrying it is rebuilt rather than addressing a note there.
+    #[test]
+    fn a_written_turn_address_reads_back_only_as_one_the_check_accepts() {
+        let address = TurnAddress::of("graph-run-1", "worker").expect("an address");
+        let written = serde_json::to_value(&address).expect("an address writes");
+        assert_eq!(
+            written,
+            serde_json::json!({"run": "graph-run-1", "member": "worker"})
+        );
+        assert_eq!(
+            serde_json::from_value::<TurnAddress>(written).expect("it reads back"),
+            address
+        );
+        for refused in [
+            serde_json::json!({"run": "graph-run-1", "member": "../outside"}),
+            serde_json::json!({"run": "  ", "member": "worker"}),
+            serde_json::json!({"run": "graph-run-1", "member": "worker", "extra": 1}),
+        ] {
+            assert!(
+                serde_json::from_value::<TurnAddress>(refused.clone()).is_err(),
+                "{refused} read as an address"
+            );
+        }
+    }
 
     /// The spelling `record_by_process` sends is the one the linked sibling's
     /// executable parses as `history show RUN`.
@@ -3677,6 +3845,92 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A turn record carrying a `transcript` reference is journalled byte for
+    /// byte as its producer wrote it — whichever path relayed it, and however
+    /// long a text beside the reference is: the ingest re-bound is for records
+    /// still carrying a copy, and a reference record carries none.
+    #[test]
+    fn a_relayed_reference_record_is_journalled_byte_for_byte_as_received() {
+        let reference: oneagentgraph::event::ActivityTranscript =
+            serde_json::from_value(serde_json::json!({
+                "history_dir": "/state/oneharness/history",
+                "history_project": "home-operator-worktree",
+                "history_session": "node-scope-1-worker-skill-20261023T000000Z-1",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+                "index": 3,
+                "tool_call_id": "toolu_3",
+            }))
+            .expect("the sibling's reference shape");
+        let activity = oneagentgraph::event::TurnActivity {
+            transcript: Some(reference),
+            kind: "tool_call".into(),
+            // Past the payload bound: a copy record's text this long is cut at
+            // ingest, and a reference record's is not.
+            name: Some(format!(
+                "mcp__{}",
+                "x".repeat(crate::event::MAX_PAYLOAD_TEXT_BYTES)
+            )),
+            detail: None,
+            truncated: false,
+            output: None,
+            output_truncated: false,
+            tool_call_id: Some("toolu_3".into()),
+            index: 3,
+        };
+        let serde_json::Value::Object(payload) =
+            serde_json::to_value(&activity).expect("the sibling's payload serialises")
+        else {
+            panic!("a turn activity serialises as an object");
+        };
+        let produced = oneagentgraph::event::Envelope {
+            v: 1,
+            ts: "2026-10-23T06:00:00.123Z".into(),
+            stream: "node-scope-1".into(),
+            seq: 12,
+            source: oneagentgraph::event::Source::from(oneagentgraph::event::SOURCE_WORD),
+            kind: oneagentgraph::event::EventKind::TurnActivity.into(),
+            dimensions: Default::default(),
+            labels: oneagentgraph::event::Labels {
+                run_id: Some("node-scope-1".into()),
+                member: Some("worker".into()),
+                ..oneagentgraph::event::Labels::default()
+            },
+            payload,
+            artifacts: Vec::new(),
+        };
+        let line = serde_json::to_string(&produced).expect("the sibling's envelope serialises");
+        assert!(line.contains(r#""transcript":{"history_dir""#), "{line}");
+
+        let [off_the_wire] = &read_envelopes(&line)[..] else {
+            panic!("the sibling's own NDJSON did not read back as one envelope: {line}");
+        };
+        let mut off_the_wire = off_the_wire.clone();
+        adopt_labels(&mut off_the_wire.labels);
+        let in_process = relayed(produced).expect("the library path relays it");
+
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-relayed-reference-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = crate::ledger::RunPaths::under(&root, "relayed-reference");
+        paths.create().expect("a scratch run root");
+        let mut journal = crate::journal::Journal::open(&paths);
+        journal
+            .relay(&off_the_wire)
+            .expect("the journal appends the reference relayed as a line");
+        journal
+            .relay(&in_process)
+            .expect("the journal appends the reference relayed as a value");
+        let written = std::fs::read_to_string(paths.journal()).expect("the journal reads");
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(
+            written,
+            format!("{line}\n{line}\n"),
+            "a relayed reference record reached the journal in bytes its producer did not write"
+        );
+    }
+
     /// `oneagentgraph` publishes its terminal event before its final process
     /// reap. The sender held here is that still-running teardown: settlement
     /// must be available while disconnection is deliberately impossible.
@@ -4224,22 +4478,49 @@ mod tests {
     /// the burst rather than waiting on a process this run never started.
     #[test]
     fn a_pipe_an_orphan_holds_open_ends_on_the_silence_after_the_graph_is_over() {
+        assert_the_stream_ends_on_a_pipe_an_orphan_holds(Duration::ZERO);
+    }
+
+    /// The same end, with the answer to whether the graph is over arriving
+    /// later than the whole bound this test once held the stream to: what ends
+    /// it is the silence after the graph is found over, however long the
+    /// finding took.
+    #[test]
+    fn a_pipe_an_orphan_holds_open_ends_however_late_the_graph_is_found_over() {
+        assert_the_stream_ends_on_a_pipe_an_orphan_holds(RELAY_POLL * 4 + RELAY_POLL / 2);
+    }
+
+    /// Relay a pipe an orphan holds open past the graph's end, with `over`
+    /// answering after `answering`, and hold that the stream ended **while the
+    /// pipe was still held** — which no end of the pipe can explain.
+    ///
+    /// Decided by what ended the stream rather than by how long it took: the
+    /// orphan's handle is held until the relayed lines are back, so a stream
+    /// that waited for the pipe never comes back at all. The deadline is a guard
+    /// against hanging the suite on that defect, not a bound on the relay.
+    fn assert_the_stream_ends_on_a_pipe_an_orphan_holds(answering: Duration) {
         let (holder, held_open) = mpsc::channel::<()>();
-        let started = Instant::now();
-        let lines = lines_relayed_from(
-            ScriptedPipe {
+        let (relayed, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            let pipe = ScriptedPipe {
                 held: Duration::ZERO,
                 burst: std::io::Cursor::new(b"{\"seq\":1}\n".to_vec()),
                 held_open: Some(held_open),
-            },
-            true,
-        );
-        let waited = started.elapsed();
+            };
+            let over = move || {
+                std::thread::sleep(answering);
+                true
+            };
+            let lines: Vec<String> = relayed_lines(BufReader::new(pipe), over)
+                .map(|line| line.expect("a scripted pipe reads"))
+                .collect();
+            let _ = relayed.send(lines);
+        });
+        let lines = lines.recv_timeout(Duration::from_secs(60));
         drop(holder);
-        assert_eq!(lines, vec!["{\"seq\":1}".to_string()]);
-        assert!(
-            waited < RELAY_POLL * 4,
-            "the stream waited {waited:?} on a pipe the graph had already left"
+        assert_eq!(
+            lines.expect("the stream waited on a pipe the graph had already left"),
+            vec!["{\"seq\":1}".to_string()]
         );
     }
 

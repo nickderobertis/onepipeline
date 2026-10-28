@@ -6,9 +6,9 @@
 // which runs the real manylinux build (Docker), `uv`, `pip`, `npm` and `cargo`;
 // the registries and GitHub they talk to are local servers
 // (`support/release-doubles.mjs`, `npm/test/registry-support.mjs`) that the
-// journeys can inspect and tell to fail. macOS and Windows artifacts, which this
-// host cannot build, are stood in for by files with their planned names, so the
-// availability check has every platform to find or miss.
+// journeys can inspect and tell to fail. arm64 Linux, macOS and Windows
+// artifacts, which this host cannot build, are stood in for by files with their
+// planned names, so the availability check has every platform to find or miss.
 //
 // Outside the deterministic gate: the build needs Docker, the manylinux image
 // and a Rust toolchain from the network, and minutes of release compile. Run it
@@ -27,7 +27,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -36,6 +36,7 @@ import {
   PyPIDouble,
 } from "../../release/tests/support/release-doubles.mjs";
 import { Registry } from "../../npm/test/registry-support.mjs";
+import { assertSbomShape } from "../../npm/test/sbom-support.mjs";
 
 const ROOT = process.cwd();
 const VERSION = readFileSync(join(ROOT, "Cargo.toml"), "utf8").match(
@@ -168,9 +169,15 @@ async function npmPublish(s, dir) {
   assert.equal(result.code, 0, said(result));
 }
 
-/// An npm platform package for `target` carrying `binary`, as npm-build.mjs makes it.
+/// An npm platform package for `target` carrying `binary`, as npm-build.mjs makes
+/// it, with a stand-in for the SBOM a build would hand it.
 async function platformPackage(target, binary, version = VERSION) {
   const out = mkdtempSync(join(SCRATCH, "npm-platform-"));
+  const sbom = join(out, "onepipeline.cyclonedx.json");
+  writeFileSync(
+    sbom,
+    JSON.stringify({ bomFormat: "CycloneDX", metadata: { component: { name: "onepipeline" } } }),
+  );
   const result = await run("node", [
     "scripts/npm-build.mjs",
     "platform",
@@ -178,6 +185,8 @@ async function platformPackage(target, binary, version = VERSION) {
     target,
     "--binary",
     binary,
+    "--sbom",
+    sbom,
     "--version",
     version,
     "--out",
@@ -187,10 +196,10 @@ async function platformPackage(target, binary, version = VERSION) {
   return result.stdout.trim();
 }
 
-/// What the macOS and Windows build jobs would have published, by planned name.
+/// What the arm64 Linux, macOS and Windows build jobs would have published, by planned name.
 async function otherPlatformsPublished(s, linux) {
   const binary = linux.artifacts.find((a) => a.kind === "archive").path;
-  for (const platform of ["macos", "windows"]) {
+  for (const platform of ["linux-arm64", "macos", "windows"]) {
     const plan = JSON.parse(
       execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
     );
@@ -212,6 +221,34 @@ async function otherPlatformsPublished(s, linux) {
 
 let built;
 let linux;
+
+/// A copy of the build, changed by `tamper`, published against fresh doubles
+/// with `env` over a release job's, refused before anything is uploaded.
+async function publishTampered(tamper, env = {}) {
+  const s = await services();
+  const out = join(ROOT, "target", "release-journeys", `tampered-${process.pid}`);
+  rmSync(out, { recursive: true, force: true });
+  try {
+    mkdirSync(out, { recursive: true });
+    execFileSync("cp", ["-a", join(OUT, "linux"), join(out, "linux")]);
+    const manifest = join(out, "linux", "build.json");
+    const build = JSON.parse(
+      readFileSync(manifest, "utf8").replaceAll(join(OUT, "linux"), join(out, "linux")),
+    );
+    tamper(build, join(out, "linux"));
+    writeFileSync(manifest, JSON.stringify(build));
+    const result = await run("just", ["release-linux", "publish"], {
+      env: { ...s.env, ONEPIPELINE_RELEASE_OUT: out, ...env },
+    });
+    assert.deepEqual(writesOf(s), {}, "nothing was published");
+    assert.deepEqual(s.github.writes(), [], "the Release was not written to");
+    return result;
+  } finally {
+    await s.stop();
+    rmSync(out, { recursive: true, force: true });
+  }
+}
+const of = (build, kind) => build.artifacts.find((a) => a.kind === kind);
 
 before(async () => {
   rmSync(OUT, { recursive: true, force: true });
@@ -477,6 +514,130 @@ describe("a refused PyPI upload", () => {
   });
 });
 
+describe("a re-run after an earlier attempt published part of the Linux artifacts", () => {
+  const PACKAGE = "onepipeline-cli-linux-x64";
+  const EARLIER = join(ROOT, "target", "release-journeys", `earlier-${process.pid}`);
+
+  /// The build an earlier attempt of this release made: this run's binary with
+  /// bytes appended — still the same program, as a rebuild is, and not the same
+  /// file — packaged into every artifact by the release's own packaging and held
+  /// to the plan, as that attempt's build phase would have left it.
+  const EARLIER_BUILD = String.raw`
+import base64, hashlib, importlib.util, json, sys, zipfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('release', 'release/release.py')
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+source, out = Path(sys.argv[1]), Path(sys.argv[2])
+platform, target = 'linux', 'x86_64-unknown-linux-gnu'
+version = release.cargo_version()
+release.fresh(out)
+wheel = out / 'wheels' / target / source.name
+wheel.parent.mkdir(parents=True)
+with zipfile.ZipFile(source) as old, zipfile.ZipFile(wheel, 'w', zipfile.ZIP_DEFLATED) as new:
+    infos = old.infolist()
+    members = {info.filename: old.read(info) for info in infos}
+    exe = next(name for name in members if name.endswith('.data/scripts/onepipeline'))
+    members[exe] += b'\0built by an earlier attempt of this release\n'
+    record = next(name for name in members if name.endswith('.dist-info/RECORD'))
+    digest = base64.urlsafe_b64encode(hashlib.sha256(members[exe]).digest()).rstrip(b'=').decode()
+    members[record] = ''.join(f'{exe},sha256={digest},{len(members[exe])}\n' if line.split(',')[0] == exe
+                              else line + '\n' for line in members[record].decode().splitlines()).encode()
+    for info in infos:
+        new.writestr(info, members[info.filename])
+built = release.staged.package(target, wheel, out, version)
+paths = {'archive': Path(built['archive']), 'wheel': Path(built['wheel']), 'npm': Path(built['npm']),
+         'checksum': Path(built['archive']).with_name(f'onepipeline-v{version}-{target}.sha256')}
+files = [{**a, 'file': paths[a['kind']].name, 'path': str(paths[a['kind']]),
+          'sha256': hashlib.sha256(paths[a['kind']].read_bytes()).hexdigest()}
+         for a in release.plan(platform, version)['artifacts']]
+release.conform(platform, version, files)
+(out / 'build.json').write_text(json.dumps({'schema_version': 1, 'platform': platform, 'tag': f'v{version}',
+                                            'version': version, 'artifacts': files}))
+`;
+
+  let earlier;
+  before(async () => {
+    const wheel = linux.artifacts.find((a) => a.kind === "wheel").path;
+    const made = await run("python3", ["-c", EARLIER_BUILD, wheel, join(EARLIER, "linux")]);
+    assert.equal(made.code, 0, said(made));
+    earlier = JSON.parse(readFileSync(join(EARLIER, "linux", "build.json"), "utf8"));
+  });
+  after(() => rmSync(EARLIER, { recursive: true, force: true }));
+
+  const file = (build, kind) => build.artifacts.find((a) => a.kind === kind);
+
+  it("keeps everything the earlier attempt published, and verifies that build", async () => {
+    const s = await services();
+    try {
+      // The earlier attempt gave up on npm, which then served its package.
+      s.npm.lagFor(PACKAGE, 8000);
+      const gaveUp = await run("just", ["release-linux", "publish"], {
+        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: EARLIER, PUBLISH_NPM_AWAIT_BUDGET: "2" },
+      });
+      assert.equal(gaveUp.code, 1, said(gaveUp));
+      assert.match(gaveUp.stderr, new RegExp(`still does not serve '${PACKAGE}@`));
+      for (const deadline = Date.now() + 30_000; !s.npm.visible(PACKAGE).includes(VERSION); ) {
+        assert.ok(Date.now() < deadline, "npm never served the earlier attempt's package");
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      const landed = writesOf(s);
+
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT };
+      const rerun = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.match(rerun.stdout, /PyPI already holds .* from an earlier attempt/, said(rerun));
+      assert.match(rerun.stdout, /npm already holds .* from an earlier attempt/, said(rerun));
+      assert.match(rerun.stdout, /the Release already holds .* from an earlier attempt .*; kept/);
+      assert.deepEqual(writesOf(s), landed, "nothing was uploaded again");
+
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+      assert.match(verified.stdout, /installs from its registry and runs$/m);
+      assert.doesNotMatch(verified.stdout, /more than one build/, said(verified));
+      assert.equal(
+        sha(s.pypi.files.get(file(earlier, "wheel").file).content),
+        file(earlier, "wheel").sha256,
+        "what verify installed from PyPI is the earlier attempt's wheel",
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+
+  it("reports the registries serving two builds when npm took none of the earlier one", async () => {
+    const s = await services();
+    try {
+      // The earlier attempt reached the Release and PyPI, and npm refused it.
+      s.npm.refuseNextPublish = true;
+      const refused = await run("just", ["release-linux", "publish"], {
+        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: EARLIER },
+      });
+      assert.equal(refused.code, 1, said(refused));
+
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT };
+      const rerun = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.match(
+        rerun.stdout,
+        /the Release already holds .* from an earlier attempt .*; kept, because PyPI holds/,
+      );
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+      assert.match(
+        verified.stdout,
+        new RegExp(
+          `^release: ${TARGET} is served as more than one build: the Release \\S+, PyPI \\S+, npm \\S+;`,
+          "m",
+        ),
+        said(verified),
+      );
+    } finally {
+      await s.stop();
+    }
+  });
+});
+
 describe("registry verification refuses what a user could not run", () => {
   /// A double serving the Linux artifacts, with one of them replaced.
   async function serving({ wheel = true, npmBinary = null, npmVersion = VERSION } = {}) {
@@ -585,32 +746,6 @@ describe("registry verification refuses what a user could not run", () => {
 });
 
 describe("publication refuses a build that is not the plan, untouched", () => {
-  /// A copy of the build, changed by `tamper`, published against fresh doubles.
-  async function publishTampered(tamper) {
-    const s = await services();
-    const out = join(ROOT, "target", "release-journeys", `tampered-${process.pid}`);
-    rmSync(out, { recursive: true, force: true });
-    try {
-      mkdirSync(out, { recursive: true });
-      execFileSync("cp", ["-a", join(OUT, "linux"), join(out, "linux")]);
-      const manifest = join(out, "linux", "build.json");
-      const build = JSON.parse(
-        readFileSync(manifest, "utf8").replaceAll(join(OUT, "linux"), join(out, "linux")),
-      );
-      tamper(build, join(out, "linux"));
-      writeFileSync(manifest, JSON.stringify(build));
-      const result = await run("just", ["release-linux", "publish"], {
-        env: { ...s.env, ONEPIPELINE_RELEASE_OUT: out },
-      });
-      assert.deepEqual(writesOf(s), {}, "nothing was published");
-      return result;
-    } finally {
-      await s.stop();
-      rmSync(out, { recursive: true, force: true });
-    }
-  }
-  const of = (build, kind) => build.artifacts.find((a) => a.kind === kind);
-
   it("refuses a build of another version", async () => {
     const result = await publishTampered((build) => {
       build.version = "0.0.1";
@@ -671,6 +806,98 @@ describe("publication refuses a build that is not the plan, untouched", () => {
     assert.equal(result.code, 1, said(result));
     assert.match(result.stderr, /requires GLIBC_2\.\d+, above the planned floor 2\.17/);
   });
+});
+
+/// Where every npm platform package carries its binary's SBOM.
+const SBOM = "package/sboms/onepipeline.cyclonedx.json";
+
+/// The SBOM a packed npm package carries, and every file it carries under sboms/.
+function npmSbom(tgz) {
+  const files = execFileSync("tar", ["-tzf", tgz], { encoding: "utf8" })
+    .split("\n")
+    .filter((name) => name.startsWith("package/sboms/") && !name.endsWith("/"));
+  return { files, text: execFileSync("tar", ["-xzOf", tgz, SBOM], { encoding: "utf8" }) };
+}
+
+/// Rewrite a packed npm package's SBOM: drop it (`-`) or replace it with `payload`.
+const REPLACE_SBOM = `
+import io, sys, tarfile
+path, payload = sys.argv[1], sys.argv[2]
+with tarfile.open(path) as original:
+    members = [(m, original.extractfile(m).read() if m.isfile() else None) for m in original.getmembers()]
+with tarfile.open(path, 'w:gz') as changed:
+    for member, data in members:
+        if member.name == 'package/sboms/onepipeline.cyclonedx.json':
+            if payload == '-': continue
+            data = payload.encode(); member.size = len(data)
+        changed.addfile(member, io.BytesIO(data) if data is not None else None)
+`;
+
+describe("the real build's SBOM, with PyPI publication off", () => {
+  const PACKAGE = "onepipeline-cli-linux-x64";
+  const OFF = { PYPI_PUBLISH: "false", PYPI_TOKEN: "", NPM_PUBLISH: "true" };
+
+  it("is the wheel's own, and npm serves it with every linked crate at Cargo.lock's version", async () => {
+    // maturin generated it from the manylinux build's own Cargo graph.
+    const wheel = execFileSync(
+      "python3",
+      [
+        "-c",
+        "import sys,zipfile; w=zipfile.ZipFile(sys.argv[1]); " +
+          "n,=[n for n in w.namelist() if '.dist-info/sboms/' in n]; sys.stdout.write(w.read(n).decode())",
+        of(linux, "wheel").path,
+      ],
+      { encoding: "utf8" },
+    );
+    const staged = npmSbom(of(linux, "npm").path);
+    assert.deepEqual(staged.files, [SBOM], "the staged package carries one file under sboms/");
+    assert.equal(staged.text, wheel, "the staged package carries the wheel's SBOM");
+    assertSbomShape(staged.text, VERSION);
+
+    const s = await services();
+    const served = join(mkdtempSync(join(SCRATCH, "served-")), `${PACKAGE}-${VERSION}.tgz`);
+    try {
+      const env = { ...s.env, ONEPIPELINE_RELEASE_OUT: OUT, ...OFF };
+      const published = await run("just", ["release-linux", "publish"], { env });
+      assert.equal(published.code, 0, said(published));
+      assert.match(published.stdout, /skipped PyPI \(PYPI_PUBLISH off\)/);
+      assert.equal(s.pypi.files.size, 0, "nothing was uploaded to PyPI");
+      const tarball = s.npm.packages.get(PACKAGE)?.versions.get(VERSION)?.tarball;
+      assert.ok(tarball, `npm took ${PACKAGE}@${VERSION}`);
+      writeFileSync(served, tarball);
+      const fromNpm = npmSbom(served);
+      assert.deepEqual(fromNpm.files, [SBOM], "the served package carries one file under sboms/");
+      assert.equal(fromNpm.text, wheel, "npm serves the wheel's SBOM");
+      assertSbomShape(fromNpm.text, VERSION);
+      const verified = await run("just", ["release-linux", "verify"], { env });
+      assert.equal(verified.code, 0, said(verified));
+    } finally {
+      await s.stop();
+      rmSync(dirname(served), { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, payload, reason] of [
+    ["lacks its SBOM", "-", "omitted sboms/onepipeline.cyclonedx.json"],
+    [
+      "carries a document that is not CycloneDX",
+      '{"bomFormat": "SPDX"}',
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+  ]) {
+    it(`refuses the real package when it ${label}, naming it, before any upload`, async () => {
+      const result = await publishTampered((build) => {
+        const npm = of(build, "npm");
+        execFileSync("python3", ["-c", REPLACE_SBOM, npm.path, payload]);
+        npm.sha256 = sha(readFileSync(npm.path));
+      }, OFF);
+      assert.equal(result.code, 1, said(result));
+      assert.ok(
+        result.stderr.includes(`npm package ${PACKAGE} ${reason}, so nothing is published`),
+        said(result),
+      );
+    });
+  }
 });
 
 describe("a registry switched off", () => {
@@ -743,7 +970,8 @@ describe("publish's own verification", () => {
       const results = JSON.parse(readFileSync(join(out, "common", "publish-results.json"), "utf8"));
       assert.deepEqual(results["npm-launcher"], { published: "success", verified: "failure" });
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
       assert.equal(recorded.code, 0, said(recorded));
       const record = JSON.parse(
@@ -806,6 +1034,8 @@ describe("publish: the platform-independent artifacts", () => {
       /not every platform is published, so nothing platform-independent is/,
     );
     for (const missing of [
+      `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz on the Release`,
+      `npm:onepipeline-cli-linux-arm64@${VERSION} on npm`,
       `onepipeline-v${VERSION}-aarch64-apple-darwin.tar.gz on the Release`,
       `onepipeline_cli-${VERSION}-py3-none-win_amd64.whl on PyPI`,
       `npm:onepipeline-cli-darwin-arm64@${VERSION} on npm`,
@@ -889,7 +1119,7 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
   /// Every platform's assets on the Release, with PyPI and npm switched off.
   async function assetsOnly() {
     const s = await services();
-    for (const platform of ["linux", "macos", "windows"]) {
+    for (const platform of ["linux", "linux-arm64", "macos", "windows"]) {
       const plan = JSON.parse(
         execFileSync("just", [`release-${platform}`, "plan"], { encoding: "utf8" }),
       );
@@ -956,7 +1186,8 @@ describe("publish: the crate, and a registry that loses an artifact", () => {
       assert.equal(refused.code, 1, said(refused));
       assert.deepEqual(results().crate, { published: "failure", verified: "skipped" });
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const recorded = await run("just", ["release-outcome"], { env: { ...env, ...jobs } });
       assert.equal(recorded.code, 0, said(recorded));
       const record = JSON.parse(

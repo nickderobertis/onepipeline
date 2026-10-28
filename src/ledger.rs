@@ -60,6 +60,7 @@
 // decided, and `unknown` is never anybody's.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -262,6 +263,13 @@ impl RunPaths {
     /// path would be a promise nobody asked for about a cache.
     pub(crate) fn checkpoint(&self) -> PathBuf {
         self.dir.join("checkpoint.json")
+    }
+
+    /// The run's **member liveness**: each in-flight dispatch member's latest
+    /// heartbeat, overwritten in place rather than journalled. See
+    /// [`crate::heartbeat`].
+    pub(crate) fn liveness(&self) -> PathBuf {
+        self.dir.join("liveness.json")
     }
 
     /// The directory holding one record per live **watch** of this run.
@@ -688,6 +696,27 @@ pub struct LaunchRecord {
     /// build launched is still a run this one can read, adopt, and report on.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project: String,
+    /// Opaque labels recorded at launch.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "crate::labels::launch_labels"
+    )]
+    pub labels: BTreeMap<String, String>,
+    /// Explicit qualified project group, or none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::labels::launch_group"
+    )]
+    pub group: Option<String>,
+    /// The launched project's recorded copy origin, or none.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::labels::launch_group"
+    )]
+    pub project_origin: Option<String>,
     /// The directory every member of this run works in.
     ///
     /// The launch directory, made absolute once — at `start`, by the process
@@ -916,10 +945,9 @@ pub struct LaunchRecord {
     /// The write-back's per-item budget, in seconds, or `0` on a record that
     /// names none.
     ///
-    /// **Resolved once, at the launch**, out of the flag, the environment, and
-    /// the launch config in that order — so an `adopt` bounds the copies it
-    /// projects as its launch chose rather than by an environment that has
-    /// since moved. Read through [`item_budget`](Self::item_budget), which is
+    /// Resolved at launch out of the flag, the environment, and the launch
+    /// config in that order. An `adopt --writeback-item-budget` replaces it;
+    /// adoption otherwise keeps it and ignores the environment. Read through [`item_budget`](Self::item_budget), which is
     /// where `0` becomes "the record does not say" again: the shipped default,
     /// [`cli::DEFAULT_WRITEBACK_ITEM_BUDGET_SECONDS`] — and never a budget of
     /// zero, which is no budget at all. Defaulted so a record written before
@@ -1078,6 +1106,20 @@ pub struct LaunchRecord {
     /// every record written before it reads unchanged.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub flow: String,
+    /// The run's public id: what it is named by wherever the destination is not private —
+    /// the run id itself where the linked `onevcs`'s public-output check passes it, and
+    /// otherwise `run-` and twelve hex digits of its SHA-256.
+    ///
+    /// **Decided once, at the launch**, where the id is minted, and replayed by every driver
+    /// that adopts the run. Empty on a record written before this field existed, which reads
+    /// the same derivation over its id. Omitted when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub public_id: String,
+    /// Whether the plan's own name failed the same check at the launch, so a destination
+    /// that is not private carries the [public id](Self::public_id) in its place. `false` is
+    /// what a record written before this field existed reads as. Omitted when `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub name_withheld: bool,
 }
 
 impl LaunchRecord {
@@ -1431,6 +1473,22 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let body = serde_json::to_string_pretty(value)
         .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
     write_atomic(path, body.as_bytes(), Durability::Record)
+}
+
+/// [`write_json`] for a derived document a lost write costs nothing durable:
+/// published by the same rename, with no disk sync.
+///
+/// For the files a journal append or a relayed beat rewrites. The summary and the
+/// append receipt are caches a reader checks against the journal before it trusts
+/// them, and the journal they follow is not synced either, so syncing them bought
+/// no durability the record itself has. The liveness file is not rebuilt from the
+/// journal: losing it loses only the beats since the journal last carried one, and
+/// the next beat writes it again. Each sync cost every relayed record its share of
+/// the host's sync latency on a thread that writes them one at a time.
+pub fn write_json_derived<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let body = serde_json::to_string_pretty(value)
+        .map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
+    write_atomic(path, body.as_bytes(), Durability::Projection)
 }
 
 /// What a write is asked to survive, beyond the reader it is already safe from.
@@ -1887,11 +1945,15 @@ fn write_record(path: &Path, file: &mut fs::File, line: &str) -> Result<()> {
     // answer is the boundary this append starts on, which is what a failure
     // restores.
     let boundary = file.seek(SeekFrom::End(0)).map_err(ledger)?;
-    let written = file
-        .write_all(format!("{line}\n").as_bytes())
-        .and_then(|()| file.flush());
+    crate::ordering::journal_held(path, line)?;
+    let receipt = crate::appendstamp::before(path, file);
+    let written =
+        crate::sys::append_all(file, format!("{line}\n").as_bytes()).and_then(|()| file.flush());
     match written {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            crate::appendstamp::after(path, file, receipt);
+            Ok(())
+        }
         Err(e) => {
             // Whatever of the record reached the file goes back off it. A
             // failure to undo leaves the original failure as the one reported:
@@ -2013,6 +2075,9 @@ pub fn read_records(path: &Path) -> Vec<Record> {
     };
     // llmlint: ignore-end[no_panics_on_recoverable_errors]
     counted(bytes.len(), ());
+    crate::loopstats::journal_read(path, 0, bytes.len() as u64);
+    #[cfg(test)]
+    crate::readprobe::read(path, 0, bytes.len() as u64);
     records_of(&bytes, 0)
 }
 
@@ -2083,8 +2148,9 @@ impl EnvelopeLine {
 /// Every line of a run's journal from its first `from` bytes, as the bus reader
 /// read each one, or nothing where the file cannot be read from there.
 ///
-/// The one decoder of journal envelope lines. `from` is a record boundary, as
-/// [`read_records_from`] requires; a file that does not exist, cannot be opened,
+/// The ordinary decoder of journal envelope lines; the trusted append-range
+/// reader below shares its envelope serde implementation but omits its boundary
+/// probe. `from` is a record boundary; a file that does not exist, cannot be opened,
 /// or is shorter than `from` reads as holding nothing past it, which is the rule
 /// every ledger reader here follows.
 pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
@@ -2132,7 +2198,36 @@ pub(crate) fn read_envelope_lines(path: &Path, from: u64) -> Vec<EnvelopeLine> {
             }
         }
     }
+    crate::loopstats::journal_read(path, from, start - from);
+    #[cfg(test)]
+    crate::readprobe::read(path, from, start - from);
     counted(usize::try_from(start - from).unwrap_or(usize::MAX), lines)
+}
+
+/// Decode a range starting at a boundary already established by a retained
+/// view. Unlike `Reader::open_at`, this does not read the byte before `from`:
+/// the append receipt establishes continuity and the cursor supplies the boundary.
+/// Envelope validation still belongs to the vocabulary's serde implementation.
+pub(crate) fn read_appended_envelope_lines(path: &Path, from: u64, len: u64) -> Vec<EnvelopeLine> {
+    let Some(bytes) = read_range(path, from, len) else {
+        return Vec::new();
+    };
+    records_of(&bytes, from)
+        .into_iter()
+        .map(|record| EnvelopeLine {
+            line: record.line,
+            offset: record.offset,
+            bytes: record.bytes,
+            terminated: record.terminated,
+            envelope: record
+                .terminated
+                .then(|| {
+                    let start = (record.offset - from) as usize;
+                    serde_json::from_slice(&bytes[start..start + record.bytes as usize]).ok()
+                })
+                .flatten(),
+        })
+        .collect()
 }
 
 /// The **raw bytes** of a byte range of a file, or `None` where the file does not
@@ -2154,6 +2249,9 @@ pub(crate) fn read_range(path: &Path, from: u64, len: u64) -> Option<Vec<u8>> {
     let want = usize::try_from(len).ok()?;
     let mut bytes = vec![0u8; want];
     file.read_exact(&mut bytes).ok()?;
+    crate::loopstats::journal_read(path, from, len);
+    #[cfg(test)]
+    crate::readprobe::read(path, from, len);
     Some(counted(bytes.len(), bytes))
 }
 
@@ -3646,6 +3744,9 @@ mod tests {
         LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -3681,6 +3782,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
@@ -4589,6 +4692,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -4624,6 +4730,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         };
         assert!(!record.owned_by(sys::UNKNOWN_LAUNCHER));
         assert_eq!(record.owner_label("anyone"), "[unknown]");
@@ -4634,6 +4742,9 @@ mod tests {
         let record = LaunchRecord {
             run_id: "demo".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: "graphs/dag-scope.yaml".into(),
             graph_run: String::new(),
@@ -4669,6 +4780,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         };
         let label = record.owner_label("mine");
         assert!(!label.contains("secret-session-id"), "{label} leaks the id");

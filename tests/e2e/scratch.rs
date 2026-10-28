@@ -313,6 +313,20 @@ fn reply(world: &World, run: &str, commands: serde_json::Value) {
         .exited(0);
 }
 
+/// Wait for the run's driver to let go of it, once its ending's scratch record is written.
+///
+/// A driver journals that record, and then its `driver-exited`, inside its final handover and
+/// *before* it releases the run's lock, so a run whose record is on the journal still reads
+/// as driven — `ACTIVE`, not ended — until the release that follows. A view or a discard
+/// made on the record alone reads that window wherever the release comes late enough, as it
+/// does on a host slow to end a process. See
+/// `driver::a_run_reads_let_go_only_once_its_driver_has_released_it`.
+fn let_go(world: &World, run: &str) {
+    world.until("the driver to let go", |world| {
+        world.run(&["status", run, "--json"]).json()["driven"] == false
+    });
+}
+
 fn read_views(world: &World, run: &str) -> (String, String) {
     let status = world.run(&["status", run]);
     status.exited(0);
@@ -333,8 +347,12 @@ fn read_views(world: &World, run: &str) -> (String, String) {
         [
             "driven",
             "ending",
+            "group",
+            "labels",
             "liveness",
+            "nodes",
             "paused",
+            "public_id",
             "run_id",
             "schema_version",
             "word"
@@ -436,6 +454,7 @@ fn failed_scratch_is_recorded_once_and_views_use_the_record_with_a_five_director
     world.until("the failed or unfinished ending records scratch", |world| {
         !world.events_of("seven", "scratch-retained").is_empty()
     });
+    let_go(&world, "seven");
     let records = world.events_of("seven", "scratch-retained");
     assert_eq!(records.len(), 1);
     let record = &records[0]["payload"];
@@ -519,6 +538,7 @@ fn discard_reports_its_own_walk_and_preserves_everything_else() {
     world.until("the failed ending", |world| {
         !world.events_of(&run, "scratch-retained").is_empty()
     });
+    let_go(&world, &run);
     assert_retained(&world, &run, "failed", 1);
     let mut expected: Vec<_> = dirs
         .iter()
@@ -557,9 +577,14 @@ fn discard_reports_its_own_walk_and_preserves_everything_else() {
         // The journal is held to its prefix above; only the run's own derived
         // caches at its root may be rewritten, as any append or view does.
         if !path.starts_with(world.run_file(&run, "scratch"))
-            && !["events.jsonl", "summary.json", "checkpoint.json"]
-                .iter()
-                .any(|cache| path == world.run_file(&run, cache))
+            && ![
+                "events.jsonl",
+                "events.append.json",
+                "summary.json",
+                "checkpoint.json",
+            ]
+            .iter()
+            .any(|cache| path == world.run_file(&run, cache))
         {
             assert_eq!(
                 std::fs::read(&path).unwrap(),
@@ -735,9 +760,7 @@ fn made_live_again_after(partly_discarded: bool) {
     world.until("the run to end again", |world| {
         world.events_of(&run, "scratch-retained").len() == 2
     });
-    world.until("the driver to let go", |world| {
-        world.run(&["status", &run, "--json"]).json()["driven"] == false
-    });
+    let_go(&world, &run);
     let latest = assert_retained(&world, &run, "failed", 2);
     assert_eq!(latest["dirs"].as_array().unwrap().len(), 2);
 }
@@ -1086,6 +1109,7 @@ fn links_are_unlinked_without_following_them_and_a_link_scratch_root_is_refused(
                 )
                 .is_empty()
         });
+        let_go(&world, "links");
         if !success {
             world.run(&["scratch", "discard", "links"]).exited(0);
         }
@@ -1180,6 +1204,7 @@ fn partial_filesystem_failure_is_journalled_and_visible_for_both_removal_trigger
                 )
                 .is_empty()
         });
+        let_go(&world, "partial");
         let discarded = if success {
             None
         } else {
@@ -1367,6 +1392,7 @@ fn retained_disk_usage_matches_du_for_sparse_files_and_hard_links() {
     world.until("the retention record", |world| {
         !world.events_of("usage", "scratch-retained").is_empty()
     });
+    let_go(&world, "usage");
     let record = world.events_of("usage", "scratch-retained");
     assert_eq!(record[0]["payload"]["total_bytes"], bytes);
     assert_eq!(record[0]["payload"]["dirs"][0]["bytes"], bytes);
@@ -1409,12 +1435,32 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
         // external journal fixture; the real driver and compiled discard reader
         // consume it, without substituting their fold or filesystem operations.
         let record = serde_json::json!({"v":999, "ts":stamp, "stream":"future-producer", "seq":0, "source":"pipeline", "kind":"future-operation", "labels":{"run_id":run}, "payload":{}, "artifacts":[]});
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(world.run_file(run, "events.jsonl"))
-            .unwrap()
-            .write_all(format!("{record}\n").as_bytes())
-            .unwrap();
+        // On Windows the live driver appends under a share mode that admits no
+        // second writer, so an open landing inside one of its appends is a sharing
+        // violation: wait it out, as the engine's own appender does. The handle is
+        // closed at the end of this block, before any wait for the driver below,
+        // so it can never be the second writer that blocks one of its appends.
+        {
+            let waiting_since = std::time::Instant::now();
+            let mut journal = loop {
+                match std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(world.run_file(run, "events.jsonl"))
+                {
+                    Err(e)
+                        if cfg!(windows)
+                            && e.raw_os_error() == Some(32)
+                            && waiting_since.elapsed() < std::time::Duration::from_secs(30) =>
+                    {
+                        onepipeline_testfakes::profile::thread::sleep(
+                            std::time::Duration::from_millis(2),
+                        );
+                    }
+                    opened => break opened.unwrap(),
+                }
+            };
+            journal.write_all(format!("{record}\n").as_bytes()).unwrap();
+        }
         // llmlint: ignore-end[tests_mirror_real_usage]
         if automatic {
             world.release("build.go");
@@ -1423,6 +1469,19 @@ fn unreadable_journal_keeps_scratch_at_success_and_refuses_discard() {
                     && !world.run_file(run, "owner.lock").exists()
             });
             assert!(world.events_of(run, "scratch-removed").is_empty());
+            // The driver went on appending after the fixture's record while the
+            // test waited, so nothing the test held kept it out of its journal.
+            let journal = world.journal(run);
+            let fixture = journal
+                .iter()
+                .position(|event| event["stream"] == "future-producer")
+                .expect("the fixture's record is in the journal");
+            assert!(
+                journal[fixture + 1..]
+                    .iter()
+                    .any(|event| event["kind"] == "turn-completed"),
+                "the driver appended nothing after the fixture's record: {journal:?}"
+            );
         }
         assert_eq!(snapshot(&world.run_file(run, "scratch")), before);
         let (status, _) = read_views(&world, run);

@@ -199,11 +199,25 @@ pub enum Stop {
 /// signals at all, because a teardown that cannot see what it must end has to
 /// say so rather than end half of it.
 ///
-/// The table is read a moment before the signals go out, so a child started
-/// inside that moment is missed; signalling the root first is what closes that
-/// in practice.
+/// On Unix a child started after the table was read is not missed: the tree is
+/// frozen, shown stopped, and listed again until a listing finds nothing new,
+/// and only then signalled — see the Unix `platform_stop`. On Windows the table
+/// is read once, so a child started between that reading and the signals is
+/// still missed: a known platform limitation, not yet closed there.
 pub fn stop(pid: u32, how: Stop) -> Teardown {
-    platform_stop(&[pid], how).0
+    let (established, _, _, discovery) = platform_stop(&[pid], how);
+    as_discovered(established, discovery)
+}
+
+/// What a teardown may claim once it is known whether its discovery finished:
+/// a tree it signalled whole is only partly signalled if it stopped looking
+/// before the listings settled. The one rule [`stop`] and [`confirmed`] both
+/// apply, so neither can report a clean stop the other would refuse.
+fn as_discovered(established: Teardown, discovery: Discovery) -> Teardown {
+    match (established, discovery) {
+        (Teardown::Signalled, Discovery::Incomplete) => Teardown::PartlySignalled,
+        (established, _) => established,
+    }
 }
 
 /// Ask several trees to stop **together**, and then watch until they are gone.
@@ -223,13 +237,13 @@ pub fn stop(pid: u32, how: Stop) -> Teardown {
 /// was in a tree reported [`Teardown::Signalled`] all the same, and was not ended
 /// by this teardown.
 pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardown, Vec<u32>) {
-    let (established, aimed, delivered) = platform_stop(pids, how);
+    let (established, aimed, delivered, discovery) = platform_stop(pids, how);
     let roots = delivered
         .into_iter()
         .filter(|pid| pids.contains(pid))
         .collect();
     (
-        confirmed(established, || gone_within(&aimed, patience)),
+        confirmed(established, discovery, || gone_within(&aimed, patience)),
         roots,
     )
 }
@@ -273,12 +287,15 @@ pub fn stop_and_confirm(pids: &[u32], how: Stop, patience: Duration) -> (Teardow
 // `a_confirmed_stop_answers_only_once_every_descendant_is_gone` and
 // `a_stop_that_watches_reports_a_tree_that_took_the_ask_and_stayed`, and through the
 // binary in `tests/e2e/driver.rs`.
-fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
-    match established {
+fn confirmed(established: Teardown, discovery: Discovery, gone: impl FnOnce() -> bool) -> Teardown {
+    let confirmed = match established {
         // A tree that is gone within the patience was reached, however the
         // per-process asks read at the instant they were made; one still
         // standing when it runs out is the run the operator has to be told is
-        // still running.
+        // still running. And a tree whose discovery did not finish is never
+        // confirmed clean, however soon what was found is gone: the probe
+        // watches only what was found, and what was not found is exactly what
+        // may still be running.
         Teardown::Signalled | Teardown::PartlySignalled => {
             if gone() {
                 Teardown::Signalled
@@ -287,7 +304,8 @@ fn confirmed(established: Teardown, gone: impl FnOnce() -> bool) -> Teardown {
             }
         }
         established => established,
-    }
+    };
+    as_discovered(confirmed, discovery)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -339,9 +357,84 @@ fn aimable(roots: &[u32]) -> Vec<u32> {
     aimed
 }
 
-/// What one round of signalling established, the pids it aimed at, and the pids
-/// its signal was delivered to.
-type Signalling = (Teardown, Vec<u32>, Vec<u32>);
+/// The test failpoint a teardown meets once it has listed the tree it is about
+/// to signal, before it signals any of it.
+const STOP_LISTED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_LISTED_GATE";
+
+/// Meet [`STOP_LISTED_GATE_ENV`]: a journey holds a teardown here so what the
+/// run starts after the listing is placed on the far side of it. Nothing at all
+/// where the variable is unset.
+fn listed() {
+    let _ = crate::ordering::meet(STOP_LISTED_GATE_ENV);
+}
+
+/// The test failpoint a teardown meets once its discovery has answered, before
+/// it signals anything.
+#[cfg(unix)]
+const STOP_DISCOVERED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_DISCOVERED_GATE";
+
+/// Meet [`STOP_DISCOVERED_GATE_ENV`]: a journey holds a teardown here so what a
+/// process its discovery could not hold starts is placed after the last listing.
+/// Nothing at all where the variable is unset.
+#[cfg(unix)]
+fn discovered() {
+    let _ = crate::ordering::meet(STOP_DISCOVERED_GATE_ENV);
+}
+
+/// What one round of signalling established, the pids it aimed at, the pids its
+/// signal was delivered to, and whether what it aimed at is the whole tree.
+type Signalling = (Teardown, Vec<u32>, Vec<u32>, Discovery);
+
+/// Whether a teardown found every process in the tree it signalled.
+///
+/// Carried beside what the signals established rather than folded into it,
+/// because the confirmation after them only watches the pids that were found:
+/// a teardown that stopped looking before its listings settled can watch every
+/// one of those go and still have left a process nobody found running, and
+/// that must reach the caller as a stop that did not finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Discovery {
+    /// The last listing found nothing the teardown did not already hold.
+    Complete,
+    /// The teardown signalled before a listing had settled: one was refused,
+    /// or it ran out of [`FREEZE_BOUND`] while the tree was still growing.
+    Incomplete,
+}
+
+/// The processes a teardown has paused, let go again when this is dropped —
+/// on every way out of the teardown, a panic included.
+///
+/// A paused process reads as running to every view and ends nothing, and a
+/// teardown that returned with one still paused would leave it so for good.
+#[cfg(unix)]
+struct Paused(Vec<u32>);
+
+#[cfg(unix)]
+impl Drop for Paused {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            let _ = signal_one(*pid, libc::SIGCONT);
+        }
+    }
+}
+
+/// How long a teardown keeps freezing what each new listing finds before it
+/// signals what it has.
+///
+/// A frozen process starts nothing, so the listings settle as soon as the tree
+/// is frozen, which is a listing or two. What this bounds is a tree with a
+/// process in it that does not stop — one this user may not stop, or one that
+/// took the signal and runs on — and that may keep starting more: the teardown
+/// signals what it found rather than waiting on it, and answers that its
+/// discovery did not finish.
+#[cfg(unix)]
+const FREEZE_BOUND: Duration = Duration::from_secs(2);
+
+/// How long discovery waits before asking again whether what it paused has
+/// stopped: a stop signal takes effect when its target is next scheduled, which
+/// is a moment rather than at once.
+#[cfg(unix)]
+const STOPPED_POLL: Duration = Duration::from_millis(5);
 
 #[cfg(unix)]
 fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
@@ -351,36 +444,210 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     };
     let mut aimed = aimable(roots);
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     // The table is read **before** anything is signalled: a process whose parent
     // has died is reparented at once, so a table read after any root is gone no
     // longer descends to what was under it.
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new(), Vec::new());
+        return (
+            Teardown::NotAttempted,
+            Vec::new(),
+            Vec::new(),
+            Discovery::Incomplete,
+        );
     };
-    // The roots first, so what is left has stopped growing while its members are
-    // taken down.
-    for root in aimed.clone() {
-        for descendant in descended_from(&table, root) {
-            if !aimed.contains(&descendant) {
-                aimed.push(descendant);
-            }
-        }
-    }
+    listed();
+    aim_at_descent(&mut aimed, &table, self::pid());
+    // Frozen before anything is signalled, and listed again until a listing
+    // finds nothing new. One listing is a moment old by the time its signals go
+    // out, and a dispatch that starts its next turn inside that moment starts a
+    // process no walk of it found: the dispatch dies of the signal, the turn is
+    // handed to `init`, and it runs on — spending what the stop was asked to
+    // stop. A stopped process starts nothing, and a stopped parent is still the
+    // parent of what it did start, so once the tree is frozen a listing is
+    // complete. A stop signal that was delivered is not yet a stopped process,
+    // so a listing counts only once the host shows every process it descends
+    // from as stopped. Nothing outside descent is frozen, and every process that
+    // is frozen is let go again once it has been signalled, by `Paused`.
+    let mut frozen = Paused(Vec::new());
+    let discovery = discover(
+        &mut aimed,
+        &mut frozen.0,
+        Instant::now().checked_add(FREEZE_BOUND),
+        |pid| signal_one(pid, libc::SIGSTOP) == Reached::Delivered,
+        all_stopped,
+        process_table,
+    );
+    discovered();
     // Every answer is kept: one process this user may not signal is one still
     // running, and a teardown that reported the tree as reached anyway would be
     // the same false completion in a smaller place. And a walk that found
     // nothing but processes already gone reached no tree at all, which is the
     // answer a caller reports as such rather than as a stop it made.
     let answers: Vec<Reached> = aimed.iter().map(|pid| signal_one(*pid, signal)).collect();
+    // The signal waits on a stopped process until it runs again, so letting
+    // the tree go is what delivers it.
+    drop(frozen);
     let delivered = aimed
         .iter()
         .zip(&answers)
         .filter(|(_, answer)| **answer == Reached::Delivered)
         .map(|(pid, _)| *pid)
         .collect();
-    (established(&answers), aimed, delivered)
+    (established(&answers), aimed, delivered, discovery)
+}
+
+/// Pause everything in `aimed`, wait until the host shows all of it stopped,
+/// list again, and add what the listing finds, until a listing finds nothing
+/// new — and say whether it got there.
+///
+/// Every pid `pause` reports paused is recorded in `paused`, which the caller
+/// holds for letting them go. `pause` is asked again on every round, since a
+/// delivered stop signal is not a stopped process: what `stopped` cannot show
+/// stopped is asked again, and no listing is taken until it can. Discovery is
+/// [`Discovery::Incomplete`] when a listing is refused, and when `deadline`
+/// passes first — while what was paused has not all been shown stopped, or while
+/// the tree is still growing: in both the caller signals what it has, and what it
+/// does not have is what may still be running. Takes its pausing, its check and
+/// its listing so the decision can be driven to each of its ends, the deadline
+/// above all — a process that takes the signal and runs on is one a real host
+/// gives only to a fixture that traces it.
+#[cfg(unix)]
+fn discover(
+    aimed: &mut Vec<u32>,
+    paused: &mut Vec<u32>,
+    deadline: Option<Instant>,
+    mut pause: impl FnMut(u32) -> bool,
+    mut stopped: impl FnMut(&[u32]) -> bool,
+    mut list: impl FnMut() -> Option<Vec<(u32, u32)>>,
+) -> Discovery {
+    loop {
+        for pid in aimed.iter() {
+            if pause(*pid) && !paused.contains(pid) {
+                paused.push(*pid);
+            }
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Discovery::Incomplete;
+        }
+        if !stopped(aimed) {
+            std::thread::sleep(STOPPED_POLL);
+            continue;
+        }
+        let Some(table) = list() else {
+            return Discovery::Incomplete;
+        };
+        let found = aimed.len();
+        aim_at_descent(aimed, &table, self::pid());
+        if aimed.len() == found {
+            return Discovery::Complete;
+        }
+    }
+}
+
+/// Whether the host shows every process in `pids` that is still there as
+/// stopped, and so starting nothing — and `false` whenever it cannot say.
+///
+/// A process that has exited is stopped for this purpose, and so is one that
+/// has exited and not been reaped. One that is there but which this user may
+/// not signal is never shown stopped by anything this did, so it is `false`
+/// for as long as it runs. Only a group stop counts: a process held by a tracer
+/// is one the tracer may let go at any moment. On Linux every thread is asked,
+/// because a process's other threads are still running until the last of them
+/// has taken the stop.
+#[cfg(unix)]
+fn all_stopped(pids: &[u32]) -> bool {
+    let there: Vec<u32> = pids
+        .iter()
+        .copied()
+        .filter(|pid| signal_one(*pid, 0) != Reached::Absent)
+        .collect();
+    if there.is_empty() {
+        return true;
+    }
+    let ids = there
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    crate::rendercost::process_spawned("ps");
+    let mut asked = std::process::Command::new("ps");
+    #[cfg(target_os = "linux")]
+    asked.arg("-L");
+    // `ps -p` fails when none of its ids is a process any more, which is also
+    // the answer of a `ps` that could not start or could not run: asked again
+    // next round.
+    let Some(answered) = asked
+        .args(["-o", "pid=,stat=", "-p", &ids])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|answered| answered.status.success())
+    else {
+        return false;
+    };
+    let Ok(text) = String::from_utf8(answered.stdout) else {
+        return false;
+    };
+    let mut shown: Vec<u32> = Vec::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let mut columns = line.split_whitespace();
+        let (Some(Ok(pid)), Some(state), None) = (
+            columns.next().map(str::parse::<u32>),
+            columns.next(),
+            columns.next(),
+        ) else {
+            return false;
+        };
+        if !matches!(state.chars().next(), Some('T' | 'Z' | 'X')) {
+            return false;
+        }
+        shown.push(pid);
+    }
+    // One the answer leaves out is stopped only if it has gone since: still
+    // there and unshown is not a process anybody can say has stopped.
+    there
+        .iter()
+        .all(|pid| shown.contains(pid) || signal_one(*pid, 0) == Reached::Absent)
+}
+
+/// Add to `aimed` every process `table` shows descended from what it already
+/// holds — but never `me`, nor anything reached only through it.
+///
+/// The roots stay first and in their order, so what is signalled first is
+/// what would otherwise go on starting more. Every member is walked, not the
+/// roots alone, so a member whose parent exited before it was frozen still
+/// reaches what it starts afterwards. `me` is the stopping process: a stop run
+/// from inside the tree it ends — an agent of the run stopping its own run —
+/// must not freeze itself, which would leave it and the whole run stopped for
+/// good, nor end itself before it has signalled the rest. What it started is
+/// the `ps` it lists with, a new one every listing, so not walking through it
+/// is also what lets the listings settle. A stop that is the roots' *parent*
+/// is above the walk and changes nothing about it.
+#[cfg(unix)]
+fn aim_at_descent(aimed: &mut Vec<u32>, table: &[(u32, u32)], me: u32) {
+    // Without its own row, `me` is a process no walk reaches, and so is
+    // everything it started.
+    let without_me: Vec<(u32, u32)> = table
+        .iter()
+        .copied()
+        .filter(|(pid, _)| *pid != me)
+        .collect();
+    let mut walked = 0;
+    while walked < aimed.len() {
+        for descendant in descended_from(&without_me, aimed[walked]) {
+            if !aimed.contains(&descendant) {
+                aimed.push(descendant);
+            }
+        }
+        walked += 1;
+    }
 }
 
 /// What the answers from one round of signalling establish about the tree.
@@ -592,11 +859,22 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed_roots.is_empty() {
-        return (Teardown::NothingToStop, aimed_roots, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed_roots,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     let Some(table) = process_table() else {
-        return (Teardown::NotAttempted, Vec::new(), Vec::new());
+        return (
+            Teardown::NotAttempted,
+            Vec::new(),
+            Vec::new(),
+            Discovery::Incomplete,
+        );
     };
+    listed();
     let mut tree = aimed_roots.clone();
     for root in &aimed_roots {
         tree.extend(descended_from(&table, *root));
@@ -611,7 +889,12 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         .filter(|pid| platform_process_may_be_live(*pid))
         .collect();
     if aimed.is_empty() {
-        return (Teardown::NothingToStop, aimed, Vec::new());
+        return (
+            Teardown::NothingToStop,
+            aimed,
+            Vec::new(),
+            Discovery::Complete,
+        );
     }
     // Every process is asked separately, because `taskkill` takes one root, and
     // the answers are folded the way a teardown of several trees has to be: one
@@ -664,7 +947,10 @@ fn platform_stop(roots: &[u32], _how: Stop) -> Signalling {
         (false, true) => Teardown::PartlySignalled,
         (false, false) => Teardown::NotAttempted,
     };
-    (established, aimed, delivered)
+    // One listing and nothing after it, so what it found is all this arm can
+    // know of; a root's child started since is the gap the Unix arm's freeze
+    // closes, and this one does not yet.
+    (established, aimed, delivered, Discovery::Complete)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1191,10 +1477,35 @@ impl StartToken {
                 .get_or_init(|| ps_process_start_token(self.pid));
             legacy_reading(now.as_deref(), recorded)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            macos_reading(&self.recorded, recorded)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             TokenReading::Different
         }
+    }
+}
+
+/// A macOS record that is not this process's token word for word. One in the
+/// older spelling — `lstart` alone, written by a build before the microseconds
+/// were — is the same where its second is this process's, at the one-second
+/// resolution it was written to, so a run a previous build launched stays
+/// stoppable; anything else is another process.
+///
+/// Pure, so it is compiled into every target's tests and held on hosts that are
+/// not macOS too.
+// llmlint: ignore[changed_behavior_has_e2e] what this tells apart is one pid handed to a second
+// process inside the second the first started in, and no test can ask a host to reuse a pid that
+// fast; every journey that records a start and reads it back runs through here on macOS, and
+// `a_macos_start_token_tells_apart_two_starts_in_one_second` holds each spelling on every host.
+#[cfg(any(test, target_os = "macos"))]
+fn macos_reading(now: &str, recorded: &str) -> TokenReading {
+    let legacy = !recorded.contains(START_MICROS);
+    match now.split_once(START_MICROS) {
+        Some((second, _)) if legacy && second == recorded => TokenReading::Same,
+        _ => TokenReading::Different,
     }
 }
 
@@ -1434,9 +1745,17 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// looked at from another is two processes with two environments, and the view
 /// that exists to say whether its dispatches are alive reported them dead.
 /// Pinning the zone and locale on the child leaves the reading a function of the
-/// process alone. Its one-second resolution means a pid reused within the same
-/// rendered second cannot be distinguished; that is the portability cost on a
-/// platform without a finer stable process identity.
+/// process alone.
+///
+/// `lstart` is spelled to the second, which cannot tell apart two processes
+/// started within one: a driver retained to displace another can take that
+/// one's pid and its record would read as claimed before the driver had done
+/// anything. So on macOS the kernel's own microseconds of the same start —
+/// `proc_pidinfo`'s `PROC_PIDTBSDINFO`, which answers for a zombie too — follow
+/// the second, see `kernel_start_micros`. Where the kernel will not say there
+/// is no token, as where `ps` will not: a second alone would read as another
+/// process against the record this very process wrote. The other targets
+/// without procfs keep the one-second spelling.
 ///
 /// Read strictly. A `ps` that cannot run, exits non-zero, or writes bytes this
 /// cannot decode is not an answer, and neither is an empty line — a token
@@ -1450,7 +1769,54 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// host misbehaving rather than from the process ending.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn platform_process_start_token(pid: u32) -> Option<StartToken> {
-    ps_process_start_token(pid).map(|recorded| StartToken { recorded })
+    let second = ps_process_start_token(pid)?;
+    #[cfg(target_os = "macos")]
+    let recorded = format!("{second}{START_MICROS}{:06}", kernel_start_micros(pid)?);
+    #[cfg(not(target_os = "macos"))]
+    let recorded = second;
+    Some(StartToken { recorded })
+}
+
+/// What a macOS start token carries between `lstart`'s second and the kernel's
+/// microseconds of it.
+#[cfg(any(test, target_os = "macos"))]
+const START_MICROS: &str = " +0.";
+
+/// The microseconds of `pid`'s start the kernel recorded, or `None` where it
+/// will not say: no such process, or an answer that is not the whole record.
+///
+/// A non-zero `arg` is what asks this flavor to answer for a zombie as well:
+/// XNU's `proc_pidinfo` looks among exited, unreaped processes for
+/// `PROC_PIDTBSDINFO` only when it is set, and reads it for nothing else. With
+/// it zero, a child that had already exited — a dispatch or a retained driver
+/// that settled at once — had no token, so its claim was refused and a record
+/// naming another process read as its own.
+#[cfg(target_os = "macos")]
+fn kernel_start_micros(pid: u32) -> Option<u64> {
+    const FIND_ZOMBIE: u64 = 1;
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    // SAFETY: `info` is writable storage of the flavor's struct and `size` is
+    // its exact size, so the kernel writes nothing beyond it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            FIND_ZOMBIE,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // llmlint: ignore[changed_behavior_has_e2e] a short `proc_pidinfo` answer or a
+    // microsecond field of a million or more is the kernel misreporting a process, not a state a
+    // test can put it in; the process that is not there at all is the `ps` refusal above.
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel answered with the whole struct, so every field is set.
+    let info = unsafe { info.assume_init() };
+    (info.pbi_start_tvusec < 1_000_000).then_some(info.pbi_start_tvusec)
 }
 
 /// How a Linux start token is spelled ahead of its clock ticks.
@@ -1553,9 +1919,66 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
     // report. `WAIT_OBJECT_0` is a process that has exited, and `WAIT_FAILED` is
     // a question this host would not take; neither is a proof of a live process,
     // and both resolve to "this host will not say".
-    (read != 0 && waited == WAIT_TIMEOUT).then(|| StartToken {
+    (read != 0 && waited == WAIT_TIMEOUT).then(|| filetime_token(&created))
+}
+
+/// A Windows creation time as a token records it.
+#[cfg(windows)]
+fn filetime_token(created: &windows_sys::Win32::Foundation::FILETIME) -> StartToken {
+    StartToken {
         recorded: format!("{}:{}", created.dwHighDateTime, created.dwLowDateTime),
-    })
+    }
+}
+
+/// When `child` started, read through the child this process spawned rather
+/// than looked up by its pid — the reading a launcher compares the claim its
+/// child writes against.
+///
+/// An unreaped child's pid names that child and nothing else, so on Unix the
+/// pid is asked as any other is: a child that has exited and not been reaped
+/// still answers with its start.
+#[cfg(unix)]
+pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    process_start_token(child.id())
+}
+
+/// When `child` started, read through the handle the child holds.
+///
+/// [`process_start_token`] answers nothing for a process that has exited, for
+/// the liveness reason on its Windows reading. A launcher asks something else:
+/// not whether its child still runs, but when it started, so that a record
+/// naming the child's pid under some *other* start is not read as the child's
+/// claim. A child that exits at once — one that refused, or one that claimed
+/// and settled — has exited by the time its launcher looks, and a reading by pid
+/// would leave that comparison with nothing to compare. The child's own handle
+/// pins the process object, so its creation time is still that process's, and
+/// is asked with no exit check.
+#[cfg(windows)]
+pub(crate) fn child_start_token(child: &std::process::Child) -> Option<StartToken> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+
+    let mut created = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let mut exited = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: the handle is the child's own, open for as long as `child` is
+    // borrowed, and every out-parameter is a `FILETIME` this frame owns for the
+    // duration of the call.
+    let read = unsafe {
+        GetProcessTimes(
+            child.as_raw_handle(),
+            &raw mut created,
+            &raw mut exited,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    };
+    (read != 0).then(|| filetime_token(&created))
 }
 
 /// Open an append-only file so this process is its **only** appender until the
@@ -1573,10 +1996,14 @@ fn platform_process_start_token(pid: u32) -> Option<StartToken> {
 /// handle the append is made through, and never on the healing path alone.
 ///
 /// The handle is opened for reading too, because the appender has to look at the
-/// file's own tail before it writes, and the caller seeks to the end before it
-/// writes rather than relying on the open mode — the two platforms give a
-/// truncatable handle in different ways, and only one of them can truncate an
+/// file's own tail before it writes, and the caller writes through
+/// [`append_all`] rather than relying on the open mode — the two platforms give
+/// a truncatable handle in different ways, and only one of them can truncate an
 /// append-only one.
+///
+/// The exclusion is between the appenders that take it, and between them only:
+/// on both platforms a reader, or a process appending without this lock, opens
+/// the file while the handle is held.
 pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     platform_open_locked_append(path)
 }
@@ -1585,6 +2012,43 @@ pub fn open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::Fi
 /// the file, so a caller can say it is about to wait before it does.
 pub fn try_open_locked_append(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     platform_try_open_locked_append(path)
+}
+
+/// Write all of `bytes` to a handle from [`open_locked_append`] at the end of
+/// the file as it stands at the write, not where the handle last looked.
+///
+/// The lock excludes only the appenders that take it, so a process appending
+/// without it may have grown the file since the caller sought to its end. The
+/// Unix handle is opened to append, so each write lands at the end already; the
+/// Windows one is a plain write handle, and is told the end in the write itself.
+pub fn append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    platform_append_all(file, bytes)
+}
+
+#[cfg(unix)]
+fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    std::io::Write::write_all(file, bytes)
+}
+
+/// `WriteFile` given the offset `0xFFFFFFFF:0xFFFFFFFF` writes at the end of the
+/// file, as a handle opened for `FILE_APPEND_DATA` would; `seek_write` passes the
+/// offset in exactly those two halves. Each write is one such call, and
+/// `write_all` is std's own, short writes and interruptions included.
+#[cfg(windows)]
+fn platform_append_all(file: &mut std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    struct AtEnd<'a>(&'a std::fs::File);
+
+    impl std::io::Write for AtEnd<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            std::os::windows::fs::FileExt::seek_write(self.0, buf, u64::MAX)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    std::io::Write::write_all(&mut AtEnd(file), bytes)
 }
 
 // llmlint: ignore-block[changed_behavior_has_e2e] the contended answer of both arms is
@@ -1618,27 +2082,21 @@ fn platform_try_open_locked_append(
     Err(failed)
 }
 
-/// One attempt at the share-mode exclusion the waiting arm below retries: a
-/// sharing violation is another appender holding the file.
+/// One attempt at the exclusion the waiting arm below retries: the appender
+/// lock held, or a sharing violation from a build that still excluded at the
+/// open, is another appender holding the file.
 #[cfg(windows)]
 fn platform_try_open_locked_append(
     path: &std::path::Path,
 ) -> std::io::Result<Option<std::fs::File>> {
-    use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(path)
-    {
-        Ok(file) => Ok(Some(file)),
-        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => Ok(None),
-        Err(e) => Err(e),
-    }
+    let file = match open_shared_for_append(path) {
+        Ok(file) => file,
+        Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(try_lock_appender(&file)?.then_some(file))
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1675,54 +2133,125 @@ fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::f
 /// Windows has no advisory lock a reader can ignore: `LockFileEx` is
 /// *mandatory*, so a range lock over the file's data would fail every view
 /// reading a live run — the one thing this crate's readers must never do. The
-/// exclusion is taken at `CreateFile` instead, by opening with a share mode that
-/// admits readers and no second writer, and waiting for the writer that holds it
-/// to let go.
+/// lock is taken instead on one byte at [`APPENDER_LOCK_BYTE`], far past any end
+/// a file of records reaches, which no reader and no write ever touches: it
+/// excludes the appenders that ask for it and nothing else, as `flock` does.
 ///
-/// A plain write handle rather than an append-only one, which is what that share
-/// mode buys: a handle opened for appending alone cannot be truncated here —
-/// setting the end of a file needs write access — and truncating the fragment is
-/// half of what the caller does. Nothing else may hold this file for writing
-/// while this handle is open, so seeking to the end and writing there *is* an
-/// append.
+/// The open itself excludes nobody. It shares reading and writing, so a reader,
+/// and a process appending to the file without asking this crate — which Unix
+/// has always admitted — open it while this handle is held; a share mode
+/// admitting no second writer would refuse them for as long as the append, its
+/// heal and its receipt take. Deletion is not shared: nothing removes or renames
+/// a ledger file while it is being appended to.
 ///
-/// A sharing violation is the *contended* answer rather than a failure, and the
-/// wait is bounded so an appender can never hang a view or a driver: past the
-/// deadline the error is handed back as what it is.
+/// A plain write handle rather than an append-only one: a handle opened for
+/// appending alone cannot be truncated here — setting the end of a file needs
+/// write access — and truncating the fragment is half of what the caller does.
+/// The record itself goes through [`append_all`], which writes at the end of the
+/// file as it stands at that write, so a foreign append that landed after the
+/// caller looked at the tail is written after rather than over.
+///
+/// The lock held is the *contended* answer rather than a failure, and the wait
+/// is bounded so an appender can never hang a view or a driver: past the
+/// deadline the error is handed back as what it is. So is a sharing violation,
+/// which an appender of a build that still excluded at the open hands back.
 // llmlint: ignore-block[changed_behavior_has_e2e] the *uncontended* half of this arm is
 // driven by every journey that appends, on the Windows leg of CI, which runs the same
-// suite. What has no journey is the contended half, and the reason is that the holder a
-// journey needs is a second writer this suite can only be on the platform it is written
-// on: `tests/e2e/journal.rs` holds the store with `flock` and says so. A Windows journey
-// authored here would be one nobody has ever seen pass or fail — this host cannot link
-// that target, let alone run it — which is a worse thing to ship than a stated gap.
+// suite, and so is the shared open: `tests/e2e/journal.rs` appends from the test process
+// while a held driver has the journal. What has no journey is the contended half, and the
+// reason is that the holder a journey needs is a second writer this suite can only be on
+// the platform it is written on: `tests/e2e/journal.rs` holds the store with `flock` and
+// says so. A Windows journey authored here would be one nobody has ever seen pass or fail
+// — this host cannot link that target, let alone run it — which is a worse thing to ship
+// than a stated gap.
 #[cfg(windows)]
 fn platform_open_locked_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Foundation::ERROR_SHARING_VIOLATION;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    use windows_sys::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION};
 
     /// How long an appender waits for the writer ahead of it.
     const DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
     let waiting_since = std::time::Instant::now();
     loop {
-        let opened = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(path);
-        match opened {
+        let attempt = open_shared_for_append(path).and_then(|file| {
+            if try_lock_appender(&file)? {
+                Ok(file)
+            } else {
+                Err(std::io::Error::from_raw_os_error(
+                    ERROR_LOCK_VIOLATION as i32,
+                ))
+            }
+        });
+        match attempt {
             Err(e)
-                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION as i32)
-                    && waiting_since.elapsed() < DEADLINE =>
+                if matches!(
+                    e.raw_os_error(),
+                    Some(code) if code == ERROR_SHARING_VIOLATION as i32
+                        || code == ERROR_LOCK_VIOLATION as i32
+                ) && waiting_since.elapsed() < DEADLINE =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             other => return other,
         }
     }
+}
+
+/// The one byte the Windows appender lock covers: the last offset a signed
+/// 64-bit file position can name, which no file of records is ever long enough
+/// to reach, so locking it blocks no read or write of the file's data.
+#[cfg(windows)]
+const APPENDER_LOCK_BYTE: u64 = i64::MAX as u64 - 1;
+
+#[cfg(windows)]
+fn open_shared_for_append(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(path)
+}
+
+/// Take the appender lock on `file` without waiting: `false` while another
+/// handle holds it. Released when the handle closes, including when the process
+/// holding it dies.
+#[cfg(windows)]
+fn try_lock_appender(file: &std::fs::File) -> std::io::Result<bool> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let mut at = OVERLAPPED::default();
+    at.Anonymous.Anonymous.Offset = APPENDER_LOCK_BYTE as u32;
+    at.Anonymous.Anonymous.OffsetHigh = (APPENDER_LOCK_BYTE >> 32) as u32;
+    // SAFETY: the handle is one the caller owns and keeps open across the call,
+    // and `at` is a live OVERLAPPED that names the range; a synchronous handle
+    // asked not to wait completes before the call returns, so nothing keeps it.
+    let locked = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &raw mut at,
+        )
+    };
+    if locked != 0 {
+        return Ok(true);
+    }
+    let failed = std::io::Error::last_os_error();
+    if failed.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) {
+        return Ok(false);
+    }
+    Err(failed)
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2212,6 +2741,76 @@ mod tests {
         );
     }
 
+    /// A macOS token is `lstart`'s second and the kernel's microseconds of it,
+    /// so two processes started within one second read as two. A record a build
+    /// before the microseconds wrote is `lstart` alone, and is still this
+    /// process's where its second is.
+    #[test]
+    fn a_macos_start_token_tells_apart_two_starts_in_one_second() {
+        let now = "Sun Oct 11 19:23:36 2026 +0.004211";
+        for (recorded, reading) in [
+            ("Sun Oct 11 19:23:36 2026", TokenReading::Same),
+            (
+                "Sun Oct 11 19:23:36 2026 +0.731052",
+                TokenReading::Different,
+            ),
+            ("Sun Oct 11 19:23:37 2026", TokenReading::Different),
+            (
+                "a token in no spelling this host writes",
+                TokenReading::Different,
+            ),
+        ] {
+            assert_eq!(macos_reading(now, recorded), reading, "{recorded:?}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let token = process_start_token(pid()).expect("this host says when a process started");
+            assert!(
+                token.recorded().contains(START_MICROS),
+                "{:?} carries no microseconds",
+                token.recorded()
+            );
+        }
+    }
+
+    /// A child that has exited and not been reaped still is the process its pid
+    /// names, and is asked for its start exactly as it was while it ran: a
+    /// dispatch or a retained driver that settles at once is claimed by that
+    /// token, and one with none is refused or read by its pid alone.
+    #[cfg(unix)]
+    #[test]
+    fn an_exited_unreaped_child_keeps_the_start_token_it_ran_under() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a child starts");
+        let running = child_start_token(&child);
+        let pid = libc::id_t::try_from(child.id()).expect("a pid fits an id_t");
+        // SAFETY: an all-zero `siginfo_t` is a valid out-parameter, and
+        // `WNOWAIT` leaves the child unreaped, so its pid is not handed on.
+        let exited = unsafe {
+            let mut info: libc::siginfo_t = std::mem::zeroed();
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(exited, 0, "the child is waited on without being reaped");
+        let zombie = child_start_token(&child).expect("an exited, unreaped child has a start");
+        if let Some(running) = running {
+            assert_eq!(zombie.recorded(), running.recorded());
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            zombie.recorded().contains(START_MICROS),
+            "{:?} carries no microseconds",
+            zombie.recorded()
+        );
+        child.wait().expect("the child is reaped");
+    }
+
     /// The signals entry 88 of the divergence register says an interrupted
     /// landing's cleanup covers are exactly the ones the guard holds — the drift
     /// gate between that sentence and `HELD`.
@@ -2573,6 +3172,45 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         false
+    }
+
+    /// What a teardown aims at is descent from what it already holds — kept in
+    /// order, roots first — and never the stopping process or what it started,
+    /// while a stop that is the roots' own parent still reaches all of it.
+    ///
+    /// A stop run from inside the run it ends is a descendant of that run's
+    /// roots, and the teardown freezes what it aims at: aiming at itself would
+    /// leave it, and the run with it, stopped for good, and aiming at the `ps`
+    /// it lists with would find a new process every listing. A member held
+    /// from an earlier listing is walked too, so a process whose parent exited
+    /// before it was frozen still reaches what it starts afterwards.
+    #[cfg(unix)]
+    #[test]
+    fn a_teardown_aims_at_descent_and_never_at_the_stop_or_what_it_started() {
+        // 10 is the root; 12 is the stop, under 11; 13 is its `ps`. 20 was
+        // found under the root before and has since been handed to `init`.
+        let table = [
+            (10, 1),
+            (11, 10),
+            (12, 11),
+            (13, 12),
+            (14, 11),
+            (15, 14),
+            (20, 1),
+            (21, 20),
+        ];
+        let mut aimed = vec![10, 20];
+        aim_at_descent(&mut aimed, &table, 12);
+        assert_eq!(aimed[..2], [10, 20], "the roots were not kept first");
+        let mut rest = aimed[2..].to_vec();
+        rest.sort_unstable();
+        assert_eq!(rest, [11, 14, 15, 21]);
+        // A stop that started the roots itself is above the walk, and reaches
+        // all of it.
+        let mut aimed = vec![11];
+        aim_at_descent(&mut aimed, &table, 10);
+        aimed.sort_unstable();
+        assert_eq!(aimed, [11, 12, 13, 14, 15]);
     }
 
     /// A live process, a process already gone, and an id that is not a process
@@ -3593,14 +4231,185 @@ try {
     #[test]
     fn a_descendant_the_tree_kill_already_ended_is_a_clean_stop() {
         assert_eq!(
-            confirmed(Teardown::PartlySignalled, || true),
+            confirmed(Teardown::PartlySignalled, Discovery::Complete, || true),
             Teardown::Signalled,
             "a teardown whose tree was gone within the patience refused a stop it had made"
         );
         assert_eq!(
-            confirmed(Teardown::Signalled, || true),
+            confirmed(Teardown::Signalled, Discovery::Complete, || true),
             Teardown::Signalled,
             "a teardown that reached its whole tree was not reported as one"
+        );
+    }
+
+    /// Discovery reaches each of its ends, and pauses everything it found on the
+    /// way to any of them.
+    ///
+    /// Settled: a listing that finds nothing new, taken only once everything
+    /// paused is shown stopped. Incomplete: a listing the host refuses, a deadline
+    /// passed while the tree is still growing, and a deadline passed while a
+    /// process it paused — or could not pause — is not shown stopped. The last
+    /// two need a host that will not settle, which a real one gives only to a
+    /// process this user may not pause or one a tracer keeps running, so the
+    /// pausing, the check and the listing are handed in.
+    #[cfg(unix)]
+    #[test]
+    fn discovery_settles_or_says_it_did_not_and_pauses_what_it_found() {
+        // The ends meant to settle get a deadline nothing reaches, so a host
+        // whose short sleeps run long — a loaded Mac runner — cannot end them
+        // first; only the ends meant to be ended by the deadline get a short one.
+        let soon = || Instant::now().checked_add(std::time::Duration::from_millis(50));
+        let patient = || Instant::now().checked_add(std::time::Duration::from_secs(60));
+        let grown = vec![(10, 1), (11, 10), (12, 11)];
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let settled = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| true,
+            |_| true,
+            || Some(grown.clone()),
+        );
+        assert_eq!(settled, Discovery::Complete);
+        assert_eq!(
+            (aimed.clone(), paused.clone()),
+            (vec![10, 11, 12], vec![10, 11, 12])
+        );
+
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let refused = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| true,
+            |_| true,
+            || None,
+        );
+        assert_eq!(
+            (refused, aimed, paused),
+            (Discovery::Incomplete, vec![10], vec![10])
+        );
+
+        // A tree that grows at every listing never settles, so only the
+        // deadline ends it: whatever was found by then is paused, and the
+        // answer is that discovery did not finish.
+        let mut next = 100;
+        let mut growing = || {
+            next += 1;
+            Some((101..=next).map(|pid| (pid, 10)).chain([(10, 1)]).collect())
+        };
+        let (mut aimed, mut paused) = (vec![10], Vec::new());
+        let bounded = discover(
+            &mut aimed,
+            &mut paused,
+            soon(),
+            |_| true,
+            |_| true,
+            &mut growing,
+        );
+        assert_eq!(bounded, Discovery::Incomplete);
+        assert!(
+            aimed.len() > 1,
+            "the tree never grew, so the bound was not what ended it"
+        );
+        assert_eq!(
+            paused, aimed,
+            "something found before the bound was left unpaused"
+        );
+
+        // A process the pause did not reach is not recorded as paused, and is
+        // never shown stopped, so no listing is taken and the deadline ends it.
+        let (mut aimed, mut paused, mut listings) = (vec![10], Vec::new(), 0);
+        let unpaused = discover(
+            &mut aimed,
+            &mut paused,
+            soon(),
+            |pid| pid != 10,
+            |pids| !pids.contains(&10),
+            || {
+                listings += 1;
+                Some(grown.clone())
+            },
+        );
+        assert_eq!(unpaused, Discovery::Incomplete);
+        assert_eq!(
+            (aimed, paused, listings),
+            (vec![10], Vec::new(), 0),
+            "a pid the pause did not reach was recorded as paused, or listed past"
+        );
+
+        // A stop that was delivered and has not yet taken is waited on and
+        // asked about again — every round pausing anew — and the listing is
+        // taken only once it has, so what it shows is a frozen tree.
+        let (mut aimed, mut paused, mut asked, mut pauses) = (vec![10], Vec::new(), 0, 0);
+        let taken = discover(
+            &mut aimed,
+            &mut paused,
+            patient(),
+            |_| {
+                pauses += 1;
+                true
+            },
+            |_| {
+                asked += 1;
+                asked > 2
+            },
+            || Some(vec![(10, 1)]),
+        );
+        assert_eq!(taken, Discovery::Complete);
+        assert_eq!((aimed, paused), (vec![10], vec![10]));
+        assert_eq!(
+            (asked, pauses),
+            (3, 3),
+            "a delivered stop was trusted as taken"
+        );
+    }
+
+    /// A live process this user has not stopped is not shown stopped; one it
+    /// has stopped is, and so is one that is gone.
+    ///
+    /// Asked of the host itself, because the answer is the host's: a child of
+    /// this test, running, then stopped, then ended and reaped.
+    #[cfg(unix)]
+    #[test]
+    fn a_process_is_shown_stopped_only_once_the_host_says_it_has_stopped() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a child to ask about");
+        let pid = child.id();
+        assert!(!all_stopped(&[pid]), "a running process was shown stopped");
+        assert_eq!(signal_one(pid, libc::SIGSTOP), Reached::Delivered);
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !all_stopped(&[pid]) {
+            assert!(
+                Instant::now() < deadline,
+                "a stopped process was never shown stopped"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(all_stopped(&[pid]), "a process that is gone was not");
+        assert!(all_stopped(&[]));
+    }
+
+    /// A teardown whose discovery did not finish is never confirmed clean, even
+    /// once everything it found is gone: what it did not find is what may
+    /// still be running. And the answers that say nothing was signalled keep
+    /// their own meaning.
+    #[test]
+    fn a_teardown_that_stopped_looking_is_never_confirmed_clean() {
+        for established in [Teardown::Signalled, Teardown::PartlySignalled] {
+            assert_eq!(
+                confirmed(established, Discovery::Incomplete, || true),
+                Teardown::PartlySignalled,
+                "{established:?} over an unfinished discovery was confirmed as a clean stop"
+            );
+        }
+        assert_eq!(
+            confirmed(Teardown::NotAttempted, Discovery::Incomplete, || true),
+            Teardown::NotAttempted
         );
     }
 
@@ -3616,12 +4425,12 @@ try {
     #[test]
     fn a_tree_still_standing_when_the_patience_runs_out_is_still_a_refusal() {
         assert_eq!(
-            confirmed(Teardown::PartlySignalled, || false),
+            confirmed(Teardown::PartlySignalled, Discovery::Complete, || false),
             Teardown::PartlySignalled,
             "a stop that left part of the run running reported a clean teardown"
         );
         assert_eq!(
-            confirmed(Teardown::Signalled, || false),
+            confirmed(Teardown::Signalled, Discovery::Complete, || false),
             Teardown::PartlySignalled,
             "a signalled tree that was still there when the patience ran out was reported as \
              gone"
@@ -3638,18 +4447,18 @@ try {
         // about was the only thing to see, after the leg that reads it here had
         // gone green.
         assert_eq!(
-            confirmed(Teardown::NotAttempted, || true),
+            confirmed(Teardown::NotAttempted, Discovery::Complete, || true),
             Teardown::NotAttempted,
             "a teardown that never began was reported as one that reached the tree"
         );
         #[cfg(unix)]
         assert_eq!(
-            confirmed(Teardown::Refused, || true),
+            confirmed(Teardown::Refused, Discovery::Complete, || true),
             Teardown::Refused,
             "a teardown every ask of which was refused was reported as one that reached the tree"
         );
         assert_eq!(
-            confirmed(Teardown::NothingToStop, || true),
+            confirmed(Teardown::NothingToStop, Discovery::Complete, || true),
             Teardown::NothingToStop,
             "a teardown that found no tree to aim at was reported as one that ended a run"
         );

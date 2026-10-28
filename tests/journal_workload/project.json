@@ -1,0 +1,82 @@
+{
+  "name": "onepipeline-journal-workload",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/journal_workload",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:workload"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build journal_workload",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/journal_workload/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/journal_workload/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/journal_workload/main.rs",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/journal_workload/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint journal_workload",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/journal_workload/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint"
+      ]
+    },
+    "workload": {
+      "command": "just _journal-workload-run",
+      "dependsOn": [
+        "build"
+      ],
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/journal_workload/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ],
+      "parallelism": false,
+      "cache": false,
+      "outputs": [
+        "{workspaceRoot}/target/budget-records/journal-workload.json"
+      ]
+    }
+  }
+}

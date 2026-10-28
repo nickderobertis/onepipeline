@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Release onepipeline one platform at a time, then the platform-independent rest.
 
-release.yml's three build jobs and its `publish` job are each one call of this
+release.yml's four build jobs and its `publish` job are each one call of this
 through the `just release-<platform>` / `just release-publish` recipes, so a
 release and a developer drive the same steps. What each phase does, and in what
 order, is AGENTS.md's "Commits, releases, and merging".
 
 Usage:
-  release.py plan PLATFORM [--version V]       PLATFORM: linux, macos, windows or common
+  release.py plan PLATFORM [--version V]       PLATFORM: linux, linux-arm64, macos, windows or common
   release.py build PLATFORM [--out DIR]        build each target once, package, test-install
   release.py publish PLATFORM [--out DIR] [--dry-run]
   release.py verify PLATFORM [--out DIR]       install from the registries and run it
@@ -27,6 +27,7 @@ The release reaches this as environment, which the workflow sets:
   ONEPIPELINE_PYPI_UPLOAD_URL, ONEPIPELINE_PYPI_INDEX_URL, ONEPIPELINE_PYPI_JSON_URL,
   ONEPIPELINE_CRATE_REGISTRY, npm_config_registry   where each registry is (default: the public one)
   ONEPIPELINE_RELEASE_VERIFY_BUDGET   seconds an install may wait for a registry (default 600)
+  PUBLISH_NPM_AWAIT_BUDGET   seconds a phase waits in all for npm to serve what it published (default 900)
   ONEPIPELINE_RELEASE_OUT where each platform's files go (default target/release-artifacts)
 
 Quiet on success: one summary line per phase (a dry run lists what it would
@@ -35,6 +36,7 @@ was refused or a step failed, named on stderr with what to do next. Exit 2: the
 command line was refused.
 """
 import argparse
+import base64
 import contextlib
 import hashlib
 import importlib.util
@@ -60,23 +62,27 @@ _spec = importlib.util.spec_from_file_location('staged', SCRIPTS / 'build-staged
 staged = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(staged)
 
-# The targets each build job builds, once each. Intel macOS and Linux arm64 are
-# not built: README.md says how to install there from source.
+# The targets each build job builds, once each, on a runner of that target's own
+# architecture. Intel macOS is not built: README.md says how to install there
+# from source.
 PLATFORMS = {
     'linux': ['x86_64-unknown-linux-gnu'],
+    'linux-arm64': ['aarch64-unknown-linux-gnu'],
     'macos': ['aarch64-apple-darwin'],
     'windows': ['x86_64-pc-windows-msvc'],
 }
 
 # The wheel platform tag each target's build is held to, and the glibc floor a
-# Linux binary may not exceed. Linux builds once, inside the manylinux2014 image,
-# so its archive and npm package carry the wheel's binary and the wheel's floor.
+# Linux binary may not exceed. Each Linux target builds once, inside its
+# architecture's manylinux2014 image, so its archive and npm package carry the
+# wheel's binary and the wheel's floor.
 WHEEL_PLATFORM = {
     'x86_64-unknown-linux-gnu': 'manylinux_2_17_x86_64.manylinux2014_x86_64',
+    'aarch64-unknown-linux-gnu': 'manylinux_2_17_aarch64.manylinux2014_aarch64',
     'aarch64-apple-darwin': 'macosx_11_0_arm64',
     'x86_64-pc-windows-msvc': 'win_amd64',
 }
-GLIBC_FLOOR = {'x86_64-unknown-linux-gnu': (2, 17)}
+GLIBC_FLOOR = {'x86_64-unknown-linux-gnu': (2, 17), 'aarch64-unknown-linux-gnu': (2, 17)}
 
 PYPI_NAME = 'onepipeline-cli'
 NPM_LAUNCHER = 'onepipeline-cli'
@@ -205,6 +211,12 @@ def npm_package(target):
     return f"onepipeline-cli-{facts['platform']}-{facts['arch']}", facts
 
 
+def job_key(platform):
+    """The prefix of the environment release.yml hands `outcome` for one build job:
+    `linux-arm64` is LINUX_ARM64, because a shell variable name has no `-`."""
+    return platform.upper().replace('-', '_')
+
+
 def check_targets():
     declared = set(staged.supported_targets())
     built = {target for targets in PLATFORMS.values() for target in targets}
@@ -302,8 +314,8 @@ def conform(platform, version, artifacts):
                f"{artifact['glibc_floor']}", 'build it inside the manylinux2014 image, as `just wheel-linux` does')
 
 
-def compile_wheel(platform, target, out):
-    if platform == 'linux':
+def compile_wheel(target, out):
+    if target in GLIBC_FLOOR:
         wheels = out / 'wheels' / target
         wheels.mkdir(parents=True, exist_ok=True)
         try:
@@ -325,7 +337,7 @@ def build(args):
     fresh(out)
     records = []
     for target in PLATFORMS[args.platform]:
-        wheel = compile_wheel(args.platform, target, out)
+        wheel = compile_wheel(target, out)
         try:
             records.append(staged.package(target, wheel, out, version))
         except (ValueError, OSError, subprocess.SubprocessError) as error:
@@ -377,6 +389,19 @@ def built(platform, out, tag, version):
         expect(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == artifact.get('sha256'),
                f'{path} changed after it was built and test-installed',
                'rebuild; only the files the test-install ran may be published')
+        if artifact['kind'] == 'npm' and artifact['target']:
+            # A platform package is the npm consumer's only record of which
+            # crate versions its binary links, so one without it is not published.
+            name = artifact['package'].split(':', 1)[1]
+            rebuild = "rebuild; scripts/npm-build.mjs puts the wheel's SBOM in every platform package"
+            try:
+                with tarfile.open(path) as bundle:
+                    staged.npm_sbom(bundle, name)
+            except tarfile.TarError as error:
+                raise Refused(f'npm package {name} is not a readable tarball ({error}), so nothing is published',
+                              rebuild) from error
+            except ValueError as error:
+                raise Refused(f'{error}, so nothing is published', rebuild) from error
     return manifest
 
 
@@ -516,30 +541,46 @@ def pypi_urls():
 
 
 def pypi_files(version):
-    """The filenames PyPI serves for this version; none when it has no release of it."""
+    """The files PyPI serves for this version, each filename to its sha256; none
+    when it has no release of it."""
     status, body = http('GET', f'{pypi_urls()[2]}/{PYPI_NAME}/{version}/json')
     if status == 404:
-        return set()
+        return {}
     expect(status == 200, f'PyPI answered {status} for {PYPI_NAME} {version}', 're-run once PyPI answers')
     release = json_of(body, f'PyPI\'s {PYPI_NAME} {version}', lambda v: isinstance(v, dict)
                       and isinstance(v.get('urls'), list)
-                      and all(isinstance(u, dict) and isinstance(u.get('filename'), str) for u in v['urls']))
-    return {entry['filename'] for entry in release['urls']}
+                      and all(isinstance(u, dict) and isinstance(u.get('filename'), str)
+                              and isinstance(u.get('digests'), dict) and isinstance(u['digests'].get('sha256'), str)
+                              and re.fullmatch('[0-9a-f]{64}', u['digests']['sha256']) for u in v['urls']))
+    return {entry['filename']: entry['digests']['sha256'] for entry in release['urls']}
 
 
-def npm_serves(package, version):
-    view = subprocess.run([shutil.which('npm') or 'npm', 'view', f'{package}@{version}', 'version', '--prefer-online'],
+def npm_view(package, version, field):
+    """One field of what npm serves for `package@version`, or None when it serves no such version."""
+    view = subprocess.run([shutil.which('npm') or 'npm', 'view', f'{package}@{version}', field, '--prefer-online'],
                           text=True, capture_output=True)
     if view.returncode == 0:
         # npm prints nothing for a version a package it knows does not have.
-        answered = view.stdout.strip()
-        expect(answered in ('', version), f"npm answered '{answered}' for {package}@{version}",
-               're-run once the npm registry answers normally')
-        return answered == version
+        return view.stdout.strip() or None
     if 'E404' in view.stderr or '404 Not Found' in view.stderr:
-        return False
+        return None
     raise Refused(f'npm could not be asked about {package}@{version}: {view.stderr.strip()}',
                   're-run once the npm registry answers')
+
+
+def npm_serves(package, version):
+    answered = npm_view(package, version, 'version')
+    expect(answered in (None, version), f"npm answered '{answered}' for {package}@{version}",
+           're-run once the npm registry answers normally')
+    return answered == version
+
+
+def npm_integrity(package, version):
+    """The integrity npm records for the tarball it serves as `package@version`, or None."""
+    answered = npm_view(package, version, 'dist.integrity')
+    expect(answered is None or re.fullmatch(r'sha512-[A-Za-z0-9+/]+={0,2}', answered),
+           f"npm answered '{answered}' for {package}@{version}'s integrity", 're-run once the npm registry answers normally')
+    return answered
 
 
 def crate_registry():
@@ -581,6 +622,44 @@ def crate_args():
     return ['--index', f'sparse+{crate_registry()}'] if crate_registry() else []
 
 
+REGISTRY_NAMES = {'github-release': 'the Release', 'pypi': 'PyPI', 'npm': 'npm'}
+
+
+def digest(artifact):
+    """What the artifact's registry identifies its bytes by: npm the tarball's
+    sha512 integrity, the Release and PyPI its sha256."""
+    if artifact['destination'] == 'npm':
+        return 'sha512-' + base64.b64encode(hashlib.sha512(Path(artifact['path']).read_bytes()).digest()).decode()
+    return artifact['sha256']
+
+
+def short(value):
+    return value.split('-', 1)[-1][:12] + '…'
+
+
+def holdings(release, version, uploads):
+    """What each registry already holds under each file this phase would upload,
+    read before anything is written: the registry's digest of it, or None.
+
+    A registry holding a planned name with other bytes than this build's holds
+    an earlier attempt of this release, because nothing else publishes under
+    this version's names, and a re-run's build is not byte-identical to the one
+    before it: the binary is not reproducible across runners.
+    """
+    assets = release.assets()
+    pypi = pypi_files(version) if any(a['destination'] == 'pypi' for a in uploads) else {}
+    held = {}
+    for artifact in uploads:
+        name = artifact['file']
+        if artifact['destination'] == 'github-release':
+            held[name] = hashlib.sha256(release.download(assets[name])).hexdigest() if name in assets else None
+        elif artifact['destination'] == 'pypi':
+            held[name] = pypi.get(name)
+        else:
+            held[name] = npm_integrity(artifact['package'].split(':', 1)[1], version)
+    return held
+
+
 def publish(args):
     tag, version, channels = guard('publish', dry_run=args.dry_run)
     manifest = built(args.platform, out_dir(args), tag, version)
@@ -592,21 +671,67 @@ def publish(args):
         say(f"dry run: published nothing for {args.platform}{skipped(channels, ['pypi', 'npm'])}")
         return
     release = Release(tag)
-    uploaded = [Path(a['path']).name for a in uploads
-                if a['destination'] == 'github-release' and release.upload(Path(a['path']))]
-    wheels = [Path(a['path']) for a in uploads if a['destination'] == 'pypi']
+    held = holdings(release, version, uploads)
+    ours = [a['file'] for a in uploads if held[a['file']] == digest(a)]
+    earlier = [a['file'] for a in uploads if held[a['file']] not in (None, digest(a))]
+    # PyPI and npm never replace a file, so what an earlier attempt put there is
+    # what this release ships from them; verify installs and runs it.
+    for artifact in uploads:
+        if artifact['file'] in earlier and artifact['destination'] != 'github-release':
+            where = REGISTRY_NAMES[artifact['destination']]
+            what = (f"{artifact['package'].split(':', 1)[1]}@{version}" if artifact['destination'] == 'npm'
+                    else artifact['file'])
+            say(f"{where} already holds {what} from an earlier attempt of {tag} ({short(held[artifact['file']])}, "
+                f"where this build's is {short(digest(artifact))}); it is kept, since {where} never replaces a "
+                "published file, and this build's is not uploaded")
+    # The Release, unlike PyPI and npm, can replace a file, so its archive and
+    # checksum follow them, as a pair, so that the three serve one build:
+    #   * kept, when PyPI or npm holds an earlier attempt's file for this
+    #     target. publish uploads the Release's pair before PyPI and npm, so a
+    #     pair held alongside such a file is that same attempt's build, and
+    #     replacing it would leave the Release the one registry serving another;
+    #   * replaced with this build's, when neither does: PyPI and npm are about
+    #     to take this build, and the pair is all that is left of the earlier one.
+    # What neither choice can make one build — PyPI holding an earlier attempt's
+    # wheel while npm takes this build's package — verify reports, because it
+    # compares the binary each registry serves.
+    uploaded = []
+    for target in PLATFORMS[args.platform]:
+        pair = [a for a in uploads if a['destination'] == 'github-release' and a['target'] == target]
+        if not pair or all(a['file'] in ours for a in pair):
+            continue
+        fixed = sorted({REGISTRY_NAMES[a['destination']] for a in uploads
+                        if a['target'] == target and a['destination'] != 'github-release' and a['file'] in earlier})
+        if fixed and all(held[a['file']] is not None for a in pair):
+            say(f"the Release already holds {' and '.join(a['file'] for a in pair)} from an earlier attempt of {tag}; "
+                f"kept, because {' and '.join(fixed)} hold{'s' if len(fixed) == 1 else ''} that attempt's {target} "
+                'build too and never replace a file')
+            continue
+        replaced = [a['file'] for a in pair if a['file'] in earlier]
+        uploaded += [a['file'] for a in pair if release.upload(Path(a['path']), replace=a['file'] in earlier)]
+        if replaced:
+            why = (f"because the Release held only part of that attempt's pair, and a pair from two builds does not "
+                   f"verify; {' and '.join(fixed)} still serve{'s' if len(fixed) == 1 else ''} that attempt's build, "
+                   'which verify reports' if fixed else
+                   f"because neither PyPI nor npm holds that attempt's {target} build")
+            say(f"the Release held {' and '.join(replaced)} from an earlier attempt of {tag}; replaced with this "
+                f"build's, {why}")
+    wheels = [Path(a['path']) for a in uploads if a['destination'] == 'pypi' and held[a['file']] is None]
     if wheels:
         upload, index, _ = pypi_urls()
         env = dict(os.environ, UV_PUBLISH_TOKEN=os.environ['PYPI_TOKEN'])
-        # `--check-url` asks the index first, so a re-run uploads only the wheels
-        # it does not already serve.
+        # `--check-url` asks the index again, so a wheel that reached it since
+        # it was read above is skipped rather than uploaded twice.
         run('uv', 'publish', '--quiet', '--trusted-publishing', 'never', '--publish-url', upload,
             '--check-url', index, *[str(wheel) for wheel in wheels], env=env)
-    for artifact in uploads:
-        if artifact['destination'] == 'npm':
-            run('bash', str(SCRIPTS / 'publish-npm.sh'), artifact['path'], capture=True)
-    say(f"published {args.platform}'s {len(uploads)} artifact(s) for {version} "
-        f"({len(uploaded)} Release asset(s) uploaded, the rest already there){skipped(channels, ['pypi', 'npm'])}")
+    packages = [a['path'] for a in uploads if a['destination'] == 'npm' and held[a['file']] is None]
+    if packages:
+        # One call, so one deadline bounds this job's whole wait for npm.
+        run('bash', str(SCRIPTS / 'publish-npm.sh'), *packages, capture=True)
+    sent = len(uploaded) + len(wheels) + len(packages)
+    kept = [name for name in earlier if name not in uploaded]
+    say(f"published {args.platform}'s artifacts for {version}: {sent} uploaded, {len(uploads) - sent} already there"
+        f"{f' ({len(kept)} from an earlier attempt)' if kept else ''}{skipped(channels, ['pypi', 'npm'])}")
 
 
 def smoke(directory, version, label):
@@ -659,6 +784,8 @@ def verify(args):
     with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         for target in PLATFORMS[args.platform]:
+            # The executable each registry put on disk, by where it came from.
+            served = {}
             archive = staged.archive_name(version, target)
             checksum = f'onepipeline-v{version}-{target}.sha256'
             for name in [archive, checksum]:
@@ -670,6 +797,7 @@ def verify(args):
             (scratch / archive).write_bytes(payload)
             unpack(scratch / archive, target, scratch / 'archive' / target)
             smoke(scratch / 'archive' / target, version, f'Release archive {archive}')
+            served['the Release'] = scratch / 'archive' / target / staged.binary_name(target)
             if channels['pypi']:
                 venv = scratch / 'pypi' / target
                 run(sys.executable, '-m', 'venv', str(venv))
@@ -680,6 +808,7 @@ def verify(args):
                               str(python), '-m', 'pip', 'install', '--no-cache-dir', '--index-url', pypi_urls()[1],
                               f'{PYPI_NAME}=={version}')
                 smoke(bindir, version, f'PyPI {PYPI_NAME} {version} on {target}')
+                served['PyPI'] = bindir / staged.binary_name(target)
             if channels['npm']:
                 name, _ = npm_package(target)
                 prefix = scratch / 'npm' / target
@@ -688,6 +817,15 @@ def verify(args):
                               'npm', 'install', '--prefix', str(prefix), '--prefer-online', '--no-audit',
                               '--no-fund', f'{name}@{version}')
                 smoke(prefix / 'node_modules' / name / 'bin', version, f'npm {name} {version}')
+                served['npm'] = prefix / 'node_modules' / name / 'bin' / staged.binary_name(target)
+            builds = {where: hashlib.sha256(path.read_bytes()).hexdigest() for where, path in served.items()}
+            if len(set(builds.values())) > 1:
+                # Each ran above, so this is not a failure; but a re-run after a
+                # partial publish can leave the registries serving more than one
+                # build, and whoever reads this release should not have to find out.
+                say(f'{target} is served as more than one build: '
+                    + ', '.join(f'{where} {digest[:12]}…' for where, digest in builds.items())
+                    + '; each installs and runs, and each was test-installed by the attempt that built it')
     say(f"every {args.platform} artifact of {version} installs from its registry and runs{skipped(channels, ['pypi', 'npm'])}")
 
 
@@ -695,7 +833,7 @@ def availability(version, channels, common=False):
     """Every planned artifact a registry does not serve, so one refusal names them all."""
     missing = []
     assets = Release(f'v{version}').assets()
-    pypi = pypi_files(version) if channels['pypi'] else set()
+    pypi = pypi_files(version) if channels['pypi'] else {}
     for platform in PLATFORMS:
         for artifact in plan(platform, version)['artifacts']:
             where = artifact['destination']
@@ -850,12 +988,12 @@ def outcome(args):
             results['npm-launcher']['published'] = 'success'
     for platform in PLATFORMS:
         for phase in ['RESULT', 'PUBLISHED', 'VERIFIED']:
-            value = os.environ.get(f'{platform.upper()}_{phase}', '')
-            expect(value in ('', *RESULTS), f"{platform.upper()}_{phase} is '{value}', not a job or step result GitHub reports",
+            value = os.environ.get(f'{job_key(platform)}_{phase}', '')
+            expect(value in ('', *RESULTS), f"{job_key(platform)}_{phase} is '{value}', not a job or step result GitHub reports",
                    'pass success, failure, cancelled or skipped')
     builds = {}
     for platform in PLATFORMS:
-        key = platform.upper()
+        key = job_key(platform)
         job = os.environ.get(f'{key}_RESULT') or 'skipped'
         builds[platform] = {phase: os.environ.get(f'{key}_{phase.upper()}') or job
                             for phase in ['published', 'verified']}

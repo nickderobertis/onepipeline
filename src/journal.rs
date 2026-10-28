@@ -21,6 +21,11 @@ use crate::sys;
 
 pub use crate::event::PipelineKind;
 
+/// The next sequence number this process's stream may claim on each run's journal,
+/// shared by every writer it opens there. See [`Journal::open`].
+static SEQUENCES: std::sync::Mutex<BTreeMap<std::path::PathBuf, u64>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
 /// The append-only writer for one run.
 ///
 /// It holds the next sequence number for this process's stream, which is taken
@@ -47,15 +52,24 @@ impl Journal {
     /// Open the run's journal for appending.
     pub fn open(paths: &RunPaths) -> Self {
         let stream = format!("{}-{}", sys::hostname(), sys::pid());
-        let next_seq = ledger::read_lines(&paths.journal())
-            .iter()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .filter(|value| value.get("stream").and_then(Value::as_str) == Some(stream.as_str()))
-            .filter_map(|value| value.get("seq").and_then(Value::as_u64))
-            .max()
-            .map_or(0, |max| max + 1);
+        // Read off the run's checkpoint and the records past it, as the summary
+        // beside it is: a writer opening on a long run reads what is new, never the
+        // history its next sequence number has to be above.
+        let (summary, claimed) = crate::summary::Maintainer::opened_for(paths, &stream);
+        let next_seq = claimed.map_or(0, |max| max + 1);
+        // Every writer this process opens on one run shares the stream, so they
+        // share its next number too: two writers each counting from what they read
+        // would claim one `seq` twice.
+        let next_seq = {
+            let mut claimed = SEQUENCES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let shared = claimed.entry(paths.journal()).or_insert(next_seq);
+            *shared = (*shared).max(next_seq);
+            *shared
+        };
         Self {
-            summary: crate::summary::Maintainer::of(paths),
+            summary,
             paths: paths.clone(),
             stream,
             next_seq,
@@ -78,9 +92,18 @@ impl Journal {
         kind: &str,
         body: &T,
     ) -> Result<crate::event::ArtifactRef> {
+        // Named for the number the next record of this process's stream takes,
+        // which another writer of this process may have moved past this one's.
+        let next = SEQUENCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.paths.journal())
+            .copied()
+            .unwrap_or(self.next_seq)
+            .max(self.next_seq);
         let path = self
             .paths
-            .report_for(&format!("{kind}-{}", self.stream), self.next_seq);
+            .report_for(&format!("{kind}-{}", self.stream), next);
         ledger::write_json(&path, body)?;
         let bytes = std::fs::metadata(&path)
             .map_err(|source| crate::error::Error::Ledger {
@@ -114,6 +137,19 @@ impl Journal {
         ) {
             panic!("an emitter wrote a {kind} record its own document refuses: {refusal}");
         }
+        // Taken and moved on under one lock: another writer of this process on
+        // this run may have moved past this writer's own count, and two taking
+        // the same number would be one `seq` claimed twice.
+        let seq = {
+            let mut claimed = SEQUENCES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let shared = claimed.entry(self.paths.journal()).or_insert(self.next_seq);
+            let seq = (*shared).max(self.next_seq);
+            *shared = seq + 1;
+            seq
+        };
+        self.next_seq = seq;
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: sys::now_rfc3339(),
@@ -173,6 +209,9 @@ impl Journal {
         // bytes back off the file and returned above, with no summary written
         // for them.
         self.summary.appended(envelope, bytes);
+        // And after it for the same reason: a stream read asked once this returns
+        // was asked of a store that holds the record.
+        crate::views::recorded(&self.paths.run, envelope);
         Ok(())
     }
 }
@@ -188,8 +227,15 @@ impl Journal {
 ///
 /// `truncated` is only ever set to `true`: a producer that said `false` and then
 /// handed over an over-long text was wrong about its own payload.
+///
+/// Only a record still carrying a copy is cut. A sibling's turn record carrying
+/// a `transcript` reference this build reads carries no content copy at all —
+/// the content is in the history file it names, read through
+/// [`crate::views::transcript`] — so it is kept exactly as its producer wrote
+/// it. A `transcript` key on anything else, or one that is not a reference, is
+/// no such record, and is bounded like any other.
 fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
-    if !envelope.payload.values().any(over_the_bound) {
+    if references_its_history(envelope) || !envelope.payload.values().any(over_the_bound) {
         return Cow::Borrowed(envelope);
     }
     let mut cut = envelope.clone();
@@ -200,6 +246,14 @@ fn within_the_bound(envelope: &Envelope) -> Cow<'_, Envelope> {
     }
     cut.payload.insert("truncated".to_string(), json!(true));
     Cow::Owned(cut)
+}
+
+/// Whether a relayed envelope is a sibling's turn record carrying a reference
+/// into its history that this build reads.
+fn references_its_history(envelope: &Envelope) -> bool {
+    envelope.source == crate::event::Source::Agentgraph
+        && crate::views::transcript::TranscriptRef::of(&envelope.kind.0, &envelope.payload)
+            .is_some_and(|reference| reference.is_ok_and(|reference| reference.is_reference()))
 }
 
 /// Whether one payload value is a text past the bound.
@@ -321,6 +375,150 @@ pub(crate) fn finished_records_after(path: &Path, from: u64) -> Vec<(Option<Enve
     grown
 }
 
+/// [`finished_records_after`], for a reader that **trusts the boundary it resumes
+/// at** rather than asking the byte in front of it.
+///
+/// What a reader resuming from a checkpoint reads: the bytes in front of `from`
+/// are history it has already folded and never reads again — not even the one
+/// terminator the bus reader asks about, since a run's covered history is exactly
+/// what that reader may no longer assume is there to read. Everything from `from`
+/// to the end of the file as it stands now.
+pub(crate) fn finished_records_from(path: &Path, from: u64) -> Vec<(Option<Envelope>, u64)> {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    finished_records_within(path, from, length.saturating_sub(from))
+}
+
+/// [`finished_records_from`], over at most `len` bytes from `from`: what a rebuild
+/// folds one window at a time. A record the window ends inside is left for the
+/// next one, exactly as a record whose writer has not finished it is.
+pub(crate) fn finished_records_within(
+    path: &Path,
+    from: u64,
+    len: u64,
+) -> Vec<(Option<Envelope>, u64)> {
+    finished_lines_within(path, from, len)
+        .into_iter()
+        .map(|line| (line.record, line.bytes))
+        .collect()
+}
+
+/// One **finished** line of a run's journal as a fold takes it: the record it
+/// holds, how many bytes of the file it occupies, and what of it is no record
+/// this build can read.
+///
+/// The loss rides beside the record rather than being read again later, because
+/// what an [`Integrity`] says a store lost is exactly the lines a fold already met:
+/// a reader that wanted it from the fold's own read of those lines would
+/// otherwise have to read the whole store once more to be told it.
+#[derive(Debug, Clone)]
+pub(crate) struct FinishedLine {
+    /// The record, where the line holds one this build reads.
+    pub(crate) record: Option<Envelope>,
+    /// How many bytes of the file the line occupies, its terminator included.
+    pub(crate) bytes: u64,
+    /// What of the line is lost, where any of it is.
+    pub(crate) lost: Option<Lost>,
+}
+
+/// Which of the two classes an [`Integrity`] counts a lost line under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LossKind {
+    /// A record whose writer did not finish it.
+    Truncated,
+    /// A whole line this build cannot read.
+    Unparseable,
+}
+
+/// What of one line an [`Integrity`] counts as lost: which of its two classes, where
+/// in the file the line begins, and how many of its bytes are no record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lost {
+    /// Which class it is lost under.
+    pub(crate) kind: LossKind,
+    /// Where in the file the line begins.
+    pub(crate) offset: u64,
+    /// How many of its bytes are not a record this build can read.
+    pub(crate) bytes: u64,
+}
+
+/// What an [`Integrity`] counts lost of one line it read as `reading`: nothing for a
+/// whole record or a blank line, the fragment in front of a glued record, and the
+/// whole line otherwise.
+fn lost_of(reading: &Reading, offset: u64, bytes: u64) -> Option<Lost> {
+    match reading {
+        Reading::Whole(_) | Reading::Blank => None,
+        Reading::Glued { lost, .. } => Some(Lost {
+            kind: LossKind::Truncated,
+            offset,
+            bytes: *lost,
+        }),
+        Reading::Truncated => Some(Lost {
+            kind: LossKind::Truncated,
+            offset,
+            bytes,
+        }),
+        Reading::Unparseable => Some(Lost {
+            kind: LossKind::Unparseable,
+            offset,
+            bytes,
+        }),
+    }
+}
+
+/// [`finished_records_within`], with what each line lost: the read a fold that
+/// keeps a run's [`Integrity`] beside its state takes.
+pub(crate) fn finished_lines_within(path: &Path, from: u64, len: u64) -> Vec<FinishedLine> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut grown = Vec::new();
+    for line in ledger::read_appended_envelope_lines(path, from, len) {
+        if !line.terminated {
+            break;
+        }
+        let (offset, bytes) = (line.offset, line.bytes);
+        let reading = reading(line, path);
+        let lost = lost_of(&reading, offset, bytes);
+        let record = match reading {
+            Reading::Whole(envelope) | Reading::Glued { envelope, .. } => Some(envelope),
+            Reading::Blank | Reading::Truncated | Reading::Unparseable => None,
+        };
+        grown.push(FinishedLine {
+            record,
+            bytes: bytes + 1,
+            lost,
+        });
+    }
+    grown
+}
+
+/// [`finished_lines_within`], over everything from `from` to the end of the file
+/// as it stands now.
+pub(crate) fn finished_lines_from(path: &Path, from: u64) -> Vec<FinishedLine> {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    finished_lines_within(path, from, length.saturating_sub(from))
+}
+
+/// What an [`Integrity`] counts lost of every line from `from` to the end of the
+/// file — finished or not — numbering them from `first_line`, the count of lines
+/// in front of `from`.
+///
+/// What a reader holding the losses of everything in front of `from` already
+/// asks of the rest, trusting the boundary as [`finished_records_from`] does.
+pub(crate) fn losses_from(path: &Path, from: u64, first_line: u64) -> Integrity {
+    let length = std::fs::metadata(path).map_or(0, |about| about.len());
+    let mut integrity = Integrity::default();
+    for line in ledger::read_appended_envelope_lines(path, from, length.saturating_sub(from)) {
+        let number = usize::try_from(first_line)
+            .unwrap_or(usize::MAX)
+            .saturating_add(line.line);
+        let (offset, bytes) = (line.offset, line.bytes);
+        integrity.count(number, lost_of(&reading(line, path), offset, bytes));
+    }
+    integrity
+}
+
 /// Every **finished** record a run's journal has grown by since its first `from`
 /// bytes, and the byte a later read resumes at.
 ///
@@ -338,6 +536,23 @@ pub(crate) fn finished_after(path: &Path, from: u64) -> (Vec<Envelope>, u64) {
     let mut at = from;
     let mut events = Vec::new();
     for line in ledger::read_envelope_lines(path, from) {
+        if !line.terminated {
+            break;
+        }
+        at += line.bytes + 1;
+        if let Reading::Whole(envelope) | Reading::Glued { envelope, .. } = reading(line, path) {
+            events.push(envelope);
+        }
+    }
+    (events, at)
+}
+
+/// Read a retained view's verified append range, without the boundary byte
+/// `Reader::open_at` otherwise checks in the consumed prefix.
+pub(crate) fn appended_range(path: &Path, from: u64, len: u64) -> (Vec<Envelope>, u64) {
+    let mut at = from;
+    let mut events = Vec::new();
+    for line in ledger::read_appended_envelope_lines(path, from, len) {
         if !line.terminated {
             break;
         }
@@ -425,6 +640,8 @@ enum Reading {
 /// line as JSON — and a line that is whole and unreadable.
 // llmlint: ignore-block[boundary_inputs_validated] the store is this crate's own record and not external input, and `docs/contract.md` is explicit about how it is read: a relayed envelope's kind is a wire string this library never rejects, and a record from a version this build does not know is *skipped and reported* rather than refused. `deny_unknown_fields` here would turn a newer build's record — the case this reader exists to name — into a parse failure indistinguishable from a torn one, and refusing an unknown `v` would do the same.
 fn reading(line: ledger::EnvelopeLine, path: &Path) -> Reading {
+    #[cfg(test)]
+    crate::readprobe::parsed(path, line.offset);
     if let Some(envelope) = line.envelope {
         return Reading::Whole(envelope);
     }
@@ -504,6 +721,22 @@ pub struct Integrity {
 }
 
 impl Integrity {
+    /// Count what line `line` lost, under the class it lost it as.
+    pub(crate) fn count(&mut self, line: usize, lost: Option<Lost>) {
+        let Some(lost) = lost else {
+            return;
+        };
+        let loss = Loss {
+            line,
+            offset: lost.offset,
+            bytes: lost.bytes,
+        };
+        match lost.kind {
+            LossKind::Truncated => self.truncated.push(loss),
+            LossKind::Unparseable => self.unparseable.push(loss),
+        }
+    }
+
     /// Whether the store holds every record it was ever written, whole.
     pub fn is_whole(&self) -> bool {
         self.truncated.is_empty() && self.unparseable.is_empty() && self.healed.is_empty()
@@ -565,35 +798,23 @@ impl Integrity {
     }
 }
 
-/// What one run's journal holds that is not a whole record.
+/// What one run's journal holds that is not a whole record, read from its first
+/// byte.
 ///
 /// Read from the file rather than from the folded events, because what this is
-/// about is exactly the records the fold never saw.
-pub fn integrity(path: &Path) -> Integrity {
+/// about is exactly the records the fold never saw. What a view says is
+/// [`crate::checkpoint::integrity`]'s answer, which reads only what the run's
+/// checkpoint does not account for; this whole read is the reference the tests
+/// hold that answer to.
+#[cfg(test)]
+pub(crate) fn integrity(path: &Path) -> Integrity {
     let mut integrity = Integrity {
         healed: ledger::torn_tails(path),
         ..Integrity::default()
     };
     for line in ledger::read_envelope_lines(path, 0) {
         let (number, offset, bytes) = (line.line, line.offset, line.bytes);
-        match reading(line, path) {
-            Reading::Whole(_) | Reading::Blank => {}
-            Reading::Glued { lost, .. } => integrity.truncated.push(Loss {
-                line: number,
-                offset,
-                bytes: lost,
-            }),
-            Reading::Truncated => integrity.truncated.push(Loss {
-                line: number,
-                offset,
-                bytes,
-            }),
-            Reading::Unparseable => integrity.unparseable.push(Loss {
-                line: number,
-                offset,
-                bytes,
-            }),
-        }
+        integrity.count(number, lost_of(&reading(line, path), offset, bytes));
     }
     integrity
 }
@@ -785,6 +1006,12 @@ pub const SETTLED_BASE: &str = "base";
 /// node had stack parents.
 pub const SETTLED_STACK: &str = "stack";
 
+/// The `node-settled` payload field naming the releases a node held for them still
+/// awaits — `[{producer, target}]`, in the order its reference rows list them —
+/// present exactly on a `complete-but-held` settlement and on an awaiting-release
+/// `complete-but-draft` one.
+pub const SETTLED_AWAITING: &str = "awaiting";
+
 /// The `node-settled` payload field saying what putting a kept branch on its
 /// identity's origin found to do: `pushed`, `already-on-origin` or `no-remote`,
 /// in `onevcs::Preservation`'s own words.
@@ -955,6 +1182,67 @@ mod tests {
             envelope.payload,
             "a payload nothing was over the bound in was rewritten anyway"
         );
+    }
+
+    /// Only a sibling's turn record carrying a reference this build reads is
+    /// kept past the bound: a `transcript` key that is no reference, or one on a
+    /// record of another source, buys no exemption.
+    #[test]
+    fn only_a_turn_record_that_really_references_its_history_escapes_the_bound() {
+        let long = "s".repeat(MAX_PAYLOAD_TEXT_BYTES + 1);
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+        });
+        let kept = relayed_with(payload(&[
+            ("transcript", reference.clone()),
+            ("turn", json!(1)),
+            ("role", json!(long.clone())),
+        ]));
+        assert_eq!(within_the_bound(&kept).payload, kept.payload);
+
+        for (what, envelope) in [
+            (
+                "a null reference",
+                relayed_with(payload(&[
+                    ("transcript", json!(null)),
+                    ("text", json!(long.clone())),
+                ])),
+            ),
+            (
+                "a reference of the wrong shape",
+                relayed_with(payload(&[
+                    ("transcript", json!({"history_dir": "/state"})),
+                    ("text", json!(long.clone())),
+                ])),
+            ),
+            ("a record of this crate's own", {
+                let mut own = relayed_with(payload(&[
+                    ("transcript", reference.clone()),
+                    ("text", json!(long.clone())),
+                ]));
+                own.source = Source::Pipeline;
+                own
+            }),
+            ("a kind that carries no turn content", {
+                let mut other = relayed_with(payload(&[
+                    ("transcript", reference.clone()),
+                    ("text", json!(long.clone())),
+                ]));
+                other.kind = EventKind("member-settled".into());
+                other
+            }),
+        ] {
+            let cut = within_the_bound(&envelope);
+            assert_eq!(
+                cut.payload["text"].as_str().map(str::len),
+                Some(MAX_PAYLOAD_TEXT_BYTES),
+                "{what} escaped the bound"
+            );
+            assert_eq!(cut.payload["truncated"], json!(true), "{what}");
+        }
     }
 
     fn scratch(name: &str) -> PathBuf {

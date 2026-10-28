@@ -308,7 +308,9 @@ impl Watch {
     /// The pairs this run's journal already records.
     pub(crate) fn of_run(paths: &RunPaths) -> Self {
         Self {
-            recorded: recorded_in(&journal::read(&paths.journal())),
+            // Off the run's checkpoint, which keeps every `branches-superseded`
+            // record as written, rather than off a read of the run's history.
+            recorded: recorded_in(&crate::checkpoint::recalled(paths)),
             answered: BTreeSet::new(),
         }
     }

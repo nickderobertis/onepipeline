@@ -698,6 +698,13 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
     if let Some(address) = fake::node_script(dir, &key, "rendezvous") {
         fake::meet(&address);
     }
+    // `<key>.stops-its-run` has this dispatch stop the run it belongs to, from
+    // inside it, as an agent of the run running the engine's own `stop` would.
+    // Started and not waited for: the stop ends this dispatch. Its pid is in
+    // `<key>.stopper.pid` and what it said in `<key>.stopper.out`.
+    if dir.join(format!("{key}.stops-its-run")).exists() {
+        fake::stop_own_run(&dir.join(format!("{key}.stopper")));
+    }
     if dir.join(format!("{key}.wait")).exists() {
         let go = dir.join(format!("{key}.go"));
         let until = if dir.join(format!("{key}.stops-when-interrupted")).exists() {
@@ -2118,9 +2125,10 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     // `instruction_truncated` is that library's statement about its own field,
     // and this double publishes what it really did.
     match serde_json::to_value(oneagentgraph::event::TurnStarted {
+        transcript: None,
         turn: 1,
         role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-        instruction,
+        instruction: Some(instruction),
         instruction_truncated: false,
         started_at: fake::now(),
         // The first turn's instruction is the composed task, which is the one
@@ -2129,6 +2137,56 @@ fn asked(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
     }) {
         Ok(payload) => Some(payload),
         Err(error) => fake::fail(&format!("a turn opening is not an object: {error}")),
+    }
+}
+
+/// A tool call carrying a `transcript` reference, when
+/// `{key}.referenced-name-bytes` scripted a length for the tool's name — and
+/// nothing otherwise.
+///
+/// The name is published **whole and unflagged** past the payload bound, beside
+/// a reference of the sibling's own shape: whether a record that carries no
+/// content copy is cut on the way in is the relay's to decide, and a double that
+/// pre-cut it would answer that for the code under test.
+fn referenced(dir: &std::path::Path, key: &str) -> Option<serde_json::Value> {
+    let bytes = fake::node_script(dir, key, "referenced-name-bytes")?;
+    let name = match bytes.trim().parse::<usize>() {
+        Ok(bytes) if bytes <= SAYABLE => format!("mcp__{}", "x".repeat(bytes)),
+        Ok(bytes) => fake::fail(&format!(
+            "{key}.referenced-name-bytes asks for {bytes} bytes; nothing past {SAYABLE} says \
+             anything a payload bound does not already"
+        )),
+        Err(error) => fake::fail(&format!(
+            "{key}.referenced-name-bytes is not a byte count: {error}"
+        )),
+    };
+    // Read through the sibling's own type, so the shape is the one it publishes.
+    let reference: oneagentgraph::event::ActivityTranscript =
+        match serde_json::from_value(serde_json::json!({
+            "history_dir": fake::script_dir().join("history").display().to_string(),
+            "history_project": "fake-project",
+            "history_session": format!("{key}-referenced"),
+            // Any canonical UUIDv7: the sibling's type refuses anything else.
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 2,
+            "tool_call_id": "toolu_referenced",
+        })) {
+            Ok(reference) => reference,
+            Err(error) => fake::fail(&format!("not the sibling's reference shape: {error}")),
+        };
+    match serde_json::to_value(oneagentgraph::event::TurnActivity {
+        transcript: Some(reference),
+        kind: "tool_call".into(),
+        name: Some(name),
+        detail: None,
+        truncated: false,
+        output: None,
+        output_truncated: false,
+        tool_call_id: Some("toolu_referenced".into()),
+        index: 2,
+    }) {
+        Ok(payload) => Some(payload),
+        Err(error) => fake::fail(&format!("a turn activity is not an object: {error}")),
     }
 }
 
@@ -2230,6 +2288,11 @@ fn open_turn(args: &[String], dir: &std::path::Path, key: &str, node: &str, step
 /// `<key>.unplaceable-beats-after-the-first` keeps beating on a clock that stops
 /// being readable: one placeable beat, then a stream of unplaceable ones, which
 /// is what a reader has to keep reporting liveness through.
+///
+/// `<key>.activity-with-each-beat` makes the member work as well as beat: each
+/// tick also publishes one `turn-activity` naming the tick, the record a running
+/// turn emits most, so a journey can watch a member's work reach the journal
+/// while it is held.
 fn hold(
     args: &[String],
     dir: &std::path::Path,
@@ -2259,10 +2322,31 @@ fn hold(
     let loses_the_clock = dir
         .join(format!("{key}.unplaceable-beats-after-the-first"))
         .exists();
+    let works = dir.join(format!("{key}.activity-with-each-beat")).exists();
     // Above every `seq` the turn's own envelopes use, so a beat can never be
     // taken for one of them.
     let mut seq = 100;
+    let mut tick = 0;
     fake::wait_for_any_ticking(until, every, &mut || {
+        if works {
+            tick += 1;
+            publish(&serde_json::json!({
+                "v": 1,
+                "ts": fake::now(),
+                "stream": stream(),
+                "seq": seq,
+                "source": "agentgraph",
+                "kind": oneagentgraph::event::EventKind::TurnActivity.as_str(),
+                "labels": stamp_session(
+                    &labels,
+                    &stream(),
+                    oneagentgraph::event::EventKind::TurnActivity,
+                ),
+                // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the sibling publishes this payload as an open map and owns no type for it; its reader here is `projection::fold_activity`, which this shape is read through end to end by the `journal_scaling` and `views` journeys, so a reading that moved would fail them.
+                "payload": {"kind": "tool_use", "name": "Bash", "detail": format!("tick {tick}")},
+            }));
+            seq += 1;
+        }
         let stamp = if loses_the_clock && seq > 100 {
             unplaceable_now()
         } else {
@@ -2509,47 +2593,51 @@ fn emit(
     if let Some(opening) = asked(dir, key) {
         envelope(1, oneagentgraph::event::EventKind::TurnStarted, opening);
     }
-    envelope(
-        2,
-        oneagentgraph::event::EventKind::TurnActivity,
-        serde_json::json!({
-            "kind": "tool_call",
-            "name": "bash",
-            "detail": "echo the turn ran",
-            "message": "the dispatch ran",
-            // Echoed so a test can assert the task prose the node was given,
-            // including the rendered planner-context section.
-            "task": task,
-            "dir": fake::flag(args, "--dir"),
-            // The scratch directory this dispatch read out of its own
-            // environment, on the run's own record: a journey asserts the
-            // promise from the store rather than from this program's files.
-            "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
-            // The session whose worktree this dispatch runs in, and the runs
-            // root, each as this dispatch read them out of its own environment
-            // — absent where the engine handed none, for `scratch_dir`'s reason.
-            "session": std::env::var(SESSION_ENV).ok(),
-            "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
-            // And the flow, which a dispatch is never handed: reported so a
-            // journey can assert its absence from the run's own record.
-            "flow": std::env::var(FLOW_ENV).ok(),
-            // And who this dispatch asks its manager as, so a journey can assert
-            // from the store that a real dispatch is given one and that no two
-            // share it.
-            //
-            // llmlint: ignore[boundary_inputs_validated] reported rather than
-            // checked, deliberately: a double that refused a name it did not
-            // like could not show a journey an engine that handed out a bad one,
-            // which is what this value exists to be asserted against. Lossy for
-            // the same reason — dropping a value this host cannot read as text
-            // would report it as *nothing given*, a different failure from the
-            // one that happened — so absent here means no asker was given at all.
-            "asker": std::env::var_os(ASKER_ENV)
-                .map(|given| given.to_string_lossy().into_owned()),
-            // What this turn was told to do instead, while it was running.
-            "redirected": redirected,
-        }),
-    );
+    if let Some(activity) = referenced(dir, key) {
+        envelope(2, oneagentgraph::event::EventKind::TurnActivity, activity);
+    } else {
+        envelope(
+            2,
+            oneagentgraph::event::EventKind::TurnActivity,
+            serde_json::json!({
+                "kind": "tool_call",
+                "name": "bash",
+                "detail": "echo the turn ran",
+                "message": "the dispatch ran",
+                // Echoed so a test can assert the task prose the node was given,
+                // including the rendered planner-context section.
+                "task": task,
+                "dir": fake::flag(args, "--dir"),
+                // The scratch directory this dispatch read out of its own
+                // environment, on the run's own record: a journey asserts the
+                // promise from the store rather than from this program's files.
+                "scratch_dir": std::env::var(SCRATCH_DIR_ENV).ok(),
+                // The session whose worktree this dispatch runs in, and the runs
+                // root, each as this dispatch read them out of its own environment
+                // — absent where the engine handed none, for `scratch_dir`'s reason.
+                "session": std::env::var(SESSION_ENV).ok(),
+                "runs_dir": std::env::var(RUNS_DIR_ENV).ok(),
+                // And the flow, which a dispatch is never handed: reported so a
+                // journey can assert its absence from the run's own record.
+                "flow": std::env::var(FLOW_ENV).ok(),
+                // And who this dispatch asks its manager as, so a journey can assert
+                // from the store that a real dispatch is given one and that no two
+                // share it.
+                //
+                // llmlint: ignore[boundary_inputs_validated] reported rather than
+                // checked, deliberately: a double that refused a name it did not
+                // like could not show a journey an engine that handed out a bad one,
+                // which is what this value exists to be asserted against. Lossy for
+                // the same reason — dropping a value this host cannot read as text
+                // would report it as *nothing given*, a different failure from the
+                // one that happened — so absent here means no asker was given at all.
+                "asker": std::env::var_os(ASKER_ENV)
+                    .map(|given| given.to_string_lossy().into_owned()),
+                // What this turn was told to do instead, while it was running.
+                "redirected": redirected,
+            }),
+        );
+    }
     // A producer that stamps one `seq` on two records. Only a producer in error
     // does it, and the merge has nothing to be right about beyond being stable —
     // which is exactly why it needs saying: a store that shuffled these under a
@@ -2590,9 +2678,10 @@ fn emit(
         // and a double that pre-cut it would answer that question for the code
         // under test.
         match serde_json::to_value(oneagentgraph::event::TurnMessage {
+            transcript: None,
             turn: 1,
             role: oneagentgraph::event::Party::Assistant.as_str().to_string(),
-            text: said,
+            text: Some(said),
             truncated: false,
             // The agent's own words: none of the sibling's three origins names
             // them, so the sibling stamps nothing and so does this double.

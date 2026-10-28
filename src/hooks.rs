@@ -268,7 +268,7 @@ pub(crate) fn verdict(
     if decision_outstanding() {
         return Verdict::Paused;
     }
-    if present.contains(&NodeStatus::CompleteDraft) {
+    if present.iter().any(|status| status.awaits_release()) {
         return Verdict::NotEnded;
     }
     if present.contains(&NodeStatus::Failed) || present.contains(&NodeStatus::Skipped) {
@@ -292,6 +292,15 @@ pub(crate) fn judge(state: &RunState, paths: &RunPaths) -> Judged {
             nodes: unsettled(state, &statuses),
         })),
     }
+}
+
+/// Whether a graph standing at `statuses` has reached the success ending — the
+/// [`verdict`] a success hook fires on and a view prints `SETTLED` for — which is
+/// what marks the run's home `done` (`crate::home`).
+pub(crate) fn succeeded(statuses: &BTreeMap<String, NodeStatus>) -> bool {
+    let present = statuses.values().copied().collect();
+    // Success is decided before any decision is asked about, so none is.
+    verdict(&present, || false) == Verdict::Success
 }
 
 /// Every node not `done`, in plan order, as a hook is handed it — and as a
@@ -536,8 +545,7 @@ fn fired(paths: &RunPaths) -> bool {
 /// an epoch. A fold that has lost a record retires nothing, for the reason
 /// [`fired`] gives an edit beside one.
 pub(crate) fn adoption_starts_epoch(state: &RunState, paths: &RunPaths) -> bool {
-    let standing = epochs(&journal::read(&paths.journal()));
-    if !state.strict || standing.marker != Some(FiredOver::Live) {
+    if !state.strict || state.hook_marker != Some(FiredOver::Live) {
         return false;
     }
     let statuses = state.statuses();
@@ -560,8 +568,9 @@ struct Epochs {
 
 /// What the graph was at when a standing marker was fired, which is what
 /// [`adoption_starts_epoch`] asks of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FiredOver {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FiredOver {
     /// Work was left that could still move: the hook fired over a run that had
     /// not ended, which only an adoption then carries on.
     Live,
@@ -570,40 +579,65 @@ enum FiredOver {
 }
 
 /// Walk a journal the way [`fired`] reads it — the one rule, so the epoch
-/// `results` labels a record with is the epoch the marker was held against.
+/// `results` labels a record with is the epoch the marker was held against. The
+/// rule is [`Marked`]'s, which every fold applies to [`RunState::hook_marker`];
+/// this walk only notes where each marker it held was retired.
 fn epochs(events: &[Envelope]) -> Epochs {
     let mut state = RunState {
         strict: true,
         ..RunState::default()
     };
-    let mut marker = None;
     let mut ended_by = Vec::new();
     for (at, event) in events.iter().enumerate() {
-        let kind = PipelineKind::from_wire(&event.kind);
-        // The ending in front of an edit arriving while a marker stands, and
-        // nothing otherwise: an edit that found the run live changed no ending,
-        // whatever it left behind.
-        let before = (kind == Some(PipelineKind::EditCommitted) && marker.is_some())
-            .then(|| ending(&state))
-            .flatten();
+        let standing = state.hook_marker.is_some();
         crate::projection::fold_one(&mut state, event);
+        if standing && state.hook_marker.is_none() {
+            ended_by.push(at);
+        }
+    }
+    Epochs {
+        marker: state.hook_marker,
+        ended_by,
+    }
+}
+
+/// The run-end hook's marker across one record a fold takes: what the graph's
+/// ending was in front of it, taken before the record is folded, and the marker
+/// the record leaves standing, decided once it is.
+pub(crate) struct Marked {
+    /// The ending in front of an edit arriving while a marker stands, and nothing
+    /// otherwise: an edit that found the run live changed no ending, whatever it
+    /// left behind.
+    before: Option<Ended>,
+}
+
+impl Marked {
+    /// What the marker rule needs of `state` before `event` is folded into it.
+    pub(crate) fn before(state: &RunState, event: &Envelope) -> Self {
+        let edit = PipelineKind::from_wire(&event.kind) == Some(PipelineKind::EditCommitted);
+        Self {
+            before: (edit && state.hook_marker.is_some())
+                .then(|| ending(state))
+                .flatten(),
+        }
+    }
+
+    /// Leave on `state`, now holding `event`, the marker the record leaves standing.
+    pub(crate) fn after(self, state: &mut RunState, event: &Envelope) {
+        let kind = PipelineKind::from_wire(&event.kind);
         // An adoption that started an epoch says so on its own record: it was
         // decided by [`adoption_starts_epoch`] on the graph the adoption drove,
         // and is read back rather than derived a second time.
         let adopted_live = kind == Some(PipelineKind::DriverAdopted)
-            && marker.is_some()
+            && state.hook_marker.is_some()
             && journal::starts_hook_epoch(&event.payload);
-        match before {
-            Some(before) if state.strict && ending(&state) != Some(before) => {
-                marker = None;
-                ended_by.push(at);
+        match self.before {
+            Some(before) if state.strict && ending(state) != Some(before) => {
+                state.hook_marker = None;
             }
-            _ if adopted_live => {
-                marker = None;
-                ended_by.push(at);
-            }
+            _ if adopted_live => state.hook_marker = None,
             _ if kind == Some(PipelineKind::RunHookFired) => {
-                marker = Some(if ending(&state).is_none() {
+                state.hook_marker = Some(if ending(state).is_none() {
                     FiredOver::Live
                 } else {
                     FiredOver::Ended
@@ -612,7 +646,6 @@ fn epochs(events: &[Envelope]) -> Epochs {
             _ => {}
         }
     }
-    Epochs { marker, ended_by }
 }
 
 /// The two ways a graph has ended, as the epoch rule tells them apart: which hook
@@ -734,7 +767,7 @@ fn edit_named(edit: &Envelope) -> String {
 ///   carries the liveness has already answered `true`; a dependency that is
 ///   parked, waiting or failed makes its dependents `blocked` or `skipped`
 ///   instead, so a `pending` node with no such ancestor cannot be derived.
-/// * `complete-but-draft` is **unreachable from here**, which is why no journey
+/// * `complete-but-draft` and `complete-but-held` are **unreachable from here**, which is why no journey
 ///   drives it: [`judge`] answers `NotEnded` for a graph holding one, so a run
 ///   that has ever held such a node has never fired and has no marker to retire.
 ///   It is answered rather than swept into the `false` arm because the day a
@@ -746,7 +779,7 @@ fn edit_named(edit: &Envelope) -> String {
 fn live(statuses: &BTreeMap<String, NodeStatus>) -> bool {
     statuses.values().any(|status| match status {
         NodeStatus::Ready | NodeStatus::Running => true,
-        NodeStatus::Waiting | NodeStatus::CompleteDraft => true,
+        NodeStatus::Waiting | NodeStatus::CompleteDraft | NodeStatus::CompleteHeld => true,
         NodeStatus::Pending
         | NodeStatus::Blocked
         | NodeStatus::Parked
@@ -1242,8 +1275,12 @@ mod tests {
                 .expect("the record is written");
         }
 
+        // The run as its fold holds it, marker and all: what an adoption decides by.
+        let folded = crate::projection::fold(&journal::read(&paths.journal()));
+        assert_eq!(folded.hook_marker, Some(FiredOver::Live));
         let strict = RunState {
             strict: true,
+            hook_marker: folded.hook_marker,
             ..build.clone()
         };
         assert!(
@@ -1252,6 +1289,7 @@ mod tests {
         );
         let lossy = RunState {
             strict: false,
+            hook_marker: folded.hook_marker,
             ..build
         };
         assert!(
@@ -1271,16 +1309,16 @@ mod tests {
     fn a_draft_waiting_on_a_release_has_not_ended_and_an_empty_graph_has_not_begun() {
         let root = scratch("not-ended");
         let paths = RunPaths::under(&root, "demo");
-        for beside in [NodeStatus::Done, NodeStatus::Failed, NodeStatus::Parked] {
-            assert_eq!(
-                judge(
-                    &holding(&[("build", beside), ("lift", NodeStatus::CompleteDraft)]),
-                    &paths
-                ),
-                Judged::NotEnded,
-                "a draft beside a {} node was judged an ending",
-                beside.as_str()
-            );
+        for awaiting in [NodeStatus::CompleteDraft, NodeStatus::CompleteHeld] {
+            for beside in [NodeStatus::Done, NodeStatus::Failed, NodeStatus::Parked] {
+                assert_eq!(
+                    judge(&holding(&[("build", beside), ("lift", awaiting)]), &paths),
+                    Judged::NotEnded,
+                    "a {} node beside a {} node was judged an ending",
+                    awaiting.as_str(),
+                    beside.as_str()
+                );
+            }
         }
         assert_eq!(judge(&RunState::default(), &paths), Judged::NotEnded);
         // And the draft landing is what ends it.

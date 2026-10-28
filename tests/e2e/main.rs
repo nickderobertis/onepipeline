@@ -66,6 +66,14 @@ mod compatibility;
 // grounds as `mod landing` and `mod watch` below.
 mod checkpoint;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] thirty-nine journeys, each a
+// whole run or landing over the linked store's GitHub, Linear and `local-md` sources, and what
+// they exercise is the write-back's closure thread and the close-out every run that settles ends
+// in — `closures`, `home`, `writeback`, `engine`, `hooks` and the landing verbs in `land` — so
+// a project edged narrower than the crate could not honestly run them, and any change to how a
+// run ends can put the cost back. Entries 132 and 134.
+mod closures;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod concurrency;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a continuation is read by
 // `taskgraph`, journalled by `driver`, gated by `engine` and `lifecycle`, projected by
@@ -137,6 +145,16 @@ mod holds;
 mod host_view;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod journal;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] a driver whose cost is its
+// run's live state: each journey drives the compiled binary's reconcile loop, its relay, its
+// claimer, its checkpoint and liveness files and the `reply`, `status` and `watch` views over
+// one real run store, holding a pass open or a member beating for twenty heartbeats while it
+// does. What any of them exercises is `engine`, `checkpoint`, `projection`, `journal`,
+// `ledger`, `heartbeat`, `views` and `driver` together, so the narrowest edge they can
+// honestly sit behind is the crate itself, which is this target's; a project edged narrower
+// would drop them out of `nx affected` for the very changes to the loop they exist to catch.
+mod journal_scaling;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] the reason is at the head of
 // `tests/e2e/landing.rs`, and is carried here too because this declaration is the other
 // site the rule reads: the module is measured at about 45 seconds on an idle host, and
@@ -197,6 +215,7 @@ mod multi_source;
 // plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is
 // the narrowest edge they can honestly sit behind; same grounds as `mod multi_source` above.
 mod budget_result;
+mod linear_launch;
 mod linear_loopback;
 mod linear_writeback;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
@@ -227,6 +246,11 @@ mod publish_preserve;
 // head of `tests/e2e/publication_boundary.rs` and is not restated here; it belongs to this
 // binary for the reason `mod publish_preserve` above does.
 mod publication_boundary;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the reason is at the
+// head of `tests/e2e/public_id.rs` and is not restated here; it belongs to this binary for
+// the reason `mod publication_boundary` above does.
+mod public_id;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod real_vcs;
 mod recorded_channel;
@@ -288,6 +312,15 @@ mod surface;
 // `mod criteria_rule` above.
 mod templates;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys drive a
+// real supervised dispatch over the real sibling and read it back through `monitor`, `watch`,
+// `status`, `transcript` and `scratch` — `views`, `watch`, `projection`, `journal`, `note`
+// and `scratch` under `src/` at once, plus the repository's own `graphs/` and `personas/`
+// the dispatch runs — so the crate is the narrowest edge they can honestly sit behind, as
+// for `mod shutdown` above. An edge of their own would be a new project in the graph, and so
+// a new required context in `ci.yml` and branch protection, which is not this change's to add.
+mod transcript_refs;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod turns;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these journeys read
 // `docs/stop-guard.md` and `docs/contract-divergences.md` (the synopsis and shape drift
@@ -324,6 +357,7 @@ mod wake_budget;
 // sits; that project is edged on conversational cost, which this module has none of.
 mod watch;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+mod withdrawn;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] four of its journeys
 // wait past the write-back's sixty-second floor by construction, for the reason at the
 // head of `tests/e2e/writeback_budget.rs`; this declaration is the other site the rule

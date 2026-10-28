@@ -94,6 +94,7 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     let mut built = Vec::new();
     for (platform, runner) in [
         ("linux", "ubuntu-latest"),
+        ("linux-arm64", "ubuntu-24.04-arm"),
         ("macos", "macos-latest"),
         ("windows", "windows-latest"),
     ] {
@@ -121,6 +122,10 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
     // cross-compilation. Dispatch-local proof runs on Linux, so these structural
     // assertions hold the Mac job's commands without simulating Darwin execution.
     assert_eq!(plan("macos"), ["aarch64-apple-darwin"]);
+    // arm64 Linux is built natively on its own arm64 runner, not cross-compiled
+    // from the x86-64 one.
+    assert_eq!(plan("linux"), ["x86_64-unknown-linux-gnu"]);
+    assert_eq!(plan("linux-arm64"), ["aarch64-unknown-linux-gnu"]);
     for (path, forbidden) in [
         (".github/workflows/release.yml", &text),
         (
@@ -164,5 +169,13 @@ fn release_packaging_retains_every_target_and_installs_apple_silicon_before_publ
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(needs, ["build-linux", "build-macos", "build-windows"]);
+    assert_eq!(
+        needs,
+        [
+            "build-linux",
+            "build-linux-arm64",
+            "build-macos",
+            "build-windows"
+        ]
+    );
 }

@@ -24,9 +24,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use crate::continuation::{
-    change, host, onepipeline, open_pulls, ran, recorded, said, Created, Tracked,
-};
+use crate::cleanup::{Created, Tracked};
+use crate::continuation::{change, host, onepipeline, open_pulls, ran, recorded, said};
 use crate::harness::{plan_of, World};
 use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, run_stamp, scratch_repo};
@@ -204,6 +203,9 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
         missing("this run still carries a stand-in for `gh`, so it would never reach GitHub")
     );
     first.script("harness.work", &format!("reviewed on the store {stamp}"));
+    // A file of this run's own: another job's smoke shares the scratch repository, and
+    // two runs writing one file conflict on whichever base merged the other first.
+    first.script("harness.work-file", &format!("review-{stamp}.md"));
     first.script("harness.work-per-task", "");
     let name = format!("review-{}", stamp.replace(['_', '.'], "-"));
     let project = first.plan(
@@ -344,7 +346,7 @@ fn review_comments_found_on_one_host_are_reworked_and_declined_on_a_cold_one_fro
 
     // B reworks the bottom draft for the first comment, in a file of its own so the draft
     // above it restacks over it cleanly.
-    second.script("harness.work-file", "review-answer.md");
+    second.script("harness.work-file", &format!("review-answer-{stamp}.md"));
     second.script(
         "harness.work",
         &format!("named as the review asked {stamp}"),

@@ -17,6 +17,11 @@
 //! refuses any other, so a line oneharness starts sending that this double does
 //! not speak is a refusal a journey reads rather than an argument it silently
 //! swallows.
+//!
+//! It also speaks the shared server a controlled turn runs on — `codex
+//! app-server [-c SETTING]... --listen unix://PATH`, which oneharness-core 0.28
+//! starts once per pool key — and serves it with
+//! [`onepipeline_testfakes::codex_app_server`] (unix only, as that address is).
 
 use onepipeline_testfakes as fake;
 use std::process::ExitCode;
@@ -36,6 +41,9 @@ fn main() -> ExitCode {
     // Recorded first, so an argv this double refuses is still readable by the
     // journey that has to explain why the candidate was stepped past.
     fake::record(&dir, "codex", &args);
+    if args.first().map(String::as_str) == Some("app-server") {
+        return app_server(&args[1..], dir);
+    }
     if let Err(refusal) = declared(&args) {
         return fake::refuse(&refusal);
     }
@@ -88,6 +96,36 @@ const SETTINGS: [&str; 6] = [
     "analytics.enabled=true",
 ];
 
+/// Serve the shared app-server `args` (what follows `app-server`) asks for, or
+/// refuse a line oneharness does not build: its `-c` settings, then exactly one
+/// `--listen unix://PATH`, and nothing else.
+fn app_server(args: &[String], dir: std::path::PathBuf) -> ExitCode {
+    let mut listen = None;
+    let mut rest = args.iter().map(String::as_str);
+    while let Some(arg) = rest.next() {
+        match (arg, rest.next()) {
+            ("-c", Some(setting))
+                if SETTINGS.contains(&setting) || setting.starts_with("model_catalog_json=") => {}
+            ("--listen", Some(address)) if listen.is_none() => listen = Some(address),
+            (arg, value) => {
+                return fake::refuse(&format!(
+                    "codex app-server takes no argument {arg:?} {value:?} here"
+                ))
+            }
+        }
+    }
+    let Some(listen) = listen else {
+        return fake::refuse("codex app-server was given no --listen address");
+    };
+    #[cfg(unix)]
+    fake::codex_app_server::run(listen, dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (listen, dir);
+        fake::refuse("this double serves the app-server's unix:// address on unix only")
+    }
+}
+
 /// Whether `args` is a `codex exec` line oneharness builds, or why it is not.
 ///
 /// The verb first, then its options in any order, then exactly one prompt —
@@ -101,7 +139,7 @@ const SETTINGS: [&str; 6] = [
 fn declared(args: &[String]) -> Result<(), String> {
     let mut rest = args.iter().map(String::as_str).peekable();
     if rest.next() != Some("exec") {
-        return Err("codex is only driven as `codex exec` here".to_owned());
+        return Err("codex is only driven as `codex exec` or `codex app-server` here".to_owned());
     }
     if rest.peek() == Some(&"resume") {
         rest.next();

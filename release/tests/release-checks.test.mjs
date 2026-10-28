@@ -111,7 +111,7 @@ describe("an ineligible release", () => {
       vars,
       secrets: { GITHUB_TOKEN: "not-a-real-token", ...secrets },
       needs: Object.fromEntries(
-        ["build-linux", "build-macos", "build-windows"].map((job) => [
+        ["build-linux", "build-linux-arm64", "build-macos", "build-windows"].map((job) => [
           job,
           { result: "success", outputs: { published: "success", verified: "success" } },
         ]),
@@ -198,7 +198,7 @@ describe("an ineligible release", () => {
             [],
             `${job}: refused before asking GitHub anything`,
           );
-          for (const platform of ["linux", "macos", "windows", "common"]) {
+          for (const platform of ["linux", "linux-arm64", "macos", "windows", "common"]) {
             assert.ok(!existsSync(join(out, platform, "build.json")), `${job}: nothing was built`);
           }
           ran.push(`${job}: ${step.run}`);
@@ -580,7 +580,7 @@ describe("publish asks every registry before it writes anything", () => {
   async function everyPlatformOnTheRelease() {
     const github = await new GitHubDouble().start();
     const release = github.addRelease(TAG);
-    for (const platform of ["linux", "macos", "windows"]) {
+    for (const platform of ["linux", "linux-arm64", "macos", "windows"]) {
       for (const artifact of JSON.parse((await run("just", [`release-${platform}`, "plan"])).stdout)
         .artifacts) {
         if (artifact.destination === "github-release") {
@@ -657,6 +657,60 @@ describe("publish asks every registry before it writes anything", () => {
     }
   });
 
+  it("refuses while linux-arm64 alone is missing, naming each of its artifacts, before publishing anything", async () => {
+    // Every other build job's assets and wheels are out; npm serves no platform
+    // package yet, so the launcher must not be published naming any of them.
+    const github = await new GitHubDouble().start();
+    const release = github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    try {
+      for (const platform of ["linux", "macos", "windows"]) {
+        const plan = JSON.parse((await run("just", [`release-${platform}`, "plan"])).stdout);
+        for (const artifact of plan.artifacts) {
+          if (artifact.destination === "github-release") {
+            release.assets.push({
+              id: github.nextId++,
+              name: artifact.file,
+              content: Buffer.from(artifact.file),
+            });
+          } else if (artifact.destination === "pypi") {
+            pypi.serve(artifact.file, Buffer.from(artifact.file));
+          }
+        }
+      }
+      const result = await publishWith(github, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        PYPI_PUBLISH: "true",
+        NPM_PUBLISH: "true",
+      });
+      assert.match(
+        result.stderr,
+        /not every platform is published, so nothing platform-independent is/,
+      );
+      for (const missing of [
+        `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz on the Release`,
+        `onepipeline-v${VERSION}-aarch64-unknown-linux-gnu.sha256 on the Release`,
+        `onepipeline_cli-${VERSION}-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl on PyPI`,
+        `npm:onepipeline-cli-linux-arm64@${VERSION} on npm`,
+      ]) {
+        assert.ok(result.stderr.includes(missing), `names ${missing}: ${said(result)}`);
+      }
+      assert.ok(
+        !result.stderr.includes(`x86_64-unknown-linux-gnu.tar.gz on the Release`),
+        "x86-64 Linux is not missing",
+      );
+      assert.equal(pypi.writes().length, 0, "nothing was uploaded to PyPI");
+      assert.deepEqual(npm.visible("onepipeline-cli"), [], "the launcher was not published");
+    } finally {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("refuses when the crates.io index fails or garbles its answer", async () => {
     const github = await everyPlatformOnTheRelease();
     const crates = await new CratesDouble().start();
@@ -675,6 +729,350 @@ describe("publish asks every registry before it writes anything", () => {
       await Promise.all([github.stop(), crates.stop()]);
     }
   });
+});
+
+/// The interpreter `just _release-python` runs on this host.
+const PYTHON = process.platform === "win32" ? "python" : "python3";
+
+/// The Windows build job's build phase, minus the compiler, which this host does
+/// not have: a wheel whose executable is `payload`, packaged into the archive,
+/// its checksum and the npm package by the release's own packaging
+/// (`scripts/build-staged-release.py`), held to the plan, and listed in the
+/// build.json that phase writes. Two attempts' builds differ in the binary's
+/// bytes and nothing else, which is how a re-run's rebuild differs from the
+/// build an earlier attempt published.
+const STAND_IN_BUILD = String.raw`
+import hashlib, importlib.util, json, sys, zipfile
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('release', 'release/release.py')
+release = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(release)
+out, payload = Path(sys.argv[1]), sys.argv[2].encode()
+platform, target = 'windows', 'x86_64-pc-windows-msvc'
+version = release.cargo_version()
+release.fresh(out)
+wheel = out / 'wheels' / target / release.wheel_name(version, target)
+wheel.parent.mkdir(parents=True)
+stem = f'onepipeline_cli-{version}'
+with zipfile.ZipFile(wheel, 'w') as bundle:
+    bundle.writestr(f'{stem}.dist-info/METADATA', f'Metadata-Version: 2.1\nName: onepipeline-cli\nVersion: {version}\n')
+    bundle.writestr(f'{stem}.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: release-checks\nRoot-Is-Purelib: false\nTag: py3-none-win_amd64\n')
+    bundle.writestr(f'{stem}.dist-info/sboms/onepipeline.cyclonedx.json', '{"bomFormat": "CycloneDX", "metadata": {"component": {"name": "onepipeline"}}}')
+    bundle.writestr(f'{stem}.data/scripts/onepipeline.exe', payload)
+    bundle.writestr(f'{stem}.dist-info/RECORD', '')
+record = release.staged.package(target, wheel, out, version)
+paths = {'archive': Path(record['archive']), 'wheel': Path(record['wheel']), 'npm': Path(record['npm']),
+         'checksum': Path(record['archive']).with_name(f'onepipeline-v{version}-{target}.sha256')}
+files = [{**a, 'file': paths[a['kind']].name, 'path': str(paths[a['kind']]),
+          'sha256': hashlib.sha256(paths[a['kind']].read_bytes()).hexdigest()}
+         for a in release.plan(platform, version)['artifacts']]
+release.conform(platform, version, files)
+(out / 'build.json').write_text(json.dumps({'schema_version': 1, 'platform': platform, 'tag': f'v{version}',
+                                            'version': version, 'artifacts': files}))
+`;
+
+describe("a re-run of a build job whose earlier attempt published part of it", () => {
+  const PACKAGE = "onepipeline-cli-win32-x64";
+
+  /// A build of the Windows job's artifacts under `base`, as its build phase leaves it.
+  async function standInBuild(base, payload) {
+    const result = await run(PYTHON, ["-c", STAND_IN_BUILD, join(base, "windows"), payload]);
+    assert.equal(result.code, 0, said(result));
+    const manifest = JSON.parse(readFileSync(join(base, "windows", "build.json"), "utf8"));
+    const of = (kind) => manifest.artifacts.find((a) => a.kind === kind);
+    return { manifest, of, bytes: (kind) => readFileSync(of(kind).path) };
+  }
+
+  async function services() {
+    const github = await new GitHubDouble().start();
+    github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    const env = (out) =>
+      releaseEnv(github, out, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        UV_CACHE_DIR: join(home, "uv-cache"),
+        PUBLISH_NPM_AWAIT_BUDGET: "2",
+        PUBLISH_NPM_AWAIT_INTERVAL: "1",
+      });
+    /// Every upload each registry has taken, by what it took.
+    const writes = () => ({
+      release: github
+        .writes()
+        .map(
+          (r) =>
+            `${r.method} ${r.method === "POST" ? new URLSearchParams(r.query).get("name") : r.path}`,
+        ),
+      pypi: pypi.writes().length,
+      npm: npm.timeline.filter((e) => e.kind === "accepted").map((e) => e.identity),
+    });
+    const stop = async () => {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    };
+    return { github, pypi, npm, env, writes, stop };
+  }
+
+  /// What each registry serves of this platform now, as bytes or an npm integrity.
+  async function served(s, build) {
+    const asset = (kind) =>
+      s.github.release(TAG).assets.find((a) => a.name === build.of(kind).file)?.content;
+    const integrity = await run("npm", ["view", `${PACKAGE}@${VERSION}`, "dist.integrity"], {
+      env: npmConfig(s.npm, scratch("npm-view")),
+    });
+    return {
+      archive: asset("archive"),
+      checksum: asset("checksum"),
+      wheel: s.pypi.files.get(build.of("wheel").file)?.content,
+      npm: integrity.stdout.trim(),
+    };
+  }
+
+  function integrityOf(buffer) {
+    return `sha512-${createHash("sha512").update(buffer).digest("base64")}`;
+  }
+
+  /// The registries serve every file of `build`, and so one build.
+  async function servesOnly(s, build, label) {
+    const now = await served(s, build);
+    assert.ok(now.archive?.equals(build.bytes("archive")), `the Release serves ${label}'s archive`);
+    assert.ok(
+      now.checksum?.equals(build.bytes("checksum")),
+      `the Release serves ${label}'s checksum`,
+    );
+    assert.ok(now.wheel?.equals(build.bytes("wheel")), `PyPI serves ${label}'s wheel`);
+    assert.equal(now.npm, integrityOf(build.bytes("npm")), `npm serves ${label}'s package`);
+  }
+
+  async function until(condition, what) {
+    for (const deadline = Date.now() + 30_000; Date.now() < deadline; ) {
+      if (condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.fail(`${what} within 30s`);
+  }
+
+  it("treats what the earlier attempt published as published, uploading nothing again", async () => {
+    const s = await services();
+    const first = scratch("release-attempt-1");
+    const second = scratch("release-attempt-2");
+    try {
+      // v0.80.0's first attempt: every upload accepted, and npm serving the
+      // package only after the job had given up waiting for it.
+      const earlier = await standInBuild(first, "the first attempt's onepipeline.exe");
+      s.npm.lagFor(PACKAGE, 8000);
+      const gaveUp = await run("just", ["release-windows", "publish"], { env: s.env(first) });
+      assert.equal(gaveUp.code, 1, said(gaveUp));
+      assert.match(gaveUp.stderr, new RegExp(`still does not serve '${PACKAGE}@`), said(gaveUp));
+      await until(() => s.npm.visible(PACKAGE).includes(VERSION), "npm served the package");
+      const landed = s.writes();
+
+      // The re-run rebuilds, and the binary is not byte-reproducible.
+      const rebuilt = await standInBuild(second, "the second attempt's onepipeline.exe");
+      for (const kind of ["archive", "checksum", "wheel", "npm"]) {
+        assert.notEqual(rebuilt.of(kind).sha256, earlier.of(kind).sha256, `${kind} differs`);
+      }
+      const rerun = await run("just", ["release-windows", "publish"], { env: s.env(second) });
+      assert.equal(rerun.code, 0, said(rerun));
+      for (const line of [
+        `PyPI already holds ${earlier.of("wheel").file} from an earlier attempt of ${TAG}`,
+        `npm already holds ${PACKAGE}@${VERSION} from an earlier attempt of ${TAG}`,
+        `the Release already holds ${earlier.of("archive").file} and ${earlier.of("checksum").file} from an earlier attempt of ${TAG}; kept`,
+      ]) {
+        assert.ok(rerun.stdout.includes(line), `says: ${line}\n${said(rerun)}`);
+      }
+      assert.deepEqual(s.writes(), landed, "nothing was uploaded, replaced or deleted again");
+      await servesOnly(s, earlier, "the first attempt");
+    } finally {
+      await s.stop();
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces the earlier attempt's Release assets when neither PyPI nor npm holds that build", async () => {
+    const s = await services();
+    const first = scratch("release-attempt-1");
+    const second = scratch("release-attempt-2");
+    try {
+      // The first attempt uploaded the Release's pair, then PyPI refused it,
+      // so nothing of that build reached a registry that cannot replace a file.
+      await standInBuild(first, "the first attempt's onepipeline.exe");
+      s.pypi.refuseNext(
+        "POST",
+        /^\/legacy\/$/,
+        403,
+        "Invalid or non-existent authentication information.",
+      );
+      const refused = await run("just", ["release-windows", "publish"], { env: s.env(first) });
+      assert.equal(refused.code, 1, said(refused));
+      assert.equal(s.pypi.files.size, 0, said(refused));
+
+      const rebuilt = await standInBuild(second, "the second attempt's onepipeline.exe");
+      const rerun = await run("just", ["release-windows", "publish"], { env: s.env(second) });
+      assert.equal(rerun.code, 0, said(rerun));
+      assert.ok(
+        rerun.stdout.includes(
+          `the Release held ${rebuilt.of("archive").file} and ${rebuilt.of("checksum").file} from an earlier attempt of ${TAG}; replaced with this build's`,
+        ),
+        said(rerun),
+      );
+      await servesOnly(s, rebuilt, "the second attempt");
+    } finally {
+      await s.stop();
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+});
+
+/// Rewrite a built npm package's SBOM — dropped (`-`), replaced by `payload`, or
+/// the whole package overwritten with bytes that are not a tarball (`!`) — and
+/// re-record its hash in build.json, so only the SBOM check stands in the way.
+const REPLACE_NPM_SBOM = `
+import hashlib, io, json, sys, tarfile
+from pathlib import Path
+out, payload = Path(sys.argv[1]), sys.argv[2]
+manifest = json.loads((out / 'build.json').read_text())
+artifact, = [a for a in manifest['artifacts'] if a['kind'] == 'npm']
+source = Path(artifact['path'])
+if payload == '!':
+    source.write_bytes(b'not a tarball')
+    artifact['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+    (out / 'build.json').write_text(json.dumps(manifest))
+    sys.exit()
+with tarfile.open(source) as original:
+    members = [(m, original.extractfile(m).read() if m.isfile() else None) for m in original.getmembers()]
+with tarfile.open(source, 'w:gz') as changed:
+    for member, data in members:
+        if member.name == 'package/sboms/onepipeline.cyclonedx.json':
+            if payload == '-': continue
+            data = payload.encode(); member.size = len(data)
+        changed.addfile(member, io.BytesIO(data) if data is not None else None)
+artifact['sha256'] = hashlib.sha256(source.read_bytes()).hexdigest()
+(out / 'build.json').write_text(json.dumps(manifest))
+`;
+
+/// What a packed npm package carries under sboms/, by member name.
+const NPM_SBOMS = `
+import io, json, sys, tarfile
+with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read())) as bundle:
+    print(json.dumps({m.name: bundle.extractfile(m).read().decode()
+                      for m in bundle.getmembers() if m.isfile() and m.name.startswith('package/sboms/')}))
+`;
+
+describe("a platform package's SBOM with PyPI publication off", () => {
+  const PACKAGE = "onepipeline-cli-win32-x64";
+  const SBOM = "package/sboms/onepipeline.cyclonedx.json";
+
+  async function services() {
+    const github = await new GitHubDouble().start();
+    github.addRelease(TAG);
+    const pypi = await new PyPIDouble().start();
+    const npm = new Registry();
+    await npm.start();
+    const home = scratch("npm-home");
+    const env = (out) =>
+      releaseEnv(github, out, {
+        ...pypi.env(),
+        ...npmConfig(npm, home),
+        PYPI_PUBLISH: "false",
+        PYPI_TOKEN: "",
+        PUBLISH_NPM_AWAIT_BUDGET: "30",
+        PUBLISH_NPM_AWAIT_INTERVAL: "1",
+      });
+    const stop = async () => {
+      await Promise.all([github.stop(), pypi.stop(), npm.stop()]);
+      rmSync(home, { recursive: true, force: true });
+    };
+    return { github, pypi, npm, env, stop };
+  }
+
+  async function standInBuild(base) {
+    const result = await run(PYTHON, [
+      "-c",
+      STAND_IN_BUILD,
+      join(base, "windows"),
+      "the build's onepipeline.exe",
+    ]);
+    assert.equal(result.code, 0, said(result));
+    return JSON.parse(readFileSync(join(base, "windows", "build.json"), "utf8"));
+  }
+
+  function sbomsOf(tarball) {
+    return JSON.parse(
+      execFileSync(PYTHON, ["-c", NPM_SBOMS], { input: tarball, encoding: "utf8" }),
+    );
+  }
+
+  it("stages the platform package with the wheel's SBOM and publishes it to npm alone", async () => {
+    const s = await services();
+    const base = scratch("release-sbom");
+    try {
+      const manifest = await standInBuild(base);
+      const staged = readFileSync(manifest.artifacts.find((a) => a.kind === "npm").path);
+      const expected =
+        '{"bomFormat": "CycloneDX", "metadata": {"component": {"name": "onepipeline"}}}';
+      assert.deepEqual(sbomsOf(staged), { [SBOM]: expected }, "the staged package carries it");
+
+      const published = await run("just", ["release-windows", "publish"], { env: s.env(base) });
+      assert.equal(published.code, 0, said(published));
+      assert.match(published.stdout, /skipped PyPI \(PYPI_PUBLISH off\)/);
+      assert.equal(s.pypi.writes().length, 0, "nothing was uploaded to PyPI");
+      const served = s.npm.packages.get(PACKAGE)?.versions.get(VERSION)?.tarball;
+      assert.ok(served, `npm took ${PACKAGE}@${VERSION}`);
+      assert.deepEqual(sbomsOf(served), { [SBOM]: expected }, "the package npm serves carries it");
+    } finally {
+      await s.stop();
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  for (const [label, payload, reason] of [
+    ["lacks its SBOM", "-", "omitted sboms/onepipeline.cyclonedx.json"],
+    [
+      "carries a document that is not an object",
+      "[]",
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+    [
+      "carries a document that is not CycloneDX",
+      '{"bomFormat": "SPDX"}',
+      "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+    ],
+    ["is not a tarball at all", "!", "is not a readable tarball"],
+  ]) {
+    it(`refuses to publish a platform package that ${label}, naming it, before any upload`, async () => {
+      const s = await services();
+      const base = scratch("release-sbom");
+      try {
+        await standInBuild(base);
+        const replaced = await run(PYTHON, [
+          "-c",
+          REPLACE_NPM_SBOM,
+          join(base, "windows"),
+          payload,
+        ]);
+        assert.equal(replaced.code, 0, said(replaced));
+        const refused = await run("just", ["release-windows", "publish"], { env: s.env(base) });
+        assert.equal(refused.code, 1, said(refused));
+        assert.ok(
+          refused.stderr.includes(`npm package ${PACKAGE} ${reason}`) &&
+            refused.stderr.includes("so nothing is published"),
+          said(refused),
+        );
+        assert.deepEqual(s.github.writes(), [], "nothing was uploaded to the Release");
+        assert.equal(s.pypi.writes().length, 0, "nothing was uploaded to PyPI");
+        assert.deepEqual(s.npm.timeline, [], "nothing was published to npm");
+      } finally {
+        await s.stop();
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("a lock that links an engine twice", () => {
@@ -801,7 +1199,7 @@ describe("the release outcome record", () => {
     });
     assert.equal(published.code, 0, said(published));
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: "success",
@@ -836,7 +1234,8 @@ describe("the release outcome record", () => {
     ]);
     try {
       const jobs = {};
-      for (const key of ["LINUX", "MACOS", "WINDOWS"]) jobs[`${key}_RESULT`] = "success";
+      for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+        jobs[`${key}_RESULT`] = "success";
       const result = await run("just", ["release-outcome"], {
         env: releaseEnv(github, out, { ...jobs, NPM_PUBLISH: "false" }),
       });
@@ -874,7 +1273,7 @@ describe("the release outcome record", () => {
       }),
     );
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: "success",
@@ -902,6 +1301,9 @@ describe("the release outcome record", () => {
       LINUX_RESULT: "failure",
       LINUX_PUBLISHED: "skipped",
       LINUX_VERIFIED: "skipped",
+      LINUX_ARM64_RESULT: "success",
+      LINUX_ARM64_PUBLISHED: "success",
+      LINUX_ARM64_VERIFIED: "success",
       MACOS_RESULT: "success",
       MACOS_PUBLISHED: "success",
       MACOS_VERIFIED: "success",
@@ -922,7 +1324,7 @@ describe("the release outcome record", () => {
 
   it("records nothing shipped only when no build job reached its publish step", async () => {
     const failedBuilding = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(failedBuilding, {
         [`${key}_RESULT`]: "failure",
         [`${key}_PUBLISHED`]: "skipped",
@@ -942,7 +1344,8 @@ describe("the release outcome record", () => {
     // A cancelled job reports no step outcomes, and may have stopped between
     // two uploads, so it is not proof that nothing shipped.
     const cancelled = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) cancelled[`${key}_RESULT`] = "cancelled";
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"])
+      cancelled[`${key}_RESULT`] = "cancelled";
     result = await run("just", ["release-outcome"], { env: releaseEnv(github, out, cancelled) });
     assert.equal(result.code, 0, said(result));
     assert.deepEqual(states(recorded())["pypi:onepipeline-cli"], [
@@ -954,7 +1357,7 @@ describe("the release outcome record", () => {
 
   function allJobs(published, verified) {
     const jobs = {};
-    for (const key of ["LINUX", "MACOS", "WINDOWS"]) {
+    for (const key of ["LINUX", "LINUX_ARM64", "MACOS", "WINDOWS"]) {
       Object.assign(jobs, {
         [`${key}_RESULT`]: "success",
         [`${key}_PUBLISHED`]: published[key] ?? "success",
@@ -974,6 +1377,24 @@ describe("the release outcome record", () => {
       }),
     );
   }
+
+  it("records a release whose linux-arm64 build failed as shipped but not verified", async () => {
+    launcherResults("success", "success");
+    const failed = {
+      LINUX_ARM64_RESULT: "failure",
+      LINUX_ARM64_PUBLISHED: "skipped",
+      LINUX_ARM64_VERIFIED: "skipped",
+    };
+    const result = await run("just", ["release-outcome"], {
+      env: releaseEnv(github, out, { ...allJobs({}, {}), ...failed }),
+    });
+    assert.equal(result.code, 0, said(result));
+    const record = recorded();
+    assert.equal(record.outcome, "shipped-unverified");
+    for (const id of ["pypi:onepipeline-cli", "npm:onepipeline-cli"]) {
+      assert.deepEqual(states(record)[id], ["shipped-unverified", "success", "failure"], id);
+    }
+  });
 
   it("records a build job whose publish step failed as shipped but not verified", async () => {
     launcherResults("success", "success");
@@ -1164,14 +1585,16 @@ describe("the release outcome record", () => {
   });
 
   it("refuses a job result GitHub does not report rather than guessing", async () => {
-    const result = await run("just", ["release-outcome"], {
-      env: releaseEnv(github, out, { LINUX_RESULT: "succeeded" }),
-    });
-    assert.equal(result.code, 1, said(result));
-    assert.match(
-      result.stderr,
-      /LINUX_RESULT is 'succeeded', not a job or step result GitHub reports/,
-    );
+    for (const key of ["LINUX_RESULT", "LINUX_ARM64_RESULT"]) {
+      const result = await run("just", ["release-outcome"], {
+        env: releaseEnv(github, out, { [key]: "succeeded" }),
+      });
+      assert.equal(result.code, 1, said(result));
+      assert.match(
+        result.stderr,
+        new RegExp(`${key} is 'succeeded', not a job or step result GitHub reports`),
+      );
+    }
   });
 });
 

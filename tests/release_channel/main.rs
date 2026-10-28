@@ -50,7 +50,10 @@ use onepipeline::channel::layout::{
 use serde_json::{json, Map, Value};
 
 use harness::{binary, World};
-use recorded_support::{answered, normalized, recorded_world, seeded_with, LAYOUT, RELEASE, RUN};
+use recorded_support::{
+    answered, assert_core_derived_holds, is_core_derived, normalized, recorded_world, seeded_with,
+    LAYOUT, RELEASE, RUN,
+};
 
 #[path = "../e2e/harness.rs"]
 mod harness;
@@ -133,10 +136,13 @@ fn fed(world: &World, program: &Path, args: &[&str], stdin: &str) -> (Option<i32
     )
 }
 
-/// Every file of the layout in `channel`, `None` for one it does not hold.
+/// Every file of the layout in `channel` that 0.28.2 could write, `None` for one it
+/// does not hold. The core's derived files are no file of that release's: each one
+/// this build wrote is held to what it is derived from instead.
 fn files(channel: &Path) -> Vec<(&'static str, Option<String>)> {
     LAYOUT
         .into_iter()
+        .filter(|file| !is_core_derived(file))
         .map(|file| (file, std::fs::read_to_string(channel.join(file)).ok()))
         .collect()
 }
@@ -149,6 +155,11 @@ fn alike(release: &Path, ours: &Path, step: &str, normalize: fn(&str) -> String)
             theirs.as_deref().map(normalize),
             "after {step}, {file} differs between {RELEASE}'s channel and this build's"
         );
+    }
+    for file in LAYOUT.into_iter().filter(|file| is_core_derived(file)) {
+        if ours.join(file).exists() {
+            assert_core_derived_holds(step, ours, file);
+        }
     }
 }
 
@@ -283,6 +294,7 @@ fn write_channel(dir: &Path) {
                     },
                     reason: (!applied).then(|| "the node has settled".to_owned()),
                     refusal: None,
+                    turn: None,
                 }],
             })
             .expect("answered");
@@ -314,7 +326,13 @@ fn write_channel(dir: &Path) {
     assert_eq!(pending.message, "still pending");
 
     for file in LAYOUT {
-        assert!(dir.join(file).is_file(), "the layout wrote no {file}");
+        if is_core_derived(file) {
+            if dir.join(file).exists() {
+                assert_core_derived_holds("written", dir, file);
+            }
+        } else {
+            assert!(dir.join(file).is_file(), "the layout wrote no {file}");
+        }
     }
 }
 

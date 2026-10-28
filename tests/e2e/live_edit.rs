@@ -4482,3 +4482,134 @@ fn read_everything(world: &World, run: &str) {
     }
     panic!("`next` never ran out of surfaces on {run}");
 }
+
+/// Every live edit accepts what the loader accepts: an `add`, a `retry` and a
+/// `requeue` whose resulting node is a `local-direct` consumer naming `consumes`
+/// are each applied — under `fast` and under `published` alike — and each node
+/// then behaves as its adoption says: a `fast` one is dispatched once its producer
+/// has landed, before any release, and a `published` one is held on the release.
+///
+/// The loader stopped refusing that pair, and no live-edit check refuses it
+/// either, so plan load and every edit give one answer by construction; this is
+/// the journey that says the edits give it through the real binary.
+#[test]
+fn every_live_edit_accepts_a_local_direct_consumer_and_runs_it_by_its_adoption() {
+    let world = World::new("edit-consumes-local-direct");
+    world.write_graphs();
+    world.repository("local-direct", &[]);
+    let engine_repo = world.extra_repository("engine");
+    // A probe with no answer: nothing is released for as long as this runs.
+    let (script, _no_release) = world.probe_in(&engine_repo, "engine");
+    world.releases(&format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {script}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n"
+    ));
+    let mut engine = lifecycle("engine", &[]);
+    engine["repo"] = json!("engine");
+    world.script("engine.work", "the engine's work\n");
+    const ADOPTIONS: [&str; 2] = ["fast", "published"];
+    let mut nodes = vec![engine];
+    for adoption in ADOPTIONS {
+        // A node to retry, failing on its own.
+        nodes.push(agent(&format!("flaky-{adoption}"), &[]));
+        world.script(&format!("flaky-{adoption}.fail"), "1");
+        // A node to requeue: parked from the plan, and amended into a consumer.
+        let mut parked = lifecycle(&format!("requeued-{adoption}"), &["engine"]);
+        parked["parked"] = json!(true);
+        nodes.push(parked);
+    }
+    let run = live(&world, "consumes-edited", nodes, &["engine"]);
+    world.until("the nodes to retry to fail", |world| {
+        ADOPTIONS.iter().all(|adoption| {
+            world.events_of(&run, "node-settled").iter().any(|event| {
+                event["labels"]["node"] == format!("flaky-{adoption}")
+                    && event["payload"]["status"] == "failed"
+            })
+        })
+    });
+
+    let consuming = |id: &str, adoption: &str| {
+        let mut node = lifecycle(id, &["engine"]);
+        node["consumes"] = json!({"engine": "crate"});
+        node["adoption"] = json!(adoption);
+        node
+    };
+    let mut commands = Vec::new();
+    for adoption in ADOPTIONS {
+        commands
+            .push(json!({"op": "add", "node": consuming(&format!("added-{adoption}"), adoption)}));
+        commands.push(json!({"op": "retry", "id": format!("flaky-{adoption}"),
+            "node": consuming(&format!("retried-{adoption}"), adoption)}));
+        commands.push(
+            json!({"op": "requeue", "id": format!("requeued-{adoption}"), "amend": {
+                "consumes": {"engine": "crate"}, "adoption": adoption,
+            }}),
+        );
+    }
+    for id in ["added", "retried", "requeued"] {
+        for adoption in ADOPTIONS {
+            world.script(
+                &format!("{id}-{adoption}.work"),
+                &format!("{id}-{adoption} pins the engine\n"),
+            );
+        }
+    }
+    for command in &commands {
+        world
+            .run_with_stdin(&["reply", &run], &envelope(json!([command])))
+            .exited(0)
+            .err_lacks("consumes")
+            .err_lacks("opens no change request");
+    }
+    world.until("every edit to commit", |world| {
+        committed(world, &run).len() == commands.len()
+    });
+    let dispatched = |world: &World, node: &str| {
+        world
+            .events_of(&run, "node-dispatched")
+            .iter()
+            .any(|event| event["labels"]["node"] == node)
+    };
+    for id in ["added", "retried", "requeued"] {
+        for adoption in ADOPTIONS {
+            assert!(
+                !dispatched(&world, &format!("{id}-{adoption}")),
+                "{id}-{adoption} was dispatched before its producer landed"
+            );
+        }
+    }
+
+    // The producer lands. Every `fast` consumer starts on its branch with no
+    // release out; every `published` one is held on the release instead.
+    world.release("engine.go");
+    world.until("every fast consumer to be dispatched", |world| {
+        ["added", "retried", "requeued"]
+            .iter()
+            .all(|id| dispatched(world, &format!("{id}-fast")))
+    });
+    world.until(
+        "every published consumer to be held on the release",
+        |world| {
+            ["added", "retried", "requeued"].iter().all(|id| {
+                world
+                    .events_of(&run, "release-wait")
+                    .iter()
+                    .any(|event| event["labels"]["node"] == format!("{id}-published"))
+            })
+        },
+    );
+    assert!(world.events_of(&run, "release-arrived").is_empty());
+    for id in ["added", "retried", "requeued"] {
+        assert!(
+            !dispatched(&world, &format!("{id}-published")),
+            "{id}-published was dispatched with its release still out"
+        );
+    }
+}

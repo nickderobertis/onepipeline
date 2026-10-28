@@ -62,7 +62,103 @@ const DRIVER_HANDOVER: Duration = Duration::from_secs(30);
 /// Long enough that an ordinary teardown never reports a survivor it merely
 /// outran, short enough that an operator whose run really is wedged hears about
 /// it rather than watching a command hang.
-const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+pub(crate) const TEARDOWN_PATIENCE: Duration = Duration::from_secs(5);
+
+/// The file in the run's directory a `stop` holds locked for the whole of its
+/// teardown, and a driver's observer watch holds across each restart.
+///
+/// A stop cancels the observer the launch record names and then signals the
+/// tree its driver heads, and the watch starts another observer the moment it
+/// sees one stop — which the stop's own cancel is. Unheld, a restart landing
+/// between the cancel and the signal started a judge the signal then met and
+/// could not end, and one landing after the stop listed the tree started a judge
+/// nothing ended at all. Held, every restart is either recorded before the stop
+/// reads which observer to cancel, or never made. See [`hold_observer_restarts`].
+const OBSERVER_RESTART_LOCK_FILE: &str = "observer-restart.lock";
+
+/// The test failpoint a driver's observer watch meets the first time it sees an
+/// observer stop, before it asks whether to start another.
+const OBSERVER_SETTLED_GATE_ENV: &str = "ONEPIPELINE_TEST_OBSERVER_SETTLED_GATE";
+
+/// The test failpoint a `stop` meets once it has cancelled the run's observer,
+/// before it signals the run's tree.
+const STOP_OBSERVER_CANCELLED_GATE_ENV: &str = "ONEPIPELINE_TEST_STOP_OBSERVER_CANCELLED_GATE";
+
+/// The test failpoint a retained driver meets once it has written its claim
+/// into the launch record, before its loop appends anything.
+const DRIVER_CLAIMED_GATE_ENV: &str = "ONEPIPELINE_TEST_DRIVER_CLAIMED_GATE";
+
+/// How often a stop looks again at a restart lock a restart in flight holds.
+const RESTART_LOCK_POLL: Duration = Duration::from_millis(20);
+
+/// Open the run's observer restart lock, making it where it is not there yet.
+///
+/// An existing lock is opened for reading, which is all a lock needs, so a run
+/// directory that has since gone read-only still has one to take: the driver
+/// makes it when it opens its watch — see [`ObserverWatch::of`] — and a run
+/// whose launch record can no longer be written is still a run to keep watched.
+/// Anything at the path that is not a file is refused rather than locked.
+fn observer_restart_lock(paths: &RunPaths) -> std::io::Result<std::fs::File> {
+    let path = paths.dir.join(OBSERVER_RESTART_LOCK_FILE);
+    let file = match std::fs::File::open(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?,
+        opened => opened?,
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other("it is not a file"));
+    }
+    Ok(file)
+}
+
+/// Hold the run's observer restarts still for a teardown: wait out a restart in
+/// flight, so it is recorded before the teardown reads which observer to cancel,
+/// and keep the next from starting for as long as the answer is held.
+///
+/// The wait is bounded by what one restart is allowed — the graph's startup
+/// backstop, and the record write after it — and said on standard error while it
+/// lasts. A lock that cannot be opened or taken, or a restart still holding it
+/// past that bound, is refused rather than gone on without: a teardown that
+/// signalled the driver unheld is the race this lock exists to close, and would
+/// leave behind whatever observer the driver starts next. The refusal names the
+/// lock and why, so the caller signals nothing and says the run is untouched.
+fn hold_observer_restarts(paths: &RunPaths) -> Result<std::fs::File> {
+    let path = paths.dir.join(OBSERVER_RESTART_LOCK_FILE);
+    let refused = |source: std::io::Error| Error::Ledger {
+        path: path.clone(),
+        source,
+    };
+    let file = observer_restart_lock(paths).map_err(refused)?;
+    let mut until = None;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let bound = agentgraph::startup_timeout() + TEARDOWN_PATIENCE;
+                let until = *until.get_or_insert_with(|| {
+                    eprintln!(
+                        "onepipeline: run '{}': waiting up to {} seconds for the observer its \
+                         driver is restarting before the driver is stopped",
+                        paths.run,
+                        bound.as_secs()
+                    );
+                    Instant::now() + bound
+                });
+                if Instant::now() >= until {
+                    return Err(refused(std::io::Error::other(format!(
+                        "the driver's observer restart still holds it after {} seconds",
+                        bound.as_secs()
+                    ))));
+                }
+                std::thread::sleep(RESTART_LOCK_POLL);
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(refused(error)),
+        }
+    }
+}
 
 /// How many of a failed driver's last lines a refusal repeats.
 ///
@@ -95,6 +191,34 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // stream are what a closed pipe cuts short.
     match cli.command {
         Verb::Start(args) => start(&args),
+        Verb::Label(args) => {
+            let labels = crate::labels::parse(&args.labels)?;
+            let unlabel = args
+                .unlabel
+                .into_iter()
+                .map(verbs::LabelKey::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(Error::Refused)?;
+            let group = if args.no_group {
+                verbs::LabelGroup::Clear
+            } else {
+                crate::labels::group(args.group.as_deref())?
+                    .map_or(verbs::LabelGroup::Keep, verbs::LabelGroup::Set)
+            };
+            let overlay = verbs::label(
+                &resolve(&args.run)?,
+                verbs::LabelRequest {
+                    labels: &labels,
+                    unlabel: &unlabel,
+                    group,
+                    force: args.force,
+                    launcher: &sys::launcher(),
+                    session: &sys::launching_session(),
+                },
+            )?;
+            println!("{}", verbs::render_labelled(&overlay));
+            Ok(EXIT_SUCCESS)
+        }
         Verb::Scratch(crate::cli::ScratchCommand::Discard { run }) => {
             let discarded = verbs::scratch_discard(&ledger::runs_root(), &run)?;
             print!("{}", verbs::render_scratch_discard(&discarded));
@@ -148,7 +272,8 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             // there that runs `adopt` attached asserts `"settlement":"complete"` on stdout
             // beside the hook's own record — and the order of the two is not a fact stdout
             // carries. Entry 81 of `docs/contract-divergences.md` records the change.
-            let adopted = verbs::adopt(&paths, how)?;
+            let adopted =
+                verbs::adopt_with_writeback_item_budget(&paths, how, args.writeback_item_budget)?;
             println!("{}", verbs::render_adopted(&adopted));
             Ok(adopted.exit_code())
             // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -293,17 +418,26 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
             Ok(EXIT_SUCCESS)
         }
         Verb::Status(args) => {
-            let status = verbs::status(&ledger::runs_root(), args.run.as_deref())?;
-            // `--json` requires a run, which the parser enforces, so the status
-            // here is that run's folded detail.
-            if let (true, verbs::Status::Run(detail)) = (args.json, &status) {
+            // `--json` requires a run, which the parser enforces. Its reading is the
+            // run's state and nothing of its store, so it is read from the run's
+            // checkpoint and what was appended past it rather than from its history.
+            if let (true, Some(run)) = (args.json, args.run.as_deref()) {
+                let view = RunView::open_current(&verbs::resolved(&ledger::runs_root(), run)?)?;
                 let reading =
-                    serde_json::to_string(&crate::views::reading(&detail.view)).map_err(|e| {
+                    serde_json::to_string(&crate::views::reading(&view)).map_err(|e| {
                         Error::Invalid(format!("the run's reading could not be rendered: {e}"))
                     })?;
                 println!("{reading}");
                 return Ok(EXIT_SUCCESS);
             }
+            // One run's text reads the same off its checkpoint: every record a line
+            // of it quotes is folded or kept whole there, so its history is not read.
+            let status = match args.run.as_deref() {
+                Some(run) => verbs::Status::Run(verbs::RunStatus {
+                    view: RunView::open_current(&verbs::resolved(&ledger::runs_root(), run)?)?,
+                }),
+                None => verbs::status(&ledger::runs_root(), None)?,
+            };
             if args.no_providers {
                 print!("{}", status.render_without_providers());
             } else {
@@ -968,18 +1102,19 @@ impl Found {
 
 /// Whether the driver `claim` names provably can no longer act, by this host's own records:
 /// a run of this host, under this runs root, that nothing drives — its ownership lock taken
-/// and let go again here. Anything else is a driver only its acknowledgement, or its lease
-/// running out, can say has let go.
+/// and let go again here. Anything else is a driver only its acknowledgement, or the
+/// takeover's wait passing with no publication of its under way, can say has let go.
 fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>) -> Result<bool> {
     let Some(claim) =
         claim.filter(|claim| claim.host == sys::hostname() && ledger::is_valid_run_id(&claim.run))
     else {
         return Ok(false);
     };
-    let paths = RunPaths::under(root, &claim.run);
-    if !paths.dir.is_dir() {
+    // A store not declared private names the run by its public id.
+    let Some(run) = crate::publicid::run_named(root, &claim.run) else {
         return Ok(false);
-    }
+    };
+    let paths = RunPaths::under(root, &run);
     Ok(match engine::take_if_undriven(&paths)? {
         Some(lock) => {
             lock.release();
@@ -1200,6 +1335,8 @@ fn read_rendering(named: &str) -> Result<String> {
 
 /// `onepipeline start`.
 fn start(args: &StartArgs) -> Result<i32> {
+    let labels = crate::labels::parse(&args.labels)?;
+    let group = crate::labels::group(args.group.as_deref())?;
     // The store first: a plan that cannot be read is a launch that never starts,
     // and a store this build cannot read a project out of is named here rather
     // than by a node that fails on its first dispatch. Nothing is dispatched and
@@ -1212,6 +1349,7 @@ fn start(args: &StartArgs) -> Result<i32> {
     // check below reads each task's own record, and the write-back's landed baseline is seeded
     // from this one read, so its first projection reads nothing the launch has just read.
     let mut read = store.read_plan(&project).map_err(Error::from)?;
+    let mut project_origin = crate::labels::origin(&read.project_metadata)?;
     graph::validate(&read.plan)?;
     // Who drives the project, off that same read: a read that failed has already refused
     // the launch above, so a claim is never defaulted to none.
@@ -1504,6 +1642,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
     let root = ledger::runs_root();
     let run = mint_run_id(&plan, project.native(), &root);
+    // Its public id, decided where the id is minted and before anything records the run: a
+    // check that cannot answer gives the hashed form, which names nothing.
+    let public = crate::publicid::decide(&run, plan.name.as_deref());
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has
@@ -1513,8 +1654,13 @@ fn start(args: &StartArgs) -> Result<i32> {
         && found.may_stand_over_a_driver()
         && !gone_from_this_host(&root, claim.as_ref())?
     {
+        // Named on the store as every write-back of the run names it there.
         let mine = crate::payload::DriverClaim {
-            run: run.clone(),
+            run: if store.source_declared_private(project.source()) {
+                run.clone()
+            } else {
+                public.id.as_str().to_owned()
+            },
             host: sys::hostname(),
             session: crate::vcs::usable(&sys::launching_session()),
             pid: sys::pid(),
@@ -1529,6 +1675,7 @@ fn start(args: &StartArgs) -> Result<i32> {
             &crate::boundary::of_run(&plan).scope,
         )?;
         read = store.read_plan(&project).map_err(Error::from)?;
+        project_origin = crate::labels::origin(&read.project_metadata)?;
         graph::validate(&read.plan)?;
         crate::templates::check_plan(&templates, &read, &launch_dir)?;
         if !args.fresh {
@@ -1608,6 +1755,8 @@ fn start(args: &StartArgs) -> Result<i32> {
     }
     let paths = RunPaths::under(&root, &run);
     paths.create()?;
+    // The store operations the launch's read asked for, and every one after, are this run's.
+    crate::storeops::attach(&paths.dir);
     ledger::write_json(&paths.plan(), &plan)?;
     // The flow this launch is a member of, recorded in the flow before the run's
     // own record names it, so no record names a flow that cannot see the run.
@@ -1618,6 +1767,9 @@ fn start(args: &StartArgs) -> Result<i32> {
     let mut record = LaunchRecord {
         run_id: run.clone(),
         project: args.project.clone(),
+        labels: crate::labels::raw(&labels),
+        group: group.map(|group| group.as_str().to_owned()),
+        project_origin,
         // Absolute, once, here: this is the only process that knows where the
         // operator launched from, and every later driver — including the one a
         // fresh `adopt` starts from some other directory — replays this value
@@ -1692,6 +1844,8 @@ fn start(args: &StartArgs) -> Result<i32> {
         // llmlint: ignore-end[changed_behavior_has_e2e]
         oneharness_sessions: Some(sessions_file(&paths)?),
         flow: flow.map(|id| id.as_str().to_owned()).unwrap_or_default(),
+        public_id: public.id.into_string(),
+        name_withheld: public.plan_name == crate::publicid::PlanName::Withheld,
     };
     record.driven_by_this_process();
     // The record is durable *before* anything that reads it exists. The engine
@@ -1950,22 +2104,33 @@ const HANDOVER_READ_GATE_ENV: &str = "ONEPIPELINE_TEST_HANDOVER_READ_GATE";
 /// from and nothing else will ever read them out loud.
 fn confirm_driving(paths: &RunPaths, driver: &mut std::process::Child) -> Result<()> {
     let pid = driver.id();
-    // The driver's own start stamp, read while the child is unreaped and its pid
-    // therefore cannot have been handed on. A pid alone is not the claim: the
-    // record this driver is taking over names the driver it displaces, and a host
-    // that hands a freed pid on within moments — Windows does — can give that
-    // very pid to this child, so the record would read as claimed before the
-    // child had done anything. Where the host will not stamp the child, the
-    // child cannot stamp its claim either, and the pid is all either side has.
-    let stamp = sys::process_start_token(pid);
+    // The driver's own start stamp, read through the child itself: its pid while
+    // it is unreaped, which therefore cannot have been handed on, and its handle
+    // on Windows, which answers by pid for no process that has exited — and a
+    // driver that refused at once has. A pid alone is not the claim: the record
+    // this driver is taking over names the driver it displaces, and a host that
+    // hands a freed pid on within moments — Windows does — can give that very
+    // pid to this child, so the record would read as claimed before the child
+    // had done anything. Where the child's start cannot be read, only a record
+    // carrying no start either — what a host that stamps nothing has its driver
+    // write — is decided by the pid: one carrying a start is some process's, and
+    // nothing here can say it is this one's.
+    let stamp = sys::child_start_token(driver);
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey through the binary
+    // reaches an unreadable start here: every launch reads it off a child it has not
+    // reaped, which Linux and macOS answer by pid and Windows through the child's
+    // handle. A reaped child is the one way Linux and macOS leave it unreadable, and
+    // `a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start`
+    // drives this wait over exactly that.
     let claimed = || {
         ledger::read_json_opt::<LaunchRecord>(&paths.launch()).is_some_and(|record| {
             record.pid == pid
-                && stamp
-                    .as_ref()
-                    .is_none_or(|stamp| stamp.matches(&record.started))
+                && stamp.as_ref().map_or(record.started.is_empty(), |stamp| {
+                    stamp.matches(&record.started)
+                })
         })
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     // Test failpoints only, and nothing at all where their variables are unset:
     // a journey holds this process before its first reading, or between that
     // reading and its first look at whether the driver has exited, so what the
@@ -2142,7 +2307,8 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     // won was still working.
     let lock = engine::claim(&paths)?;
     let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
-    let view = RunView::open(&paths)?;
+    // The run's state, for its goal and its adoption: nothing of its store.
+    let view = RunView::open_current(&paths)?;
     let log = paths.driver_log();
     if retained == Retained::Adopting {
         take_the_run_over(&paths, &mut record)?;
@@ -2158,6 +2324,12 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
     let mut observer = observe(&paths, &mut record, goal.as_deref(), output)?;
     record.driven_by_this_process();
     ledger::write_json(&paths.launch(), &record)?;
+    // Test failpoint only, and nothing at all where its variable is unset: a
+    // journey holds this driver with its claim written and nothing appended
+    // since, so the run's summary still names the process that launched it.
+    if let Err(error) = crate::ordering::meet(DRIVER_CLAIMED_GATE_ENV) {
+        eprintln!("onepipeline: {error}");
+    }
 
     // Scoped, so the watch is joined before this returns rather than left holding
     // the observer of a driver that has finished with it.
@@ -2182,7 +2354,7 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         })?
     };
     if let Some(run) = observer.as_mut() {
-        run.cancel();
+        observer_let_go(&paths.run, run);
     }
     // The run's end is judged by the driver that let go of it, with the lock
     // already released — a detached one exactly as an attached one.
@@ -2190,6 +2362,20 @@ pub(crate) fn drive_run(paths: &RunPaths, retained: Retained) -> Result<i32> {
         crate::hooks::at_let_go(&paths, crate::hooks::Relay::Quiet);
     }
     Ok(settled.state.exit_code())
+}
+
+/// End the observer of a run its driver is letting go of, and every process it
+/// started, before the driver exits. A graph that has not also recorded its own
+/// ending within [`TEARDOWN_PATIENCE`] is said on the driver's stderr, since a
+/// reader of that record will find it unfinished.
+fn observer_let_go(run: &str, observer: &mut agentgraph::GraphRun) {
+    if !observer.stop(TEARDOWN_PATIENCE) {
+        eprintln!(
+            "onepipeline: the observer graph for '{run}' had not recorded its ending {} \
+             seconds after its run's driver let go of it; the processes it started are ended",
+            TEARDOWN_PATIENCE.as_secs()
+        );
+    }
 }
 
 /// Keep the run watched, and reap the graph that stopped watching it.
@@ -2340,6 +2526,21 @@ struct ObserverWatch<'a> {
     /// Whether this driver has said that an observer stopped as it let go, so a
     /// watch polling through the release says it once.
     said_let_go: bool,
+    /// What this driver last said about a restart lock it could not take — a
+    /// stop holding it, or why it could not be taken — so a watch polling
+    /// through either says each once.
+    said_held: Option<String>,
+}
+
+/// Whether a watch may restart an observer now, as the run's restart lock says.
+enum RestartHold {
+    /// It may: the lock, held until the restart is recorded.
+    Free(std::fs::File),
+    /// It may not: a `stop` of the run holds the lock.
+    Stopping,
+    /// It may not: the lock could not be opened or taken, so nothing says a
+    /// stop is not under way.
+    Unreadable(std::io::Error),
 }
 
 /// What a watch did about an observer that stopped watching the run.
@@ -2349,6 +2550,13 @@ enum Stopped {
     /// None, because the loop is letting go of the run and the record is no
     /// longer this driver's to move.
     LettingGo,
+    /// None yet, because the run's restart lock is not this watch's to take: a
+    /// `stop` holds it, and ends this driver, or it cannot be taken at all, and
+    /// nothing says a stop is not under way. An observer started either way
+    /// could be one a stop had already looked past. Asked again at the next
+    /// look, so a stop that refused and let go — or a lock that can be taken
+    /// again — leaves the run watched again.
+    Held,
     /// None, and nothing this driver runs will start another.
     Over,
 }
@@ -2361,6 +2569,16 @@ impl<'a> ObserverWatch<'a> {
         goal: Option<String>,
         output: agentgraph::GraphOutput<'a>,
     ) -> Self {
+        // Made now, while the run's directory is surely writable, so a restart
+        // has a lock to take after it no longer is. One that cannot be made is
+        // said now and again by the first restart it holds back.
+        if let Err(error) = observer_restart_lock(paths) {
+            eprintln!(
+                "onepipeline: run '{}': {OBSERVER_RESTART_LOCK_FILE} cannot be made ({error}); \
+                 no observer is restarted until it can",
+                paths.run
+            );
+        }
         Self {
             paths,
             record,
@@ -2370,6 +2588,7 @@ impl<'a> ObserverWatch<'a> {
             limit: observer_restart_limit(),
             restarted: 0,
             said_let_go: false,
+            said_held: None,
         }
     }
 
@@ -2379,6 +2598,13 @@ impl<'a> ObserverWatch<'a> {
     /// holds the run; [`Self::restart`] says what becomes of one the loop lets go
     /// of while it is under way.
     fn stopped(&mut self, observer: &mut agentgraph::GraphRun) -> Stopped {
+        // Test failpoint only, and nothing at all where its variable is unset: a
+        // journey holds the first observer this watch sees stop here, so where
+        // its restart lands against a `stop` is the journey's order.
+        static MET: AtomicBool = AtomicBool::new(false);
+        if !MET.swap(true, Ordering::SeqCst) {
+            let _ = crate::ordering::meet(OBSERVER_SETTLED_GATE_ENV);
+        }
         if !self.holds() {
             // Still said as a stop, because it is one: a run that settles before
             // its watch next looks — an observer refused at once does — has its
@@ -2393,10 +2619,58 @@ impl<'a> ObserverWatch<'a> {
             }
             return Stopped::LettingGo;
         }
+        // Held across the restart, record write included, so a stop that takes
+        // it next reads the graph run this restart recorded and ends that one.
+        let _restarts = match self.restart_hold() {
+            RestartHold::Free(file) => {
+                self.said_held = None;
+                file
+            }
+            RestartHold::Stopping => {
+                self.say_held(format!(
+                    "the observer graph for '{}' has stopped watching while the run is being \
+                     stopped; no other is started",
+                    self.paths.run
+                ));
+                return Stopped::Held;
+            }
+            RestartHold::Unreadable(error) => {
+                self.say_held(format!(
+                    "the observer graph for '{}' has stopped watching and no other is started: \
+                     {} cannot be taken ({error}), so nothing says a stop is not under way; \
+                     it is asked again while the run is driven",
+                    self.paths.run,
+                    self.paths.dir.join(OBSERVER_RESTART_LOCK_FILE).display()
+                ));
+                return Stopped::Held;
+            }
+        };
         observer_stopped_watching(&self.paths.run);
         match self.restart(observer) {
             Some(()) => Stopped::Restarted,
             None => Stopped::Over,
+        }
+    }
+
+    /// Take the run's restart lock for one restart — see
+    /// [`hold_observer_restarts`].
+    fn restart_hold(&self) -> RestartHold {
+        let file = match observer_restart_lock(self.paths) {
+            Ok(file) => file,
+            Err(error) => return RestartHold::Unreadable(error),
+        };
+        match file.try_lock() {
+            Ok(()) => RestartHold::Free(file),
+            Err(std::fs::TryLockError::WouldBlock) => RestartHold::Stopping,
+            Err(std::fs::TryLockError::Error(error)) => RestartHold::Unreadable(error),
+        }
+    }
+
+    /// Say why no observer was restarted, once for as long as the reason holds.
+    fn say_held(&mut self, why: String) {
+        if self.said_held.as_deref() != Some(why.as_str()) {
+            eprintln!("onepipeline: {why}");
+            self.said_held = Some(why);
         }
     }
 
@@ -2695,6 +2969,22 @@ fn relay_observer(
         .map_err(|e| Error::Invalid(format!("cannot start the attach relay: {e}")))
 }
 
+/// Put one envelope the observer emitted in the run's journal — all but a
+/// heartbeat, which no reader asks of the journal any more: an observer member's
+/// beat is not a dispatch member's, and `liveness.json` keeps only those (see
+/// [`crate::heartbeat`]).
+fn relay_observed(
+    paths: &RunPaths,
+    journal: &mut Journal,
+    envelope: &crate::event::Envelope,
+) -> Result<()> {
+    if crate::heartbeat::is_heartbeat(envelope) {
+        crate::heartbeat::beat(paths, envelope);
+        return Ok(());
+    }
+    journal.relay(envelope)
+}
+
 /// Run the engine loop in this process and stream the run until it settles.
 ///
 /// The loop runs on a thread of its own so this one can render. Reading it
@@ -2730,12 +3020,14 @@ fn attach(
     if let Some(run) = watched.as_deref_mut() {
         relay_observer(paths, run, tx)?;
     }
-    // Every event already printed, by the record it is, and whether the header has been. Not a
-    // count of lines: the merged order interleaves another stream's records by their own
-    // clock, so a record relayed late lands *among* lines already printed, and a count of them
-    // would print the line it displaced a second time and never print the one that arrived.
-    let mut printed: std::collections::HashSet<(String, u64, String, String)> =
-        std::collections::HashSet::new();
+    // The run's fold, kept current from what its journal appends, and the byte the
+    // stream has printed up to: each record is read once, as it arrives, and the
+    // history in front of the run's checkpoint — folded already, and on a long run
+    // most of the store — is never read for a line. A record relayed late is printed
+    // when it arrives, rather than among lines already printed.
+    let mut projected =
+        crate::checkpoint::Projected::open_with(paths, crate::checkpoint::Persist::No);
+    let mut printed_to = projected.covered_bytes();
     let mut headed = false;
     // How long the journal was when the run was last read, so it is read again
     // only once it has grown.
@@ -2746,6 +3038,9 @@ fn attach(
     // the one death that is raised rather than only relayed. See
     // [`report_a_stopped_chain`].
     let mut chains = engine::ChainRecords::default();
+    // Held for the whole stream, on the thread that renders it: see
+    // [`views::StreamReads`] for what it carries and when it lets go.
+    let carried = views::StreamReads::begin(&paths.run);
 
     let driving = paths.clone();
     let letting_go = watch.letting_go();
@@ -2766,7 +3061,7 @@ fn attach(
         // Everything the observer emits joins the merged store, so an attach and
         // a later replay see the same stream.
         while let Ok(envelope) = rx.try_recv() {
-            journal.relay(&envelope)?;
+            relay_observed(paths, &mut journal, &envelope)?;
             report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
         }
 
@@ -2793,7 +3088,7 @@ fn attach(
                             relay_observer(paths, run, tx.clone())?;
                         }
                     }
-                    Stopped::LettingGo => {}
+                    Stopped::LettingGo | Stopped::Held => {}
                     Stopped::Over => observer_gone = true,
                 }
             }
@@ -2813,7 +3108,7 @@ fn attach(
             while std::time::Instant::now() < deadline {
                 match rx.recv_timeout(ATTACH_POLL) {
                     Ok(envelope) => {
-                        journal.relay(&envelope)?;
+                        relay_observed(paths, &mut journal, &envelope)?;
                         report_a_stopped_chain(paths, &mut journal, &mut chains, &envelope)?;
                     }
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -2835,7 +3130,15 @@ fn attach(
             continue;
         }
         read_at = Some(length);
-        let view = RunView::open(paths)?;
+        projected.refresh(paths);
+        let appended = journal::finished_records_from(&paths.journal(), printed_to);
+        printed_to += appended.iter().map(|(_, bytes)| bytes).sum::<u64>();
+        let mut arrived: Vec<crate::event::Envelope> = appended
+            .into_iter()
+            .filter_map(|(event, _)| event)
+            .collect();
+        journal::merge_order(&mut arrived);
+        let view = RunView::of_state(paths, (*projected).clone())?;
         // The stream is progress for a person; the settlement below is the one
         // record a caller parses. Keeping them on separate descriptors is what
         // lets a script read `stdout` as JSON while a terminal still follows
@@ -2844,19 +3147,13 @@ fn attach(
         // the person who started it, and a profile is what a *reader* of a run
         // chooses. There is nobody else here to have chosen one.
         let unfiltered = EventFilter::default();
-        let fresh: Vec<_> = view
-            .events
+        let fresh: Vec<_> = arrived
             .iter()
             .filter(|event| unfiltered.matches(event))
-            .filter(|event| {
-                printed.insert((
-                    event.stream.clone(),
-                    event.seq,
-                    event.ts.clone(),
-                    event.kind.0.clone(),
-                ))
-            })
             .collect();
+        // See `StreamReads::before_render` for what the render about to be made of
+        // these records carries from the last one.
+        carried.before_render(&paths.run, &fresh, concluded);
         if !fresh.is_empty() || !headed {
             let rendered = views::monitor_shown(&view, fresh);
             for line in rendered.lines().skip(usize::from(headed)) {
@@ -2870,8 +3167,10 @@ fn attach(
             // loop's own verdict is unwrapped, because that verdict may be a
             // refusal, and a launch that returned one having left a graph
             // running would leave an agent working on a run nobody is driving.
+            // Waited for, because this process is about to exit and the graph's
+            // reaper is one of its threads: see [`agentgraph::GraphRun::stop`].
             if let Some(run) = watched.as_deref_mut() {
-                run.cancel();
+                observer_let_go(&paths.run, run);
             }
             // Whatever the loop reported is this launch's failure to report: a
             // lock it could not take, a ledger it could not read.
@@ -2926,16 +3225,25 @@ pub(crate) fn settled(state: &crate::projection::RunState, paths: &RunPaths) -> 
 /// `onepipeline adopt --detach`: validate, displace the undriven driver, and hand
 /// the run to the program `retain` names.
 ///
-/// Nothing is written here, and the lock is not taken here either. The process
-/// that will drive the run is the one that takes the lock, bumps the adoption,
-/// and names itself — one writer of each — so a reader between this line and
-/// the driver being up sees the run exactly as the refusals left it: undriven,
-/// and adoptable again. A launcher that claimed on the driver's behalf would
+/// An explicit budget is persisted under the ownership lock before spawning.
+/// The process that will drive the run then takes the lock, bumps the adoption,
+/// and names itself — one writer of each. Until that driver claims it, the run
+/// remains undriven and adoptable again. A launcher that claimed on the driver's behalf would
 /// instead be publishing its own pid for a run it is about to walk away from.
 ///
 /// Answers the retained driver's pid once it has claimed the run.
-pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) -> Result<u32> {
+pub(crate) fn adopt_detached(
+    paths: &RunPaths,
+    retain: &crate::verbs::Retain,
+    budget: Option<u64>,
+) -> Result<u32> {
     validate_and_displace_for_adoption(paths)?;
+    if let Some(budget) = budget {
+        let _lock = engine::claim(paths)?;
+        let mut record: LaunchRecord = ledger::read_json(&paths.launch())?;
+        record.writeback_item_budget = budget;
+        ledger::write_json(&paths.launch(), &record)?;
+    }
     let mut driver = retain_driver(paths, retain)?;
     let pid = driver.id();
     confirm_driving(paths, &mut driver)?;
@@ -2945,11 +3253,12 @@ pub(crate) fn adopt_detached(paths: &RunPaths, retain: &crate::verbs::Retain) ->
 /// `onepipeline adopt`: validate, displace the undriven driver, and drive the run
 /// in this process until it settles.
 ///
-/// Adoption keeps everything the run owns and replaces only the driver: the run
-/// id, the journal, and the ledger are the ones it already had. `said` is told
+/// Adoption keeps the run id, journal, and ledger. An explicit budget replaces
+/// the recorded allowance before this driver projects anything. `said` is told
 /// the settlement as [`attach`] says it.
 pub(crate) fn adopt_attached(
     paths: &RunPaths,
+    budget: Option<u64>,
     said: &mut dyn FnMut(Settlement),
 ) -> Result<Settlement> {
     let (mut record, view) = validate_and_displace_for_adoption(paths)?;
@@ -2959,6 +3268,9 @@ pub(crate) fn adopt_attached(
     // this process while the driver that won carried on.
     let lock = engine::claim(paths)?;
 
+    if let Some(budget) = budget {
+        record.writeback_item_budget = budget;
+    }
     take_the_run_over(paths, &mut record)?;
     ledger::write_json(&paths.launch(), &record)?;
     report_and_journal_adoption(paths, &record, &view)?;
@@ -3014,7 +3326,9 @@ fn validate_and_displace_for_adoption(paths: &RunPaths) -> Result<(LaunchRecord,
             owner: record.owner_label(&session),
         });
     }
-    let view = RunView::open(paths)?;
+    // The verdict and the adoption's record are read off the run's state alone, so
+    // it is resumed from the checkpoint rather than read from the run's history.
+    let view = RunView::open_current(paths)?;
     // A `PARKED` run is refused here with an `ACTIVE` one: its driver is alive and
     // only quiet, and taking the run over would end that live work.
     let liveness = view.liveness();
@@ -3314,13 +3628,51 @@ pub(crate) fn established(teardown: Option<sys::Teardown>) -> journal::StopTeard
 // over one listing. A root recorded as ended is one the signal was delivered to: a root that
 // went before its ask is not, and what that leaves, a reissued pid declined, is the refusal
 // `a_stop_that_signalled_nothing_leaves_a_reissued_pid_declined` drives for a teardown whose
-// signal reached nothing.
+// signal reached nothing. The observer restarts held across the teardown, and the observer read
+// again under that hold, are driven in `tests/e2e/dispatch.rs`, by
+// `a_stop_ends_an_observer_restart_asked_between_its_cancel_and_its_signal` and
+// `a_stop_ends_an_observer_restart_asked_after_its_signals_listing`; a hold that cannot be taken
+// is the refusal `a_stop_that_cannot_hold_its_runs_observer_restarts_refuses_and_signals_nothing`
+// and `a_stop_that_outwaits_its_bound_for_a_restart_refuses_and_signals_nothing` drive.
 pub(crate) fn terminate(paths: &RunPaths, record: &LaunchRecord) -> Result<Option<sys::Teardown>> {
+    let mut aim = roots_to_stop(paths, record)?;
+    // Held until this teardown has answered, so the driver it ends starts no
+    // observer after the one below is cancelled.
+    let mut _restarts = None;
+    if let Aim::Here { roots, .. } = &aim {
+        if !roots.is_empty() {
+            // A run launched with no observer graph has none to restart, so
+            // it has no hold to take either.
+            if record.observer_graph().is_some() {
+                _restarts = Some(hold_observer_restarts(paths)?);
+            }
+            // Read again under the lock: a restart that finished while it was
+            // waited for recorded the graph run now watching, and that is the
+            // one to cancel.
+            let observer = ledger::read_json_opt::<LaunchRecord>(&paths.launch())
+                .map_or_else(|| record.graph_run.clone(), |current| current.graph_run);
+            // An attached observer runs on threads in its host. Let its graph
+            // reap providers before signalling the host that owns those threads.
+            match agentgraph::stop_observer(&observer, &paths.run, TEARDOWN_PATIENCE) {
+                Ok(true) => {
+                    // Cancellation can take time, and can end a root. Re-read
+                    // ownership before signalling any PID that might be reused.
+                    aim = roots_to_stop(paths, record)?;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("onepipeline: {error}; continuing process-tree teardown");
+                }
+            }
+            // Test failpoint only, and nothing at all where its variable is unset.
+            let _ = crate::ordering::meet(STOP_OBSERVER_CANCELLED_GATE_ENV);
+        }
+    }
     let Aim::Here {
         roots,
         unproven,
         declined,
-    } = roots_to_stop(paths, record)?
+    } = aim
     else {
         return Ok(None);
     };
@@ -3721,13 +4073,13 @@ pub(crate) fn deliver_note_envelope(
     paths: &RunPaths,
     envelope: &Reply,
 ) -> Result<crate::note::Delivered> {
-    let [Command::Note { id, text, .. }] = &envelope.commands[..] else {
+    let [Command::Note { id, .. }] = &envelope.commands[..] else {
         return Err(Error::Refused(
             "a note is delivered one at a time, and this envelope carries something else"
                 .to_string(),
         ));
     };
-    let (id, text) = (id.clone(), text.clone());
+    let id = id.clone();
     match submit_envelope(paths, None, envelope)? {
         // Compiled here, so what it answered is in hand.
         Submitted::AppliedHere { operations } => reached_in(&operations)
@@ -3737,16 +4089,24 @@ pub(crate) fn deliver_note_envelope(
                     "note: node '{id}': the delivery recorded no disposition"
                 ))
             }),
-        // Compiled by the run's own reconciler, which recorded it: the record is
-        // written before the outcome this returned on, so it is there to be read.
-        Submitted::AppliedByRun { .. } => last_note_delivered(paths, &id, &text)?
-            .map(crate::note::Delivered::To)
-            .ok_or_else(|| {
-                Error::Refused(format!(
-                    "note: node '{id}': the run applied the note and recorded no disposition \
-                     for it"
-                ))
-            }),
+        // Answered by the run's own reconciler as it handed the note to its
+        // receiver's inbox — `queued` — so what became of it is the note's own
+        // record, written once that receiver's turn answers it: waited for here,
+        // for as long as a reply waits for its answer.
+        Submitted::AppliedByRun { reply } => {
+            let deadline = Instant::now() + Duration::from_secs(reply_timeout_seconds());
+            loop {
+                match note_record(paths, reply)? {
+                    Some(Ok(reached)) => break Ok(crate::note::Delivered::To(reached)),
+                    Some(Err(reason)) => break Err(note_refused(&id, &reason)),
+                    // llmlint: ignore[changed_behavior_has_e2e] the reply timeout elapsing is
+                    // read from the calling process's environment, as the `Queued` arm below
+                    // says, and this call is a library call a journey cannot bound from outside.
+                    None if Instant::now() >= deadline => break Ok(crate::note::Delivered::Queued),
+                    None => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }
         // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the reply
         // timeout elapsing, which is read from the *calling process's*
         // environment — and this call is a library call, so a journey driving it
@@ -3763,6 +4123,21 @@ pub(crate) fn deliver_note_envelope(
     }
 }
 
+/// The refusal a note's own `edit-rejected` record states, as the call's error.
+///
+/// That record's reason is the refusal the run wrote, already worded in full —
+/// `refused: note: node '…': …` — so it is returned as it stands rather than
+/// prefixed a second time; only a reason that does not name the node is given
+/// the node's name.
+fn note_refused(id: &str, reason: &str) -> Error {
+    let reason = reason.strip_prefix("refused: ").unwrap_or(reason);
+    if reason.starts_with(&format!("note: node '{id}': ")) {
+        Error::Refused(reason.to_owned())
+    } else {
+        Error::Refused(format!("note: node '{id}': {reason}"))
+    }
+}
+
 /// The disposition one compiled note recorded.
 fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     operations.iter().find_map(|operation| match operation {
@@ -3771,48 +4146,68 @@ fn reached_in(operations: &[edits::Operation]) -> Option<crate::note::Reached> {
     })
 }
 
-/// What the run recorded for the last note of this text delivered to this node,
-/// or nothing where it recorded none.
+/// What the run recorded for the note at the head of envelope `envelope`: the
+/// party or dispatch it reached, or the reason it was refused — or nothing yet,
+/// while it waits in its receiver's inbox.
 ///
 /// # Errors
 ///
 /// [`Error::Invalid`] for a committed edit whose recorded operations are not a
 /// shape this build reads. That is the run's own record being unreadable, and it
-/// is **not** the same answer as no disposition: the caller turns the second into
-/// "the run applied the note and recorded no disposition for it", which would
-/// send a manager looking for a delivery that is sitting in the journal all
-/// along. So it is said rather than folded into that.
-fn last_note_delivered(
+/// is **not** the same answer as no record yet: the caller would wait out its
+/// whole timeout for a delivery that is sitting in the journal all along. So it
+/// is said rather than folded into that.
+fn note_record(
     paths: &RunPaths,
-    node: &str,
-    text: &crate::note::NoteText,
-) -> Result<Option<crate::note::Reached>> {
-    for envelope in journal::read(&paths.journal()).into_iter().rev() {
-        if envelope.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+    envelope: u64,
+) -> Result<Option<std::result::Result<crate::note::Reached, String>>> {
+    // Off the records the projection keeps whole — every refusal naming an envelope
+    // and every commit carrying a note — rather than the run's history: this is asked
+    // every few milliseconds for as long as a reply waits.
+    for record in crate::checkpoint::current(paths).recalled.into_iter().rev() {
+        if record
+            .payload
+            .get("envelope")
+            .and_then(serde_json::Value::as_u64)
+            != Some(envelope)
+        {
             continue;
         }
-        let Some(recorded) = envelope.payload.get("operations") else {
+        if record.kind.0 == journal::PipelineKind::EditRejected.as_str()
+            && record
+                .payload
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                == Some(0)
+        {
+            return Ok(Some(Err(record
+                .payload
+                .get("reason")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("the run refused it and recorded no reason")
+                .to_owned())));
+        }
+        if record.kind.0 != journal::PipelineKind::EditCommitted.as_str() {
+            continue;
+        }
+        let Some(recorded) = record.payload.get("operations") else {
             continue;
         };
+        // llmlint: ignore[changed_behavior_has_e2e] an `edit-committed` of this crate's own,
+        // naming this very envelope, whose operations this build cannot read is a journal
+        // edited by hand — no verb, driver or death writes one — so a journey reaching it
+        // would prove the fixture; it is said rather than waited out, as this read said it
+        // before it was keyed on the envelope.
         let operations: Vec<edits::Operation> =
             serde_json::from_value(recorded.clone()).map_err(|why| {
                 Error::Invalid(format!(
                     "run '{}': a committed edit at seq {} records operations this build does \
                      not read, so what it did with a note cannot be said: {why}",
-                    paths.run, envelope.seq
+                    paths.run, record.seq
                 ))
             })?;
-        let reached = operations.iter().find_map(|operation| match operation {
-            edits::Operation::NoteDelivered {
-                node: written,
-                text: said,
-                reached,
-                ..
-            } if written == node && said == text => Some(reached.clone()),
-            _ => None,
-        });
-        if reached.is_some() {
-            return Ok(reached);
+        if let Some(reached) = reached_in(&operations) {
+            return Ok(Some(Ok(reached)));
         }
     }
     Ok(None)
@@ -3908,7 +4303,10 @@ pub(crate) fn submit_envelope(
     correlation: Option<&onemessagebus::Correlation>,
     envelope: &Reply,
 ) -> Result<Submitted> {
-    let view = RunView::open(paths)?;
+    // The run's state, launch and channel, and nothing of its store: what this asks
+    // before it queues is answered by the fold, so it is read from the checkpoint
+    // and what was appended past it rather than from every record the run holds.
+    let view = RunView::open_current(paths)?;
     let channel = ChannelState::of_run(paths, &view.launch);
     channel.declares(&envelope.author)?;
     // The publication boundary, before anything is queued, applied or journalled: an
@@ -4119,7 +4517,7 @@ pub(crate) fn submit_envelope(
                         &mut projected,
                         crate::payload::ReadjustTrigger::Rework,
                     )?;
-                    readjusted = RunView::open(paths)?;
+                    readjusted = RunView::open_current(paths)?;
                     let frontier = Frontier {
                         node_validator: readjusted.launch.node_validator().map(str::to_owned),
                         graph_validation: Some(edits::GraphValidation {
@@ -4229,6 +4627,9 @@ pub(crate) fn submit_envelope(
                         envelope.author.clone(),
                         operations,
                     )?;
+                    // A note this withdrew is its own envelope's to answer again,
+                    // as it is when a driver applies the withdrawal.
+                    crate::withdrawal::answer_each(paths, operations, None)?;
                     // The planner is told what any other author did here as well as
                     // in the loop: which of the two applied an edit is an accident of
                     // whether anything was driving the run, and the planner owns the
@@ -4525,6 +4926,23 @@ fn validate_here(
         let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch())?;
         return crate::reply::staged_decline(paths, state, launch.review_reply_graph(), operations);
     }
+    if let Command::WithdrawNote {
+        envelope,
+        index,
+        reason,
+    } = command
+    {
+        // Nothing is driving the run, and a driver that claimed envelopes it never
+        // answered sends this one through the queue instead — so a live note with
+        // no answer here is in an envelope no driver claimed, offered to nobody,
+        // and a driver that judges it later skips it (`engine::seated`).
+        return Ok(engine::Staged::Compiled(match crate::withdrawal::validate(
+            paths, envelope, *index, reason,
+        )? {
+            crate::withdrawal::Validated::Carried(operations) => operations,
+            crate::withdrawal::Validated::Live(operation) => vec![operation],
+        }));
+    }
     let Command::Note {
         id,
         addressee,
@@ -4532,6 +4950,7 @@ fn validate_here(
         criterion,
         deliver,
         persist,
+        delivery_timeout_seconds,
     } = command
     else {
         return Ok(engine::Staged::Compiled(operations));
@@ -4541,7 +4960,7 @@ fn validate_here(
         addressee: *addressee,
         text,
         criterion: criterion.as_ref(),
-        reach: crate::note::Reach::of(id, *deliver, *persist)?,
+        reach: crate::note::Reach::of(id, *deliver, *persist, *delivery_timeout_seconds)?,
         // Nothing is driving the run, so the frontier this was validated
         // against is the whole of what says whether the node has a dispatch
         // left to carry the note to.
@@ -4765,6 +5184,9 @@ mod tests {
         LaunchRecord {
             run_id: "stopped".into(),
             project: "plans:demo".into(),
+            labels: Default::default(),
+            group: None,
+            project_origin: None,
             dir: PathBuf::from("/tmp/launch"),
             graph: String::new(),
             graph_run: String::new(),
@@ -4800,6 +5222,8 @@ mod tests {
             oneharness_sessions: None,
             flow: String::new(),
             envelope_reviewer_bar: Default::default(),
+            public_id: String::new(),
+            name_withheld: false,
         }
     }
 
@@ -4822,6 +5246,29 @@ mod tests {
             .to_string()
     }
 
+    /// Wait for `driver` to exit while leaving it what a launcher holds of a
+    /// child that has: on Unix an unreaped pid, on Windows an open handle.
+    fn exited_unreaped(driver: &mut std::process::Child) {
+        #[cfg(unix)]
+        {
+            // SAFETY: `info` is a `siginfo_t` this frame owns for the call, and
+            // `WNOWAIT` leaves the child unreaped for `driver` to reap.
+            let waited = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    driver.id(),
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                )
+            };
+            assert_eq!(waited, 0, "{}", std::io::Error::last_os_error());
+        }
+        // A Windows child's handle stays open across `wait`, until it drops.
+        #[cfg(windows)]
+        driver.wait().expect("the retained driver exits");
+    }
+
     /// The first driver `retained` starts whose own start does not read as
     /// `displaced`. A start token is only as fine as its host keeps it — one
     /// second for macOS's `ps lstart`, one clock tick for Linux's procfs — so a
@@ -4836,7 +5283,11 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let mut driver = retained();
-            if start_of(driver.id()) != displaced {
+            if sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded()
+                != displaced
+            {
                 return driver;
             }
             driver.wait().expect("a set-aside driver exits");
@@ -4863,8 +5314,18 @@ mod tests {
         let root = scratch("confirm-equal");
         let paths = RunPaths::under(&root, "retained");
         paths.create().expect("the run directory");
-        let first = retained_driver();
-        let displaced = start_of(first.id());
+        let mut first = retained_driver();
+        let displaced = sys::child_start_token(&first)
+            .expect("the retained child has a start")
+            .recorded()
+            .to_string();
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(first.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the equal-start launch record is written");
+        confirm_driving(&paths, &mut first)
+            .expect("an equal start under the child's pid is its own claim");
         let mut first = Some(first);
 
         let mut driver =
@@ -4878,6 +5339,38 @@ mod tests {
             .expect("the driver's log is written");
         let refused = confirm_driving(&paths, &mut driver)
             .expect_err("a record naming the displaced start was read as this driver's claim")
+            .to_string();
+        assert!(refused.contains("did not claim it"), "{refused}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A retained driver whose start cannot be read is not confirmed by a record
+    /// naming its pid under another process's start.
+    ///
+    /// Windows answers a process's start by pid only while it runs, so a driver
+    /// that refused at once left nothing to compare a record against, and a
+    /// record naming its pid under the displaced driver's start read as its
+    /// claim. Driven by reaping the driver first, which leaves Linux and macOS
+    /// no start to give for it, so a record carrying none is all its pid can
+    /// decide; Windows reads the reaped child's start through its handle, which
+    /// is not the displaced one's either.
+    #[test]
+    fn a_retained_driver_whose_start_cannot_be_read_is_not_confirmed_by_another_start() {
+        let root = scratch("confirm-unread");
+        let paths = RunPaths::under(&root, "retained");
+        paths.create().expect("the run directory");
+        let displaced = start_of(sys::pid());
+        let mut driver = retained_apart_from(&displaced, retained_driver);
+        driver.wait().expect("the retained driver exits");
+        ledger::write_json(
+            &paths.launch(),
+            &launched_by(driver.id(), &sys::hostname(), &displaced),
+        )
+        .expect("the launch record is written");
+        std::fs::write(paths.driver_log(), "onepipeline: an unreadable lock\n")
+            .expect("the driver's log is written");
+        let refused = confirm_driving(&paths, &mut driver)
+            .expect_err("a record naming another process's start was read as this driver's claim")
             .to_string();
         assert!(refused.contains("did not claim it"), "{refused}");
         let _ = std::fs::remove_dir_all(&root);
@@ -4923,8 +5416,14 @@ mod tests {
         // Its own start is its claim, and stays one after it has exited: a
         // driver that took the run and settled at once did take it.
         let mut driver = retained_driver();
-        recorded(&launched_by(driver.id(), &here, &start_of(driver.id())));
-        driver.wait().expect("the retained driver exits");
+        recorded(&launched_by(
+            driver.id(),
+            &here,
+            sys::child_start_token(&driver)
+                .expect("the retained child has a start")
+                .recorded(),
+        ));
+        exited_unreaped(&mut driver);
         confirm_driving(&paths, &mut driver).expect("a driver that claimed the run is confirmed");
 
         // And one that wrote nothing at all leaves the record naming the driver

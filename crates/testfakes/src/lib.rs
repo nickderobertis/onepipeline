@@ -20,6 +20,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+pub mod codex_app_server;
 pub mod containment;
 pub mod hosted;
 pub mod profile;
@@ -344,6 +346,13 @@ pub fn segment(name: &str) -> String {
         mapped
     }
 }
+
+/// What `fake-claude` opens each `turn.activity` reasoning block with, followed by
+/// a space, the block's ordinal, the millisecond it was emitted at and the emitting
+/// turn's pid — the same three words it appends to `activity-emitted.txt` for every
+/// block. One definition, read by the double that writes it and by
+/// `tests/journal_workload`, which finds the blocks in the run's journal.
+pub const ACTIVITY_MARK: &str = "journal-workload activity";
 
 /// A per-node script file, e.g. `build.fail`.
 pub fn node_script(dir: &Path, node: &str, suffix: &str) -> Option<String> {
@@ -704,6 +713,46 @@ pub fn ask_manager(question: &str) {
     }
 }
 
+/// Start `onepipeline stop --force` on the run this process belongs to, with
+/// what it prints going to `<record>.out`, record its pid in `<record>.pid`,
+/// and do not wait for it.
+///
+/// The run is read out of this process's own environment, as [`ask_manager`]
+/// reads it. Not waited for, because the stop ends the process that started
+/// it; `--force` because the dispatch is not the session that launched the run.
+/// The pid is how a reader knows the stop has answered: once that process has
+/// ended, what it printed is all there is.
+pub fn stop_own_run(record: &Path) {
+    let run = match std::env::var(RUN_ID_ENV) {
+        Ok(run) if !run.is_empty() => run,
+        _ => fail(&format!("{RUN_ID_ENV} is unset: no run to stop")),
+    };
+    let cli = match std::env::var(CLI_BIN_ENV) {
+        Ok(cli) if !cli.is_empty() => cli,
+        _ => fail(&format!(
+            "{CLI_BIN_ENV} is unset: no engine to stop it with"
+        )),
+    };
+    // The process that becomes the stop records its own pid first, and then
+    // becomes it: a pid written by this process after the spawn could come too
+    // late, because the stop ends this process.
+    let script = "printf '%s\\n' \"$$\" >\"$2.partial\" && mv \"$2.partial\" \"$2\" \
+        && exec \"$0\" stop \"$1\" --force >\"$3\" 2>&1";
+    let started = std::process::Command::new("sh")
+        .args(["-c", script])
+        .arg(&cli)
+        .arg(&run)
+        .arg(format!("{}.pid", record.display()))
+        .arg(format!("{}.out", record.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if let Err(error) = started {
+        fail(&format!("cannot run `{cli} stop {run}`: {error}"));
+    }
+}
+
 /// Act as the dag-scope graph's monitor member: observe, and change nothing.
 ///
 /// Exactly what the shipped `monitor` persona is for. It runs **no engine
@@ -747,10 +796,47 @@ pub fn observe(dir: &Path) -> std::process::ExitCode {
         // until it is released is also what makes every one of them a graph that
         // has announced itself before it goes, rather than one whose launcher
         // may have met its exit first.
-        wait_for_any(&[
+        let released = [
             dir.join("observer.go"),
             dir.join(format!("observer.go.{nth}")),
-        ]);
+        ];
+        // `observer.heartbeat` holds a number of milliseconds and makes the held
+        // observer's monitor member beat on that clock, as a real one does every
+        // fifteen seconds: a member of no dispatch, so its beats name no node.
+        match std::fs::read_to_string(dir.join("observer.heartbeat"))
+            .ok()
+            .and_then(|every| every.trim().parse::<u64>().ok())
+            .filter(|every| *every > 0)
+        {
+            Some(every) => {
+                let mut seq = 0u64;
+                wait_for_any_ticking(
+                    &released,
+                    std::time::Duration::from_millis(every),
+                    &mut || {
+                        use std::io::Write;
+                        // A driver that stopped reading closes the pipe, and a beat
+                        // nobody reads is no failure of this double's.
+                        let _ = writeln!(
+                            std::io::stdout(),
+                            "{}",
+                            serde_json::json!({
+                                "v": 1,
+                                "ts": now(),
+                                "stream": format!("fake-observer-{}", std::process::id()),
+                                "seq": seq,
+                                "source": "agentgraph",
+                                "kind": oneagentgraph::event::EventKind::MemberHeartbeat.as_str(),
+                                "labels": {"run_id": format!("fake-observer-{}", std::process::id()), "member": "monitor"},
+                                "payload": {},
+                            })
+                        );
+                        seq += 1;
+                    },
+                );
+            }
+            None => wait_for_any(&released),
+        }
     }
     // What a real monitor member reads once it is let go, where a journey asks
     // (`observer.monitor`): the run's whole merged stream, through the very

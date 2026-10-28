@@ -1528,6 +1528,7 @@ pub(crate) fn reply(
             verdict: crate::verbs::VerdictHalf::OnTheQueue,
         },
         advice: Vec::new(),
+        notes: std::collections::BTreeMap::new(),
     })
 }
 

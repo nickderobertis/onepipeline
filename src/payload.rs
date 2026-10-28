@@ -62,6 +62,9 @@ pub(crate) enum Status {
     /// `complete-but-draft`.
     #[serde(rename = "complete-but-draft")]
     CompleteDraft,
+    /// `complete-but-held`.
+    #[serde(rename = "complete-but-held")]
+    CompleteHeld,
     /// `failed`.
     Failed,
     /// `skipped`.
@@ -81,6 +84,7 @@ impl From<crate::graph::NodeStatus> for Status {
             S::Cancelled => Self::Cancelled,
             S::Done => Self::Done,
             S::CompleteDraft => Self::CompleteDraft,
+            S::CompleteHeld => Self::CompleteHeld,
             S::Failed => Self::Failed,
             S::Skipped => Self::Skipped,
         }
@@ -226,10 +230,10 @@ impl From<&crate::note::Reached> for ReachedWord {
         use crate::note::Reached as R;
         match reached {
             R::Queued => Self::Queued,
-            R::Worker => Self::Worker,
-            R::Supervisor => Self::Supervisor,
+            R::Worker { .. } => Self::Worker,
+            R::Supervisor { .. } => Self::Supervisor,
             R::JudgedWith { .. } => Self::JudgedWith,
-            R::Carried => Self::Carried,
+            R::Carried { .. } => Self::Carried,
         }
     }
 }
@@ -549,7 +553,28 @@ pub(crate) struct NodeSettled {
     /// rather than dispatched. Entry 119 of `docs/contract-divergences.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) continued: Option<Continued>,
+    /// The releases a node held for them still awaits, one per release in the
+    /// order its reference rows list them: present exactly on a `complete-but-held`
+    /// settlement and on a `complete-but-draft` one awaiting a release, and absent
+    /// from every other. What a view reads the wait off, rather than the detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) awaiting: Option<Vec<Awaited>>,
 }
+
+// llmlint: ignore-block[invalid_states_unrepresentable] a wire document: a repository
+// identity is a `String` on every surface `onevcs` publishes and on the reference row it is
+// copied from, and a target name is written as the word `onevcs::TargetName` already
+// checked when the row was read; nothing reads either back to decide anything.
+/// One release a held node still awaits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Awaited {
+    /// The producer's repository identity, its normalized origin.
+    pub(crate) producer: String,
+    /// The release target of it awaited: the one the node's `consumes` names, else
+    /// the producer's `default_target`.
+    pub(crate) target: String,
+}
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A settlement a launch continued from its project's store.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -620,19 +645,20 @@ pub(crate) struct DriverClaim {
     pub(crate) pid: u32,
     /// When the claim was written, RFC 3339.
     pub(crate) claimed_at: String,
-    /// The terms the claiming driver's lease runs on, which a run taking the project over
-    /// waits out; absent from a claim written by a build that kept no lease.
+    /// The terms the claiming driver's host was given, whose cancel grace a run taking the
+    /// project over waits out; absent from a claim written by a build that kept no lease.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) lease: Option<ClaimLease>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-/// The terms a claiming driver's lease runs on: how often it reads its claim, and how long
-/// a dispatch its lease ends has to stop before it is killed.
+/// The terms a claiming driver's host was given: its claim interval, which paces how often a
+/// takeover reads the claim, and its cancel grace, which a run taking the project over waits
+/// out before it starts without an acknowledgement.
 // llmlint: ignore[boundary_inputs_validated] the rule stated at this module's head: no payload document denies unknown fields; the store boundary checks these in `continuation::claim_of`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct ClaimLease {
-    /// The driver's claim interval, in whole seconds.
+    /// The host's claim interval, in whole seconds.
     // llmlint: ignore[invalid_states_unrepresentable] zero is unrepresentable; the day's upper bound is the setting's (`continuation::MAX_CLAIM_INTERVAL`), checked where a claim is read at the store boundary, and a newtype for it would publish a schema of its own in `schemas/events.json` for a bound no reader of a journal record needs.
     pub(crate) interval_seconds: std::num::NonZeroU64,
     /// The driver's cancel grace, in whole seconds.
@@ -761,6 +787,12 @@ pub(crate) struct EditRejected {
     /// field existed, and from one no queued envelope produced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) envelope: Option<u64>,
+    /// Where in that envelope's `commands` the refused command sat, from zero:
+    /// what names a refused note among several alike in one envelope. Present
+    /// beside `envelope`, and absent from a record written before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) index: Option<u64>,
     /// The refusal by kind, where it was one the reconciler names as one; `reason`
     /// is then its text. Absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1776,6 +1808,78 @@ pub(crate) struct NodeLanded {
     pub(crate) via: Option<String>,
 }
 
+/// `landing-closures`: what the store did with the GitHub issues one landing closed —
+/// entry 132 of `docs/contract-divergences.md`, whose fenced example `tests/contract.rs`
+/// holds to this type.
+///
+/// Every member is always written, `node`, `class` and `reason` as `null` when they have
+/// nothing to say, so a reader reads one fixed shape.
+// llmlint: ignore[invalid_states_unrepresentable] Entry 132 fixes this record's flat shape for its consumers — `class` and `reason` beside `outcome` rather than inside a tagged variant — and `closures::record` is its one constructor, which fills both exactly when the outcome is `failed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LandingClosures {
+    /// The node whose landing it is, or `null` for a `publish-branch`, `repo-recover` or
+    /// `integrate` landing outside a run.
+    pub(crate) node: Option<String>,
+    /// The commit the landing reached its base at.
+    pub(crate) commit: String,
+    /// The issues the landing reported closing, as `owner/name#N`, as it reported them.
+    pub(crate) closes: Vec<String>,
+    /// Whether the store's call finished with every item written, or failed for good.
+    pub(crate) outcome: ClosureOutcome,
+    /// The store's `items`, verbatim: one per issue and source asked.
+    pub(crate) items: Vec<Value>,
+    /// The store's `unsupported` sources, verbatim: each was sent no request.
+    pub(crate) unsupported: Vec<String>,
+    /// The failure's class, as the store decided it — `null` unless `outcome` is `failed`.
+    pub(crate) class: Option<crate::writeback::FailureClass>,
+    /// Why it failed, in the store's words — `null` unless `outcome` is `failed`.
+    pub(crate) reason: Option<String>,
+}
+
+/// What one landing's closure call came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ClosureOutcome {
+    /// The call finished and no item it reports failed.
+    Projected,
+    /// The call, or an item it reports, failed, and is not asked again.
+    Failed,
+}
+
+/// `home-status`: what the store answered when the run's home was marked `done` — entry 134
+/// of `docs/contract-divergences.md`, whose fenced examples `tests/contract.rs` holds to this
+/// type.
+///
+/// One per run, written once the call has finished. Every member is always written, `status`,
+/// `class` and `reason` as `null` when they have nothing to say, so a reader reads one fixed
+/// shape.
+// llmlint: ignore[invalid_states_unrepresentable] Entry 134 fixes this record's flat shape for its consumers — `status`, `class` and `reason` beside `outcome` rather than inside a tagged variant, as `landing-closures` has them — and `home::record` is its one constructor, which fills `status` exactly when the outcome is `written` and the other two exactly when it is `failed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HomeStatus {
+    /// The run's home, by the qualified id its launch recorded.
+    pub(crate) project: String,
+    /// Whether the store wrote the home `done`, or failed to for good.
+    pub(crate) outcome: HomeOutcome,
+    /// The home's status as the store read it back — `null` unless `outcome` is `written`.
+    pub(crate) status: Option<onetaskgraph_plugin_api::Status>,
+    /// The failure's class, as the store decided it — `null` unless `outcome` is `failed`.
+    pub(crate) class: Option<crate::writeback::FailureClass>,
+    /// Why it failed, in the store's words — `null` unless `outcome` is `failed`.
+    pub(crate) reason: Option<String>,
+}
+
+/// What the call marking a run's home `done` came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HomeOutcome {
+    /// The store wrote the home `done`.
+    Written,
+    /// The store refused the write, and it is not asked again.
+    Failed,
+}
+
 /// `node-absorbed`: a draft's change request was merged into another node's branch, so
 /// its work reaches the root only with that node's.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2241,6 +2345,8 @@ payload_messages! {
     NodeReady => "node-ready";
     NodeDispatched => "node-dispatched";
     NodeSettled => "node-settled";
+    LandingClosures => "landing-closures";
+    HomeStatus => "home-status";
     NodeRequeued => "node-requeued";
     EditCommitted => "edit-committed";
     CommandAccepted => "command-accepted";
@@ -2351,6 +2457,23 @@ mod tests {
             // one deliberate addition since the capture — the filter's optional
             // `significance` matcher field, which only admits more.
             let mut held = held.clone();
+            // And onejudge 0.20.0's optional note `delivery`, defaulted to the
+            // interrupt, which admits every note the capture admitted —
+            // entry 133 of `docs/contract-divergences.md`.
+            if text == "agent.note@1" {
+                if let Some(properties) = held
+                    .pointer_mut("/properties")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    properties.remove("delivery");
+                }
+                if let Some(definitions) = held
+                    .pointer_mut("/$defs")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    definitions.remove("Delivery");
+                }
+            }
             if text == "agent.event-filter@1" {
                 if let Some(properties) = held
                     .pointer_mut("/$defs/Matcher/properties")
@@ -2818,6 +2941,7 @@ mod tests {
             S::Cancelled,
             S::Done,
             S::CompleteDraft,
+            S::CompleteHeld,
             S::Failed,
             S::Skipped,
         ] {
@@ -2914,12 +3038,14 @@ mod tests {
         use crate::note::Reached as R;
         for reached in [
             R::Queued,
-            R::Worker,
-            R::Supervisor,
+            R::Worker { turn: None },
+            R::Supervisor {
+                turn: Some(crate::note::NoteTurn::Interrupted),
+            },
             R::JudgedWith {
                 completion_reason: String::new(),
             },
-            R::Carried,
+            R::carried(),
         ] {
             let tagged = serde_json::to_value(&reached).expect("a delivery serializes");
             assert_eq!(

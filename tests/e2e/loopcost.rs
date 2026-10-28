@@ -67,9 +67,52 @@ const QUEUED_DISPATCHES: Duration = Duration::from_secs(3 * 100);
 /// So the patience is that sum with room, and a hold nobody releases still fails
 /// first, as an `until` timeout.
 fn measured(name: &str) -> World {
-    World::new(name)
+    measuring(World::new(name))
+}
+
+/// `world`, with what [`measured`] gives every journey here.
+///
+/// Applied over a world rather than only made fresh, so a setting the world
+/// already carries is one these override.
+///
+/// **And a claim read no window here can reach.** A driver reads its project's
+/// claim on its own interval from its launch, whatever the run is doing, so a
+/// journey whose set-up ends close to that interval opens its window over the
+/// read: the scale journey's hundred dispatches ended four to five minutes in on
+/// a Windows runner, inside the shipped five, and each of its drivers' windows
+/// held one claim read and the store bytes that pass read. So the interval is
+/// pinned at [`PINNED_CLAIM_INTERVAL`], longer than any journey here runs, and
+/// the one read a driver makes is its launch's, before any window opens.
+fn measuring(world: World) -> World {
+    world
         .with_env(LOOP_STATS_ENV, "1")
         .with_env(RENDEZVOUS_SECONDS_ENV, "900")
+        .with_env(
+            CLAIM_INTERVAL_ENV,
+            &PINNED_CLAIM_INTERVAL.as_secs().to_string(),
+        )
+}
+
+/// The claim interval a measured driver reads on: a day, the longest the setting
+/// takes, and longer than every journey here by far.
+const PINNED_CLAIM_INTERVAL: Duration = Duration::from_secs(86_400);
+
+/// The setting naming how often a driver reads the claim on its project, in whole
+/// seconds.
+const CLAIM_INTERVAL_ENV: &str = "ONEPIPELINE_CLAIM_INTERVAL_SECONDS";
+
+/// What a window says when a paced claim read landed inside it.
+///
+/// A claim read is paced work the driver owes on its own interval whatever the
+/// run is doing, and not an idle pass's cost, so a window holding one has not
+/// measured what these journeys claim — and is named as that, rather than as
+/// whatever that read happened to cost.
+fn holds_no_claim_read(run: &str, did: &Counts) {
+    assert_eq!(
+        did.claim_reads, 0,
+        "{run}'s driver read its project's claim inside the window, which measures an idle \
+         pass and not a paced read: {did:?}"
+    );
 }
 
 /// The records a run wrote that change what the graph is: what "one per recorded
@@ -233,6 +276,7 @@ fn a_converged_run_does_no_scheduling_work_while_it_records_nothing() {
         "the graph's statuses were re-derived: {did:?}"
     );
     assert_eq!(did.publications, 0, "the board was re-published: {did:?}");
+    holds_no_claim_read("idle", &did);
     assert_eq!(did.store_bytes, 0, "the run store was read: {did:?}");
     assert_eq!(
         did.upstream_reads, 0,
@@ -334,6 +378,9 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
         .map(|(nth, run)| counts(&world, run).since(before[nth]))
         .collect();
 
+    for (nth, run) in ["small", "large"].iter().enumerate() {
+        holds_no_claim_read(run, &did[nth]);
+    }
     // Within a constant factor of one another, rather than in proportion to the
     // runs. Both are nought, which is inside any factor there is.
     assert!(
@@ -361,6 +408,56 @@ fn an_idle_pass_does_not_grow_with_the_run_it_is_idling_on() {
 // llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-end[tests_mirror_real_usage]
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// How often [`a_claim_read_due_inside_a_window_is_held_out_of_it`]'s world reads
+/// its claim, were nothing to hold that read out of the window: the shortest
+/// interval the setting takes, so the window over it costs seconds.
+const CLAIM_DUE_INSIDE_A_WINDOW: Duration = Duration::from_secs(1);
+
+// llmlint: ignore-block[tests_mirror_real_usage] whether a driver read its project's claim
+// inside an interval is reported by nothing a user reads — a read that finds the project its own
+// writes no record — so the driver's own count of its claim reads is the only observation of it.
+// The binary, the plan store, the dispatch and the setting are the real ones.
+// llmlint: ignore-block[e2e_not_mocked] one node held in flight across the window, as every
+// journey here holds one — see the module note above.
+/// A measured window holds no paced claim read, however soon the world it is
+/// measured over would otherwise have one due.
+///
+/// The scale journey's window opens once a hundred dispatches have run, and a
+/// driver reads its claim [every five minutes](CLAIM_INTERVAL_ENV) from its launch:
+/// on a runner slow enough that those dispatches end between four and five minutes
+/// in, the read lands in the window, and what it costs reads as an idle pass's.
+/// Waiting that long here would be a slow runner's timing restated; a world whose
+/// claim is due every second puts a read in every window instead, which is the
+/// same ordering on any host.
+#[test]
+fn a_claim_read_due_inside_a_window_is_held_out_of_it() {
+    let world = measuring(World::new("loopcost-claim").with_env(
+        CLAIM_INTERVAL_ENV,
+        &CLAIM_DUE_INSIDE_A_WINDOW.as_secs().to_string(),
+    ));
+    world.script("hold.wait", "hold");
+    let plan = world.plan("claim", &plan_of("claim", vec![agent("hold", &[])]));
+    world.run(&["start", &plan, "--detach"]).exited(0);
+    world.until("the dispatch to start", |world| {
+        recorded(world, "claim", "node-dispatched", "hold")
+    });
+    reporting(&world, "claim");
+
+    let before = counts(&world, "claim");
+    // Three intervals, so a read due on that interval lands inside whichever
+    // instant the window opened at.
+    onepipeline_testfakes::profile::thread::sleep(3 * CLAIM_DUE_INSIDE_A_WINDOW);
+    let did = counts(&world, "claim").since(before);
+    holds_no_claim_read("claim", &did);
+
+    world.release("hold.go");
+    world.until("the run to settle", |world| {
+        world.run_file("claim", "result.json").is_file()
+    });
+}
+// llmlint: ignore-end[e2e_not_mocked]
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// The two things a pass does about whole state are paid once per recorded state
 /// change, not once per pass.
@@ -440,16 +537,17 @@ fn the_board_and_the_frontier_are_recomputed_once_per_recorded_state_change() {
 /// its own passes are running at.
 ///
 /// Two consumers of the same upstream, one woken five times a second by a
-/// narrating dispatch and one every two seconds. The chatty one runs passes at
-/// more than twice the quiet one's rate, and what they read out of the upstream
-/// is the same.
+/// narrating dispatch and one every two seconds. The chatty one runs more passes
+/// than the quiet one, and what they read out of the upstream is the same.
 ///
 /// Five a second rather than twenty: every beat a dispatch sends is a record the
 /// loop relays, and a host that relays fewer of them a second than it is sent
-/// never finishes a pass — each one drains a backlog that grew while it ran. A
-/// loaded Windows runner relayed under twenty a second, so the chatty loop ran
-/// eighteen passes in the window, and the premise below failed with every claim
-/// under it intact (run 36666603034).
+/// never finishes a pass — each one drains a backlog that grew while it ran.
+///
+/// How many passes a host fits in the window is no part of the verdict: a host
+/// whose every pass takes an interval or longer has every pass due, so a correct
+/// loop reads on each of them. What is asserted is whether any round of reads
+/// began before its interval was due.
 ///
 /// Measured over [`WINDOW`], the same minute every other bound here is stated
 /// over: a paced read is a **rate**, and a window of a few seconds bounds it at a
@@ -497,31 +595,26 @@ fn another_runs_ledger_is_read_on_its_own_interval_and_not_on_the_loops() {
         .map(|(nth, run)| counts(&world, run).since(before[nth]))
         .collect();
 
+    // Whether a round of reads came before its interval was due is timed where
+    // the reads are made, so it is the same answer at any pass rate: a loop
+    // reading on its own cadence begins one early whenever two passes fall
+    // inside an interval, and a correct one never does, however slow its passes.
+    for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
+        assert_eq!(
+            did[nth].early_upstream_reads, 0,
+            "{run} read the upstream before its interval was due: {did:?}"
+        );
+    }
+
     // Two reads answer one edge — has the node settled, and how far has that run
     // got — so twice a second is four reads a second and no more.
     let ceiling = 4 * WINDOW.as_secs() + 4;
-    // The chatty loop ran more passes than the ceiling allows reads, which is
-    // what makes the claims below mean anything: a loop that read on every pass
-    // would have read at least that often and broken the ceiling. Stated against
-    // the ceiling rather than against the quiet loop's passes, because the quiet
-    // loop is paced by deadlines and the chatty one by how fast this host runs a
-    // pass — on a loaded Windows runner a third of the idle rate, which put a
-    // ratio between the two below any fixed multiple while every claim here held.
-    assert!(
-        did[0].passes > ceiling,
-        "the chatty loop ran too few passes for its reads to say anything: {did:?}"
-    );
     for (nth, run) in ["chatty", "quiet"].iter().enumerate() {
         assert!(
             did[nth].upstream_reads <= ceiling,
             "{run} read the upstream more often than the interval allows: {did:?}"
         );
     }
-    assert!(
-        did[0].upstream_reads <= 2 * did[1].upstream_reads + 4,
-        "reading the upstream tracked the loop's pass rate: {did:?}"
-    );
-
     for run in ["chatty", "quiet"] {
         world.release(&format!("{run}-hold.go"));
     }

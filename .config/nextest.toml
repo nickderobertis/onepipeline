@@ -188,6 +188,26 @@ filter = 'binary(e2e) and (test(=adoption::a_held_release_is_asked_about_on_its_
 threads-required = 4
 priority = 100
 
+# llmlint: ignore-block[comments_earn_their_place] the jobs, times and counts below
+# are the measurement that decides this journey needs the whole group, and the next
+# person to move it has nothing else to move it against.
+# The busy review round takes the whole group too, because its cost is process
+# starts and they are what three other journeys' trees compete for. Its four drivers
+# (`start --attach`, two `adopt`s, `readjust`) start ~13,000 `git` processes over the
+# round, 31-61 a second each for its whole life, counted with the journey's own
+# counting `git` on Linux; a `git` start costs some twenty times as much on the
+# Windows runner. Alone on windows-2025-vs2026 it ran 292.6-316.5s in all nine
+# re-runs of jobs 118874344934, 118939059378 and 118975966027; beside three other
+# tests in shard 2/2 it reached the 540s limit on all three first attempts. Whole,
+# it costs that leg about 225s of sharing and leaves ~1.7x of its alone time
+# under the limit. `review_round::the_busy_review_round_takes_the_whole_group`
+# holds this in place.
+[[profile.default.overrides]]
+filter = 'binary(e2e) and test(=review_round::the_busy_review_round_ends_answered_and_true_and_records_what_it_spent)'
+threads-required = 4
+priority = 100
+# llmlint: ignore-end[comments_earn_their_place]
+
 # Declared on `default` and inherited by `ci`, so the cap holds on the
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.

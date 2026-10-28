@@ -709,10 +709,8 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         "the write-back rewrote the project's title or a key it does not own:\n{board}"
     );
 
-    // An `add` is the one copy, and it lands the project item beside the node it creates: the
-    // project is read once for it, so the copy finds the project as the board holds it and
-    // writes nothing to it — title, description, labels, repositories and keys read back byte
-    // for byte.
+    // An `add` copies only the new member, without reading or writing the project:
+    // title, description, labels, repositories and keys read back byte for byte.
     let mark = records(&world, run).len();
     edit(
         &world,
@@ -734,9 +732,13 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
         .collect();
     assert_eq!(created.len(), 1, "{created:?}");
     assert_eq!(created[0]["items"], json!(["extra"]), "{}", created[0]);
-    assert_eq!(created[0]["calls"]["project-show"], 1, "{}", created[0]);
+    assert!(
+        created[0]["calls"].get("project-show").is_none(),
+        "{}",
+        created[0]
+    );
     assert_eq!(created[0]["actions"]["created"], 1, "{}", created[0]);
-    assert_eq!(created[0]["actions"]["unchanged"], 1, "{}", created[0]);
+    assert_eq!(created[0]["actions"]["unchanged"], 0, "{}", created[0]);
     assert_eq!(
         landed(&world, run)["items"]["extra"]["destination"],
         board_task(&world.store_tasks(&project), "extra")["id"],
@@ -766,11 +768,17 @@ fn the_landed_baseline_is_seeded_at_launch_and_advanced_only_by_what_landed() {
     world.until_store("the lost change to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "not landed yet"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "not landed yet",
+                )
         })
     });
     world.until("the baseline to record the lost change", |world| {
-        landed(world, run)["items"]["later"]["metadata"]["onepipeline.context"] == "not landed yet"
+        crate::harness::carries_latest(
+            &landed(world, run)["items"]["later"]["metadata"]["onepipeline.context"],
+            "not landed yet",
+        )
     });
     no_record_is_whole_or_reads_a_page_of_tasks(&world, run);
     world.release("work.go");
@@ -1074,7 +1082,10 @@ fn a_projection_after_a_failed_attempt_carries_what_had_not_landed() {
     let noted_on = |world: &World, node: &str, text: &str| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == node
-                && task["item"]["metadata"]["onepipeline.context"] == text
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    text,
+                )
         })
     };
 
@@ -1273,7 +1284,10 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     world.until_store("the metered update to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "counted"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "counted",
+                )
         })
     });
 
@@ -1292,13 +1306,24 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
     world.until_store("the unmetered update to land", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"] == "reported as it was"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "reported as it was",
+                )
         })
     });
 
     // A person has already put on the board what the next update names: the store is asked,
     // writes nothing, and says so — the item counted `unchanged`, and no field written.
     let later = board_task(&world.store_tasks(&project), "later").clone();
+    // Carried notes accumulate on the node, so what the next update names is the
+    // context the board holds with this note after it.
+    let named = format!(
+        "{}\n\nalready on the board",
+        later["item"]["metadata"]["onepipeline.context"]
+            .as_str()
+            .expect("the board holds later's context")
+    );
     // llmlint: ignore-block[tests_mirror_real_usage] a `local-md` destination *is* its folder of
     // Markdown, so a person editing the board edits that file.
     rewritten(
@@ -1309,10 +1334,7 @@ fn the_record_carries_exactly_what_the_update_said_it_wrote_and_spent() {
                 .get_mut("metadata")
                 .and_then(Value::as_object_mut)
                 .expect("metadata")
-                .insert(
-                    "onepipeline.context".to_owned(),
-                    json!("already on the board"),
-                );
+                .insert("onepipeline.context".to_owned(), json!(named));
         },
     );
     // llmlint: ignore-end[tests_mirror_real_usage]
@@ -1403,8 +1425,10 @@ fn a_run_directory_holding_an_older_engines_store_record_adopts_and_projects_by_
     world.until_store("the adopted driver's change to reach the board", |world| {
         world.store_tasks(&project).iter().any(|task| {
             task["item"]["metadata"]["onepipeline.id"] == "later"
-                && task["item"]["metadata"]["onepipeline.context"]
-                    == "a change for the adopted driver"
+                && crate::harness::carries_latest(
+                    &task["item"]["metadata"]["onepipeline.context"],
+                    "a change for the adopted driver",
+                )
         })
     });
 }
@@ -1983,7 +2007,19 @@ fn shadow_document(path: &Path) -> Result<Value, String> {
         ));
     }
     if path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("projects")) {
-        if body != concurrent_project_body() {
+        // MembersOnly publishes just the project's identity. Accept its empty body
+        // only with that exact front matter; a truncated full project still fails.
+        let origin = parsed["metadata"]["onetaskgraph.origin"].as_str();
+        let identity = origin
+            .and_then(|origin| origin.parse::<onetaskgraph_core::GlobalId>().ok())
+            .is_some_and(|origin| {
+                parsed
+                    == json!({
+                        "title": origin.native,
+                        "metadata": {"onetaskgraph.origin": origin.to_string()}
+                    })
+            });
+        if !(body == concurrent_project_body() || (body.is_empty() && identity)) {
             return Err(format!(
                 "{} has a partial project body of {} bytes",
                 path.display(),
@@ -2051,7 +2087,7 @@ fn shadow_documents(dir: &Path) -> Vec<PathBuf> {
 // conversational note journeys; moving this filesystem race there loses this module's
 // crateSource coverage when the projection code changes.
 /// Two runs each `add` nodes one at a time — every creation rewriting its run's shadow project
-/// document and writing the added node's, and taking the previous one out — while a reader lists
+/// identity document and writing the added node's, and taking the previous one out — while a reader lists
 /// and parses both shadow stores at rate, as the `local-md` source a copy reads them through
 /// does: no document it reads is ever torn.
 #[test]
@@ -2154,6 +2190,98 @@ fn overlapping_projections_never_show_a_reader_a_torn_shadow_document() {
         );
         world.release(&format!("{run}-hold.go"));
     }
+}
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+// llmlint: ignore-block[tests_mirror_real_usage] no CLI output reports a torn file, and a
+// rewrite under an open reader is caught only by holding the document open across it, as
+// `local-md` itself reads; the projection's ordering gate holds that window still.
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this uses the same compiled
+// binary and store fixture as its peer write-back journeys. The only separate test edge is for
+// conversational note journeys; moving this filesystem race there loses this module's
+// crateSource coverage when the projection code changes.
+/// A creation carries its task's images by having the store rewrite the task's shadow
+/// document. A reader part of the way through that document when the rewrite runs — held
+/// there by the projection's own ordering gate, between the document being published and its
+/// images being carried — still reads the whole document it opened: the store writes the
+/// replacement beside it and renames it into place, so the file the reader holds is never
+/// the one written.
+#[test]
+fn a_reader_part_way_through_a_shadow_document_reads_it_whole_across_its_image_rewrite() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let run = "writeback-shadow-rewrite";
+    let gate = crate::harness::Rendezvous::failpoint();
+    let world = World::new(run)
+        .through_scripted_source()
+        .with_env("ONEPIPELINE_TEST_PROJECTION_AUTHOR_GATE", &gate.address());
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the initial projection", |world| {
+        records(world, run)
+            .iter()
+            .any(|record| record["outcome"] == "projected")
+    });
+    let mut reply = world
+        .cmd(&["reply", run])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    reply
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            json!({"version": 3, "commands": [{"op": "add", "node": agent("drawn", &[])}]})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+    let held = gate.arrived();
+    drop(gate);
+
+    let path = shadow_documents(&world.run_file(run, "writeback"))
+        .into_iter()
+        .find(|path| {
+            shadow_document(path).is_ok_and(|read| read["metadata"]["onepipeline.id"] == "drawn")
+        })
+        .expect("the creation published the added node's shadow document before its images");
+    let whole = std::fs::read_to_string(&path).expect("the published document reads");
+    let mut reader = std::fs::File::open(&path).expect("the reader opens the document");
+    let mut text = vec![0; whole.len() / 2];
+    reader
+        .read_exact(&mut text)
+        .expect("the reader reads the first half");
+
+    held.release();
+    let answer = reply.wait_with_output().unwrap();
+    assert!(
+        answer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&answer.stderr)
+    );
+    world.until("the creation to land", |world| {
+        records(world, run).iter().any(|record| {
+            record["outcome"] == "projected" && record["actions"]["created"].as_u64() >= Some(1)
+        })
+    });
+    reader
+        .read_to_end(&mut text)
+        .expect("the reader reads the rest");
+    assert_eq!(
+        String::from_utf8_lossy(&text),
+        whole,
+        "a reader part way through {} when its images were carried read it torn",
+        path.display()
+    );
+    world.release("work.go");
+    world.until("the run to finish", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[tests_mirror_real_usage]

@@ -1188,17 +1188,17 @@ fn addressed(addressee: crate::note::Addressee) -> &'static str {
 /// earlier dispatch acted on it or never saw it.
 fn delivered_as(reached: &crate::note::Reached) -> &'static str {
     match reached {
-        crate::note::Reached::Worker => {
+        crate::note::Reached::Worker { .. } => {
             "delivered into the worker's turn, and read by the supervisor with that turn's response"
         }
-        crate::note::Reached::Supervisor => {
+        crate::note::Reached::Supervisor { .. } => {
             "delivered into the supervisor's turn, and read by the worker with that decision"
         }
         crate::note::Reached::JudgedWith { .. } => {
             "delivered into the supervisor's turn, whose decision with it in hand was completion"
         }
         crate::note::Reached::Queued => "queued to the next turn of that conversation to open",
-        crate::note::Reached::Carried => {
+        crate::note::Reached::Carried { .. } => {
             "delivered while no turn of that dispatch was live, and carried to this one"
         }
     }
@@ -1546,9 +1546,13 @@ pub struct Node {
     /// states none inherits the one the node it supersedes carried.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_record: Option<TaskRecord>,
-    /// Whether the node's work is public or private, as its task — and the project it
-    /// was read out of — classify it: the stricter of the two, filled from the store's
-    /// own `classification` and never from metadata. Omitted when public, the default,
+    /// The qualified authoring task whose held images a creating write-back carries.
+    /// Stated only by live `add` and `retry` edits; absent on nodes read from a plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets_from: Option<onetaskgraph_core::GlobalId>,
+    /// Whether the node's work is public or private, as its own task classifies it: the
+    /// store's `classification` of that task, never its project's and never metadata, so a
+    /// public task of a private coordinating project is public. Omitted when public, the default,
     /// so a plan written before the field existed round-trips unchanged.
     ///
     /// A node's **clearance** is the stricter of this and the effective visibility of
@@ -1863,6 +1867,23 @@ mod tests {
             serde_json::from_value::<TaskRecord>(misnamed).is_err(),
             "a record naming no source a store could carry was read"
         );
+    }
+
+    #[test]
+    fn snapshots_without_assets_from_stay_byte_identical_and_stated_sources_round_trip() {
+        let old = r#"{"schema_version":3,"concurrency":4,"tasks":[{"id":"drawn","task":"prose"}]}"#;
+        let read: Plan = serde_json::from_str(old).expect("the older snapshot reads");
+        assert!(read.tasks[0].assets_from.is_none());
+        assert_eq!(
+            serde_json::to_string(&read).expect("the snapshot writes"),
+            old
+        );
+        let mut read = read;
+        read.tasks[0].assets_from = Some("images:author/task".parse().expect("a qualified task"));
+        let written = serde_json::to_string(&read).expect("the source writes");
+        let again: Plan = serde_json::from_str(&written).expect("the source reads");
+        assert_eq!(again, read);
+        assert_eq!(again.schema_version, PLAN_SCHEMA_VERSION);
     }
 
     /// C6b, called directly: each rule is refused by its own name, in order, and
@@ -2228,7 +2249,7 @@ mod tests {
                     .parse()
                     .expect("a usable note"),
                 criterion: None,
-                reached: crate::note::Reached::Worker,
+                reached: crate::note::Reached::Worker { turn: None },
             },
             crate::note::RecordedNote {
                 addressee: crate::note::Addressee::Worker,
@@ -2240,7 +2261,7 @@ mod tests {
                         .parse()
                         .expect("a usable criterion"),
                 ),
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { reason: None },
             },
         ];
         let rendered = step.rendered_task_carrying(&node, &[], &notes);

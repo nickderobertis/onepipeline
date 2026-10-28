@@ -556,14 +556,7 @@ fn a_decline_posts_one_declined_reply_and_is_the_whole_of_its_record_on_every_ho
 fn visibility_probes(world: &World, from: usize) -> usize {
     world.invocations()[from..]
         .iter()
-        .filter(|call| call["tool"] == "gh")
-        .filter(|call| {
-            let args: Vec<&str> = call["args"]
-                .as_array()
-                .map(|args| args.iter().filter_map(Value::as_str).collect())
-                .unwrap_or_default();
-            args.len() == 2 && args[0] == "api" && args[1].split('/').count() == 3
-        })
+        .filter(|call| call["tool"] == "gh" && crate::harness::is_visibility_probe(call))
         .count()
 }
 

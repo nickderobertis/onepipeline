@@ -204,7 +204,7 @@ function objectLiteral(source, name) {
 
 /// The targets release.yml's build jobs build: each one's recipe plan.
 function builtTargets() {
-  return ["linux", "macos", "windows"].flatMap(
+  return ["linux", "linux-arm64", "macos", "windows"].flatMap(
     (platform) =>
       JSON.parse(
         execFileSync("python3", ["release/release.py", "plan", platform], {

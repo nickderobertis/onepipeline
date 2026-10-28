@@ -98,12 +98,12 @@ fn query_of(call: &Value) -> &str {
 /// a session open and a write: the repository's visibility, and whether its rules
 /// require a branch up to date with its base.
 fn is_sibling_read(call: &Value) -> bool {
-    call["args"][0] == "api"
-        && call["args"].as_array().is_some_and(|args| args.len() == 2)
-        && call["args"][1].as_str().is_some_and(|path| {
-            path == format!("repos/{SLUG}")
-                || path.starts_with(&format!("repos/{SLUG}/rules/branches/"))
-        })
+    crate::harness::is_visibility_probe(call)
+        || call["args"][0] == "api"
+            && call["args"].as_array().is_some_and(|args| args.len() == 2)
+            && call["args"][1]
+                .as_str()
+                .is_some_and(|path| path.starts_with(&format!("repos/{SLUG}/rules/branches/")))
 }
 
 /// Whether `call` writes a change request's base, description or state.
@@ -2210,8 +2210,8 @@ fn an_adoption_readjusts_before_its_first_dispatch() {
 }
 
 /// Nothing polls: a live driver with drafts outstanding and nothing to do, left over more
-/// than one of its claim intervals — shortened through the setting entry 128 names, so it
-/// reads its claim inside the window — asks the host nothing at all; and `start` takes no
+/// than one of its claim intervals — shortened through the setting entry 128 names, which no
+/// running driver reads on — asks the host nothing at all; and `start` takes no
 /// readjustment-interval flag.
 #[test]
 fn an_idle_driver_asks_the_host_nothing() {

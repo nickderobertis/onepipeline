@@ -121,6 +121,15 @@ pub enum PipelineKind {
     NodeDispatched,
     /// A node reached a terminal status.
     NodeSettled,
+    /// What the store did with the GitHub issues one landing closed: entry 132 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// One per landing commit, once the store's `complete_issues` call for it has
+    /// finished — projected, or failed for good — and never for a landing whose
+    /// `closes` is empty. Carries the landed `node` (null outside a run), the
+    /// `commit`, the `closes` it was handed, the `outcome`, the store's `items` and
+    /// `unsupported` sources verbatim, and the failure's `class` and `reason`.
+    LandingClosures,
     /// A dispatched node was handed back to the queue **without a settlement**.
     ///
     /// Written where a dispatch ended before any work began for a reason that
@@ -370,13 +379,14 @@ pub enum PipelineKind {
     /// Written by `start --take-over` beside its `run-started`, only where the
     /// project's `onepipeline.driver` named a claim; carries that claim whole as
     /// `previous` — its `run`, `host`, `session`, `pid` and `claimed_at`. The run it
-    /// names stops at its own next read of the claim. Entries 119 and 128 of
+    /// names stops at its own next read of the claim — before a publication, or as it
+    /// lets go of the project. Entries 119 and 128 of
     /// `docs/contract-divergences.md` record it.
     DriverTakenOver,
     /// A driver found its project claimed by another run, and stopped.
     ///
     /// Written by the driver that read the claim, once, at the read that found
-    /// it — at adoption, or at the read it makes once per claim interval —
+    /// it — at adoption, or at the read it makes immediately before a publication —
     /// carrying the claim it found as `by`. After it the driver dispatches and
     /// publishes nothing, and once its dispatches in flight have settled
     /// unpublished it acknowledges that claim and ends. Entries 119 and 128
@@ -402,6 +412,16 @@ pub enum PipelineKind {
     ScratchRemoved,
     /// Dispatch scratch was measured and kept at a non-success ending or pause.
     ScratchRetained,
+    /// What the store answered when the run's home was marked `done`: entry 134 of
+    /// `docs/contract-divergences.md`.
+    ///
+    /// At most one per run, once the store's `set_project_status` call for the run's
+    /// home has finished — written, or failed for good — after the run reached the
+    /// success ending. Carries the home's qualified `project`, the `outcome`, the
+    /// `status` the store read back, and the failure's `class` and `reason`.
+    ///
+    /// Last, so adding it moves no earlier variant's place in the order.
+    HomeStatus,
 }
 
 impl PipelineKind {
@@ -414,6 +434,8 @@ impl PipelineKind {
             Self::NodeReady => "node-ready",
             Self::NodeDispatched => "node-dispatched",
             Self::NodeSettled => "node-settled",
+            Self::LandingClosures => "landing-closures",
+            Self::HomeStatus => "home-status",
             Self::NodeRequeued => "node-requeued",
             Self::EditCommitted => "edit-committed",
             Self::CommandAccepted => "command-accepted",
@@ -507,6 +529,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::NodeReady,
     PipelineKind::NodeDispatched,
     PipelineKind::NodeSettled,
+    PipelineKind::LandingClosures,
+    PipelineKind::HomeStatus,
     PipelineKind::NodeRequeued,
     PipelineKind::EditCommitted,
     PipelineKind::CommandAccepted,

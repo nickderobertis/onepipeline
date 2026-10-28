@@ -718,7 +718,9 @@ impl Watch {
     pub(crate) fn of_run(paths: &RunPaths) -> Self {
         let mut adopted = BTreeSet::new();
         let mut arrived = BTreeSet::new();
-        for event in journal::read(&paths.journal()) {
+        // Off the run's checkpoint rather than its history: the fold keeps every
+        // record of these two kinds as written. See `RunState::recalled`.
+        for event in crate::checkpoint::recalled(paths) {
             let Some(node) = event.labels.node.clone().and_then(|node| renderable(&node)) else {
                 continue;
             };
@@ -868,6 +870,15 @@ impl Watch {
     /// recorded about it, so there is nothing to go and read. Answered off the
     /// per-driver cache, so asking again costs nothing.
     pub(crate) fn relays_anything(&mut self, state: &RunState) -> bool {
+        // And a settled draft that may yet land, whose stream the pass reads for that landing
+        // wherever its repository releases nothing.
+        if state
+            .sessions
+            .keys()
+            .any(|node| awaits_late_landing(state, node))
+        {
+            return true;
+        }
         let repositories: Vec<String> = state
             .sessions
             .keys()
@@ -977,13 +988,17 @@ impl Watch {
     /// a node with nothing to wait on. Nothing else holds anything: a `fast` node
     /// launches on branch readiness alone, and a node whose every dependency
     /// resolved to nothing outside its repository is never held.
+    ///
+    /// The rung is asked last, of a node something would hold: it resolves the
+    /// node's repository through `onevcs`, git processes and all, and this is
+    /// asked of every watched node on every pass.
     pub(crate) fn held(&self, watching: &[Node]) -> BTreeSet<String> {
         watching
             .iter()
-            .filter(|node| adoption_of(node) == Adoption::Published)
             .filter(|node| {
                 self.unresolved.contains_key(&node.id) || self.awaits_a_release(&node.id)
             })
+            .filter(|node| adoption_of(node) == Adoption::Published)
             .map(|node| node.id.clone())
             .collect()
     }
@@ -1135,15 +1150,23 @@ impl Watch {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
         filter: Option<&crate::filter::EventFilter>,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<String>> {
+        // The settled nodes whose streams carry a landing recorded since this run last relayed
+        // them — a merge found after its publication ended — which the closures owe a catch-up
+        // (entry 132). Not relayed: the session's own records were the follow's.
+        let mut met_landings = BTreeSet::new();
         if !self
             .relayed
             .is_none_or(|last| last.elapsed() >= self.relay_every)
         {
-            return Ok(());
+            return Ok(met_landings);
         }
         self.relayed = Some(Instant::now());
-        let mut relayed = crate::vcs::Watermarks::of_relayed(&journal::read(&paths.journal()));
+        // How far each stream has been relayed, off the run's checkpoint and what
+        // was appended past it rather than off a read of its whole history.
+        // Read only once a session's stream is about to be: a pass with no session
+        // to relay reads nothing of the run at all.
+        let mut marks: Option<crate::vcs::Watermarks> = None;
         for (node, session) in &state.sessions {
             // A dispatch still in flight has a follow of its own reading that
             // session as it is written, and two readers of one stream deciding
@@ -1160,10 +1183,13 @@ impl Watch {
                 .and_then(|repo| self.repositories.of(&repo).ok())
                 .is_none_or(|releases| releases.targets.is_empty());
             // A repository that declares no release targets releases nothing, so
-            // there is nothing recorded about it to read — which is every host
+            // there is no release recorded about it to relay — which is every host
             // that has configured none, and is what keeps such a run's store
             // exactly the store it held before there was a release record at all.
-            if releases_nothing {
+            // Its stream is still read for a draft that may yet land, for the
+            // landing alone.
+            let awaits_landing = awaits_late_landing(state, node);
+            if releases_nothing && !awaits_landing {
                 continue;
             }
             let known = crate::engine::dispatch_labels(
@@ -1175,8 +1201,19 @@ impl Watch {
                     .get(node)
                     .and_then(|node| node.persona.as_deref()),
             );
+            let relayed = marks.get_or_insert_with(|| {
+                crate::vcs::Watermarks::of_streams(crate::checkpoint::streams_reached(paths))
+            });
             for mut envelope in crate::vcs::events(session.token(), filter) {
-                if envelope.dimensions.phase != Some(crate::event::Phase::Release) {
+                if releases_nothing
+                    || envelope.dimensions.phase != Some(crate::event::Phase::Release)
+                {
+                    if envelope.source == crate::event::Source::Vcs
+                        && crate::vcs::is_landing(&envelope.kind)
+                        && relayed.beyond(&envelope)
+                    {
+                        met_landings.insert(node.clone());
+                    }
                     continue;
                 }
                 if !relayed.beyond(&envelope) {
@@ -1190,7 +1227,7 @@ impl Watch {
                 relayed.reached(&envelope);
             }
         }
-        Ok(())
+        Ok(met_landings)
     } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The word a payload and a surface name one awaited release's last answer
@@ -1362,11 +1399,13 @@ impl Watch {
     /// which is where it does more than inform — the note is what puts a worker
     /// back on that branch to move the pin, and lifting the draft is what that
     /// worker's own publication then does.
+    ///
+    /// The rung is asked last, for [`held`](Self::held)'s reason.
     pub(crate) fn ready_to_adopt(&self, told: &[Node]) -> Vec<(String, Vec<Released>)> {
         told.iter()
-            .filter(|node| adoption_of(node) == Adoption::Fast)
             .filter(|node| !self.adopted.contains(&node.id))
             .filter(|node| self.all_released(&node.id))
+            .filter(|node| adoption_of(node) == Adoption::Fast)
             .map(|node| (node.id.clone(), self.released(&node.id)))
             .collect()
     }
@@ -1435,7 +1474,7 @@ impl Watch {
         if !self.stated.contains_key(&paths.run) {
             self.stated.insert(
                 paths.run.clone(),
-                stated_landings(&journal::read(&paths.journal())),
+                stated_landings(&crate::checkpoint::current(paths)),
             );
         }
         self.stated.get(&paths.run)?.get(node).cloned()
@@ -2143,8 +2182,24 @@ fn shell_word(word: &str) -> String {
     format!("'{}'", word.replace('\'', "'\\''"))
 }
 
-/// Why one fast-adoption node's change request is opened as a **draft**, asked of
-/// `onevcs` at the moment the publication is composed.
+/// What one fast-adoption node is still waiting on at its publication: the reason
+/// its publication is held, and every release it awaits.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Awaiting {
+    /// The reason handed to `onevcs` for a draft: always
+    /// [`onevcs::DraftReason::AwaitingRelease`], naming [`first`](Self::first).
+    pub(crate) reason: onevcs::DraftReason,
+    /// The first release still awaited — the one the reason names, and the one a
+    /// held node's detail names.
+    pub(crate) first: crate::payload::Awaited,
+    /// One entry per release still awaited, in the order the node's reference rows
+    /// list them — what `node-settled`'s `awaiting` carries for a view to read.
+    pub(crate) releases: Vec<crate::payload::Awaited>,
+}
+
+/// Why one fast-adoption node's change request is opened as a **draft** — or,
+/// where its publication opens none, its branch held unlanded — asked of `onevcs`
+/// at the moment the publication is composed.
 ///
 /// The rows are the node's own reference block, so what is asked about is exactly
 /// what the worker was told to pin against. `None` is a node with nothing to wait
@@ -2157,7 +2212,7 @@ fn shell_word(word: &str) -> String {
 /// A row this run cannot put a question about is **not** drafted against — the
 /// judgement [`Dependency::askable`] already makes for the hold — because a draft
 /// nothing can ever lift is a change request nobody can finish.
-pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::DraftReason> {
+pub(crate) fn awaiting(references: &[CrossRepoReference]) -> Option<Awaiting> {
     // llmlint: ignore-block[changed_behavior_has_e2e] no plan reaches the dropped
     // half of `askable`: a row is only composed for a dependency that settled `done`
     // in a repository declaring release targets, so it has the branch or the landing
@@ -2183,8 +2238,8 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
     let (row, reference, target) = unreleased.first()?;
     // One reason names one dependency, because [`onevcs::DraftReason`] carries one
     // target — so how many are being waited on is said in the sentence a person
-    // reads rather than left for them to count.
-    Some(onevcs::DraftReason::AwaitingRelease {
+    // reads rather than left for them to count, and listed whole beside it.
+    let reason = onevcs::DraftReason::AwaitingRelease {
         because: format!(
             "this node adopted {identity} early and is pinned to {reference} rather than to a \
              released version; it is one of {count} release(s) this node adopted early, and \
@@ -2195,6 +2250,20 @@ pub(crate) fn draft_reason(references: &[CrossRepoReference]) -> Option<onevcs::
         awaiting: row.repository.clone(),
         target: target.clone(),
         reference: (*reference).to_owned(),
+    };
+    Some(Awaiting {
+        reason,
+        first: crate::payload::Awaited {
+            producer: row.repository.clone(),
+            target: target.to_string(),
+        },
+        releases: unreleased
+            .iter()
+            .map(|(row, _, target)| crate::payload::Awaited {
+                producer: row.repository.clone(),
+                target: target.to_string(),
+            })
+            .collect(),
     })
 }
 
@@ -2222,6 +2291,42 @@ pub(crate) fn drafted_detail(reason: &onevcs::DraftReason) -> String {
         ),
         onevcs::DraftReason::Held { .. } => HELD_DETAIL.to_owned(),
     }
+}
+
+/// The one line a node held **unlanded** settles with: its work finished and
+/// accepted, its publication opening no change request, and a release it adopted
+/// early not out yet.
+///
+/// Composed beside [`drafted_detail`] so the two holds are spelled in one module,
+/// and from the first release [`awaiting`] found still out — the one its reason
+/// names — so the settlement cannot name a different release from the one the node
+/// waits for. `kept` is what putting the branch on the origin answered, said in
+/// words — `pushed`, `already on origin`, or `no origin` — on a line written for a
+/// person rather than as [`crate::vcs::preservation_word`]'s journal word.
+pub(crate) fn held_detail(
+    awaited: &crate::payload::Awaited,
+    branch: &str,
+    commit: &str,
+    kept: onevcs::Preservation,
+) -> String {
+    let kept = match kept {
+        onevcs::Preservation::Pushed => "pushed",
+        // llmlint: ignore-block[changed_behavior_has_e2e] a hold is the first push of a
+        // freshly closed session's branch to an identity that has an origin — every
+        // journey's — so the push always moves something and `pushed` is the one answer
+        // a run reaches. These two arms only name `onevcs`'s other two answers to the
+        // same push; `release::tests::a_held_detail_names_each_preservation_in_words`
+        // holds their words, and the held-landing journeys drive the `pushed` arm.
+        onevcs::Preservation::AlreadyOnOrigin => "already on origin",
+        onevcs::Preservation::NoRemote => "no origin",
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+    };
+    format!(
+        "complete, and held unlanded: awaiting the {target} release of {producer}, kept on \
+         {branch} at {commit} ({kept}); it lands when that release arrives",
+        target = awaited.target,
+        producer = awaited.producer,
+    )
 }
 
 /// The one line a node that was asked to leave its change request as a draft
@@ -2370,10 +2475,10 @@ pub(crate) fn watching(
         .graph
         .iter()
         .filter(|node| {
-            matches!(
-                statuses.get(&node.id),
-                Some(&NodeStatus::Ready | &NodeStatus::CompleteDraft)
-            ) || running.contains(&node.id)
+            statuses
+                .get(&node.id)
+                .is_some_and(|status| *status == NodeStatus::Ready || status.awaits_release())
+                || running.contains(&node.id)
         })
         .cloned()
         .collect()
@@ -2382,7 +2487,9 @@ pub(crate) fn watching(
 /// Another run's folded state, for a cross-DAG dependency.
 fn upstream_of(paths: &RunPaths, reference: &crate::crossdag::Reference) -> Option<RunState> {
     let upstream = upstream_paths(paths, reference)?;
-    Some(crate::projection::fold(&journal::read(&upstream.journal())))
+    // Off that run's checkpoint and what was appended past it, as its own views
+    // read it: the fold is the same one, and its history is not read again.
+    Some(crate::checkpoint::current(&upstream))
 }
 
 /// Where the run a cross-DAG dependency names keeps its own record.
@@ -2408,8 +2515,7 @@ fn upstream_paths(paths: &RunPaths, reference: &crate::crossdag::Reference) -> O
 /// Beside a stated **commit**, the change request the same fold knows the node's
 /// work by — [`RunState::known_change_url`] — which is what the release question
 /// falls back to when `onevcs` cannot resolve the commit.
-fn stated_landings(events: &[crate::event::Envelope]) -> BTreeMap<String, Stated> {
-    let state = crate::projection::fold(events);
+fn stated_landings(state: &RunState) -> BTreeMap<String, Stated> {
     state
         .stated_landings
         .iter()
@@ -2668,9 +2774,43 @@ impl Resurfacing {
     }
 }
 
+/// Whether `node` settled having published a change that has not landed, and no landing of it
+/// has been recorded since: the one node a merge somebody makes later, recorded on its own
+/// session stream, can land — what the closures' catch-up reads that stream for (entry 132 of
+/// `docs/contract-divergences.md`).
+fn awaits_late_landing(state: &RunState, node: &str) -> bool {
+    state.landings.get(node) == Some(&crate::graph::Landing::Unlanded)
+        && !state.landing_commits.contains_key(node)
+        && !state.landed_how.contains_key(node)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A held node's detail names its release, branch and commit, and what its
+    /// preservation answered in words a person reads — each of the three answers.
+    #[test]
+    fn a_held_detail_names_each_preservation_in_words() {
+        let awaited = crate::payload::Awaited {
+            producer: "github.com/owner/engine".into(),
+            target: "crate".into(),
+        };
+        for (kept, said) in [
+            (onevcs::Preservation::Pushed, "pushed"),
+            (onevcs::Preservation::AlreadyOnOrigin, "already on origin"),
+            (onevcs::Preservation::NoRemote, "no origin"),
+        ] {
+            assert_eq!(
+                held_detail(&awaited, "feat/consumer", "4f2c9e1", kept),
+                format!(
+                    "complete, and held unlanded: awaiting the crate release of \
+                     github.com/owner/engine, kept on feat/consumer at 4f2c9e1 ({said}); it \
+                     lands when that release arrives"
+                )
+            );
+        }
+    }
     use onevcs::Baseline;
 
     fn dependency(target: Option<&str>, style: Option<ReleaseStyle>) -> Dependency {
@@ -3056,14 +3196,14 @@ mod tests {
             Some("opened"),
             json!({"status": "done", "change_url": "https://example.invalid/pull/7"}),
         );
-        let read = stated_landings(&[
+        let read = stated_landings(&crate::projection::fold(&[
             opened,
             stated("opened", "3f9a1c2ab"),
             stated("restated", "https://example.invalid/pull/8"),
             stated("restated", "9d8c7b6ef"),
             stated("unknown", "0a1b2c3d4"),
             stated("url", "https://example.invalid/pull/9"),
-        ]);
+        ]));
         let fallback = |node: &str| read[node].fallback.as_deref();
         assert_eq!(fallback("opened"), Some("https://example.invalid/pull/7"));
         assert_eq!(fallback("restated"), Some("https://example.invalid/pull/8"));
@@ -3141,12 +3281,12 @@ mod tests {
         };
         let stated = |node: &str, landing: &str| json!([{"kind": "landing-from-evidence", "node": node, "landing": landing}]);
         assert_eq!(
-            stated_landings(&[
+            stated_landings(&crate::projection::fold(&[
                 edit(stated("publish", "3f9a1c2ab")),
                 edit(stated("other", "https://example.invalid/pull/1")),
                 // A record corrected twice: the newest correction is the one.
                 edit(stated("publish", "9d8c7b6ef")),
-            ])
+            ]))
             .into_iter()
             .map(|(node, stated)| (node, stated.landing))
             .collect::<BTreeMap<String, String>>(),
@@ -3178,13 +3318,13 @@ mod tests {
             stated("publish", "3f9a1c"),
         ] {
             assert!(
-                stated_landings(&[edit(unreadable.clone())]).is_empty(),
+                stated_landings(&crate::projection::fold(&[edit(unreadable.clone())])).is_empty(),
                 "{unreadable} was read as a landing"
             );
         }
         // And a run whose journal states none has none, which is every run that
         // has never had a settlement corrected.
-        assert!(stated_landings(&[]).is_empty());
+        assert!(stated_landings(&crate::projection::fold(&[])).is_empty());
     }
 
     /// One release, as the note and the record name it.

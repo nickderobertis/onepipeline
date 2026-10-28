@@ -1016,6 +1016,32 @@ fn a_worker_that_goes_quiet_is_surfaced_without_holding_anything_back() {
     });
 }
 
+/// Every distinct beat the run's `liveness.json` has shown so far for this world:
+/// a member's beats are kept there rather than journalled.
+fn beats_of(world: &World, run: &str) -> Vec<String> {
+    let seen = world.root.join(format!("{run}.beats-seen"));
+    let mut beats: Vec<String> = std::fs::read_to_string(&seen)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let now = std::fs::read(world.run_file(run, "liveness.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|document| {
+            document["members"][0]["last_heartbeat_at"]
+                .as_str()
+                .map(str::to_string)
+        });
+    if let Some(now) = now {
+        if beats.last() != Some(&now) {
+            beats.push(now);
+            std::fs::write(&seen, beats.join("\n")).expect("the beats seen are kept");
+        }
+    }
+    beats
+}
+
 /// A worker that is alive and doing nothing is still reported quiet.
 ///
 /// The watch was reset by the one event whose literal meaning is "nothing is
@@ -1041,7 +1067,7 @@ fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
     // this dispatch quiet.
     world.until(
         "the wedged worker to heartbeat past the threshold",
-        |world| world.events_of("wedged", "member-heartbeat").len() >= 20,
+        |world| beats_of(world, "wedged").len() >= 20,
     );
     world.until("the wedged worker to be reported quiet", |world| {
         !world.events_of("wedged", "quiet-worker").is_empty()
@@ -1063,9 +1089,9 @@ fn a_worker_that_only_heartbeats_is_reported_quiet_rather_than_active() {
 
     // Still beating afterwards: what was reported is a worker that is alive and
     // doing nothing, not one that stopped saying anything.
-    let beats = world.events_of("wedged", "member-heartbeat").len();
+    let beats = beats_of(&world, "wedged").len();
     world.until("the wedged worker to go on heartbeating", |world| {
-        world.events_of("wedged", "member-heartbeat").len() > beats
+        beats_of(world, "wedged").len() > beats
     });
 
     world.release("stuck.go");

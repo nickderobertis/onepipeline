@@ -31,6 +31,7 @@
         "{workspaceRoot}/.github/tests/support/**/*",
         "{workspaceRoot}/.github/fixtures/release-v0.74.1-published.json",
         "{workspaceRoot}/npm/test/registry-support.mjs",
+        "{workspaceRoot}/npm/test/sbom-support.mjs",
         "{workspaceRoot}/npm/onepipeline-cli/**/*",
         "{workspaceRoot}/release/release.py",
         "{workspaceRoot}/scripts/build-staged-release.py",

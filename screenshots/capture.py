@@ -41,7 +41,7 @@ REPO = world_module.repo_root()
 #: read out of its own launch record below, because they are facts of that
 #: fixture and a copy of them here would go stale the day it is re-recorded.
 #: `tests/parity.rs` is the worked example and the offline contract.
-RECORDED = Path("tests/recorded/run-root")
+RECORDED = Path("tests/recorded/run-root/onemessagebus-repair-2")
 #: A pid no platform issues — above Linux's `PID_MAX_LIMIT` and macOS's
 #: `PID_MAX`, and not a multiple of four, which every Windows pid is — written
 #: over the recorded driver's, so the run reads as finished on any host.
@@ -450,14 +450,7 @@ def telemetry_scene(scratch: Path, binaries: Path, normalise) -> str:
     finished here, and the sibling pointed at an executable that is not there so
     the provider-health block is silence rather than a probe of this machine.
     """
-    recorded = sorted((REPO / RECORDED).iterdir())
-    recorded = [entry for entry in recorded if entry.is_dir()]
-    if len(recorded) != 1:
-        raise SystemExit(
-            f"screenshots: {RECORDED} holds {len(recorded)} recorded runs, and "
-            "this scene is about one. Name which to photograph here."
-        )
-    source = recorded[0]
+    source = REPO / RECORDED
     root = scratch / "recorded" / "runs"
     run = root / source.name
     shutil.copytree(source, run)

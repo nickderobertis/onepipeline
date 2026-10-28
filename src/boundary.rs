@@ -1372,9 +1372,12 @@ fn fields_of<T: schemars::JsonSchema>() -> Vec<String> {
 }
 
 /// What a bus pass cache keys a pass by beside the payload's bytes: a digest of the run's
-/// term scope, every node's clearance, and the terms each scoped repository contributes
-/// now. A changed term, a changed visibility or a changed scope is a different key, so a
-/// payload cached as passing is judged again rather than passed on its bytes.
+/// term scope, every node's clearance, the terms each scoped repository contributes now,
+/// and the host's public phrases as the linked onevcs reads them (or that it cannot). A
+/// changed term, a changed visibility, a changed scope or an added, removed or changed
+/// phrase is a different key, so a payload cached as passing is judged again rather than
+/// passed on its bytes — and a phrase the host withdraws is not honoured by a pass cached
+/// while it stood.
 pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<String> {
     use sha2::Digest;
     let view = crate::views::RunView::open(paths)?;
@@ -1390,11 +1393,16 @@ pub(crate) fn fingerprint(paths: &crate::ledger::RunPaths) -> crate::Result<Stri
             }
         })
         .collect();
+    let public_phrases = match onevcs::public_phrases() {
+        Ok(phrases) => serde_json::json!(phrases),
+        Err(error) => serde_json::json!({"unreadable": error.to_string()}),
+    };
     let document = serde_json::json!({
         "scope": resolved.scope,
         "clearances": resolved.clearances,
         "public_destinations": resolved.public_destinations,
         "terms": terms,
+        "public_phrases": public_phrases,
     });
     let digest = sha2::Sha256::digest(document.to_string().as_bytes());
     Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -1411,6 +1419,11 @@ pub(crate) struct Guidance {
     pub(crate) steps: Vec<GuidanceStep>,
     /// What a generalize producer is held to so its export is not refused.
     pub(crate) producer: Vec<String>,
+    /// How the plan carrying both sides is coordinated: one private canonical graph, each
+    /// task's own visibility, and the neutral public projection of a public task.
+    pub(crate) coordination: Vec<String>,
+    /// The shape of such a plan, with synthetic names only.
+    pub(crate) example: GuidanceExample,
     /// The sentence a refusal carries, which is the steps in one line.
     pub(crate) summary: String,
 }
@@ -1450,15 +1463,51 @@ impl Step {
     }
 }
 
-/// The version [`Guidance`] is written at.
-pub(crate) const GUIDANCE_VERSION: u32 = 1;
+/// A private coordinating plan of one producer and one consumer, as [`Guidance`] shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct GuidanceExample {
+    /// The private producer, then the public consumer.
+    pub(crate) tasks: Vec<ExampleTask>,
+    /// The project's `onepipeline.export_edges`, which joins them.
+    pub(crate) export_edges: Vec<ExportEdge>,
+    /// What the public consumer's public projection carries.
+    pub(crate) projection: ExampleProjection,
+}
+
+/// One task of [`GuidanceExample`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ExampleTask {
+    /// Its node id.
+    pub(crate) id: &'static str,
+    /// Its own visibility, which nothing about the plan sets.
+    pub(crate) visibility: Classification,
+    /// How it publishes, where that is not the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) publish: Option<Publish>,
+}
+
+/// The public consumer's projection in [`GuidanceExample`]: its own task and nothing private.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ExampleProjection {
+    /// The task it is a view of.
+    pub(crate) task: &'static str,
+    /// Its visibility, which is that task's own.
+    pub(crate) visibility: Classification,
+    /// The dependencies it shows: none on anything private.
+    pub(crate) dependencies: Vec<&'static str>,
+    /// The links back it carries: none.
+    pub(crate) backlinks: Vec<&'static str>,
+}
+
+/// The version [`Guidance`] is written at. Version 2 adds `coordination` and `example`.
+pub(crate) const GUIDANCE_VERSION: u32 = 2;
 
 /// The steps of [`Guidance`], in order.
 const STEPS: [(Step, &str); 4] = [
     (
         Step::Generalize,
         "Write the private work as a generic example inside one neutral directory, on a \
-         private node that publishes with `publish: \"preserve\"`.",
+         private task that publishes with `publish: \"preserve\"`.",
     ),
     (
         Step::Preserve,
@@ -1471,7 +1520,7 @@ const STEPS: [(Step, &str); 4] = [
     ),
     (
         Step::Consume,
-        "The public node depends on the producer through an entry of the project's \
+        "The public task depends on the producer through an entry of the project's \
          `onepipeline.export_edges` — `{from, to, source_directory, target_directory}` — and \
          its session starts from that commit; its id, title and task name nothing private.",
     ),
@@ -1487,6 +1536,19 @@ const PRODUCER: [&str; 3] = [
      rename it.",
 ];
 
+/// How a plan carrying both sides is coordinated, in order.
+const COORDINATION: [&str; 4] = [
+    "Visibility belongs to each task: a task is private when it says so or names a private \
+     or unknown repository, and public otherwise. A private coordinating plan may hold public \
+     tasks; the plan sets no visibility for them, and there is no setting or metadata key to \
+     add.",
+    "The plan's canonical board home stays private and holds the whole graph, the export \
+     dependency from the producer to the consumer included.",
+    "A public task's public projection is neutral: it carries the task's own screened title, \
+     task and status, and no private dependency, backlink or name of the private plan.",
+    "Screening stays on for every public task, its projection and its export.",
+];
+
 /// The guidance, as every reader of it gets it.
 pub(crate) fn guidance() -> Guidance {
     Guidance {
@@ -1496,19 +1558,83 @@ pub(crate) fn guidance() -> Guidance {
             .map(|(step, text)| GuidanceStep { step: *step, text })
             .collect(),
         producer: PRODUCER.iter().map(|line| (*line).to_owned()).collect(),
+        coordination: COORDINATION.iter().map(|line| (*line).to_owned()).collect(),
+        example: example(),
         summary: summary(),
     }
 }
 
+/// The synthetic producer's node id.
+const EXAMPLE_PRODUCER: &str = "generic-example-producer";
+
+/// The synthetic consumer's node id.
+const EXAMPLE_CONSUMER: &str = "generic-example-consumer";
+
+/// [`GuidanceExample`], with synthetic names only.
+fn example() -> GuidanceExample {
+    GuidanceExample {
+        tasks: vec![
+            ExampleTask {
+                id: EXAMPLE_PRODUCER,
+                visibility: Classification::Private,
+                publish: Some(Publish::Preserve),
+            },
+            ExampleTask {
+                id: EXAMPLE_CONSUMER,
+                visibility: Classification::Public,
+                publish: None,
+            },
+        ],
+        export_edges: vec![ExportEdge {
+            from: EXAMPLE_PRODUCER.to_owned(),
+            to: EXAMPLE_CONSUMER.to_owned(),
+            source_directory: "examples/generic".to_owned(),
+            target_directory: "examples".to_owned(),
+        }],
+        projection: ExampleProjection {
+            task: EXAMPLE_CONSUMER,
+            visibility: Classification::Public,
+            dependencies: Vec::new(),
+            backlinks: Vec::new(),
+        },
+    }
+}
+
 /// The guidance as `onepipeline boundary guidance` prints it: one JSON object, or the
-/// summary a refusal carries followed by what a producer is held to.
+/// summary a refusal carries followed by how the plan is coordinated, its example, and what
+/// a producer is held to.
 pub(crate) fn render_guidance(json: bool) -> crate::Result<String> {
     let guidance = guidance();
     if json {
         return serde_json::to_string_pretty(&guidance)
             .map_err(|error| crate::Error::Invalid(error.to_string()));
     }
-    let mut lines = vec![guidance.summary, String::new(), "A producer:".to_owned()];
+    let mut lines = vec![guidance.summary, String::new(), "Coordination:".to_owned()];
+    lines.extend(guidance.coordination.iter().map(|line| format!("- {line}")));
+    lines.push(String::new());
+    lines.push("One private coordinating plan (synthetic names):".to_owned());
+    for task in &guidance.example.tasks {
+        let mut line = format!("  {:<26} visibility: {}", task.id, task.visibility.as_str());
+        if let Some(publish) = task.publish {
+            line.push_str(&format!("   publish: \"{}\"", publish.as_str()));
+        }
+        lines.push(line);
+    }
+    lines.push("  onepipeline.export_edges:".to_owned());
+    for edge in &guidance.example.export_edges {
+        lines.push(format!(
+            "    from: {}  to: {}  source_directory: {}  target_directory: {}",
+            edge.from, edge.to, edge.source_directory, edge.target_directory
+        ));
+    }
+    let projection = &guidance.example.projection;
+    lines.push(format!(
+        "Public projection of {}: visibility: {}, dependencies: none, backlinks: none.",
+        projection.task,
+        projection.visibility.as_str()
+    ));
+    lines.push(String::new());
+    lines.push("A producer:".to_owned());
     lines.extend(guidance.producer.iter().map(|line| format!("- {line}")));
     Ok(lines.join("\n"))
 }
@@ -1516,8 +1642,9 @@ pub(crate) fn render_guidance(json: bool) -> crate::Result<String> {
 /// The steps as one sentence, which is what a refusal carries.
 fn summary() -> String {
     format!(
-        "Private work reaches a public node only by generalize -> preserve -> export -> \
-         consume: {}",
+        "Private work reaches a public task only by generalize -> preserve -> export -> \
+         consume, inside one private coordinating plan whose tasks each keep their own \
+         visibility: {}",
         STEPS
             .iter()
             .map(|(step, text)| format!("{}: {text}", step.as_str()))

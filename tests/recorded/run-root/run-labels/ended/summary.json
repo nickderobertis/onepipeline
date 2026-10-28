@@ -1,0 +1,70 @@
+{
+  "schema_version": 10,
+  "run_id": "nx-heal-removal-revise",
+  "last_write_at": 1791947821780,
+  "last_event_kind": "driver-exited",
+  "event_count": 13,
+  "node_counts": {
+    "failed": 1
+  },
+  "stop_recorded": false,
+  "graph_complete": true,
+  "decisions_pending": 0,
+  "surfaces_queued": 0,
+  "surfaces_read": 0,
+  "awaiting_human_action": false,
+  "project": "authoring:nx-heal-removal-revise",
+  "name": "nx-heal-removal-revise",
+  "launcher": "claude-code",
+  "session": "48d02257-023f-5d5c-b695-6e7faf7ea134",
+  "started_at": "2026-10-14T03:16:53.801Z",
+  "pid": 3722302,
+  "host": "U-17UN402ICR95C",
+  "started": "linux-proc-stat:147805638",
+  "owed_until_closed": true,
+  "timing": {
+    "schema_version": 2,
+    "run_id": "nx-heal-removal-revise",
+    "wall_ms": 8048,
+    "buckets": [
+      {
+        "name": "agent",
+        "ms": 7865
+      },
+      {
+        "name": "judge"
+      },
+      {
+        "name": "llmlint"
+      },
+      {
+        "name": "gate"
+      },
+      {
+        "name": "publication_wait",
+        "ms": 0
+      },
+      {
+        "name": "lock_wait",
+        "ms": 0
+      },
+      {
+        "name": "setup",
+        "ms": 0
+      },
+      {
+        "name": "scheduling",
+        "ms": 183
+      }
+    ],
+    "usage": {},
+    "dispatches": 1,
+    "settled_done": 0,
+    "no_diff": 0,
+    "surfaces_queued": 0,
+    "surfaces_read": 0
+  },
+  "oneharness_sessions": "/home/nick/projects/ai-orchestrator/runs/nx-heal-removal-revise/oneharness-sessions.jsonl",
+  "journal_len": 30328,
+  "journal_mtime_ms": 1791947821870
+}

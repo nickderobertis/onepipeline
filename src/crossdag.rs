@@ -116,8 +116,11 @@ pub fn extent(root: &Path, run: &str) -> Option<u64> {
 /// this does do is *refresh* what the quiet readers see, which is what makes
 /// theirs free.
 fn settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
+    let journal = RunPaths::under(root, &reference.run).journal();
+    let before = crate::appendstamp::Stamp::read(&journal);
     let status = read_settled_status(root, reference);
-    remember(root, reference, status);
+    let after = crate::appendstamp::Stamp::read(&journal);
+    remember(root, reference, status, (before == after).then_some(after));
     status
 }
 
@@ -159,8 +162,12 @@ static ANSWERED: Mutex<Answers> = Mutex::new(BTreeMap::new());
 /// One upstream node, under the runs root it was asked beneath.
 type Asked = (PathBuf, String, String);
 
+type JournalStamp = Option<crate::appendstamp::Stamp>;
+
 /// What that question answered, and when it was paid for.
-type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>)>;
+// The outer option withholds provenance when the journal moved during its read;
+// the inner option records a source journal that did not exist.
+type Answers = BTreeMap<Asked, (Instant, Option<NodeStatus>, Option<JournalStamp>)>;
 
 fn key(root: &Path, reference: &Reference) -> Asked {
     (
@@ -183,16 +190,21 @@ fn answered_within(
 ) -> Option<Option<NodeStatus>> {
     answers()
         .get(&key(root, reference))
-        .filter(|(read_at, _)| read_at.elapsed() < age)
-        .map(|(_, status)| *status)
+        .filter(|(read_at, _, _)| read_at.elapsed() < age)
+        .map(|(_, status, _)| *status)
 }
 
-fn remember(root: &Path, reference: &Reference, status: Option<NodeStatus>) {
+fn remember(
+    root: &Path,
+    reference: &Reference,
+    status: Option<NodeStatus>,
+    stamp: Option<JournalStamp>,
+) {
     let mut answers = answers();
     // Dropped as they go stale rather than on a size, so what is held is one
     // entry per upstream a live graph is actually asking about.
-    answers.retain(|_, (read_at, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
-    answers.insert(key(root, reference), (Instant::now(), status));
+    answers.retain(|_, (read_at, _, _)| read_at.elapsed() < 2 * crate::engine::UPSTREAM_EVERY);
+    answers.insert(key(root, reference), (Instant::now(), status, stamp));
 }
 
 fn read_settled_status(root: &Path, reference: &Reference) -> Option<NodeStatus> {
@@ -251,6 +263,8 @@ pub struct Observer {
     baselines: BTreeMap<String, u64>,
     /// The `(dependency, consumer)` pairs already reported as moved.
     reported: BTreeSet<(String, String)>,
+    /// When the last [`resolve`](Self::resolve) began reading.
+    resolved_at: Option<Instant>,
 }
 
 impl Observer {
@@ -264,6 +278,7 @@ impl Observer {
             root: root.to_path_buf(),
             baselines,
             reported,
+            resolved_at: None,
         }
     }
 
@@ -319,6 +334,14 @@ impl Observer {
         paths: &RunPaths,
         journal: &mut Journal,
     ) -> Result<BTreeMap<String, NodeStatus>> {
+        // Timed here, where the reads happen, rather than where the loop decides
+        // to make them, so a read made before its interval was due is counted
+        // whatever decided to make it.
+        let now = Instant::now();
+        if begun_early(self.resolved_at, now) {
+            crate::loopstats::early_upstream_read();
+        }
+        self.resolved_at = Some(now);
         let mut resolved = BTreeMap::new();
         for (dependency, consumers) in edges(graph) {
             let Some(reference) = parse(&dependency) else {
@@ -380,6 +403,18 @@ impl Observer {
         }
         Ok(resolved)
     }
+
+    /// When the last [`resolve`](Self::resolve) began reading, which is what the
+    /// loop's next read is paced from.
+    pub(crate) fn resolved_at(&self) -> Option<Instant> {
+        self.resolved_at
+    }
+}
+
+/// Whether a round of reads begun at `now` came less than the loop's upstream
+/// interval after the round begun at `last`.
+fn begun_early(last: Option<Instant>, now: Instant) -> bool {
+    last.is_some_and(|last| now.duration_since(last) < crate::engine::UPSTREAM_EVERY)
 }
 
 /// Resolve a graph's edges without recording anything.
@@ -388,14 +423,57 @@ impl Observer {
 /// edit is judged against. Both need the same answer the loop would get; neither
 /// may append to the journal.
 pub fn resolve_quietly(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status_recently)
+}
+
+/// A retained view must notice upstream changes before calling itself unchanged.
+/// Refresh the quiet readers' cache too, so a subsequent `RunView::open` agrees.
+pub(crate) fn resolve_for_refresh(root: &Path, graph: &Graph) -> BTreeMap<String, NodeStatus> {
+    resolve_with(root, graph, settled_status)
+}
+
+/// The input metadata belonging to the answers a quiet view actually reused.
+/// Never label a cached answer with the metadata of a newer journal. A retained
+/// view can then keep an unchanged answer after the shared cache expires,
+/// without re-reading either journal merely because time passed.
+pub(crate) fn resolution_stamps(
+    root: &Path,
+    graph: &Graph,
+    held: &BTreeMap<String, NodeStatus>,
+) -> Option<BTreeMap<String, JournalStamp>> {
+    let answered = answers();
+    let mut stamps = BTreeMap::new();
+    for dependency in edges(graph).into_keys() {
+        let Some(reference) = parse(&dependency) else {
+            continue;
+        };
+        let (_, status, stamp) = answered.get(&key(root, &reference))?;
+        if held.get(&dependency) != Some(&satisfied_status(*status)) {
+            return None;
+        }
+        let stamp = stamp.as_ref()?;
+        stamps.insert(dependency, stamp.clone());
+    }
+    Some(stamps)
+}
+
+fn satisfied_status(status: Option<NodeStatus>) -> NodeStatus {
+    match status {
+        Some(NodeStatus::Done) => NodeStatus::Done,
+        _ => NodeStatus::Blocked,
+    }
+}
+
+fn resolve_with(
+    root: &Path,
+    graph: &Graph,
+    read: fn(&Path, &Reference) -> Option<NodeStatus>,
+) -> BTreeMap<String, NodeStatus> {
     edges(graph)
         .into_keys()
         .filter_map(|dependency| {
             let reference = parse(&dependency)?;
-            let status = match settled_status_recently(root, &reference) {
-                Some(NodeStatus::Done) => NodeStatus::Done,
-                _ => NodeStatus::Blocked,
-            };
+            let status = satisfied_status(read(root, &reference));
             Some((dependency, status))
         })
         .collect()
@@ -440,6 +518,52 @@ mod tests {
         // Not a reference at all, so not this module's business either way.
         assert_eq!(parse("build"), None);
         assert!(!is_malformed("build"));
+    }
+
+    #[test]
+    fn a_round_is_early_only_inside_the_interval_since_the_last() {
+        let last = Instant::now();
+        let every = crate::engine::UPSTREAM_EVERY;
+        assert!(
+            !begun_early(None, last),
+            "a first round has nothing to be early against"
+        );
+        assert!(begun_early(Some(last), last));
+        assert!(begun_early(
+            Some(last),
+            last + every - std::time::Duration::from_millis(1)
+        ));
+        assert!(!begun_early(Some(last), last + every));
+        assert!(!begun_early(Some(last), last + 2 * every));
+    }
+
+    #[test]
+    fn resolving_twice_inside_the_interval_counts_the_second_round_early() {
+        let root =
+            std::env::temp_dir().join(format!("onepipeline-crossdag-early-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = RunPaths::under(&root, "consumer");
+        paths.create().expect("the run directory");
+        let mut journal = Journal::open(&paths);
+        let mut observer = Observer::new(&root, BTreeMap::new(), BTreeSet::new());
+        let graph = Graph::default();
+
+        observer
+            .resolve(&graph, &paths, &mut journal)
+            .expect("the first round");
+        let first = observer.resolved_at().expect("the first round is stamped");
+        let before = crate::loopstats::early_upstream_reads();
+        observer
+            .resolve(&graph, &paths, &mut journal)
+            .expect("the second round");
+        // At least one, rather than exactly: the counter is per process, and a
+        // runner that runs tests as threads of one process moves it from others.
+        assert!(
+            crate::loopstats::early_upstream_reads() > before,
+            "a round begun at once after the last was not counted early"
+        );
+        assert!(observer.resolved_at().expect("the second round is stamped") >= first);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

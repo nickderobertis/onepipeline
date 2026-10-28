@@ -24,6 +24,9 @@
 //! `get_project`, `query_tasks`, `get_task`, `task_dependencies`, `write_project`,
 //! `write_task`, `set_task_status`, `update_task`, `set_project_metadata`:
 //!
+//! * `<key>.assets-unsupported` — declare no image-asset support in the handshake,
+//!   as a destination plugin without asset storage would; ordinary reads and writes still
+//!   reach the real local-md source.
 //! * `<key>.<method>.refuse` — every call of that method is answered with the source error
 //!   the file holds, in the store's own shape (`{"kind": "rate-limited", ...}`), for as long
 //!   as the file is there. Refused **by name** when it does not read as one: a fixture that
@@ -31,6 +34,17 @@
 //! * `<key>.<method>@<id>.refuse` — the same, for the calls that name one item alone, where
 //!   `<id>` is that item's native id as `fake::segment` spells a file name: one ticket of
 //!   several refused and the rest written.
+//! * `<key>.set_project_metadata#<metadata key>.refuse` — the same, for the writes of one
+//!   project metadata key alone, where `<metadata key>` is spelled as `fake::segment` spells
+//!   a file name: a board update carrying one key refused while writes of every other key
+//!   land.
+//! * `<key>.<method>.rate-limited` — every call of that method is answered rate limited the
+//!   way a hosted provider answers once its quota is spent, for as long as the file is there.
+//!   The file holds `{"reset_at_ms": <epoch milliseconds> | null}`: before that instant each
+//!   answer carries `retry_after_seconds`, the whole seconds still to wait, rounded up; at or
+//!   after it, or where the provider named none, the answer carries no reset at all — a quota
+//!   that stays spent past its reset is answered with nothing to wait for.
+//! * `<key>.<method>@<id>.rate-limited` — the same, for the calls that name that one item.
 //! * `<key>.<method>.refuse.once` — the next call only, and the file is taken away.
 //! * `<key>.<method>.refuse.after-first` — every call of that method but the **first** this
 //!   source is handed in a command, which the real store answers; `end_command` starts the
@@ -40,6 +54,14 @@
 //!   read or the targeted update answers that the store holds no such item, with no failure
 //!   beside it, for as long as the file is there: what a hosted destination answers for a
 //!   board or an issue somebody deleted.
+//! * `<key>.get_project.without` — every project read is **served** by the real store and
+//!   answered with the project metadata key the file holds left out, for as long as the file
+//!   is there: a board that holds what was written to it and reads back without it.
+//! * `<key>.<method>.malformed` — every call of that method is **served** by the real store,
+//!   so a write it carries is applied, and then answered with a result the plugin protocol
+//!   does not give that method: a plugin that stored what it was asked to and then answered
+//!   in a shape the engine refuses, which leaves the item at the destination under an id
+//!   nobody was told.
 //! * `<key>.<method>.rendezvous` — the address this source meets the test at before it
 //!   answers that method, held until the test lets go; written by `World::rendezvous`, read by
 //!   `fake::meet`. The one way to make a store call **slow** rather than wrong.
@@ -62,6 +84,11 @@
 //!   also appended to `<key>.charged.jsonl` as `{"method": <method>, "spent": <Metering>}` —
 //!   the meter's own account across every connection, which a running total dies with — so
 //!   a journey sums what a whole run spent off what the source charged, not off a report.
+//!
+//! Every request but the handshake is also appended to `<key>.received.jsonl` as
+//! `{"at_ms": <when it arrived>, "method": <method>, "id": <the id it names, or "">,
+//! "answered": "served" | <the kind of source error it was answered with>}`: what reached
+//! this source and when, which is how a journey holds a window to the requests inside it.
 //!
 //! Every call is recorded into the directory's `invocations.jsonl` as
 //! `{"tool": <key>, "args": [<method>, <the id it names, where it names one>]}`, the
@@ -240,6 +267,14 @@ fn main() -> ExitCode {
         Ok(metered) => metered.is_some(),
         Err(why) => return stop(&why),
     };
+    let assetless = match present(
+        &settings
+            .script
+            .join(format!("{}.assets-unsupported", settings.key.0)),
+    ) {
+        Ok(value) => value,
+        Err(why) => return stop(&why),
+    };
     match host.initialize(
         handshake.id,
         handshake.params.protocol_version,
@@ -254,6 +289,20 @@ fn main() -> ExitCode {
                 if let Some(result) = answered.get_mut("result").and_then(Value::as_object_mut) {
                     result.insert("meters".to_owned(), Value::Bool(true));
                 }
+            }
+            if assetless {
+                let Some(capabilities) = answered
+                    .get_mut("result")
+                    .and_then(|result| result.get_mut("capabilities"))
+                    .and_then(Value::as_object_mut)
+                else {
+                    return stop("the hosted plugin did not answer capabilities");
+                };
+                capabilities.insert(
+                    "assets".to_owned(),
+                    serde_json::to_value(onetaskgraph_plugin_api::Support::Unsupported)
+                        .expect("a support value serializes"),
+                );
             }
             println!("{answered}");
         }
@@ -304,7 +353,22 @@ impl Scripted {
                 &self.key.0,
                 &[request.method.0.clone(), named(&request.params)?],
             );
+            let arrived = now_ms();
             let answer = self.answer(host, &request)?;
+            let answered = answer
+                .get("error")
+                .and_then(|error| error.get("kind"))
+                .and_then(Value::as_str)
+                .unwrap_or("served");
+            if request.method.0 != "end_command" {
+                let line = json!({
+                    "at_ms": arrived,
+                    "method": request.method.0,
+                    "id": named(&request.params)?,
+                    "answered": answered,
+                });
+                fake::append(&self.scenario("received.jsonl"), &line.to_string());
+            }
             println!("{answer}");
             // A command's end starts the next command's firsts: a store kept across commands
             // is asked each method's first call again in every command it runs.
@@ -350,7 +414,24 @@ impl Scripted {
                 return Ok(json!({"id": request.id, "error": error}));
             }
         }
+        if method == "set_project_metadata" {
+            if let Some(Value::String(key)) = request.params.get("key") {
+                let one = self.scenario(&format!("{method}#{}.refuse", fake::segment(key)));
+                if let Some(error) = refusal(&one)? {
+                    return Ok(json!({"id": request.id, "error": error}));
+                }
+            }
+        }
         if let Some(error) = refusal(&self.scenario(&format!("{method}.refuse")))? {
+            return Ok(json!({"id": request.id, "error": error}));
+        }
+        if !item.is_empty() {
+            let one = self.scenario(&format!("{method}@{}.rate-limited", fake::segment(&item)));
+            if let Some(error) = rate_limited(&one)? {
+                return Ok(json!({"id": request.id, "error": error}));
+            }
+        }
+        if let Some(error) = rate_limited(&self.scenario(&format!("{method}.rate-limited")))? {
             return Ok(json!({"id": request.id, "error": error}));
         }
         if present(&self.scenario(&format!("{method}.absent")))? {
@@ -371,8 +452,26 @@ impl Scripted {
             "id": request.id, "method": request.method.0, "params": request.params,
         });
         let mut answered = host.ask(&relayed)?;
+        // Served first and answered malformed after: the write is in the store either way.
+        if answered.contains_key("result")
+            && present(&self.scenario(&format!("{method}.malformed")))?
+        {
+            return Ok(json!({"id": request.id, "result": {"malformed": true}}));
+        }
         if let Some(key) = handle(&self.scenario("task.key"))? {
             keyed(method, &mut answered, &key);
+        }
+        if method == "get_project" {
+            if let Some(key) = handle(&self.scenario("get_project.without"))? {
+                if let Some(metadata) = answered
+                    .get_mut("result")
+                    .and_then(|result| result.get_mut("project"))
+                    .and_then(|project| project.get_mut("metadata"))
+                    .and_then(Value::as_object_mut)
+                {
+                    metadata.remove(key.trim());
+                }
+            }
         }
         // Ending a command clears what the source held for it and sends nothing to a hosted
         // destination, so, like `metering`, it is never charged.
@@ -477,6 +576,51 @@ fn refusal(path: &Path) -> Result<Option<SourceError>, String> {
     }
 }
 
+/// A provider's rate limit, as a scenario file states its reset: `{"reset_at_ms": <u64> |
+/// null}`. Refused by name where it does not read as one, for the reason [`refusal`] is.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RateLimit {
+    reset_at_ms: Option<u64>,
+}
+
+/// The rate-limited answer a scenario file scripts at this instant, or `None` where no file is
+/// there: the seconds until its reset, rounded up, while the reset is still ahead, and no reset
+/// once it has passed or where it names none.
+fn rate_limited(path: &Path) -> Result<Option<SourceError>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    let limit: RateLimit = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "{} is not a rate limit (`{{\"reset_at_ms\": <u64> | null}}`): {error}",
+            path.display()
+        )
+    })?;
+    Ok(Some(SourceError::RateLimited {
+        retry_after_seconds: retry_after(limit.reset_at_ms, now_ms()),
+        message: Some("the provider's quota for this token is spent".to_owned()),
+    }))
+}
+
+/// The whole seconds from `now_ms` until `reset_at_ms`, rounded up, while it is ahead.
+fn retry_after(reset_at_ms: Option<u64>, now_ms: u64) -> Option<u64> {
+    let ahead = reset_at_ms?.checked_sub(now_ms).filter(|ms| *ms > 0)?;
+    Some(ahead.div_ceil(1_000))
+}
+
+/// The epoch milliseconds now, on the clock the engine stamps a hold's `retry_at_ms` with, so a
+/// scripted reset and the reset the engine records are one instant.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// The handle a scenario file gives every task, read verbatim — a blank one included, which
 /// is how a source carries none — or `None` where no file is there.
 fn handle(path: &Path) -> Result<Option<String>, String> {
@@ -525,8 +669,19 @@ fn metering(path: &Path) -> Result<Option<Metering>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::named;
+    use super::{named, retry_after};
     use serde_json::json;
+
+    /// A reset ahead is the whole seconds until it, rounded up; one passed, or none named,
+    /// is no reset at all.
+    #[test]
+    fn a_rate_limit_names_the_seconds_to_its_reset_while_it_is_ahead() {
+        assert_eq!(retry_after(Some(31_000), 1_000), Some(30));
+        assert_eq!(retry_after(Some(31_001), 1_000), Some(31));
+        assert_eq!(retry_after(Some(1_000), 1_000), None);
+        assert_eq!(retry_after(Some(500), 1_000), None);
+        assert_eq!(retry_after(None, 1_000), None);
+    }
 
     /// A read names its item by `id`, an update by its write's `target`, and a create by a
     /// `null` target, which the protocol writes for every create.

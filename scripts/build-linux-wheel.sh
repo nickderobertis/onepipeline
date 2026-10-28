@@ -3,11 +3,11 @@
 # image the release publishes it from.
 #
 # This is the one definition of a Linux wheel build: release.yml's `build-linux`
-# job runs it through release/release.py, and ci.yml's `wheel` job through `just
-# wheel-linux`, so a pull request builds under the image, prerequisites and
-# maturin invocation a release does. The release packages its Linux archive and
-# npm package from the binary inside this wheel, so all three share its glibc
-# floor.
+# and `build-linux-arm64` jobs run it through release/release.py, and ci.yml's
+# `wheel` job through `just wheel-linux`, so a pull request builds under the
+# image, prerequisites and maturin invocation a release does. The release
+# packages each Linux archive and npm package from the binary inside its wheel,
+# so all three share that wheel's glibc floor.
 #
 # The prerequisites: `openssl-sys` is built with its vendored feature (the linked
 # onetaskgraph stores reach `reqwest` with `native-tls-vendored`), which compiles
@@ -16,7 +16,9 @@
 #
 # The build runs as root in the container, because installing those modules
 # does; what it writes into the checkout is handed back to the invoking user on
-# the way out, pass or fail.
+# the way out, pass or fail. Each target builds in its own architecture's image;
+# the release's jobs are native, and a target whose architecture is not the
+# host's runs under whatever emulation Docker has.
 #
 # Usage:
 #   build-linux-wheel.sh --target TRIPLE [--out DIR]
@@ -26,7 +28,7 @@
 # were refused. Exit 1: the build or its environment failed, named on stderr.
 set -euo pipefail
 
-usage="run 'build-linux-wheel.sh --target x86_64-unknown-linux-gnu [--out DIR]'"
+usage="run 'build-linux-wheel.sh --target x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu [--out DIR]'"
 
 fail_usage() {
   echo "$1" >&2
@@ -53,9 +55,8 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# The Linux targets release/release.py's `linux` platform builds;
-# tests/linux_wheel.rs fails when the two sets differ. arm64 Linux is not
-# released. Each carries the SHA-256 static.rust-lang.org publishes for
+# The Linux targets release/release.py's `linux` and `linux-arm64` platforms
+# build; tests/linux_wheel.rs fails when the two sets differ. Each carries the SHA-256 static.rust-lang.org publishes for
 # rustup-init $rustup_version on that architecture, so the installer the
 # container runs is the one pinned here and not whatever the download returned.
 rustup_version="1.29.1"
@@ -63,6 +64,10 @@ case "$target" in
   x86_64-unknown-linux-gnu)
     arch=x86_64 platform=linux/amd64
     rustup_sha256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+    ;;
+  aarch64-unknown-linux-gnu)
+    arch=aarch64 platform=linux/arm64
+    rustup_sha256=15f6e4ce9f583b929c996c91562bad6d4454f3281de858b02cdfdef615fac433
     ;;
   "") fail_usage "--target is required" ;;
   *) fail_usage "no manylinux build is defined for $target" ;;

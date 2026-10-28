@@ -387,18 +387,55 @@ fn protection(args: &[String], dir: &Path, path: &str) -> ExitCode {
     }
 }
 
-/// `gh api repos/R`: the repository itself, which `onevcs` 0.44.0 on asks for its
-/// visibility at every write that could reach a public destination.
+/// `gh api repos/R --include`: the repository itself, which `onevcs` 0.44.0 on asks for
+/// its visibility at every write that could reach a public destination, and 0.56.0 on
+/// asks with `--include`, so the response's status line and headers come first and a
+/// request the host did not answer is told from one it refused.
 ///
 /// `private` unless a journey scripts `gh.visibility`: a private destination is one
 /// the public boundary screens nothing for, which is what every journey here wrote
 /// before there was a boundary to ask.
+///
+/// `gh.visibility.rate-limited` is the host **not answering** that read: GitHub's own
+/// `403` for a primary rate limit — no requests remaining, and the epoch it resets at,
+/// which the file holds — written as `gh api --include` writes any response, status line
+/// and headers on stdout ahead of the body, with `gh`'s one line on stderr and exit 1.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the response is GitHub's, which
+// declares it nowhere this repository can read, and `onevcs::GitHub::visibility`'s parser of
+// it is private. Its gate is the real linked `onevcs` reading this answer: every journey that
+// publishes reads the `200` as the visibility it names, and
+// `tests/e2e/publication_boundary.rs`'s
+// `a_publication_whose_host_rate_limits_the_visibility_read_settles_on_an_unavailable_check`
+// asserts the `403`'s status, limit, resource, remaining and reset as onevcs read them, so a
+// shape that drifts from what onevcs parses fails a journey rather than a double nobody checks.
 fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
-    if args.len() != 2 {
-        return fake::refuse(&format!("gh api {path} takes no flags here: {args:?}"));
+    if args.len() != 3 || args[2] != "--include" {
+        return fake::refuse(&format!(
+            "gh api {path} takes exactly `--include` here: {args:?}"
+        ));
     }
     if path.split('/').any(str::is_empty) {
         return fake::refuse(&format!("gh api path '{path}' has an empty segment"));
+    }
+    if let Some(reset) = read_if_present(&dir.join("gh.visibility.rate-limited")) {
+        let reset: u64 = reset.trim().parse().unwrap_or_else(|_| {
+            fake::fail(&format!(
+                "gh.visibility.rate-limited holds {reset:?}, which is not the epoch second the limit resets at"
+            ))
+        });
+        let message = "API rate limit exceeded for user ID 1.";
+        print!(
+            "HTTP/2.0 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\n\
+             X-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 0\r\n\
+             X-Ratelimit-Reset: {reset}\r\nX-Ratelimit-Resource: core\r\n\
+             X-Ratelimit-Used: 5000\r\n\r\n{}",
+            serde_json::json!({
+                "message": message,
+                "documentation_url": "https://docs.github.com/rest/overview/rate-limits-for-the-rest-api",
+            })
+        );
+        eprintln!("gh: {message} (HTTP 403)");
+        return ExitCode::from(1);
     }
     let visibility = match read_if_present(&dir.join("gh.visibility")) {
         None => Visibility::Private,
@@ -408,8 +445,8 @@ fn repository(args: &[String], dir: &Path, path: &str) -> ExitCode {
             ))
         }),
     };
-    println!(
-        "{}",
+    print!(
+        "HTTP/2.0 200 OK\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{}",
         serde_json::json!({
             "visibility": visibility.word(),
             "private": visibility != Visibility::Public,
@@ -1065,6 +1102,14 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         Some("state,mergeCommit") => "state,mergeCommit",
         // Retirement reads the merged head in the same host response as the merge.
         Some("state,mergeCommit,headRefOid") => "state,mergeCommit,headRefOid",
+        // `onevcs` 0.56 reads the issues a merged change request closes in the same view
+        // as the merge, for the `closes` its landing reports.
+        Some("state,mergeCommit,closingIssuesReferences") => {
+            "state,mergeCommit,closingIssuesReferences"
+        }
+        Some("state,mergeCommit,headRefOid,closingIssuesReferences") => {
+            "state,mergeCommit,headRefOid,closingIssuesReferences"
+        }
         Some("statusCheckRollup") => "statusCheckRollup",
         // The rollup *and* the commit it was reported against, in one read.
         // `onevcs` 0.15.0 asks for the pair because a rollup read on its own
@@ -1166,6 +1211,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             "isDraft": state == Change::Draft,
             "mergeCommit": merged.then(|| serde_json::json!({"oid": merge_commit.as_str()})),
             "mergedAt": merged.then(|| read_if_present(&merged_at(dir, &id))).flatten(),
+            "closingIssuesReferences": closing_issues(dir),
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
             // repository whose only bar is the `command:` gate its rules name.
@@ -1176,6 +1222,38 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
         })
     );
     ExitCode::SUCCESS
+}
+
+/// The issues every change request on this host closes, as GitHub answers
+/// `closingIssuesReferences`: one node per `owner/name#N` a journey scripted in
+/// `gh.closes`, whitespace-separated, and none where it scripted nothing.
+fn closing_issues(dir: &Path) -> Vec<serde_json::Value> {
+    let scripted = read_if_present(&dir.join("gh.closes")).unwrap_or_default();
+    let named = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    scripted
+        .split_whitespace()
+        .map(|issue| {
+            let read = issue.split_once('#').and_then(|(repository, number)| {
+                let (owner, name) = repository.split_once('/')?;
+                let number = number.parse::<u64>().ok().filter(|number| *number > 0)?;
+                (named(owner) && named(name)).then_some((owner, name, number))
+            });
+            let Some((owner, name, number)) = read else {
+                fake::fail(&format!(
+                    "gh.closes holds {issue:?}, which is not owner/name#N"
+                ))
+            };
+            serde_json::json!({
+                "number": number,
+                "repository": {"name": name, "owner": {"login": owner}},
+            })
+        })
+        .collect()
 }
 
 /// Where a check is, and — once it has finished — how it ended.
@@ -1347,7 +1425,9 @@ impl Check {
     /// A check that has started carries `startedAt`. Where `rerun` is set, the run a
     /// ready change reports is a different run from the draft's: a workflow that runs
     /// on `ready_for_review` re-runs on a lift, and `onevcs` 0.36.0 tells a run
-    /// attached after a lift from the draft's by that start alone.
+    /// attached after a lift from the draft's by that start alone. A check that
+    /// concluded carries `completedAt` too, which `onevcs` 0.56.6 records on its
+    /// `change-check` beside the start.
     fn rollup_entry(&self, rerun: bool) -> serde_json::Value {
         let mut entry = serde_json::json!({"name": self.name, "status": self.state.status()});
         if self.state != State::Queued {
@@ -1359,6 +1439,11 @@ impl Check {
         }
         if let State::Settled(conclusion) = self.state {
             entry["conclusion"] = serde_json::json!(conclusion.wire());
+            entry["completedAt"] = serde_json::json!(if rerun {
+                READY_RUN_COMPLETED
+            } else {
+                DRAFT_RUN_COMPLETED
+            });
         }
         entry
     }
@@ -1369,6 +1454,12 @@ const DRAFT_RUN_STARTED: &str = "2026-01-01T00:00:00Z";
 
 /// When the run a ready change reported started — a later run than the draft's.
 const READY_RUN_STARTED: &str = "2026-01-01T00:05:00Z";
+
+/// When the run a draft reported concluded.
+const DRAFT_RUN_COMPLETED: &str = "2026-01-01T00:03:00Z";
+
+/// When the run a ready change reported concluded.
+const READY_RUN_COMPLETED: &str = "2026-01-01T00:08:00Z";
 
 /// What this host reports about one change request's checks.
 ///
@@ -2400,7 +2491,7 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
         };
         return match own_standing_list(owner, name, &changes, dir) {
             Ok(standings) => {
-                println!("{}", standings_wire(&standings, &reads, cost));
+                println!("{}", standings_wire(&standings, &reads, cost, dir));
                 ExitCode::SUCCESS
             }
             Err(refused) => refused,
@@ -2424,7 +2515,7 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     };
     match answer {
         Ok((standings, reads, cost)) => {
-            println!("{}", standings_wire(&standings, &reads, cost));
+            println!("{}", standings_wire(&standings, &reads, cost, dir));
             ExitCode::SUCCESS
         }
         Err(error) => fake::refuse(&error.to_string()),
@@ -2436,6 +2527,7 @@ fn standings_wire(
     standings: &[onevcs::ChangeStanding],
     reads: &[onevcs::ReviewRead],
     cost: onevcs::ReadCost,
+    dir: &Path,
 ) -> serde_json::Value {
     use onevcs::{ChangeState, ChecksVerdict};
     use serde_json::{json, Value};
@@ -2495,6 +2587,7 @@ fn standings_wire(
             "mergedAt": merged_at, "mergeCommit": commit.map(|commit| json!({"oid": commit})),
             "baseRef": if deleted { Value::Null } else { json!({"name": standing.base}) },
             "headRef": {"target": {"statusCheckRollup": {"contexts": {"nodes": contexts}}}},
+            "closingIssuesReferences": {"nodes": closing_issues(dir)},
         });
         if let Some(read) = reads.get(at) {
             let wire = review_wire(read);
@@ -2909,7 +3002,7 @@ fn own_standings(
         graphql_points: 1,
         rest_requests: 0,
     };
-    println!("{}", standings_wire(&standings, &reads, cost));
+    println!("{}", standings_wire(&standings, &reads, cost, dir));
     ExitCode::SUCCESS
 }
 

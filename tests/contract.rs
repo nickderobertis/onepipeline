@@ -1020,7 +1020,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("130.")["bundle_versions"]["events"],
+        divergence_block("141.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -1230,7 +1230,7 @@ fn the_contract_states_the_planner_channel_documents_path_version_and_source() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), DOCUMENT_VERSION);
     assert_eq!(
-        divergence_block("130.")["bundle_versions"]["planner_channel"],
+        divergence_block("136.")["bundle_versions"]["planner_channel"],
         DOCUMENT_VERSION,
         "the planner-channel version must be the one the newest entry raising it records"
     );
@@ -1822,6 +1822,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/other".into(),
             ],
         }),
+        assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
     })
     .expect("a node serialises");
@@ -1848,9 +1849,17 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
         .map(ToOwned::to_owned)
         .chain(history["label_prefix"].as_str().map(ToOwned::to_owned))
         .collect();
+    // Settlement provenance is engine output on the board, not authorable plan
+    // input. The taskgraph and writeback tests exercise these private keys; keep
+    // their documented classification explicit without adding public fields.
+    let projection_keys = ["onepipeline.settlement", "onepipeline.projected_status"];
+    for key in projection_keys {
+        assert!(CONTRACT.contains(&format!("`{key}`")));
+    }
+    assert!(CONTRACT.contains("projection-only"));
     let named: BTreeSet<String> = backticked()
         .iter()
-        .filter(|token| !stamped.contains(*token))
+        .filter(|token| !stamped.contains(*token) && !projection_keys.contains(&token.as_str()))
         .filter_map(|token| token.strip_prefix("onepipeline.").map(ToOwned::to_owned))
         .filter(|field| field != "<field>")
         .collect();
@@ -2196,6 +2205,7 @@ fn op_of(command: &Edit) -> &'static str {
         Edit::Complete { .. } => "complete",
         Edit::Amend { .. } => "amend",
         Edit::Note { .. } => "note",
+        Edit::WithdrawNote { .. } => "withdraw-note",
         Edit::Finding { .. } => "finding",
         Edit::Rework { .. } => "rework",
         Edit::Retitle { .. } => "retitle",
@@ -2340,6 +2350,84 @@ fn the_stacked_settlement_is_what_the_divergence_record_names() {
     assert_eq!(
         block["block_markers"],
         serde_json::json!(["<!-- onepipeline:stack -->", "<!-- /onepipeline:stack -->"])
+    );
+}
+
+/// The record entry 132 proposes is the one this build declares for `landing-closures`:
+/// both of its examples — a projected landing and a failed one outside a run — are admitted by
+/// the published document, a record missing a member every writer writes with a value, or
+/// naming an outcome or class nobody declared, is refused, and the kind is the vocabulary's
+/// own. `node`, `class` and `reason` may be `null`, which the vocabulary's documents leave
+/// optional as they do every such key.
+#[test]
+fn the_landing_closures_record_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("132.");
+    assert_eq!(block["kind"], PipelineKind::LandingClosures.as_str());
+    let id = schema_of(PipelineKind::LandingClosures);
+    let registry = registry();
+    for example in ["record", "failed"] {
+        registry
+            .check(&id, &block[example])
+            .unwrap_or_else(|why| panic!("entry 132's {example} is refused: {why}"));
+    }
+    for member in ["commit", "closes", "outcome", "items", "unsupported"] {
+        let mut short = block["record"].clone();
+        short.as_object_mut().expect("a record").remove(member);
+        assert!(
+            registry.check(&id, &short).is_err(),
+            "a landing-closures record without {member} was admitted"
+        );
+    }
+    for (member, word) in [("outcome", "landed"), ("class", "slow")] {
+        let mut unknown = block["failed"].clone();
+        unknown[member] = Value::String(word.into());
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a landing-closures record whose {member} is {word:?} was admitted"
+        );
+    }
+}
+
+/// The record entry 134 proposes is the one this build declares for `home-status`: both of its
+/// examples — a home written and a home the store refused — are admitted by the published
+/// document, a record missing a member every writer writes with a value, or naming an outcome
+/// or class nobody declared, is refused, and the kind is the vocabulary's own.
+#[test]
+fn the_home_status_record_is_what_the_divergence_record_names() {
+    use onepipeline::event::PipelineKind;
+    use onepipeline::payload::{registry, schema_of};
+    let block = divergence_block("134.");
+    assert_eq!(block["kind"], PipelineKind::HomeStatus.as_str());
+    let id = schema_of(PipelineKind::HomeStatus);
+    let registry = registry();
+    for example in ["record", "failed"] {
+        registry
+            .check(&id, &block[example])
+            .unwrap_or_else(|why| panic!("entry 134's {example} is refused: {why}"));
+    }
+    for member in ["project", "outcome"] {
+        let mut short = block["record"].clone();
+        short.as_object_mut().expect("a record").remove(member);
+        assert!(
+            registry.check(&id, &short).is_err(),
+            "a home-status record without {member} was admitted"
+        );
+    }
+    for (member, word) in [("outcome", "projected"), ("class", "slow")] {
+        let mut unknown = block["failed"].clone();
+        unknown[member] = Value::String(word.into());
+        assert!(
+            registry.check(&id, &unknown).is_err(),
+            "a home-status record whose {member} is {word:?} was admitted"
+        );
+    }
+    let mut unknown = block["record"].clone();
+    unknown["status"]["category"] = Value::String("finished".into());
+    assert!(
+        registry.check(&id, &unknown).is_err(),
+        "a home-status record whose status is in no category was admitted"
     );
 }
 
@@ -3317,6 +3405,8 @@ fn the_branch_name_template_is_what_the_contract_names() {
 /// wire — so what this answers is the whole inventory a consumer can read.
 fn summary_fields() -> BTreeSet<String> {
     let document = RunSummary {
+        labels: Default::default(),
+        group: None,
         schema_version: SUMMARY_SCHEMA_VERSION,
         run_id: "gated".into(),
         last_write_at: Some(1_786_000_000_000),
@@ -4054,6 +4144,33 @@ fn the_writeback_budget_surface_is_what_the_divergence_record_names() {
     // meets it in, and nothing compiles that. So the entry is held against it
     // here: every spelling, in the order the entry proposes, and the default.
     let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let passage = readme
+        .split_once("**write-back item budget**")
+        .expect("the README documents the write-back budget")
+        .1
+        .split("\n\n")
+        .next()
+        .expect("the budget passage");
+    let example = passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .find(|code| code.starts_with("adopt RUN "))
+        .expect("the budget passage shows an adoption command");
+    let words =
+        std::iter::once("onepipeline").chain(example.split_whitespace().map(|word| match word {
+            "RUN" => "budgeted-run",
+            "SECONDS" => "30",
+            word => word,
+        }));
+    let parsed = Cli::try_parse_from(words).unwrap_or_else(|error| {
+        panic!("the README's adoption `{example}` does not parse: {error}")
+    });
+    let Command::Adopt(adopted) = parsed.command else {
+        panic!("the README's budget example is not an adoption: {example}")
+    };
+    assert_eq!(adopted.writeback_item_budget, Some(30));
+
     let prose = readme.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut found: Vec<usize> = Vec::new();
     for spelling in &precedence {
@@ -4493,10 +4610,9 @@ fn the_run_history_surface_is_what_the_contract_names() {
     let at = history["summary_schema_version"]
         .as_u64()
         .expect("the block states the summary version the field arrived at");
-    assert_eq!(
-        u64::from(SUMMARY_SCHEMA_VERSION),
-        at,
-        "the summary schema moved past the version the block states"
+    assert!(
+        u64::from(SUMMARY_SCHEMA_VERSION) >= at,
+        "the summary schema predates the history field's introduction"
     );
     assert!(
         CONTRACT.contains(&spelled(&["opt_out"])),
@@ -6663,7 +6779,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 64, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 66, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6674,7 +6790,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.",
+        "130.", "132.", "134.",
     ]
     .into_iter()
     .flat_map(|entry| {
@@ -7074,7 +7190,7 @@ fn the_contract_names_the_retention_path_and_the_release_it_ships_in() {
 
 #[test]
 fn the_driver_contracts_invocation_parses_exactly_as_written() {
-    let documented = "onepipeline start PROJECT [--attach|--detach] \
+    let documented = "onepipeline start PROJECT [--label KEY=VALUE]... [--group SOURCE:PROJECT] [--attach|--detach] \
                       [--dag-graph off|REF] [--pr-author-graph REF] \
                       [--heartbeat-interval 1800] \
                       [--set PATH=VALUE]... [--node-set PATH=VALUE]... \
@@ -7771,6 +7887,20 @@ const RULINGS: &[(&str, &str)] = &[
         "117.",
         "An **armed** `checks-unsettled` is recovered the same way",
     ),
+    // op-link-linear-store: every run has a public id, which `status --json` carries.
+    (
+        "135.",
+        "`public_id` is what the run is named by wherever the destination is not private",
+    ),
+    ("137.", "onepipeline.projected_status"),
+    // The store owns task visibility: a node's classification is its task's own, never its
+    // project's, and the guidance coordinates one private plan.
+    (
+        "140.",
+        "never its project's: a public task of a private coordinating project is public",
+    ),
+    // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
+    ("143.", "`replies-cursor.json.offset`"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member
@@ -9013,12 +9143,12 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
         serde_json::from_value(block["reached"].clone()).expect("entry 60 names the dispositions");
     let carried = [
         Reached::Queued,
-        Reached::Worker,
-        Reached::Supervisor,
+        Reached::Worker { turn: None },
+        Reached::Supervisor { turn: None },
         Reached::JudgedWith {
             completion_reason: "the work is done".into(),
         },
-        Reached::Carried,
+        Reached::Carried { reason: None },
     ];
     assert_eq!(
         carried
@@ -9131,7 +9261,7 @@ fn the_note_delivery_surface_is_what_the_divergence_record_names() {
     let answers: Vec<String> =
         serde_json::from_value(api["answers"].clone()).expect("entry 60 names what it answers");
     let spelled = [
-        format!("{:?}", Delivered::To(Reached::Worker)),
+        format!("{:?}", Delivered::To(Reached::Worker { turn: None })),
         format!("{:?}", Delivered::Queued),
     ];
     for (answer, spelled) in answers.iter().zip(spelled.iter()) {
@@ -9194,12 +9324,22 @@ fn verb_functions_in_contract() -> BTreeSet<String> {
     backticked_in(verbs_paragraph())
         .into_iter()
         .chain(backticked_in(
+            CONTRACT
+                .split("\n\n")
+                .find(|paragraph| paragraph.contains("The SDK exposes\n`verbs::label("))
+                .expect("the label SDK declaration")
+                .split("`verbs::{")
+                .next()
+                .expect("the functions precede their supporting types"),
+        ))
+        .chain(backticked_in(
             include_str!("../docs/contract-divergences.md")
                 .split("## 123.")
                 .nth(1)
                 .expect("scratch proposal"),
         ))
         .filter_map(|span| {
+            let span = span.strip_prefix("verbs::").unwrap_or(&span);
             let name: String = span
                 .chars()
                 .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
@@ -9282,6 +9422,8 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
     let _: fn(&RunPaths, &str) -> Result<Receipt> = verbs::attest;
     let _: fn(&RunPaths, SurfaceKind, String) -> Result<Surfaced> = verbs::surface;
     let _: fn(&Surfaced) -> String = verbs::render_surfaced;
+    let _: fn(&RunPaths, verbs::LabelRequest<'_>) -> Result<verbs::LabelOverlay> = verbs::label;
+    let _: fn(&verbs::LabelOverlay) -> String = verbs::render_labelled;
     let _: fn(&RunPaths, StopRequest<'_>) -> Result<Stopped> = verbs::stop;
     let _: fn(&Stopped) -> String = verbs::render_stopped;
     let _: fn(&Path, ShutdownRequest) -> Result<Shutdown> = verbs::shutdown;
@@ -9306,6 +9448,12 @@ fn the_contract_names_every_post_launch_verb_the_sdk_publishes_and_no_other() {
 
     let in_source = verb_functions_in_source();
     let mut in_contract = verb_functions_in_contract();
+    let adoption_verbs: Vec<String> =
+        serde_json::from_value(divergence_block("71.")["sdk_verbs"].clone())
+            .expect("entry 71 names its SDK verbs");
+    in_contract.extend(adoption_verbs);
+    let _: fn(&RunPaths, Adopt, Option<u64>) -> Result<Adopted> =
+        verbs::adopt_with_writeback_item_budget;
     let review_verbs: Vec<String> =
         serde_json::from_value(divergence_block("122.")["sdk_verbs"].clone())
             .expect("entry 122 names its SDK verbs");
@@ -9396,11 +9544,12 @@ fn the_grouped_listing_is_what_the_contract_states() {
 
     // Rows over the checked-in golden document, so a row here is a document this
     // build reads rather than one assembled by hand.
-    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v10.json"))
+    let golden: RunSummary = serde_json::from_str(include_str!("golden/run-summary-v11.json"))
         .expect("the golden reads");
     let row = |run: &str, project: &str, name: Option<&str>, at: Option<u64>| RunSummary {
         run_id: run.into(),
         project: project.into(),
+        group: (!project.is_empty()).then(|| project.to_owned()),
         name: name.map(str::to_owned),
         last_write_at: at,
         ..golden.clone()
@@ -9444,7 +9593,7 @@ fn the_grouped_listing_is_what_the_contract_states() {
             ),
             (None, None, Some(250), vec!["orphan"]),
             (Some("plans:a"), Some("A"), Some(100), vec!["only-a"]),
-            (Some("plans:c"), None, None, vec!["undated"]),
+            (Some("plans:c"), Some("c"), None, vec!["undated"]),
         ]
     );
     assert_eq!(
@@ -10281,7 +10430,9 @@ fn the_host_reading_is_the_committed_schema_with_the_version_1_keys() {
 /// held to the type's fields and to the schema's words.
 #[test]
 fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
-    use onepipeline::views::{EndedNode, Ending, EndingKind, Paused, RunReading, RunView};
+    use onepipeline::views::{
+        AwaitedRelease, EndedNode, Ending, EndingKind, Paused, ReadingNode, RunReading, RunView,
+    };
 
     // For serialization: the document is what the type writes, so a field it
     // always writes is required, and an `Option` is written as `null`.
@@ -10308,8 +10459,11 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
     let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"liveness\""))
         .expect("the contract's run reading example is JSON");
     let reading = RunReading {
-        schema_version: 1,
+        labels: Default::default(),
+        group: None,
+        schema_version: 3,
         run_id: "demo-1".into(),
+        public_id: "demo-1".into(),
         word: "ENDED failed",
         liveness: "DRIVER DEAD",
         driven: false,
@@ -10322,12 +10476,53 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             }],
         }),
         paused: None,
+        nodes: vec![
+            ReadingNode {
+                id: "build".into(),
+                status: "done",
+                outcome: Some("merged".into()),
+                detail: None,
+                awaiting: None,
+            },
+            ReadingNode {
+                id: "sign-off".into(),
+                status: "failed",
+                outcome: Some("settled-from-evidence".into()),
+                detail: Some("the release notes were never signed".into()),
+                awaiting: None,
+            },
+        ],
         unanswered: Vec::new(),
+        inbox: Vec::new(),
     };
     assert_eq!(
         example,
         serde_json::to_value(&reading).expect("a reading serialises"),
         "the contract's example is not what the type writes"
+    );
+    // A node held for its releases carries what it awaits, as the contract's
+    // second example spells it; every other node omits the key.
+    let held: Value = serde_json::from_str(&fenced_block_naming("json", "\"awaiting\": [{"))
+        .expect("the contract's held node example is JSON");
+    assert_eq!(
+        held,
+        serde_json::to_value(ReadingNode {
+            id: "consumer".into(),
+            status: "complete-but-held",
+            outcome: Some("held-for-release".into()),
+            detail: Some(
+                "complete, and held unlanded: awaiting the crate release of \
+                 github.com/owner/engine, kept on feat/consumer at 4f2c9e1 (pushed); it lands \
+                 when that release arrives"
+                    .into()
+            ),
+            awaiting: Some(vec![AwaitedRelease {
+                producer: "github.com/owner/engine".into(),
+                target: "crate".into(),
+            }]),
+        })
+        .expect("a node serialises"),
+        "the contract's held node example is not what the type writes"
     );
     let paused = serde_json::to_value(Paused {
         human_actions: vec!["approve".into()],
@@ -10382,6 +10577,8 @@ fn the_run_reading_is_the_committed_schema_and_what_the_contract_names() {
             "`EndingKind { Complete, Failed, Unfinished, Stopped }`",
             "`Ending { kind, nodes: Vec<EndedNode> }`",
             "`EndedNode { id, status, outcome }`",
+            "`ReadingNode { id, status, outcome, detail, awaiting }`",
+            "`AwaitedRelease { producer, target }`",
             "`Paused { human_actions: Vec<String>, blocking_surface: bool }`",
             "`reading(&RunView) -> RunReading`",
             "`standing_word_of(&RunSummary) -> &'static str`",
@@ -10657,6 +10854,37 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
         .map(|step| step["step"].clone())
         .collect();
     assert_eq!(Value::Array(steps), block["boundary_guidance_steps"]);
+    // The version and the synthetic coordinating plan are the binary's own, field for field:
+    // a private preserved producer and a public consumer, each with its own visibility, the
+    // `onepipeline.export_edges` entry joining them, and a projection carrying nothing private.
+    assert_eq!(
+        guidance["schema_version"],
+        block["boundary_guidance_schema_version"]
+    );
+    assert_eq!(guidance["example"], block["boundary_guidance_example"]);
+    let example: Plan = serde_json::from_value(json!({
+        "schema_version": 3,
+        "name": "generic-example",
+        "tasks": block["boundary_guidance_example"]["tasks"]
+            .as_array()
+            .expect("the example's tasks")
+            .iter()
+            .map(|task| json!({"id": task["id"], "classification": task["visibility"]}))
+            .collect::<Vec<_>>(),
+        "export_edges": block["boundary_guidance_example"]["export_edges"],
+    }))
+    .expect("the example's tasks and edge are a plan of this schema");
+    assert_eq!(
+        example
+            .tasks
+            .iter()
+            .map(|node| node.classification)
+            .collect::<Vec<_>>(),
+        [
+            onetaskgraph_plugin_api::Classification::Private,
+            onetaskgraph_plugin_api::Classification::Public
+        ]
+    );
     assert_contract_names(
         "the publication boundary",
         &[
@@ -10665,6 +10893,8 @@ fn the_publication_boundary_block_is_the_schema_and_the_guidance_the_binary_prin
             "onepipeline boundary guidance [--json]",
             "## Repository boundary",
             "<host prefix>public/<opaque id>/task-<ordinal>",
+            "never its project's: a public task of a private coordinating project is public",
+            "the `coordination` lines",
         ],
     );
 }
@@ -11119,7 +11349,7 @@ fn the_manager_landing_contract_is_what_the_divergence_record_names() {
 /// and both bundles are at its versions and carry the op and the kinds.
 #[test]
 fn the_review_reply_surface_is_what_the_divergence_record_names() {
-    use onepipeline::channel::layout::{CommandOutcome, Op, DOCUMENT_VERSION};
+    use onepipeline::channel::layout::{CommandOutcome, Op};
     use onepipeline::channel::{Author, Command, CommandResult, CommandVerdict, Refusal};
     use onepipeline::payload::{registry, schema_of};
     let block = divergence_block("130.");
@@ -11259,6 +11489,7 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             outcome: CommandVerdict::Refused,
             reason: Some(typed.to_string()),
             refusal: Some(typed.clone()),
+            turn: None,
         };
         let wire = serde_json::to_value(&result).unwrap();
         assert_eq!(&wire[field], refusal);
@@ -11282,6 +11513,7 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
         outcome: CommandVerdict::Applied,
         reason: None,
         refusal: None,
+        turn: None,
     })
     .unwrap();
     assert!(bare.get(field).is_none(), "{bare}");
@@ -11293,9 +11525,11 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
     .unwrap();
     assert_eq!(golden["schema_version"], block["results_schema_version"]);
     assert_eq!(block["store_review_keys"], json!([]));
+    // The versions this entry raised both bundles to; entry 132 raised the events
+    // bundle since, and entry 133 the planner channel's.
     assert_eq!(
         block["bundle_versions"],
-        json!({"events": onepipeline::vocabulary::EVENTS_BUNDLE_VERSION, "planner_channel": DOCUMENT_VERSION})
+        json!({"events": "1.7.0", "planner_channel": "1.5.0"})
     );
     assert!(onepipeline::channel::layout::bundle_json().contains("\"decline\""));
     let events = onepipeline::vocabulary::events_bundle_json();
@@ -11305,4 +11539,396 @@ fn the_review_reply_surface_is_what_the_divergence_record_names() {
             "{kind}"
         );
     }
+}
+
+/// The interrupting-note surface entry 133 proposes is what this build declares:
+/// `deliver`'s three values and default, a note carrying a deadline, a
+/// `withdraw-note` that refuses a field it does not declare, the `turn` a
+/// delivered note and its command result carry — and an outcome or record
+/// written before either had one still reads, and writes back without it.
+#[test]
+fn the_interrupting_note_surface_is_what_entry_133_names() {
+    use onepipeline::channel::{CommandResult, CommandVerdict, Deliver};
+    use onepipeline::note::NoteTurn;
+    let block = divergence_block("133.");
+    let values = |schema: Value| -> Vec<Value> {
+        schema["oneOf"]
+            .as_array()
+            .expect("one schema per value")
+            .iter()
+            .map(|value| value["const"].clone())
+            .collect()
+    };
+    assert_eq!(
+        values(serde_json::to_value(schemars::schema_for!(Deliver)).unwrap()),
+        block["deliver"].as_array().unwrap().clone(),
+        "`deliver`'s values are not the ones entry 133 names"
+    );
+    assert_eq!(json!(Deliver::default()), block["default_deliver"]);
+    assert_eq!(
+        values(serde_json::to_value(schemars::schema_for!(NoteTurn)).unwrap()),
+        block["turn"].as_array().unwrap().clone(),
+        "a delivered note's `turn` values are not the ones entry 133 names"
+    );
+
+    let note: Edit = serde_json::from_value(block["note"].clone()).expect("the note reads");
+    let Edit::Note {
+        deliver,
+        delivery_timeout_seconds,
+        ..
+    } = &note
+    else {
+        panic!("entry 133's note is not a note: {note:?}");
+    };
+    assert_eq!(
+        (*deliver, *delivery_timeout_seconds),
+        (Deliver::TurnEnd, Some(2))
+    );
+    assert_eq!(serde_json::to_value(&note).unwrap(), block["note"]);
+    // The largest value the field can carry is a deadline the surface accepts.
+    let largest: Edit =
+        serde_json::from_value(block["accepted_largest"].clone()).expect("the largest reads");
+    assert!(
+        matches!(
+            &largest,
+            Edit::Note {
+                delivery_timeout_seconds: Some(u64::MAX),
+                ..
+            }
+        ),
+        "{largest:?}"
+    );
+    // Each envelope-time refusal is a command the wire reads, so it is the
+    // reconciler's rule that refuses it, naming the field.
+    for refused in block["refused_at_the_envelope"].as_array().unwrap() {
+        let command: Edit =
+            serde_json::from_value(refused["command"].clone()).expect("the command reads");
+        assert!(matches!(command, Edit::Note { .. }), "{command:?}");
+    }
+
+    let withdraw: Edit =
+        serde_json::from_value(block["withdraw_note"].clone()).expect("the withdrawal reads");
+    assert_eq!(op_of(&withdraw), "withdraw-note");
+    assert_eq!(
+        serde_json::to_value(&withdraw).unwrap(),
+        block["withdraw_note"]
+    );
+    let mut stray = block["withdraw_note"].clone();
+    stray["text"] = json!("a field it does not declare");
+    assert!(
+        serde_json::from_value::<Edit>(stray)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `text`"),
+        "a withdrawal carrying a field it does not declare was read"
+    );
+
+    let reached: Reached = serde_json::from_value(block["delivered"].clone()).expect("it reads");
+    assert_eq!(
+        reached,
+        Reached::Worker {
+            turn: Some(NoteTurn::Interrupted)
+        }
+    );
+    let before: Reached =
+        serde_json::from_value(block["delivered_before"].clone()).expect("a record before reads");
+    assert_eq!(before, Reached::Worker { turn: None });
+    assert!(serde_json::to_value(&before).unwrap().get("turn").is_none());
+    let carried: Reached =
+        serde_json::from_value(block["carried_expired"].clone()).expect("a carried note reads");
+    assert!(
+        matches!(&carried, Reached::Carried { reason: Some(reason) } if reason.contains("delivery_timeout_seconds")),
+        "{carried:?}"
+    );
+
+    let result: CommandResult = serde_json::from_value(block["result"].clone()).expect("reads");
+    assert_eq!(
+        (result.outcome, result.turn),
+        (CommandVerdict::Applied, Some(NoteTurn::Interrupted))
+    );
+    assert_eq!(serde_json::to_value(&result).unwrap(), block["result"]);
+    let earlier: CommandResult =
+        serde_json::from_value(block["result_before"].clone()).expect("an earlier result reads");
+    assert_eq!(earlier.turn, None);
+    assert_eq!(
+        serde_json::to_value(&earlier).unwrap(),
+        block["result_before"]
+    );
+
+    // The planner-channel document states both: the outcome's `turn`, and the op.
+    let bundle = onepipeline::channel::layout::bundle_json();
+    for word in ["\"withdraw-note\"", "\"NoteTurn\"", "\"turn-end\""] {
+        assert!(
+            bundle.contains(word),
+            "the planner-channel document does not state {word}"
+        );
+    }
+    // And the run reading states the `delivering` reading's `deadline`.
+    let reading: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let delivering = reading["$defs"]["Delivery"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|variant| variant["properties"]["state"]["const"] == "delivering")
+        .expect("the reading states a delivering delivery");
+    for field in block["delivering"].as_object().unwrap().keys() {
+        assert!(
+            field == "envelope" || delivering["properties"].get(field).is_some(),
+            "the run reading's `delivering` does not state `{field}`"
+        );
+    }
+}
+
+/// The overlay example is the public SDK's document, including absent versus null grouping.
+#[test]
+fn the_label_overlay_is_the_contract_document() {
+    use onepipeline::verbs::{LabelGroup, LabelKey, LabelOverlay, LabelValue, RunGroup};
+    assert_eq!(SUMMARY_SCHEMA_VERSION, 11);
+    assert!(CONTRACT.contains("11 (one after 10)"));
+    let example: Value = serde_json::from_str(&fenced_block_naming("json", "\"set_by\"")).unwrap();
+    let overlay: LabelOverlay = serde_json::from_value(example.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&overlay).unwrap(), example);
+    assert_eq!(
+        overlay.labels[&LabelKey::try_from("kind".to_owned()).unwrap()].as_str(),
+        "spikes"
+    );
+    assert_eq!(
+        overlay.group,
+        LabelGroup::Set(RunGroup::try_from("authoring:example".to_owned()).unwrap())
+    );
+    let mut absent = example.clone();
+    absent.as_object_mut().unwrap().remove("group");
+    let kept: LabelOverlay = serde_json::from_value(absent.clone()).unwrap();
+    assert_eq!(kept.group, LabelGroup::Keep);
+    assert_eq!(serde_json::to_value(kept).unwrap(), absent);
+    let mut cleared = example.clone();
+    cleared["group"] = Value::Null;
+    let clear: LabelOverlay = serde_json::from_value(cleared.clone()).unwrap();
+    assert_eq!(clear.group, LabelGroup::Clear);
+    assert_eq!(serde_json::to_value(clear).unwrap(), cleared);
+    assert!(LabelKey::try_from("Kind".to_owned()).is_err());
+    assert!(LabelValue::try_from("two\nlines".to_owned()).is_err());
+    assert!(RunGroup::try_from("unqualified".to_owned()).is_err());
+    let mut bad_time = example.clone();
+    bad_time["set_at"] = json!("not-a-time");
+    assert!(serde_json::from_value::<LabelOverlay>(bad_time).is_err());
+    let mut typo = example;
+    typo["lables"] = json!({});
+    assert!(serde_json::from_value::<LabelOverlay>(typo).is_err());
+}
+
+/// Entry 136 names every word of `CommandVerdict`, the `queued` word among them, and
+/// the published layout document and the run reading carry what that entry's ruling
+/// adds: `queued` in the channel's outcome vocabulary, and a `queued` delivery beside
+/// `RunReading`'s `inbox`.
+#[test]
+fn the_command_verdict_words_are_what_entry_136_names() {
+    use onepipeline::channel::CommandVerdict;
+    let block = divergence_block("136.");
+    let stated: Vec<String> =
+        serde_json::from_value(block["command_verdict"].clone()).expect("a list of words");
+    let every = [
+        CommandVerdict::Applied,
+        CommandVerdict::Validated,
+        CommandVerdict::Delivered,
+        CommandVerdict::Refused,
+        CommandVerdict::Queued,
+    ];
+    // Exhaustive, so a word the type gains fails to compile here until the entry
+    // and this list name it.
+    for verdict in every {
+        match verdict {
+            CommandVerdict::Applied
+            | CommandVerdict::Validated
+            | CommandVerdict::Delivered
+            | CommandVerdict::Refused
+            | CommandVerdict::Queued => {}
+        }
+    }
+    let words: Vec<String> = every
+        .iter()
+        .map(|verdict| {
+            serde_json::to_value(verdict)
+                .expect("a verdict serialises")
+                .as_str()
+                .expect("a verdict is a word")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        words, stated,
+        "entry 136 does not name CommandVerdict's words"
+    );
+    for word in &stated {
+        let read: CommandVerdict =
+            serde_json::from_value(json!(word)).expect("each stated word reads back");
+        assert_eq!(json!(read), json!(word));
+    }
+
+    let bundle: Value =
+        serde_json::from_str(&onepipeline::channel::layout::bundle_json()).expect("JSON");
+    let outcome = bundle["schemas"]
+        .as_array()
+        .expect("the bundle's schemas")
+        .iter()
+        .find(|schema| schema["id"] == "agent.command-outcome@1")
+        .expect("the bundle carries the command outcome");
+    assert_eq!(
+        outcome["schema"]["$defs"]["CommandVerdict"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(stated.len()),
+        "the layout document's CommandVerdict is not one schema per word"
+    );
+    let document = outcome["schema"]["$defs"]["CommandVerdict"].to_string();
+    for word in &stated {
+        assert!(
+            document.contains(&format!("\"{word}\"")),
+            "the planner-channel document's CommandVerdict does not state `{word}`"
+        );
+    }
+
+    let reading: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo_root().join("schemas/run-reading.schema.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        reading["properties"]["inbox"].is_object(),
+        "the run reading does not state `inbox`"
+    );
+    assert!(
+        reading["$defs"]["Delivery"]["oneOf"]
+            .as_array()
+            .is_some_and(|variants| variants
+                .iter()
+                .any(|variant| variant["properties"]["state"]["const"] == "queued")),
+        "the run reading does not state a `queued` delivery"
+    );
+}
+
+#[test]
+fn retained_run_views_publish_the_contracts_refresh_outcomes() {
+    use onepipeline::views::{Refreshed, RunView};
+    let _: fn(&mut RunView) -> onepipeline::Result<Refreshed> = RunView::refresh;
+    let outcomes = [
+        Refreshed::Unchanged,
+        Refreshed::Appended { first: 7 },
+        Refreshed::Reread,
+    ];
+    let offsets: Vec<_> = outcomes
+        .into_iter()
+        .map(|outcome| match outcome {
+            Refreshed::Unchanged => None,
+            Refreshed::Appended { first } => Some(first),
+            Refreshed::Reread => None,
+        })
+        .collect();
+    assert_eq!(offsets, [None, Some(7), None]);
+    assert_contract_names(
+        "retained view refresh",
+        &[
+            "`views::RunView::refresh(&mut self) -> crate::Result<views::Refreshed>`",
+            "`views::Refreshed { Unchanged, Appended { first: usize }, Reread }`",
+        ],
+    );
+}
+
+/// The transcript resolver is the surface the contract states — its signature,
+/// its answers and their spelling, its bound — and the `watch` machine record's
+/// `transcript` object in both its forms is what those types render.
+#[test]
+fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_states() {
+    use onepipeline::views::transcript::{
+        self, Resolved, Text, TranscriptRef, Unresolved, Why, DESCRIPTION_MAX_CHARS,
+    };
+    let _: fn(&TranscriptRef) -> std::result::Result<Resolved, Unresolved> = transcript::resolve;
+    type OfPayload<T> =
+        fn(&str, &serde_json::Map<String, Value>) -> Option<std::result::Result<T, Unresolved>>;
+    let _: OfPayload<TranscriptRef> = TranscriptRef::of;
+    let _: OfPayload<Resolved> = transcript::of_record;
+    assert_eq!(DESCRIPTION_MAX_CHARS, 120);
+    assert_contract_names(
+        "transcript resolver's",
+        &[
+            "`views::transcript::resolve(&TranscriptRef) -> Result<Resolved, Unresolved>`",
+            "`TranscriptRef::of(kind, payload)`",
+            "`views::transcript::of_record(kind, payload)`",
+            "`TranscriptRef::Instruction`",
+            "`TranscriptRef::Message`",
+            "`TranscriptRef::Decision`",
+            "`parse_supervisor`",
+            "`TranscriptRef::Activity`",
+            "`TranscriptRef::Copy { text, cut }`",
+            "`Text::Tool { kind, name, input, output }`",
+            "`DESCRIPTION_MAX_CHARS` (120)",
+            "`io::history::find_session_path`",
+            "`transcript unavailable: <path>: <why>`",
+            "`onepipeline scratch discard`",
+            "`started_at` and `completed_at`",
+        ],
+    );
+    for why in [Why::MissingFile, Why::MissingEntry, Why::Unreadable] {
+        assert_contract_names("transcript resolver's", &[&format!("`{}`", why.as_str())]);
+        assert_eq!(
+            serde_json::to_value(why).expect("a reason serializes"),
+            json!(why.as_str())
+        );
+    }
+    let copy = TranscriptRef::Copy {
+        text: Text::Instruction("## What".into()),
+        cut: true,
+    };
+    assert!(!copy.is_reference());
+
+    let blocks = fenced_blocks("json watch-transcript");
+    let [block] = &blocks[..] else {
+        panic!(
+            "expected exactly one ```json watch-transcript block, found {}",
+            blocks.len()
+        );
+    };
+    let records: Vec<Value> =
+        serde_json::from_str(block).expect("the watch-transcript example parses");
+    let (mut resolved, mut unavailable) = (0, 0);
+    for record in &records {
+        assert_eq!(record["watch"], "event", "{record}");
+        let object = record["transcript"]
+            .as_object()
+            .unwrap_or_else(|| panic!("the example carries no transcript object: {record}"));
+        if let Some(line) = object.get("unavailable") {
+            unavailable += 1;
+            let why: Why = serde_json::from_value(object["why"].clone())
+                .unwrap_or_else(|error| panic!("{error}: {record}"));
+            let rendered = Unresolved {
+                path: object["path"].as_str().expect("a path").into(),
+                why,
+            }
+            .to_string();
+            assert_eq!(line, &json!(rendered), "{record}");
+            assert_eq!(object.len(), 3, "{record}");
+        } else {
+            resolved += 1;
+            let description = object["description"].as_str().expect("a description");
+            assert!(
+                !description.contains('\n') && description.chars().count() <= DESCRIPTION_MAX_CHARS,
+                "{record}"
+            );
+            let texts: Vec<&str> = ["instruction", "message", "reasoning"]
+                .into_iter()
+                .filter(|key| object.contains_key(*key))
+                .collect();
+            let tool = object.contains_key("input") && object.contains_key("output");
+            assert!(
+                texts.len() + usize::from(tool) == 1 && object.len() == 2 + usize::from(tool),
+                "the example's text is not under exactly one field naming what it is: {record}"
+            );
+        }
+    }
+    assert!(
+        resolved >= 1 && unavailable >= 1,
+        "the example shows {resolved} resolved and {unavailable} unavailable forms, not both"
+    );
 }

@@ -21,14 +21,15 @@
 // `main.rs` states for this whole tier.
 
 use onepipeline_testfakes::profile::process::{Command, Output};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::cleanup::{Created, Tracked};
 use crate::harness::{agent, plan_of, World};
-use crate::repo::{ensure_repo, gh, gh_try, missing, Cause};
+use crate::repo::{ensure_repo, gh, gh_try, missing};
 use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 
 /// The alias every host registers its clone of the scratch repository under, and so the
@@ -36,7 +37,7 @@ use crate::{authenticated_user, git, git_credentials, run_stamp, scratch_repo};
 const ALIAS: &str = "continue-smoke";
 
 /// The claim interval every driver here runs under, shortened through entry 128's setting
-/// so a driver notices a takeover inside the journey.
+/// so a takeover reads the claim every second while it waits.
 const CLAIM_INTERVAL_SECONDS: &str = "10";
 
 /// How long a step may take against the real services before the journey gives up on it.
@@ -159,14 +160,6 @@ fn claim(world: &World, project: &str) -> Value {
     panic!("the store answered for its project only in part: {said}");
 }
 
-/// What one invocation of the journey opened on the scratch repository: the pull requests,
-/// by number, and the branches every host recorded publishing under the run's prefix.
-#[derive(Default)]
-pub(crate) struct Tracked {
-    pub(crate) pulls: BTreeSet<u64>,
-    pub(crate) branches: BTreeSet<String>,
-}
-
 impl Tracked {
     /// Add what `world` recorded for `run`: every `branch`, `url` and `change_url` its
     /// journal's `onevcs` records and settlements carry, wherever in the payload they sit.
@@ -201,270 +194,6 @@ impl Tracked {
                     _ => {}
                 }
             }
-        }
-    }
-}
-
-/// What the journey created on the scratch repository, and its cleanup.
-///
-/// [`Created::clean`] is the journey's own last step: it closes every pull request the hosts
-/// recorded opening and every open one whose title carries this run's stamp, deletes every
-/// branch under the run's prefix, and then reads each one back from GitHub to show it closed
-/// or gone — answering every failure it met rather than counting it as done. Its `Drop` runs
-/// the same sweep, best-effort, for a journey that failed before that step: declared before
-/// every world, it drops after them, once each has stopped the drivers it started, which
-/// would otherwise go on publishing after it was cleaned. A failure there is printed, since
-/// a panic while unwinding would abort the report of the one that got it there.
-pub(crate) struct Created {
-    pub(crate) slug: String,
-    pub(crate) stamp: String,
-    /// The prefixes every branch of the run is cut under — here the run's id and a `/`, once
-    /// the first launch has minted it; on a board, each task's issue number and a `/`.
-    pub(crate) prefixes: Vec<String>,
-    pub(crate) cleaned: bool,
-}
-
-/// What a cleanup met: each step it took, and every failure.
-#[derive(Default)]
-pub(crate) struct Cleanup {
-    pub(crate) observed: Vec<String>,
-    pub(crate) failures: Vec<String>,
-}
-
-impl Cleanup {
-    fn failed(&mut self, what: impl std::fmt::Display) {
-        self.failures.push(what.to_string());
-    }
-}
-
-impl Created {
-    /// Close and delete everything `tracked` names and everything the stamp and the prefixes
-    /// find, then read each back.
-    pub(crate) fn clean(&mut self, tracked: &Tracked) -> Cleanup {
-        self.cleaned = true;
-        let mut cleanup = Cleanup::default();
-        let mut pulls = tracked.pulls.clone();
-        let stamped = self.stamped_open(&mut cleanup);
-        let untracked: Vec<u64> = stamped.difference(&tracked.pulls).copied().collect();
-        if !tracked.pulls.is_empty() && !untracked.is_empty() {
-            cleanup.failed(format!(
-                "open pull requests carrying the stamp that no host recorded opening: {untracked:?}"
-            ));
-        }
-        pulls.extend(stamped);
-        let mut branches = tracked.branches.clone();
-        // Highest first, so a stacked pull request is closed before the one under it.
-        for number in pulls.iter().rev() {
-            let Some((state, head)) = self.pull(*number, &mut cleanup) else {
-                continue;
-            };
-            branches.insert(head);
-            if state == "OPEN" {
-                match gh_try(&["pr", "close", &number.to_string(), "--repo", &self.slug]) {
-                    Ok(_) => cleanup.observed.push(format!("closed #{number}")),
-                    Err(refusal) => cleanup.failed(format!("closing #{number}: {refusal}")),
-                }
-            } else {
-                cleanup
-                    .observed
-                    .push(format!("#{number} was already {state}"));
-            }
-        }
-        branches.extend(self.remote_branches(&mut cleanup));
-        for branch in &branches {
-            if !self
-                .prefixes
-                .iter()
-                .any(|prefix| branch.starts_with(prefix.as_str()))
-            {
-                cleanup.failed(format!(
-                    "{branch} is outside the run's prefixes {:?}, so it is not deleted",
-                    self.prefixes
-                ));
-                continue;
-            }
-            match self.branch_exists(branch, &mut cleanup) {
-                Some(true) => match gh_try(&[
-                    "api",
-                    "-X",
-                    "DELETE",
-                    &format!("repos/{}/git/refs/heads/{branch}", self.slug),
-                ]) {
-                    Ok(_) => cleanup.observed.push(format!("deleted {branch}")),
-                    Err(refusal) => cleanup.failed(format!("deleting {branch}: {refusal}")),
-                },
-                Some(false) => cleanup.observed.push(format!("{branch} was already gone")),
-                None => {}
-            }
-        }
-        // Read back: every pull request closed, every branch gone, nothing left to find.
-        let mut closed = Vec::new();
-        for number in &pulls {
-            match self.pull(*number, &mut cleanup) {
-                Some((state, _)) if state == "CLOSED" => closed.push(*number),
-                Some((state, _)) => {
-                    cleanup.failed(format!("#{number} reads {state} after the cleanup"));
-                }
-                None => {}
-            }
-        }
-        let mut gone = Vec::new();
-        for branch in &branches {
-            match self.branch_exists(branch, &mut cleanup) {
-                Some(false) => gone.push(branch.as_str()),
-                Some(true) => {
-                    cleanup.failed(format!("{branch} is still on the remote after the cleanup"));
-                }
-                None => {}
-            }
-        }
-        let left = self.stamped_open(&mut cleanup);
-        if !left.is_empty() {
-            cleanup.failed(format!("still open after the cleanup: {left:?}"));
-        }
-        let remaining = self.remote_branches(&mut cleanup);
-        if !remaining.is_empty() {
-            cleanup.failed(format!(
-                "branches under the prefix after the cleanup: {remaining:?}"
-            ));
-        }
-        cleanup.observed.push(format!(
-            "read back from GitHub: closed {closed:?} of {pulls:?}; gone {gone:?} of {branches:?}"
-        ));
-        cleanup
-    }
-
-    /// The open pull requests on the scratch repository whose title carries the stamp.
-    fn stamped_open(&self, cleanup: &mut Cleanup) -> BTreeSet<u64> {
-        let listed = match gh_try(&[
-            "pr",
-            "list",
-            "--repo",
-            &self.slug,
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--json",
-            "number,title",
-        ]) {
-            Ok(listed) => listed,
-            Err(refusal) => {
-                cleanup.failed(format!("listing open pull requests: {refusal}"));
-                return BTreeSet::new();
-            }
-        };
-        let listed: Vec<Value> = match serde_json::from_str(&listed) {
-            Ok(listed) => listed,
-            Err(why) => {
-                cleanup.failed(format!("reading the open pull requests: {why}: {listed}"));
-                return BTreeSet::new();
-            }
-        };
-        listed
-            .iter()
-            .filter(|pull| {
-                pull["title"]
-                    .as_str()
-                    .is_some_and(|title| title.contains(&self.stamp))
-            })
-            .filter_map(|pull| pull["number"].as_u64())
-            .collect()
-    }
-
-    /// Pull request `number`'s state and head branch, or the failure that kept them.
-    fn pull(&self, number: u64, cleanup: &mut Cleanup) -> Option<(String, String)> {
-        let read = gh_try(&[
-            "pr",
-            "view",
-            &number.to_string(),
-            "--repo",
-            &self.slug,
-            "--json",
-            "state,headRefName",
-        ]);
-        let read = match read {
-            Ok(read) => read,
-            Err(refusal) => {
-                cleanup.failed(format!("reading #{number}: {refusal}"));
-                return None;
-            }
-        };
-        let pull: Value = match serde_json::from_str(&read) {
-            Ok(pull) => pull,
-            Err(why) => {
-                cleanup.failed(format!("reading #{number}: {why}: {read}"));
-                return None;
-            }
-        };
-        match (pull["state"].as_str(), pull["headRefName"].as_str()) {
-            (Some(state), Some(head)) => Some((state.to_owned(), head.to_owned())),
-            _ => {
-                cleanup.failed(format!("#{number} names no state or head: {pull}"));
-                None
-            }
-        }
-    }
-
-    /// Whether `branch` is on the remote: `None` where GitHub's answer said neither.
-    fn branch_exists(&self, branch: &str, cleanup: &mut Cleanup) -> Option<bool> {
-        match gh_try(&[
-            "api",
-            &format!("repos/{}/git/ref/heads/{branch}", self.slug),
-        ]) {
-            Ok(_) => Some(true),
-            Err(refusal) if refusal.cause == Cause::NotFound => Some(false),
-            Err(refusal) => {
-                cleanup.failed(format!("reading {branch}: {refusal}"));
-                None
-            }
-        }
-    }
-
-    /// Every branch on the remote under one of the run's prefixes.
-    fn remote_branches(&self, cleanup: &mut Cleanup) -> BTreeSet<String> {
-        let mut branches = BTreeSet::new();
-        for prefix in &self.prefixes {
-            let listed = match gh_try(&[
-                "api",
-                &format!("repos/{}/git/matching-refs/heads/{prefix}", self.slug),
-            ]) {
-                Ok(listed) => listed,
-                Err(refusal) => {
-                    cleanup.failed(format!("listing branches under {prefix}: {refusal}"));
-                    continue;
-                }
-            };
-            let refs: Vec<Value> = match serde_json::from_str(&listed) {
-                Ok(refs) => refs,
-                Err(why) => {
-                    cleanup.failed(format!("reading branches under {prefix}: {why}: {listed}"));
-                    continue;
-                }
-            };
-            branches.extend(
-                refs.iter()
-                    .filter_map(|reference| reference["ref"].as_str())
-                    .filter_map(|reference| reference.strip_prefix("refs/heads/"))
-                    .filter(|branch| branch.starts_with(prefix.as_str()))
-                    .map(str::to_owned),
-            );
-        }
-        branches
-    }
-}
-
-impl Drop for Created {
-    fn drop(&mut self) {
-        if self.cleaned {
-            return;
-        }
-        let cleanup = self.clean(&Tracked::default());
-        for step in &cleanup.observed {
-            eprintln!("smoke: cleanup after a failed journey: {step}");
-        }
-        for failure in &cleanup.failures {
-            eprintln!("smoke: cleanup after a failed journey FAILED: {failure}");
         }
     }
 }
@@ -681,7 +410,8 @@ pub(crate) fn change(id: &str, deps: &[&str], stamp: &str) -> Value {
 
 /// A project on a shared plan store, drafted by one host, is refused to a cold host while that
 /// host's claim stands, taken over by it while the first driver is still live — which stops
-/// at its next claim check — and carried on from the store alone: no node the first host
+/// at its next claim read, before a publication — and carried on from the store alone: no
+/// node the first host
 /// settled `done` is dispatched again, a failed one is continued on its branch, and a node
 /// depending on the stacked one is drafted on that one's branch. Then two hosts launch the
 /// drafted project at the same moment, and every draft is still the one pull request open
@@ -712,6 +442,9 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         missing("this run still carries a stand-in for `gh`, so it would never reach GitHub")
     );
     first.script("harness.work", &format!("continued from the store {stamp}"));
+    // A file of this run's own: another job's smoke shares the scratch repository, and
+    // two runs writing one file conflict on whichever base merged the other first.
+    first.script("harness.work-file", &format!("continuation-{stamp}.md"));
     first.script("harness.work-per-task", "");
     // Only the agent node above the stack is held, and from before the launch: the engine
     // dispatches a lifecycle node again after a failed publication, and a hold on every
@@ -888,6 +621,11 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
     let claimed = claim(&first, &project);
     println!("smoke: the store's claim after the takeover: {claimed}");
+    // Let the node above the stack go: the first driver reads the claim before the
+    // publication its next node makes, finds the takeover, withholds that publication,
+    // ends, and acknowledges; the second carries on.
+    first.release("turn.go");
+    first.release("turn.settle");
     let since = Instant::now();
     until(
         "the first driver to notice the takeover",
@@ -896,7 +634,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         both_held,
     );
     println!(
-        "smoke: the first driver noticed the takeover {:?} after the claim reached the store",
+        "smoke: the first driver noticed the takeover {:?} after its node was let go",
         since.elapsed()
     );
     let journal = first.journal(&run);
@@ -916,10 +654,6 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
         after.is_empty(),
         "the superseded driver started work after its check: {after:?}"
     );
-    // Let the node above the stack go: the first driver ends, acknowledges the takeover,
-    // and the second carries on.
-    first.release("turn.go");
-    first.release("turn.settle");
     until(
         "the first driver to end",
         PATIENCE,
@@ -1000,7 +734,7 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
     );
 
     // Two hosts launch the drafted project at the same moment, with one more node to keep
-    // each driving long enough to read the claim.
+    // each driving: neither publishes, so each reads the claim only as it lets go.
     first.add_task(
         &name,
         "004-linger",
@@ -1081,17 +815,14 @@ fn a_stored_project_is_carried_on_by_a_cold_host_that_takes_it_over() {
             dispatched(host, &run)
         );
     }
-    println!("smoke: the store's claim once both had checked it: {claim_then}");
+    println!("smoke: the store's claim once both had launched: {claim_then}");
     for host in &racing {
         println!(
             "smoke: what a racing host recorded:\n{}",
             recorded(host, &run)
         );
     }
-    assert!(
-        left <= 1,
-        "{left} racing drivers were left driving past their claim checks"
-    );
+    println!("smoke: {left} racing drivers were driving with nothing to publish");
     first.release("turn.go");
     first.release("turn.settle");
     for (host, output) in racing.iter().zip(&outputs) {

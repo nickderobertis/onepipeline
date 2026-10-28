@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.7.3"
+onetaskgraph-version := "0.12.7"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -264,9 +264,10 @@ _crate-lint:
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
 # (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
-# are `pool_workload` and `scratch_workload`: each measures a whole host-shaped
-# workload, so its project (`onepipeline-pool-workload`,
-# `onepipeline-scratch-workload`) runs it only through `just workload`.
+# are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
+# whole host-shaped workload, so its project (`onepipeline-pool-workload`,
+# `onepipeline-scratch-workload`, `onepipeline-journal-workload`) runs it only
+# through `just workload`.
 #
 # `rest-tier` is spelled as the complement of every other binary, so a test
 # binary added later lands in the crate's tier rather than in none.
@@ -282,7 +283,8 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload)"
+rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
+codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
 note-tier := "binary(note) and not test(/^harness::/)"
@@ -546,6 +548,21 @@ _scratch-workload-run:
     @RUSTFLAGS="-D warnings" cargo nextest run --locked --test scratch_workload --test-threads 1 -E 'not test(/^harness::/)' --no-tests=fail
     @cd tests/scratch_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 
+# The `onepipeline-journal-workload` project's `workload` target: the release-built
+# driver adopts a synthesized run at each journal size of 1, 20, 80, 160 and 800 MB,
+# the journey writes `target/budget-records/journal-workload.json`, and the project's
+# own budgets file reads it. One size at a time, each process the journey starts bounded
+# at 24 GiB of address space (`ulimit -v` bounds each process, not their sum), so a
+# driver that regrew its memory with its journal fails its allocation rather than
+# pressing a shared host into swap.
+# Through libtest rather than nextest, whose per-test bound (360 s, for the offline
+# tiers) is far under one journey of five sizes; the journey bounds each of its own
+# phases instead.
+_journal-workload-run:
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
+    @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
+    @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),
 # narrowed to the journeys a nextest filter names when one is given.
@@ -665,9 +682,10 @@ engines-split:
     @bash scripts/linked-engines.sh --format split
 
 # Outside `check` and `gate` because it pulls the manylinux image and a toolchain
-# over the network and needs Docker. release.yml's `build-linux` job (through
-# `release-linux`) and ci.yml's `wheel` job both build with this script, so there
-# is one Linux wheel build.
+# over the network and needs Docker. release.yml's `build-linux` and
+# `build-linux-arm64` jobs (through `release-linux` and `release-linux-arm64`)
+# and ci.yml's `wheel` job all build with this script, so there is one Linux
+# wheel build.
 # Build the Linux wheel for TARGET inside the release's manylinux image, into OUT.
 wheel-linux target out="dist":
     @bash scripts/build-linux-wheel.sh --target {{quote(target)}} --out {{quote(out)}}
@@ -681,8 +699,11 @@ wheel-linux target out="dist":
 # it would publish and publishes nothing. Outside
 # `check` and `gate`: building needs Docker (Linux) or that platform's own
 # toolchain, and publishing needs the release's credentials.
-# Release the Linux artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
+# Release the Linux (x86-64) artifacts, one PHASE at a time (plan, build, publish, verify, dry-run).
 release-linux phase="dry-run": (_release "linux" phase)
+
+# Release the Linux (arm64) artifacts, one PHASE at a time, on an arm64 Linux host.
+release-linux-arm64 phase="dry-run": (_release "linux-arm64" phase)
 
 # Release the macOS (Apple silicon) artifacts, one PHASE at a time.
 release-macos phase="dry-run": (_release "macos" phase)
@@ -831,3 +852,8 @@ lint-llm-diff base="origin/main" *nx_args:
     LLMLINT_DIFF_BASE_SHA="$sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 NX_RUN_COMMANDS_DIRECTLY=false \
       exec bash scripts/nx.sh run onepipeline:lint-llm-diff "$@"
 
+
+# The double's own protocol/backstop checks, with an independent cache edge.
+_codex-server-test: (_tier-test "codex_server" codex-server-tier)
+
+_codex-server-test-quick: (_tier-test-quick codex-server-tier)

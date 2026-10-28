@@ -12,7 +12,9 @@
 //! The counts are per **process**, and a journey takes a delta across an
 //! interval rather than an absolute.
 
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use serde_json::json;
 
@@ -36,6 +38,10 @@ static PASSES: AtomicU64 = AtomicU64::new(0);
 static STATUSES: AtomicU64 = AtomicU64::new(0);
 static PUBLICATIONS: AtomicU64 = AtomicU64::new(0);
 static UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
+/// Rounds of upstream reads begun less than the loop's upstream interval after the
+/// round before them — timed where the reads are made, so a loop that reads on its
+/// own cadence rather than that interval is counted here at any pass rate.
+static EARLY_UPSTREAM_READS: AtomicU64 = AtomicU64::new(0);
 static RELEASE_ASKS: AtomicU64 = AtomicU64::new(0);
 /// Pool-maintenance sweeps this driver started — counted because a sweep finding
 /// nothing due writes nothing, so no other reading tells "asked" from "never asked".
@@ -43,6 +49,13 @@ static MAINTENANCE_SWEEPS: AtomicU64 = AtomicU64::new(0);
 /// Reads of the project's driver claim this driver asked its plan store for — each one a
 /// board call, so the count a quota is spent by.
 static CLAIM_READS: AtomicU64 = AtomicU64::new(0);
+/// Claims of a run's command queue this process made.
+///
+/// Counted because a claim takes the queue's lock and reads its log from the
+/// cursor's offset, so a pass that claims whatever the queue holds pays a locked
+/// read where one that finds the queue unmoved pays nothing. No other reading tells
+/// the two apart: neither writes anything.
+static QUEUE_CLAIMS: AtomicU64 = AtomicU64::new(0);
 /// Bytes read out of a run store by this process, whichever run's they came from
 /// — this one's journal, or another's answering a cross-DAG edge.
 static STORE_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -73,6 +86,16 @@ pub(crate) fn upstream_read() {
     UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
 }
 
+pub(crate) fn early_upstream_read() {
+    EARLY_UPSTREAM_READS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// What the early-read count stands at, for the check that the observer counts one.
+#[cfg(test)]
+pub(crate) fn early_upstream_reads() -> u64 {
+    EARLY_UPSTREAM_READS.load(Ordering::Relaxed)
+}
+
 pub(crate) fn release_asked() {
     RELEASE_ASKS.fetch_add(1, Ordering::Relaxed);
 }
@@ -87,6 +110,10 @@ pub(crate) const CLAIM_READS_KEY: &str = "claim_reads";
 
 pub(crate) fn claim_read() {
     CLAIM_READS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn queue_claimed() {
+    QUEUE_CLAIMS.fetch_add(1, Ordering::Relaxed);
 }
 
 #[cfg(test)]
@@ -112,6 +139,81 @@ pub(crate) fn store_read(bytes: u64) {
 
 pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
+}
+
+/// The environment variable asking a process to report **where** it read a run's
+/// journal: a file it appends one line to per read of an `events.jsonl` —
+/// `{"pid", "journal", "offset", "bytes"}` — the byte the read began at and how
+/// many it took.
+///
+/// [`STORE_BYTES`] says how much a process read, which cannot say what a journey
+/// over a checkpointed run asks: whether any read reached back into the history
+/// the checkpoint covers, and whether a rebuild read the journal once or twice.
+/// Every process reports, the verbs as well as a driver, and appends rather than
+/// rewrites, so the several processes one journey starts share the file. Absent,
+/// which is every run outside this repository's own journeys, nothing is opened.
+pub(crate) const JOURNAL_READS_ENV: &str = "ONEPIPELINE_JOURNAL_READS";
+
+/// Where this process reports its journal reads, read once.
+fn journal_reads_file() -> Option<&'static Path> {
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        std::env::var_os(JOURNAL_READS_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
+    .as_deref()
+}
+
+thread_local! {
+    /// The bytes of runs' journals this **thread** has read, every build.
+    ///
+    /// What a fold took from the journal it folds, measured across the fold:
+    /// one that resumes from a checkpoint reads only what was appended past it, so
+    /// the journal's length overstates it. Per thread for the reason the phases it
+    /// sits beside are: a reader folding runs on several threads counts each fold
+    /// on its own.
+    static THREAD_JOURNAL_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// How many bytes of runs' journals this thread has read so far.
+pub(crate) fn journal_bytes_read() -> u64 {
+    THREAD_JOURNAL_BYTES.with(std::cell::Cell::get)
+}
+
+/// Report one read of a run's journal: `bytes` of it from `offset`.
+///
+/// A line that cannot be written is said on standard error rather than handed
+/// back: the read it reports has already happened and succeeded, and the journey
+/// that asked counts lines, so a missing one fails it there.
+pub(crate) fn journal_read(path: &Path, offset: u64, bytes: u64) {
+    if path.file_name().and_then(|name| name.to_str()) != Some("events.jsonl") {
+        return;
+    }
+    THREAD_JOURNAL_BYTES.with(|counted| counted.set(counted.get() + bytes));
+    let Some(report) = journal_reads_file() else {
+        return;
+    };
+    let line = json!({
+        "pid": std::process::id(),
+        "journal": path.to_string_lossy(),
+        "offset": offset,
+        "bytes": bytes,
+    });
+    // One write of one short line to a file opened for appending, so the lines the
+    // several processes of one journey write land whole and never interleaved —
+    // and through no ledger reader, whose own reads would count into the totals.
+    let written = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()));
+    if let Err(error) = written {
+        eprintln!(
+            "onepipeline: cannot report a journal read to {}: {error}",
+            report.display()
+        );
+    }
 }
 
 /// What this thread's account stands at, for the checks that hold a bounded read
@@ -150,9 +252,11 @@ pub(crate) fn flush(paths: &crate::ledger::RunPaths) -> crate::error::Result<()>
         "statuses": STATUSES.load(Ordering::Relaxed),
         "publications": PUBLICATIONS.load(Ordering::Relaxed),
         "upstream_reads": UPSTREAM_READS.load(Ordering::Relaxed),
+        "early_upstream_reads": EARLY_UPSTREAM_READS.load(Ordering::Relaxed),
         "release_asks": RELEASE_ASKS.load(Ordering::Relaxed),
         "maintenance_sweeps": MAINTENANCE_SWEEPS.load(Ordering::Relaxed),
         (CLAIM_READS_KEY): CLAIM_READS.load(Ordering::Relaxed),
+        "queue_claims": QUEUE_CLAIMS.load(Ordering::Relaxed),
         "store_bytes": STORE_BYTES.load(Ordering::Relaxed),
         "records_folded": RECORDS_FOLDED.load(Ordering::Relaxed),
     });
@@ -222,9 +326,11 @@ mod tests {
         statuses_derived();
         published();
         upstream_read();
+        early_upstream_read();
         release_asked();
         maintenance_sweep_started();
         claim_read();
+        queue_claimed();
         store_read(7);
         records_folded(3);
         flush(&paths).expect("the counts are written");
@@ -239,9 +345,11 @@ mod tests {
             "statuses",
             "publications",
             "upstream_reads",
+            "early_upstream_reads",
             "release_asks",
             "maintenance_sweeps",
             "claim_reads",
+            "queue_claims",
             "store_bytes",
             "records_folded",
         ] {

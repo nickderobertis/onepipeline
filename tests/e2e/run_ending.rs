@@ -68,7 +68,7 @@ fn start(world: &World, run: &str, nodes: Vec<Value>, mode: &str) -> crate::harn
 /// One run, read the three ways a reader asks for it, each held to `word`.
 ///
 /// Returns the `--json` document, after holding it to the contract's shape: one
-/// line, the seven fields, `driven` the negation of an undriven liveness, never an
+/// line, the contracted fields, `driven` the negation of an undriven liveness, never an
 /// ending and a pause at once, and neither while the run is driven.
 fn read_as(world: &World, run: &str, word: &str) -> Value {
     let status = world.run(&["status", run]);
@@ -114,16 +114,39 @@ fn read_as(world: &World, run: &str, word: &str) -> Value {
     assert_eq!(
         fields,
         [
+            "labels",
+            "group",
             "schema_version",
             "run_id",
+            "public_id",
             "word",
             "liveness",
             "driven",
             "ending",
-            "paused"
+            "paused",
+            "nodes"
         ]
     );
-    assert_eq!(reading["schema_version"], 1);
+    assert_eq!(reading["schema_version"], 3);
+    // Every node of the graph is listed, each with its status word.
+    assert!(
+        reading["nodes"]
+            .as_array()
+            .is_some_and(|nodes| !nodes.is_empty()
+                && nodes
+                    .iter()
+                    .all(|node| node["id"].is_string() && node["status"].is_string())),
+        "the reading lists no nodes: {reading}"
+    );
+    assert_eq!(reading["labels"], json!({}));
+    assert_eq!(
+        reading["group"],
+        format!(
+            "{}:{}",
+            crate::harness::STORE_SOURCE,
+            crate::harness::project_id(run)
+        )
+    );
     assert_eq!(reading["run_id"], run);
     assert_eq!(reading["word"], word, "{reading}");
     let liveness = reading["liveness"].as_str().expect("a liveness word");

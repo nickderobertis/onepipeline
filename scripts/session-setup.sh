@@ -67,7 +67,7 @@ ensure_just
 verify_prereqs
 persist_session_env
 
-# Hand off to the llmlint-tier installer beside this script.
+# The llmlint tier is optional, so an install failure is logged and never fails session startup.
 setup_llmlint="$(dirname "$0")/setup-llmlint.sh"
 if [ -x "$setup_llmlint" ]; then
   "$setup_llmlint" || log "setup-llmlint.sh reported an issue (continuing)"

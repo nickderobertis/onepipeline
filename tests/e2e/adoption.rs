@@ -34,6 +34,7 @@ use crate::harness::{
     counts, human, lifecycle, plan_of, project_id, reporting, rows, until_parked, Counts,
     Repository, World, LOOP_STATS_ENV, REFUSED,
 };
+use crate::run_end_hooks::{hook, invocations, records, HOOK_TIMEOUT, RECORD_ENV};
 use oneagentgraph::event::{session_label, SESSION_LABEL};
 use onepipeline::plan::CROSS_REPO_REFERENCES_HEADING;
 use serde_json::{json, Value};
@@ -187,15 +188,15 @@ fn consumer(adoption: Option<&str>) -> Value {
     node
 }
 
-/// Give a node the release targets it consumes **and** the publication policy
-/// that carrying one obliges.
+/// Give a node the release targets it consumes, publishing through a change
+/// request.
 ///
-/// A `consumes` says this node's work is pinned to a release, and every mechanism
-/// that holds such a pin back — the draft `onevcs` opens, and the change request
-/// that draft is a state of — needs a change request to exist. So the plan loader
-/// refuses the pair on an identity that opens none, and these worlds publish
-/// `local-direct` by default: a node that consumes states the policy it publishes
-/// under, exactly as a planner writing one for such a repository has to.
+/// These worlds publish `local-direct` by default, where a `fast` node that
+/// finishes before its release is held unlanded on its origin as
+/// `complete-but-held` and lands on the release. The journeys that use this are
+/// about what a held draft change request does instead — its reason, its lift —
+/// so the node states a change-* policy of its own, as a planner writing one for
+/// such a repository may.
 fn consumes_publishing_a_change(node: &mut Value, targets: Value) {
     node["consumes"] = targets;
     node["merge_policy"] = json!("change-open");
@@ -1707,6 +1708,9 @@ fn a_plan_naming_neither_field_runs_exactly_as_it_did() {
         "a session this run followed did not close"
     );
     world.run(&["results", &run]).exited(0).out_has("merged");
+    // Both settled `done` on a local-direct landing, and neither carries `awaiting`.
+    crate::harness::no_awaiting(&world, &run, ENGINE);
+    crate::harness::no_awaiting(&world, &run, "consumer");
 }
 
 /// A fast-adoption node launches on its dependency's **branch** readiness, is
@@ -2010,11 +2014,9 @@ fn an_arrival_note_with_no_live_turn_to_reach_is_owed_to_the_next_dispatch() {
 fn a_cross_dag_dependency_is_pinned_against_git_and_named_from_the_upstreams_ledger() {
     let world = watching("adoption-crossdag");
     world.write_graphs();
-    // The consumer opens a change request, because its node is a `fast` one
-    // carrying a `consumes`: the pin it is launched against is temporary, the
-    // draft that holds it is a state of a change request, and the loader refuses
-    // that pair on an identity that opens none rather than letting the whole
-    // dispatch be paid for and then thrown away at the publication. Which
+    // The consumer opens a change request, so the temporary pin it is launched
+    // against is held as a draft should it finish before the release; on an
+    // identity that opens none it would be held unlanded instead. Which
     // repository the journey's own subject — a cross-DAG pin read off the
     // upstream run's ledger — belongs to is untouched by that.
     let (engine_repo, _consumer) = two_repositories_opening_a_change(&world);
@@ -3999,8 +4001,9 @@ fn landing_commit(world: &World, run: &str, node: &str) -> String {
 /// to exist at all.
 ///
 /// A draft is a state of a change request, so `local-direct` — which reaches the
-/// base with git alone and opens none — has nothing to draft and `onevcs` refuses
-/// a reason under it by name. The consumer therefore publishes `change-auto`,
+/// base with git alone and opens none — has nothing to draft: a `fast` node there
+/// is held unlanded on its origin as `complete-but-held` instead, which the
+/// held-landing journeys below drive. The consumer therefore publishes `change-auto`,
 /// which is also the policy that would arm the host's own merge on the change if
 /// anything let it: "nothing merges a draft" is only worth asserting where
 /// something would have.
@@ -4127,6 +4130,20 @@ fn a_fast_node_whose_release_is_not_out_settles_complete_but_draft_and_nothing_m
     );
     assert_eq!(settled["payload"]["outcome"], json!("change-draft"));
     assert_eq!(settled["payload"]["landing"], json!("unlanded"));
+    // What it awaits, as data: both releases still out, in the order its reference
+    // rows list them — on the record and on its `status --json` entry alike.
+    let awaited = json!([
+        {"producer": "github.com/owner/engine", "target": "crate"},
+        {"producer": "github.com/owner/tool", "target": "crate"},
+    ]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    let reading = world.run(&["status", &run, "--json"]).json();
+    let entry = reading["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|entry| entry["id"] == "consumer"))
+        .unwrap_or_else(|| panic!("the reading does not list the consumer: {reading}"));
+    assert_eq!(entry["status"], "complete-but-draft", "{entry}");
+    assert_eq!(entry["awaiting"], awaited, "{entry}");
     let detail = settled["payload"]["detail"]
         .as_str()
         .expect("a draft settlement says why");
@@ -4344,6 +4361,13 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
         1,
         "the node was dispatched more than once before any release arrived"
     );
+    // The draft's settlement and its reading name what it awaits, as data.
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "crate"}]);
+    assert_eq!(
+        settlement_of(&world, &run, "consumer")["payload"]["awaiting"],
+        awaited
+    );
+    assert_eq!(reading_node(&world, &run, "consumer")["awaiting"], awaited);
 
     // The worker's second turn writes something the first did not, so the branch
     // it is put back on visibly moves: this is the pin being moved, which is the
@@ -4400,6 +4424,7 @@ fn a_release_that_arrives_puts_a_worker_back_on_the_same_branch_and_lifts_the_dr
     let settled = settlement_of(&world, &run, "consumer");
     assert_eq!(settled["payload"]["outcome"], json!("merged"), "{settled}");
     assert_eq!(settled["payload"]["landing"], json!("landed"), "{settled}");
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
     // And its detail says whose draft the publication lifted: the first
     // publication's, not the second worker's — that worker drafted nothing, and
     // a settlement that said it had would send a reader to a transcript for a
@@ -4804,6 +4829,16 @@ enum Spelling {
     Commit,
     /// The change request a person reads it in.
     ChangeRequest,
+}
+
+/// How the reconciled baseline's `onevcs release status` read meets its streams.
+#[derive(Clone, Copy)]
+enum BaselineRead {
+    /// Whenever the driver's own asks leave them.
+    AsItComes,
+    /// Unreadable for the first read, the way a Windows append's lock leaves them.
+    #[cfg(unix)]
+    RefusedFirst,
 }
 
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the edge this journey needs is the crate under test itself — its own release watch, a real `onevcs` publication and a real probe subprocess — so a narrower project would declare the same dependency and skip nothing.
@@ -5327,6 +5362,11 @@ fn settle_broken(world: &World, run: &str, landing: &str, extra: Value) -> crate
 /// nobody has released yet is an answer too, and it is the one read here before a
 /// release is recorded.
 fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseStatus> {
+    release_status(world, reference).ok()
+}
+
+/// The same read, saying what `onevcs` printed where it printed no answer.
+fn release_status(world: &World, reference: &str) -> Result<onevcs::ReleaseStatus, String> {
     let output =
         onepipeline_testfakes::profile::process::Command::new(crate::harness::onevcs_binary())
             .args(["release", "status", reference, "--json"])
@@ -5335,8 +5375,94 @@ fn release_status_of(world: &World, reference: &str) -> Option<onevcs::ReleaseSt
             .stdin(std::process::Stdio::null())
             .output()
             .expect("the onevcs binary runs");
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice(&output.stdout).map_err(|_| {
+        format!(
+            "exit {:?}, stderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    })
 }
+
+/// What `onevcs release status` answers about `reference` while a driver is asking it
+/// about the same landing, waiting past a read that printed no answer.
+///
+/// The run's release watch asks on its own schedule, and every ask appends to the event
+/// streams this read resolves the landing from. Each append holds its stream under an
+/// exclusive lock, which Windows enforces against readers too: a read that meets one
+/// finds that stream unreadable and can be refused, with nothing on stdout. That is not
+/// an answer to assert on, so it is waited past and said, and `on_refused` is handed
+/// what the command printed; whatever the command answers is returned, to be asserted
+/// on whole.
+fn answered_release_status(
+    world: &World,
+    reference: &str,
+    mut on_refused: impl FnMut(&str),
+) -> onevcs::ReleaseStatus {
+    let mut answered = None;
+    world.until_store(
+        &format!("`onevcs release status {reference}` to answer"),
+        |world| match release_status(world, reference) {
+            Ok(status) => {
+                answered = Some(status);
+                true
+            }
+            Err(refused) => {
+                eprintln!("`onevcs release status {reference}` printed no answer: {refused}");
+                on_refused(&refused);
+                false
+            }
+        },
+    );
+    answered.expect("the wait ends on an answer")
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the condition is a Windows append's
+// exclusive lock on a stream a read resolves from (job 118885600571), which no command
+// can hold open on a Unix host and no CLI input produces; this stands in for it for the
+// one squash-merge journey that reads past a refused read, which otherwise drives only
+// the compiled binary and a real `onevcs`.
+/// The event streams of `world`'s `onevcs` home, made unreadable until
+/// [`restore`](UnreadableStreams::restore) gives each back the mode it had.
+///
+/// Unix stands in for the Windows lock this way: a read of a stream an append holds
+/// there fails to read it, and a read of a stream with no read permission fails here,
+/// each before `onevcs` prints an answer.
+#[cfg(unix)]
+struct UnreadableStreams(Vec<(std::path::PathBuf, std::fs::Permissions)>);
+
+#[cfg(unix)]
+impl UnreadableStreams {
+    fn of(world: &World) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let streams = world.onevcs_home().join("streams");
+        let held: Vec<_> = std::fs::read_dir(&streams)
+            .expect("the onevcs home has streams")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".ndjson"))
+            })
+            .map(|path| {
+                let mode = std::fs::metadata(&path).expect("a stream").permissions();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000))
+                    .expect("a stream made unreadable");
+                (path, mode)
+            })
+            .collect();
+        assert!(!held.is_empty(), "no stream under {}", streams.display());
+        Self(held)
+    }
+
+    fn restore(&mut self) {
+        for (path, mode) in self.0.drain(..) {
+            std::fs::set_permissions(&path, mode).expect("a stream's mode restored");
+        }
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Run one pasted `onevcs …` line through `sh`, the way a person pasting it does,
 /// with this world's `onevcs` standing in for the one on their `PATH`.
@@ -5396,7 +5522,11 @@ fn arrived_version(world: &World, run: &str, node: &str) -> Value {
 /// has stated a change request, a later commit `onevcs` cannot resolve is asked
 /// again at that change request — `docs/contract-divergences.md` entry 40 — and
 /// what the line says and names is that change request's answer.
-fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spelling: Spelling) {
+fn a_landing_with_no_release_baseline_is_answered_at_the_settle(
+    name: &str,
+    spelling: Spelling,
+    read: BaselineRead,
+) {
     let (world, run, engine_repo, branch, answer) = a_released_landing_nobody_published(name);
     let url = change_url_of(&world, &run, "landed");
     let landing = match spelling {
@@ -5526,18 +5656,6 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
                 restated.stderr
             );
         }
-        // The baseline is the sibling's record and not this crate's inference: it
-        // is what `onevcs` itself now answers about the change request.
-        match release_status_of(&world, &url) {
-            Some(onevcs::ReleaseStatus::NotReleased { at_landing, .. }) => assert_eq!(
-                at_landing,
-                onevcs::Baseline::At {
-                    version: "0.2.0".to_owned()
-                },
-                "the baseline captured at the reconciled landing is not what the probe answered"
-            ),
-            other => panic!("the reconciled landing does not answer against a baseline: {other:?}"),
-        }
         // And the wait it raised is one a probe answer can lift: the node holds
         // `not-released`, and the release after the baseline starts it, with
         // nobody having recorded anything.
@@ -5546,6 +5664,38 @@ fn a_landing_with_no_release_baseline_is_answered_at_the_settle(name: &str, spel
             |world| answered(world, &run, "consumer") == Some("not-released".to_owned()),
         );
         assert!(!dispatched(&world, &run, "consumer"));
+        // The baseline is the sibling's record and not this crate's inference: it
+        // is what `onevcs` itself answers about the change request, asked once the
+        // run has been seen holding against it, beside the driver still asking.
+        let status = match read {
+            BaselineRead::AsItComes => answered_release_status(&world, &url, |_| {}),
+            #[cfg(unix)]
+            BaselineRead::RefusedFirst => {
+                let mut unreadable = UnreadableStreams::of(&world);
+                let mut refused = Vec::new();
+                let status = answered_release_status(&world, &url, |said| {
+                    refused.push(said.to_owned());
+                    unreadable.restore();
+                });
+                unreadable.restore();
+                assert_eq!(
+                    refused.len(),
+                    1,
+                    "the read was refused once, while its streams were unreadable: {refused:?}"
+                );
+                status
+            }
+        };
+        match status {
+            onevcs::ReleaseStatus::NotReleased { at_landing, .. } => assert_eq!(
+                at_landing,
+                onevcs::Baseline::At {
+                    version: "0.2.0".to_owned()
+                },
+                "the baseline captured at the reconciled landing is not what the probe answered"
+            ),
+            other => panic!("the reconciled landing does not answer against a baseline: {other:?}"),
+        }
         releases_at(&answer, "0.3.0");
         world.until(
             "the release past the baseline to start the held node",
@@ -5609,6 +5759,7 @@ fn a_change_request_settled_with_no_release_baseline_is_answered_with_the_comman
     a_landing_with_no_release_baseline_is_answered_at_the_settle(
         "adoption-nobaseline-change",
         Spelling::ChangeRequest,
+        BaselineRead::AsItComes,
     );
 }
 
@@ -5618,6 +5769,20 @@ fn a_squash_merge_commit_no_release_can_be_attributed_through_is_answered_at_the
     a_landing_with_no_release_baseline_is_answered_at_the_settle(
         "adoption-nobaseline-squash",
         Spelling::Commit,
+        BaselineRead::AsItComes,
+    );
+}
+
+/// The same squash-merge journey with the baseline's first `onevcs release status` read
+/// refused, as one meeting a release watch's append on Windows is: the read is waited
+/// past rather than taken for the answer, and the journey ends as it does unrefused.
+#[cfg(unix)]
+#[test]
+fn a_squash_merge_commit_answered_at_the_settle_waits_past_a_refused_baseline_read() {
+    a_landing_with_no_release_baseline_is_answered_at_the_settle(
+        "adoption-nobaseline-refused",
+        Spelling::Commit,
+        BaselineRead::RefusedFirst,
     );
 }
 
@@ -6642,3 +6807,1004 @@ fn an_unchanged_release_wait_is_queued_again_only_once_read_and_a_changed_one_at
     world.run(&["stop", &run]).exited(0);
 }
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+
+/// The engine repository releasing **two** automated targets, `crate` and
+/// `bindings`, each answered by a probe of its own, with `bindings` its default:
+/// so a journey can tell a release of the target a node awaits from a release of
+/// another target of the same producer.
+///
+/// The global rung — which every release-targets document states — says `fast`,
+/// and no repository rung says anything, so a node stating no `adoption` resolves
+/// `fast`.
+fn two_targets(crate_script: &str, bindings_script: &str) -> String {
+    format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         \x20   default_target: bindings\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {crate_script}, timeout_seconds: 30}}\n\
+         \x20   - name: bindings\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {bindings_script}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n"
+    )
+}
+
+/// A host whose consumer repository commits straight to its base (`local-direct`)
+/// and carries a `pre-push` hook recording every run of it, beside an engine
+/// repository declaring [`two_targets`].
+struct HeldHost {
+    world: World,
+    consumer: Repository,
+    /// Where the `crate` probe's answer is written.
+    crate_answer: PathBuf,
+    /// Where the `bindings` probe's answer is written.
+    bindings_answer: PathBuf,
+    /// One line per run of the consumer's `pre-push` hook.
+    pushes: PathBuf,
+}
+
+impl HeldHost {
+    fn new(name: &str) -> Self {
+        Self::on(watching(name))
+    }
+
+    /// The same host on a world that records every run-end hook firing, for a
+    /// launch naming [`hook`] as both of its hooks.
+    fn recording_hooks(name: &str) -> Self {
+        let world = watching(name);
+        std::fs::create_dir_all(records(&world)).expect("a record directory");
+        let record = records(&world).to_string_lossy().into_owned();
+        Self::on(world.with_env(RECORD_ENV, &record))
+    }
+
+    fn on(world: World) -> Self {
+        world.write_graphs();
+        let pushes = world.root.join("consumer-pre-push.runs");
+        let consumer = world.repository(
+            "local-direct",
+            &[
+                "sh",
+                "-c",
+                &format!("echo run >> '{}'", pushes.to_string_lossy()),
+            ],
+        );
+        let engine = world.extra_repository(ENGINE);
+        let (crate_script, crate_answer) = world.probe_for_target(&engine, "crate");
+        let (bindings_script, bindings_answer) = world.probe_for_target(&engine, "bindings");
+        world.releases(&two_targets(&crate_script, &bindings_script));
+        Self {
+            world,
+            consumer,
+            crate_answer,
+            bindings_answer,
+            pushes,
+        }
+    }
+
+    /// How many times the consumer's `pre-push` hook has run.
+    fn pushes(&self) -> usize {
+        std::fs::read_to_string(&self.pushes)
+            .map(|runs| runs.lines().filter(|line| line.trim() == "run").count())
+            .unwrap_or(0)
+    }
+
+    /// Where a ref of the consumer's origin stands, or `None` where it has none.
+    fn on_origin(&self, reference: &str) -> Option<String> {
+        crate::harness::git(
+            &self.world,
+            &self.consumer.origin,
+            &["ls-remote", ".", reference],
+        )
+        .split_whitespace()
+        .next()
+        .map(str::to_owned)
+    }
+
+    /// The consumer's base, as its origin and its publication checkout hold it.
+    fn bases(&self) -> (Option<String>, String) {
+        (
+            self.on_origin("refs/heads/main"),
+            crate::harness::git(&self.world, &self.consumer.checkout, &["rev-parse", "main"])
+                .trim()
+                .to_owned(),
+        )
+    }
+
+    /// Run git in the consumer's origin.
+    fn origin_git(&self, args: &[&str]) -> String {
+        crate::harness::git(&self.world, &self.consumer.origin, args)
+    }
+
+    /// The branches `unpublished` counts as owed by the session that launched
+    /// this world's runs.
+    fn unpublished(&self) -> Vec<String> {
+        let listed = self.world.run(&[
+            "unpublished",
+            "--format",
+            "json",
+            "--session",
+            &self.world.session,
+        ]);
+        let document: Value = serde_json::from_str(listed.stdout.trim()).unwrap_or_else(|error| {
+            panic!(
+                "`unpublished` wrote no document ({error}):\n{}\n{}",
+                listed.stdout, listed.stderr
+            )
+        });
+        document["rows"]
+            .as_array()
+            .unwrap_or_else(|| panic!("`unpublished` listed no rows: {document}"))
+            .iter()
+            .filter_map(|row| row["branch"].as_str().map(str::to_owned))
+            .collect()
+    }
+}
+
+/// The pin file a consumer's worker writes: one line naming what it builds
+/// against, which is the whole of what moves when the release arrives.
+fn pin(on: &str) -> String {
+    format!("engine = {on}")
+}
+
+/// The consumer under [`HeldHost`]: a lifecycle node in the `local-direct`
+/// repository, stating no `merge_policy` and no `adoption`, so it resolves `fast`
+/// and publishes without a change request.
+fn held_consumer(consumes: Option<&str>) -> Value {
+    let mut node = consumer(None);
+    if let Some(target) = consumes {
+        node["consumes"] = json!({ENGINE: target});
+    }
+    node
+}
+
+/// One node's entry in `status <RUN> --json`'s `nodes`.
+fn reading_node(world: &World, run: &str, node: &str) -> Value {
+    let reading = world.run(&["status", run, "--json"]).json();
+    reading["nodes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the reading lists no nodes: {reading}"))
+        .iter()
+        .find(|entry| entry["id"] == node)
+        .cloned()
+        .unwrap_or_else(|| panic!("the reading does not list {node}: {reading}"))
+}
+
+/// Start a [`HeldHost`] run whose consumer's first dispatch holds until the
+/// producer has landed, then commits a pin file naming the producer's branch,
+/// and answer the run and the producer's branch once the consumer is held.
+fn start_held(host: &HeldHost, name: &str, consumes: Option<&str>) -> (String, String) {
+    let follower = crate::harness::agent("follower", &["consumer"]);
+    start_held_beside(host, name, consumes, vec![follower], &[])
+}
+
+/// The same, with `after` in place of the consumer's one dependent and `extra`
+/// appended to the launch.
+fn start_held_beside(
+    host: &HeldHost,
+    name: &str,
+    consumes: Option<&str>,
+    after: Vec<Value>,
+    extra: &[&str],
+) -> (String, String) {
+    let world = &host.world;
+    // The consumer's first dispatch waits to be told what to pin against, because
+    // the reference it pins to is the producer's branch, which exists only once
+    // that node has run. `consumer.go` released lets every later dispatch through.
+    world.script("consumer.wait", "");
+    world.script("consumer.work-file", "pin");
+    let mut nodes = vec![engine(), held_consumer(consumes)];
+    nodes.extend(after);
+    let run = start_with(world, name, nodes, extra);
+    world.until("the consumer to be dispatched", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    // (1) Dispatched once the producer landed, with no release answered by
+    // either probe.
+    let engine_settled = settlement_of(world, &run, ENGINE);
+    assert_eq!(
+        engine_settled["payload"]["status"], "done",
+        "{engine_settled}"
+    );
+    assert_eq!(
+        engine_settled["payload"]["landing"], "landed",
+        "{engine_settled}"
+    );
+    assert!(
+        !host.crate_answer.exists() && !host.bindings_answer.exists(),
+        "a probe answered a release before the consumer started"
+    );
+    assert!(world.events_of(&run, "release-arrived").is_empty());
+    let reference = branch_of(world, &run, ENGINE);
+    world.script(
+        "consumer.work",
+        &pin(&format!("{{ branch = \"{reference}\" }}")),
+    );
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    (run, reference)
+}
+
+/// A `fast` node whose publication opens **no change request**, finishing while the
+/// release it adopted early is still out, is held unlanded on its origin as
+/// `complete-but-held` — and lands once that release exists, in one local-direct
+/// landing whose pin names the released version.
+///
+/// The repository commits straight to its base, so there is no change request for
+/// a draft to be a state of. What holds the temporary pin back instead is that the
+/// branch is never squashed onto the base while it carries one: it waits on the
+/// origin, its dependents wait with it, and the release arriving puts a worker back
+/// on it to move the pin before the one landing it ever gets.
+#[test]
+fn a_fast_local_direct_node_is_held_unlanded_until_its_release_and_then_lands_once() {
+    let host = HeldHost::new("adoption-held-landing");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let commits_before = host.consumer.base_commits(world).len();
+
+    let (run, reference) = start_held(&host, "adoption-held-landing", Some("crate"));
+
+    // (2) Held, under its own status and word, and only after its judge accepted
+    // the work: the dispatch that ran is the one that succeeded.
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    assert_eq!(
+        settled["payload"]["outcome"], "held-for-release",
+        "{settled}"
+    );
+    let branch = branch_of(world, &run, "consumer");
+    let head = settled["payload"]["head"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the held settlement names no commit: {settled}"))
+        .to_owned();
+    let detail = format!(
+        "complete, and held unlanded: awaiting the crate release of github.com/owner/engine, \
+         kept on {branch} at {head} (pushed); it lands when that release arrives"
+    );
+    assert_eq!(settled["payload"]["detail"], json!(detail), "{settled}");
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "crate"}]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    assert_eq!(settled["payload"]["remote"], "pushed", "{settled}");
+    assert_eq!(tasks_of(world, "consumer").len(), 1);
+    // The commit is on the consumer's origin under that branch, and it carries the
+    // pin to the producer's branch.
+    assert_eq!(
+        host.on_origin(&format!("refs/heads/{branch}")).as_deref(),
+        Some(head.as_str()),
+        "the held branch is not on the consumer's origin at its commit"
+    );
+    assert_eq!(
+        host.origin_git(&["show", &format!("{head}:pin.md")]).trim(),
+        pin(&format!("{{ branch = \"{reference}\" }}"))
+    );
+    // Nothing landed, nothing ran the merge path, and no change request opened.
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before.clone()));
+    assert_eq!(host.pushes(), 0, "the merge path ran at the hold");
+    assert!(
+        world.changes_opened().is_empty(),
+        "{:?}",
+        world.changes_opened()
+    );
+    assert!(
+        !gh_calls(world)
+            .iter()
+            .any(|call| call.first().map(String::as_str) == Some("pr")
+                && call.get(1).map(String::as_str) == Some("create")),
+        "a change request was opened: {:?}",
+        gh_calls(world)
+    );
+    assert!(
+        !dispatched(world, &run, "follower"),
+        "a dependent started on held work"
+    );
+    // Every reader says the same: `status --json` reports it held with that detail
+    // and what it awaits as data, the run is neither settled nor dead, and
+    // `unpublished` counts the branch as owed.
+    let entry = reading_node(world, &run, "consumer");
+    assert_eq!(entry["status"], "complete-but-held", "{entry}");
+    assert_eq!(entry["outcome"], "held-for-release", "{entry}");
+    assert_eq!(entry["detail"], json!(detail), "{entry}");
+    assert_eq!(entry["awaiting"], awaited, "{entry}");
+    let reading = world.run(&["status", &run, "--json"]).json();
+    assert_eq!(reading["ending"], Value::Null, "{reading}");
+    assert_ne!(reading["word"], "SETTLED", "{reading}");
+    assert_ne!(reading["word"], "DRIVER DEAD", "{reading}");
+    // Every node is listed, in plan order: the producer done on its landing, and the
+    // dependent pending with nothing recorded for it.
+    let listed: Vec<&str> = reading["nodes"]
+        .as_array()
+        .expect("the reading lists its nodes")
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .collect();
+    assert_eq!(listed, [ENGINE, "consumer", "follower"], "{reading}");
+    let producer = reading_node(world, &run, ENGINE);
+    assert_eq!(producer["status"], "done", "{producer}");
+    assert_eq!(producer["outcome"], "merged", "{producer}");
+    assert!(producer.get("awaiting").is_none(), "{producer}");
+    assert_eq!(
+        reading_node(world, &run, "follower"),
+        json!({"id": "follower", "status": "pending", "outcome": null, "detail": null})
+    );
+    world
+        .run(&["status", &run])
+        .exited(0)
+        .out_has(&format!("consumer: complete-but-held — {detail}"))
+        .out_has("neither stalled nor finished")
+        .out_lacks("SETTLED");
+    assert!(
+        host.unpublished().contains(&branch),
+        "`unpublished` does not count the held branch: {:?}",
+        host.unpublished()
+    );
+    // The plan of record carries it as work still in hand.
+    world.until_store("the store to carry the held node as in progress", |world| {
+        world
+            .store_tasks(&format!("plans:{}", project_id(&run)))
+            .iter()
+            .any(|task| {
+                task["item"]["metadata"]["onepipeline.id"] == "consumer"
+                    && task["item"]["status"]["category"] == "in-progress"
+            })
+    });
+
+    // (3) A release of the producer's **other** target lifts nothing: the probe that
+    // answers it is not the one this node awaits, however many polls go by.
+    releases_at(&host.bindings_answer, "0.1.0");
+    let asked = world.probe_runs("crate");
+    world.until("the awaited target to be asked again", |world| {
+        world.probe_runs("crate") >= asked + 2
+    });
+    assert!(world.events_of(&run, "release-adopted").is_empty());
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    assert_eq!(tasks_of(world, "consumer").len(), 1);
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before.clone()));
+    assert_eq!(host.pushes(), 0);
+    assert!(!dispatched(world, &run, "follower"));
+    assert!(host.unpublished().contains(&branch));
+
+    // (4) The awaited target releases. The worker put back on the branch is told
+    // which version, and rewrites the pin to it on top of the held commit.
+    world.script("consumer.work", &pin("\"0.2.0\""));
+    // The re-dispatch is held open once it starts, so the reading of a node that has
+    // left its held settlement can be read: no `consumer.go` until it is.
+    std::fs::remove_file(world.fakes.join("consumer.go")).expect("the first hold's release");
+    releases_at(&host.crate_answer, "0.2.0");
+    world.until("the consumer to be re-dispatched", |world| {
+        tasks_of(world, "consumer").len() == 2
+    });
+    // Back at work, it is no longer reported with the words or the wait of the
+    // settlement it has left.
+    let running = reading_node(world, &run, "consumer");
+    assert_eq!(running["status"], "running", "{running}");
+    assert_eq!(running["detail"], Value::Null, "{running}");
+    assert!(running.get("awaiting").is_none(), "{running}");
+    world.release("consumer.go");
+    world.until("the consumer to land", |world| {
+        settled_status(world, &run, "consumer").as_deref() == Some("done")
+    });
+    assert_eq!(world.events_of(&run, "release-adopted").len(), 1);
+    let tasks = tasks_of(world, "consumer");
+    assert_eq!(tasks.len(), 2, "{tasks:?}");
+    assert!(
+        tasks[1].contains("github.com/owner/engine — crate 0.2.0"),
+        "the re-dispatch was not told which version arrived:\n{}",
+        tasks[1]
+    );
+    assert_eq!(
+        branch_of(world, &run, "consumer"),
+        branch,
+        "the release cut a second branch beside the held one"
+    );
+
+    // (5) One local-direct landing commit: the previous base plus exactly the
+    // branch's net changes, its pin naming the released version.
+    let landed = settlement_of(world, &run, "consumer");
+    assert_eq!(landed["payload"]["landing"], "landed", "{landed}");
+    assert!(landed["payload"].get("awaiting").is_none(), "{landed}");
+    let commits = host.consumer.base_commits(world);
+    assert_eq!(commits.len(), commits_before + 1, "{commits:?}");
+    let base_before = base_before.expect("the consumer's origin had a base");
+    assert_eq!(
+        host.origin_git(&["rev-parse", "main~1"]).trim(),
+        base_before,
+        "the landing is not one commit on the previous base"
+    );
+    assert_eq!(
+        host.origin_git(&["diff", "--name-status", &base_before, "main"])
+            .trim(),
+        "A\tpin.md",
+        "the landing carries more or less than the branch's net change"
+    );
+    assert_eq!(
+        host.consumer.base_file("pin.md").as_deref().map(str::trim),
+        Some(pin("\"0.2.0\"").as_str()),
+        "the landed pin does not name the released version"
+    );
+    // The re-dispatch committed on top of the held commit, rather than beside it.
+    let tip = landed["payload"]["head"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the landing names no branch tip: {landed}"))
+        .to_owned();
+    assert_ne!(
+        tip, head,
+        "the re-dispatch committed nothing on the held branch"
+    );
+    // Read in the publication checkout, where a session hands its branch back: a
+    // local-direct landing squashes the branch onto the base and pushes the base.
+    let checkout = |args: &[&str]| crate::harness::git(world, &host.consumer.checkout, args);
+    checkout(&["merge-base", "--is-ancestor", &head, &tip]);
+    assert_eq!(
+        checkout(&["show", &format!("{tip}:pin.md")]).trim(),
+        pin("\"0.2.0\"")
+    );
+    assert_eq!(
+        checkout(&["rev-parse", &format!("{tip}^{{tree}}")]).trim(),
+        host.origin_git(&["rev-parse", "main^{tree}"]).trim(),
+        "the landing's tree is not the branch's"
+    );
+    assert_eq!(
+        host.pushes(),
+        1,
+        "the merge path did not run exactly once, at landing"
+    );
+    // The time it spent held, from its settlement to the release re-dispatching it,
+    // is booked to the release wait of its one change.
+    let telemetry = world
+        .run(&["telemetry", &run, "--changes", "--json"])
+        .exited(0)
+        .json();
+    let change = telemetry["changes"]
+        .as_array()
+        .and_then(|changes| changes.iter().find(|change| change["node"] == "consumer"))
+        .unwrap_or_else(|| panic!("the change telemetry has no consumer: {telemetry}"))
+        .clone();
+    assert!(
+        change["segments"]["release_wait"].as_f64().unwrap_or(0.0) >= 1.0,
+        "the held change's wait is not booked to the release: {change}"
+    );
+    assert!(
+        !host.unpublished().contains(&branch),
+        "`unpublished` still counts a landed branch"
+    );
+    world.until("the dependent to run and the run to settle", |world| {
+        world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
+    });
+    assert!(dispatched(world, &run, "follower"));
+}
+
+/// A dispatch whose judge does **not** accept the work is never held: it settles as
+/// an unaccepted dispatch does, carries no `awaiting`, and nothing is kept on the
+/// origin as held for it.
+#[test]
+fn a_fast_local_direct_dispatch_its_judge_refuses_is_never_held() {
+    let host = HeldHost::new("adoption-held-refused");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    world.script("consumer.fail", "1");
+    let (run, _) = start_held(&host, "adoption-held-refused", Some("crate"));
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_ne!(
+        settled["payload"]["outcome"], "held-for-release",
+        "{settled}"
+    );
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
+    assert!(
+        !world
+            .events_of(&run, "node-settled")
+            .iter()
+            .any(|event| event["payload"]["status"] == "complete-but-held"),
+        "an unaccepted dispatch was held"
+    );
+    let entry = reading_node(world, &run, "consumer");
+    assert_eq!(entry["status"], "failed", "{entry}");
+    assert!(entry.get("awaiting").is_none(), "{entry}");
+    assert_eq!(host.bases(), (base_before, checkout_before));
+    assert_eq!(host.pushes(), 0);
+    assert!(!dispatched(world, &run, "follower"));
+}
+
+/// With **no `consumes`**, the release a held node awaits is its producer's
+/// default target — and only that target's release lands it.
+///
+/// The same world as the held-landing journey, whose engine releases `crate` and
+/// `bindings` and names `bindings` its default: a node that names neither awaits
+/// `bindings`, so `crate` releasing is a release of something it does not wait for.
+#[test]
+fn a_fast_local_direct_node_naming_no_target_is_held_for_its_producers_default_target() {
+    let host = HeldHost::new("adoption-held-default");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let commits_before = host.consumer.base_commits(world).len();
+
+    let (run, _) = start_held(&host, "adoption-held-default", None);
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    let awaited = json!([{"producer": "github.com/owner/engine", "target": "bindings"}]);
+    assert_eq!(settled["payload"]["awaiting"], awaited, "{settled}");
+    let branch = branch_of(world, &run, "consumer");
+    let head = settled["payload"]["head"]
+        .as_str()
+        .expect("the held settlement names its commit")
+        .to_owned();
+    assert_eq!(
+        host.on_origin(&format!("refs/heads/{branch}")).as_deref(),
+        Some(head.as_str())
+    );
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before.clone()));
+    assert_eq!(reading_node(world, &run, "consumer")["awaiting"], awaited);
+
+    // `crate` releasing is not the release this node awaits.
+    releases_at(&host.crate_answer, "0.2.0");
+    let asked = world.probe_runs("bindings");
+    world.until("the default target to be asked again", |world| {
+        world.probe_runs("bindings") >= asked + 2
+    });
+    assert!(world.events_of(&run, "release-adopted").is_empty());
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    assert_eq!(tasks_of(world, "consumer").len(), 1);
+    assert_eq!(host.bases(), (base_before.clone(), checkout_before));
+    // What it waits on is still the default target, read as data off its
+    // settlement and its reading — and no arrival was recorded for it, because the
+    // release that came out is of a target it never asked about.
+    assert_eq!(reading_node(world, &run, "consumer")["awaiting"], awaited);
+    assert!(
+        world.events_of(&run, "release-arrived").is_empty(),
+        "a release of a target the node does not await was recorded as its arrival: {:?}",
+        world.events_of(&run, "release-arrived")
+    );
+
+    // The default target releases, and the node lands on it.
+    world.script("consumer.work", &pin("\"bindings 0.3.0\""));
+    releases_at(&host.bindings_answer, "0.3.0");
+    world.until("the consumer to land", |world| {
+        settled_status(world, &run, "consumer").as_deref() == Some("done")
+    });
+    assert_eq!(world.events_of(&run, "release-adopted").len(), 1);
+    let tasks = tasks_of(world, "consumer");
+    assert_eq!(tasks.len(), 2, "{tasks:?}");
+    assert!(
+        tasks[1].contains("github.com/owner/engine — bindings 0.3.0"),
+        "the re-dispatch was not told which release arrived:\n{}",
+        tasks[1]
+    );
+    assert_eq!(branch_of(world, &run, "consumer"), branch);
+    let commits = host.consumer.base_commits(world);
+    assert_eq!(commits.len(), commits_before + 1, "{commits:?}");
+    let base_before = base_before.expect("the consumer's origin had a base");
+    assert_eq!(
+        host.origin_git(&["diff", "--name-status", &base_before, "main"])
+            .trim(),
+        "A\tpin.md"
+    );
+    assert_eq!(
+        host.consumer.base_file("pin.md").as_deref().map(str::trim),
+        Some(pin("\"bindings 0.3.0\"").as_str())
+    );
+    assert_eq!(host.pushes(), 1);
+}
+
+/// A run whose only unfinished work is a held node and what waits on it has **not
+/// ended** for anything that acts on an ending: no run-end hook fires and the
+/// scratch its dispatches were given is kept, however long the release takes —
+/// including when its driver is gone and an undriven `reply`, writing the run and
+/// letting go of it as a driver does, judges the ending itself. The consumer starts
+/// with no dependent, because a pending one would keep the run from ending on its
+/// own and hide whether the held node does. A `stop` is an ending of its own and
+/// records its retention once; an edit applied after it, to a graph whose held node
+/// already left it live, changes no ending and records none again. The landing is
+/// what ends the run, and only then does the success hook fire and the ending
+/// reclaim the scratch.
+#[test]
+fn a_held_run_has_not_ended_for_its_hooks_or_its_scratch_until_its_landing() {
+    let host = HeldHost::recording_hooks("adoption-held-unended");
+    let world = &host.world;
+    let hook = hook(world);
+    let (run, _) = start_held_beside(
+        &host,
+        "adoption-held-unended",
+        Some("crate"),
+        Vec::new(),
+        &[
+            "--success-hook",
+            &hook,
+            "--failure-hook",
+            &hook,
+            "--hook-timeout",
+            HOOK_TIMEOUT,
+        ],
+    );
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    let scratch = world.run_file(&run, "scratch");
+    let unended = |world: &World| {
+        assert!(
+            invocations(world, &run).is_empty(),
+            "a run-end hook fired on a held run: {:?}\n{}",
+            invocations(world, &run),
+            world.dump()
+        );
+        assert!(
+            std::fs::read_dir(&scratch).is_ok_and(|mut dirs| dirs.next().is_some()),
+            "the held run's scratch at {} was not kept\n{}",
+            scratch.display(),
+            world.dump()
+        );
+        assert!(world.events_of(&run, "scratch-removed").is_empty());
+        assert!(world.events_of(&run, "scratch-retained").is_empty());
+        let reading = world.run(&["status", &run, "--json"]).json();
+        assert_eq!(reading["ending"], Value::Null, "{reading}");
+        assert_ne!(reading["word"], "SETTLED", "{reading}");
+    };
+    unended(world);
+    // Passes of the driver go by with the node still held, each one a pass that
+    // could have judged the run ended.
+    let asked = world.probe_runs("crate");
+    world.until("the awaited target to be asked again", |world| {
+        world.probe_runs("crate") >= asked + 2
+    });
+    unended(world);
+
+    // The driver goes, and a planner's edit is applied by an undriven `reply`,
+    // which judges the run's ending as it lets go. The node it adds waits on the
+    // held one, so nothing it adds is ready to move the run on by itself.
+    crate::harness::end_driver(world, &run);
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "version": 3,
+                "commands": [{"op": "add", "node": agent("late", &["consumer"])}]
+            })
+            .to_string(),
+        )
+        .exited(0);
+    world.until("the reply to let go of the run", |world| {
+        world.run(&["status", &run, "--json"]).json()["driven"] == false
+    });
+    assert_eq!(
+        reading_node(world, &run, "late")["status"],
+        "pending",
+        "the edit was not applied"
+    );
+    unended(world);
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+    let asked = world.probe_runs("crate");
+    world.until("the adopted driver to ask the release again", |world| {
+        world.probe_runs("crate") >= asked + 2
+    });
+    unended(world);
+
+    // `stop` ends the run, firing the failure hook and recording the scratch it
+    // kept, once.
+    world.run(&["stop", &run]).exited(0);
+    world.until("the stop's retention record", |world| {
+        !world.events_of(&run, "scratch-retained").is_empty()
+    });
+    let retained = world.events_of(&run, "scratch-retained");
+    assert_eq!(retained.len(), 1, "{}", world.dump());
+    assert_eq!(retained[0]["payload"]["ending"], "stopped", "{retained:?}");
+    world.until("the stop's failure hook", |world| {
+        !invocations(world, &run).is_empty()
+    });
+    assert_eq!(invocations(world, &run), ["failure"], "{}", world.dump());
+    // An edit the stopped run takes, adding work that is ready at once, leaves the
+    // graph live as the held node already had it, so the ending the stop recorded
+    // still stands and nothing is recorded again.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({"version": 3, "commands": [{"op": "add", "node": agent("early", &[])}]})
+                .to_string(),
+        )
+        .exited(0);
+    world.until("the reply to let go of the stopped run", |world| {
+        world.run(&["status", &run, "--json"]).json()["driven"] == false
+    });
+    assert!(
+        world
+            .events_of(&run, "edit-committed")
+            .iter()
+            .any(|edit| edit.to_string().contains("early")),
+        "the edit was not applied\n{}",
+        world.dump()
+    );
+    assert_eq!(
+        world.events_of(&run, "scratch-retained").len(),
+        1,
+        "an edit that changed no ending recorded the stop's retention again\n{}",
+        world.dump()
+    );
+    world.run(&["adopt", &run, "--detach"]).exited(0);
+
+    world.script("consumer.work", &pin("\"0.2.0\""));
+    releases_at(&host.crate_answer, "0.2.0");
+    world.until("the run to settle on the landing", |world| {
+        world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
+    });
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("done")
+    );
+    assert!(dispatched(world, &run, "late"));
+    assert!(dispatched(world, &run, "early"));
+    world.until("the success hook to fire", |world| {
+        invocations(world, &run).len() == 2
+    });
+    assert_eq!(
+        invocations(world, &run),
+        ["failure", "success"],
+        "{}",
+        world.dump()
+    );
+    world.until("the ending to reclaim the scratch", |world| {
+        !world.events_of(&run, "scratch-removed").is_empty()
+    });
+    assert!(!scratch.exists(), "the ending kept the scratch");
+}
+
+/// A held node survives its driver going, `stop`, and `shutdown`, each followed by
+/// `adopt` — and the adopted run lands it on its release exactly as an unbroken
+/// one does.
+///
+/// The hold is a status the journal records, not a dispatch: nothing is in flight
+/// for it, so a driver dying loses nothing, `shutdown` has nothing to kill and finds
+/// its branch already on its origin, and `stop` ends the run with the work owed
+/// rather than landed. A driver adopting the run folds the status back and rebuilds
+/// the release watch, and nothing is re-dispatched or landed until the release
+/// answers.
+#[test]
+fn a_held_node_survives_its_driver_stop_and_shutdown_and_lands_once_adopted() {
+    let host = HeldHost::new("adoption-held-adopted");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    let commits_before = host.consumer.base_commits(world).len();
+    let (run, _) = start_held(&host, "adoption-held-adopted", Some("crate"));
+    assert_eq!(
+        settled_status(world, &run, "consumer").as_deref(),
+        Some("complete-but-held")
+    );
+    let branch = branch_of(world, &run, "consumer");
+    let head = settlement_of(world, &run, "consumer")["payload"]["head"]
+        .as_str()
+        .expect("the held settlement names its commit")
+        .to_owned();
+
+    // Whatever the interruption, the node is still held, was not dispatched again,
+    // and nothing reached its base.
+    let still_held = |when: &str| {
+        let entry = reading_node(world, &run, "consumer");
+        assert_eq!(entry["status"], "complete-but-held", "{when}: {entry}");
+        assert_eq!(
+            entry["awaiting"],
+            json!([{"producer": "github.com/owner/engine", "target": "crate"}]),
+            "{when}: {entry}"
+        );
+        assert_eq!(tasks_of(world, "consumer").len(), 1, "{when}");
+        assert_eq!(
+            host.bases(),
+            (base_before.clone(), checkout_before.clone()),
+            "{when}"
+        );
+        assert_eq!(host.pushes(), 0, "{when}");
+        assert!(!dispatched(world, &run, "follower"), "{when}");
+    };
+    // An adopted driver is watching the release again: the probe it rebuilt the
+    // watch for is asked on its own interval.
+    let adopt = |when: &str| {
+        world.run(&["adopt", &run, "--detach"]).exited(0);
+        let asked = world.probe_runs("crate");
+        world.until(&format!("the release to be asked after {when}"), |world| {
+            world.probe_runs("crate") >= asked + 2
+        });
+        still_held(&format!("adopted after {when}"));
+    };
+
+    // (a) The driver goes.
+    crate::harness::end_driver(world, &run);
+    still_held("the driver went");
+    adopt("the driver went");
+
+    // (b) `stop`: the run ends with the node not done and its branch owed.
+    world.run(&["stop", &run]).exited(0);
+    still_held("the stop");
+    let reading = world.run(&["status", &run, "--json"]).json();
+    assert_eq!(reading["word"], "ENDED stopped", "{reading}");
+    assert!(
+        reading["ending"]["nodes"]
+            .as_array()
+            .expect("an ended run lists what is not done")
+            .iter()
+            .any(|node| node["id"] == "consumer" && node["status"] == "complete-but-held"),
+        "{reading}"
+    );
+    assert!(
+        host.unpublished().contains(&branch),
+        "{:?}",
+        host.unpublished()
+    );
+    adopt("the stop");
+
+    // (c) `shutdown`: nothing in flight to kill, and the held branch reported as
+    // already on its origin at its commit.
+    let shutdown = world.run(&["shutdown", &run, "--grace", "1"]);
+    let line = shutdown
+        .stdout
+        .lines()
+        .find(|line| line.contains(&format!("@{branch}:")))
+        .unwrap_or_else(|| {
+            panic!(
+                "the shutdown report names no {branch}:\n{}\n{}",
+                shutdown.stdout, shutdown.stderr
+            )
+        });
+    assert!(
+        line.contains("already on its origin at this commit; nothing was pushed"),
+        "{line}"
+    );
+    assert!(
+        !shutdown.stdout.contains("Still running"),
+        "the shutdown found something of the held node to kill:\n{}",
+        shutdown.stdout
+    );
+    assert_eq!(host.on_origin(&format!("refs/heads/{branch}")), Some(head));
+    still_held("the shutdown");
+    adopt("the shutdown");
+
+    // The release answers, and the adopted run lands the node exactly once.
+    world.script("consumer.work", &pin("\"0.2.0\""));
+    releases_at(&host.crate_answer, "0.2.0");
+    world.until("the consumer to land", |world| {
+        settled_status(world, &run, "consumer").as_deref() == Some("done")
+    });
+    assert_eq!(world.events_of(&run, "release-adopted").len(), 1);
+    assert_eq!(tasks_of(world, "consumer").len(), 2);
+    assert_eq!(branch_of(world, &run, "consumer"), branch);
+    assert_eq!(host.consumer.base_commits(world).len(), commits_before + 1);
+    let base_before = base_before.expect("the consumer's origin had a base");
+    assert_eq!(
+        host.origin_git(&["diff", "--name-status", &base_before, "main"])
+            .trim(),
+        "A\tpin.md"
+    );
+    assert_eq!(host.pushes(), 1);
+    world.until("the run to settle", |world| {
+        world.run(&["status", &run, "--json"]).json()["word"] == "SETTLED"
+    });
+}
+
+/// A held node whose branch its origin will not take is **not** held: the
+/// preservation `onevcs` refuses settles it `failed` under
+/// `infrastructure-failure`, exactly as a kept branch's refused preservation does,
+/// and the work stays on the local branch with nothing landed.
+#[test]
+fn a_hold_whose_preservation_the_origin_refuses_fails_the_node_by_name() {
+    let host = HeldHost::new("adoption-held-unpreserved");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    // The consumer's origin itself turns every push down, which no `--no-verify`
+    // reaches.
+    let hook = host.consumer.origin.join("hooks").join("pre-receive");
+    onepipeline_testfakes::executable(
+        &hook,
+        "#!/bin/sh\necho 'this origin takes no pushes' >&2\nexit 1\n",
+    );
+    let (run, _) = start_held(&host, "adoption-held-unpreserved", Some("crate"));
+
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(
+        settled["payload"]["outcome"], "infrastructure-failure",
+        "{settled}"
+    );
+    assert!(settled["payload"].get("awaiting").is_none(), "{settled}");
+    let branch = settled["payload"]["branch"]
+        .as_str()
+        .expect("the settlement names its branch")
+        .to_owned();
+    let detail = settled["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(&format!(
+            "onevcs could not preserve {branch} to hold it for its release"
+        )) && detail.contains("pre-receive hook declined"),
+        "{detail}"
+    );
+    assert!(host.on_origin(&format!("refs/heads/{branch}")).is_none());
+    assert!(
+        host.consumer.has_branch(world, &branch),
+        "the work is gone from the checkout"
+    );
+    assert_eq!(host.bases(), (base_before, checkout_before));
+    assert!(!dispatched(world, &run, "follower"));
+}
+
+/// A node whose branch is **level with its base** is never held: it has nothing to
+/// land, so it settles as any level branch does — `failed` under `empty-branch`,
+/// for a worker that committed nothing it was asked for — awaiting nothing,
+/// whatever release is still out.
+#[test]
+fn a_local_direct_node_awaiting_a_release_with_a_level_branch_settles_and_is_not_held() {
+    let host = HeldHost::new("adoption-held-level");
+    let world = &host.world;
+    let (base_before, checkout_before) = host.bases();
+    world.script("consumer.wait", "");
+    let run = start(
+        world,
+        "adoption-held-level",
+        vec![engine(), held_consumer(Some("crate"))],
+    );
+    // Its worker writes nothing at all.
+    world.unscript("consumer.work");
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(settled["payload"]["status"], "failed", "{settled}");
+    assert_eq!(settled["payload"]["outcome"], "empty-branch", "{settled}");
+    crate::harness::no_awaiting(world, &run, "consumer");
+    assert!(!host.crate_answer.exists(), "a release came out");
+    assert_eq!(host.bases(), (base_before, checkout_before));
+}
+
+/// A node that states `merge_policy: local-direct` **itself** is held unlanded
+/// on an identity whose own rules open change requests: the policy it publishes
+/// under is its own where it states one, read through the same predicate the
+/// loader uses.
+#[test]
+fn a_node_naming_local_direct_itself_is_held_on_a_change_request_identity() {
+    let host = HeldHost::new("adoption-held-own-policy");
+    let world = &host.world;
+    consumer_opens_a_change(world);
+    let (base_before, checkout_before) = host.bases();
+    world.script("consumer.wait", "");
+    world.script("consumer.work-file", "pin");
+    let mut node = held_consumer(Some("crate"));
+    node["merge_policy"] = json!("local-direct");
+    let run = start(world, "adoption-held-own-policy", vec![engine(), node]);
+    world.until("the consumer to be dispatched", |world| {
+        dispatched(world, &run, "consumer")
+    });
+    world.script("consumer.work", &pin("{ branch = \"the engine's\" }"));
+    world.release("consumer.go");
+    world.until("the consumer to settle", |world| {
+        settled_status(world, &run, "consumer").is_some()
+    });
+    let settled = settlement_of(world, &run, "consumer");
+    assert_eq!(
+        settled["payload"]["status"], "complete-but-held",
+        "{settled}"
+    );
+    assert_eq!(
+        settled["payload"]["outcome"], "held-for-release",
+        "{settled}"
+    );
+    assert!(
+        world.changes_opened().is_empty(),
+        "{:?}",
+        world.changes_opened()
+    );
+    assert_eq!(host.bases(), (base_before, checkout_before));
+}

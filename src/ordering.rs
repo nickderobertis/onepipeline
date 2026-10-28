@@ -38,6 +38,19 @@ fn exchange(address: SocketAddr) -> std::io::Result<()> {
     stream.read_exact(&mut released)
 }
 
+static EDITS_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once per driver, by the first pass whose edits moved the run, as soon as it has
+/// taken them up and before it goes on: a journey holds the loop there, with the edit
+/// applied and answered, to order another thread against everything the rest of that pass
+/// does.
+pub(crate) fn edits_taken() -> Result<()> {
+    if !EDITS_TAKEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        meet("ONEPIPELINE_TEST_EDITS_TAKEN_GATE")?;
+    }
+    Ok(())
+}
+
 static TIMER_WAITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SETTLEMENT_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -107,6 +120,45 @@ pub(crate) fn settlement_projecting<'a>(
         && !SETTLEMENT_PROJECTING.swap(true, std::sync::atomic::Ordering::Relaxed)
     {
         meet("ONEPIPELINE_TEST_PROJECTION_SETTLED_GATE")?;
+    }
+    Ok(())
+}
+
+static DISPATCH_PROJECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, by the write-back, before it projects the first snapshot in which the node
+/// `ONEPIPELINE_TEST_PROJECTION_DISPATCHED_NODE` names is running and not yet settled: a
+/// journey holds that dispatch's projection off the store there until the node has settled.
+pub(crate) fn dispatch_projecting<'a>(mut running: impl Iterator<Item = &'a String>) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_PROJECTION_DISPATCHED_NODE") else {
+        return Ok(());
+    };
+    if running.any(|node| *node == target)
+        && !DISPATCH_PROJECTING.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_PROJECTION_DISPATCHED_GATE")?;
+    }
+    Ok(())
+}
+
+static JOURNAL_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Met once, inside this process's first append to a run's journal of a record of the kind
+/// `ONEPIPELINE_TEST_JOURNAL_HELD_KIND` names, with the journal open and its appender lock
+/// held: a journey holds the appender there to write to the journal from another process.
+pub(crate) fn journal_held(path: &std::path::Path, line: &str) -> Result<()> {
+    let Ok(target) = std::env::var("ONEPIPELINE_TEST_JOURNAL_HELD_KIND") else {
+        return Ok(());
+    };
+    let kind = serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|record| record.get("kind")?.as_str().map(str::to_owned));
+    if path.file_name() == Some(std::ffi::OsStr::new("events.jsonl"))
+        && kind.as_deref() == Some(target.as_str())
+        && !JOURNAL_HELD.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        meet("ONEPIPELINE_TEST_JOURNAL_HELD_GATE")?;
     }
     Ok(())
 }

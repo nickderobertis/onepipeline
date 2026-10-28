@@ -14,6 +14,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { assertSbomShape } from "./sbom-support.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -23,6 +24,7 @@ function hostTarget() {
   const key = `${process.platform}-${process.arch}`;
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -93,6 +95,31 @@ function launch(project, args) {
       stderr: error.stderr ?? "",
     };
   }
+}
+
+/// What a packed npm package carries, read the way npm unpacks it: every
+/// regular file, its manifest, and the SBOM it carries (null when it carries none).
+const TARBALL = `
+import json, sys, tarfile
+with tarfile.open(sys.argv[1]) as bundle:
+    files = sorted(m.name for m in bundle.getmembers() if m.isfile())
+    read = lambda name: bundle.extractfile(name).read().decode() if name in files else None
+    print(json.dumps({'files': files, 'manifest': json.loads(read('package/package.json')),
+                      'sbom': read('package/sboms/onepipeline.cyclonedx.json')}))
+`;
+
+/// The SBOM maturin put in a wheel, as text.
+const WHEEL_SBOM = `
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as wheel:
+    name, = [n for n in wheel.namelist() if '.dist-info/sboms/' in n]
+    sys.stdout.write(wheel.read(name).decode())
+`;
+
+const PYTHON = process.platform === "win32" ? "python" : "python3";
+
+function tarball(path) {
+  return JSON.parse(run(PYTHON, ["-c", TARBALL, path]));
 }
 
 describe("the npm distribution", () => {
@@ -233,6 +260,26 @@ describe("the npm distribution", () => {
     ["npm-version", "npm version mismatch"],
     ["archive-name", "archive name mismatch"],
     ["checksum", "archive checksum mismatch"],
+    ...[
+      ["npm-no-sbom", "omitted sboms/onepipeline.cyclonedx.json"],
+      [
+        "npm-sbom-object",
+        "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+      ],
+      ["npm-sbom", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
+      ["npm-sbom-json", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
+      ["npm-sbom-link", "carries sboms/onepipeline.cyclonedx.json as something other than a file"],
+    ].map(([mutation, reason]) => [
+      mutation,
+      `npm package onepipeline-cli-${process.platform}-${process.arch} ${reason}`,
+    ]),
+    ["npm-sbom-differs", "npm SBOM differs from the wheel's"],
+    [
+      "wheel-sbom-extra",
+      "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json",
+    ],
+    ["wheel-sbom-name", "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json"],
+    ["npm-sbom-extra", "unexpected npm archive member"],
   ])
     it(`rejects real staged artifact corruption: ${mutation}`, () => {
       const python = process.platform === "win32" ? "python" : "python3";
@@ -255,6 +302,88 @@ describe("the npm distribution", () => {
         },
       );
     });
+
+  it("packs the binary's SBOM, the wheel's own, as the one file under sboms/", () => {
+    const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+    const packed = tarball(record.npm);
+    assert.deepEqual(
+      packed.files.filter((name) => name.startsWith("package/sboms/")),
+      ["package/sboms/onepipeline.cyclonedx.json"],
+    );
+    assert.ok(packed.manifest.files.includes("sboms/onepipeline.cyclonedx.json"));
+    assert.equal(packed.sbom, run(PYTHON, ["-c", WHEEL_SBOM, record.wheel]));
+    assertSbomShape(packed.sbom, version);
+  });
+
+  for (const target of [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+  ]) {
+    it(`packs the SBOM it is handed into ${target}'s platform package`, () => {
+      const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));
+      const sbom = join(work, `${target}.cyclonedx.json`);
+      writeFileSync(sbom, run(PYTHON, ["-c", WHEEL_SBOM, record.wheel]));
+      const out = mkdtempSync(join(work, `platform-${target}-`));
+      const dir = run("node", [
+        "scripts/npm-build.mjs",
+        "platform",
+        "--target",
+        target,
+        "--binary",
+        join(platformDir, "bin", process.platform === "win32" ? "onepipeline.exe" : "onepipeline"),
+        "--sbom",
+        sbom,
+        "--out",
+        out,
+      ]).trim();
+      const packed = tarball(pack(dir, out));
+      assert.deepEqual(
+        packed.files.filter((name) => name.startsWith("package/sboms/")),
+        ["package/sboms/onepipeline.cyclonedx.json"],
+      );
+      assert.ok(packed.manifest.files.includes("sboms/onepipeline.cyclonedx.json"));
+      assert.equal(packed.sbom, readFileSync(sbom, "utf8"));
+    });
+  }
+
+  for (const [label, sbom, reason] of [
+    ["no --sbom", null, /--sbom <path> is required/],
+    ["an SBOM that is not JSON", "not json", /is not JSON/],
+    ["a document that is not CycloneDX", '{"bomFormat":"SPDX"}', /is not a CycloneDX document/],
+    [
+      "another crate's SBOM",
+      '{"bomFormat":"CycloneDX","metadata":{"component":{"name":"other"}}}',
+      /is not a CycloneDX document for the onepipeline crate/,
+    ],
+  ]) {
+    it(`refuses to build a platform package from ${label}`, () => {
+      const out = mkdtempSync(join(work, "refused-sbom-"));
+      const args = [
+        "scripts/npm-build.mjs",
+        "platform",
+        "--target",
+        hostTarget(),
+        "--binary",
+        join(platformDir, "bin", process.platform === "win32" ? "onepipeline.exe" : "onepipeline"),
+        "--out",
+        out,
+      ];
+      if (sbom !== null) {
+        writeFileSync(join(out, "sbom.json"), sbom);
+        args.push("--sbom", join(out, "sbom.json"));
+      }
+      const refused = spawnSync("node", args, { cwd: REPO_ROOT, encoding: "utf8" });
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.match(refused.stderr, reason);
+      assert.match(refused.stderr, /ACTION: pass --sbom/);
+      assert.equal(
+        existsSync(join(out, `onepipeline-cli-${process.platform}-${process.arch}`)),
+        false,
+      );
+    });
+  }
 
   it("rejects traversal targets before creating directories or invoking the packager", () => {
     const out = join(work, "unsafe-target");
@@ -440,10 +569,7 @@ describe("the npm distribution", () => {
     });
   }
 
-  for (const [key, name] of [
-    ["darwin-x64", /Intel macOS \(darwin-x64\) is no longer supported/],
-    ["linux-arm64", /arm64 Linux \(linux-arm64\) is no longer supported/],
-  ]) {
+  for (const [key, name] of [["darwin-x64", /Intel macOS \(darwin-x64\) is no longer supported/]]) {
     it(`refuses ${key} by name rather than looking for a package no release ships`, () => {
       const project = mkdtempSync(join(work, "app-"));
       installInto(project, [launcherTgz]);
@@ -472,6 +598,7 @@ describe("the npm distribution", () => {
     const supported = Object.keys(manifest.optionalDependencies);
     assert.deepEqual(supported.sort(), [
       "onepipeline-cli-darwin-arm64",
+      "onepipeline-cli-linux-arm64",
       "onepipeline-cli-linux-x64",
       "onepipeline-cli-win32-x64",
     ]);
@@ -510,6 +637,7 @@ it("refuses to stage an Intel macOS target, which no release builds any more", (
     );
     assert.equal(refused.status, 1, refused.stderr);
     assert.match(refused.stderr, /unsupported target; choose one of: .*aarch64-apple-darwin/);
+    assert.match(refused.stderr, /choose one of: .*aarch64-unknown-linux-gnu/);
     assert.doesNotMatch(refused.stderr, /choose one of: .*x86_64-apple-darwin/);
     assert.equal(existsSync(out), false);
   } finally {

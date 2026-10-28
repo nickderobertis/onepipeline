@@ -26,10 +26,10 @@ use crate::harness::{World, STORE_SOURCE};
 use crate::linear_loopback::{described, metadata_of, Fault, Linear, Operation, PATIENCE, PROJECT};
 
 /// The source the launch directory's `onetaskgraph.yaml` names the loopback Linear as.
-const SOURCE: &str = "tracker";
+pub(super) const SOURCE: &str = "tracker";
 
 /// The variable that source reads its key from.
-const KEY_ENV: &str = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
+pub(super) const KEY_ENV: &str = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
 
 /// The per-kind mapping, exactly as an ai-orchestrator launch's tracked `onetaskgraph.yaml`
 /// states it, indented as it sits under the source's `config`.
@@ -46,7 +46,7 @@ const MAPPING: &str = "      status_mapping:
 
 /// The team's workflow states, by Linear's `WorkflowState.type`. `Needs Attention` is not among
 /// them: a journey adds it once the run is under way, as a person would in Linear's settings.
-const STATES: &[(&str, &str)] = &[
+pub(super) const STATES: &[(&str, &str)] = &[
     ("Proposed", "backlog"),
     ("Backlog", "backlog"),
     ("Todo", "unstarted"),
@@ -58,7 +58,7 @@ const STATES: &[(&str, &str)] = &[
 
 /// The workspace's project statuses: a vocabulary of their own, sharing two names with the
 /// team's states and no more.
-const STATUSES: &[(&str, &str)] = &[
+pub(super) const STATUSES: &[(&str, &str)] = &[
     ("Proposal", "backlog"),
     ("Idea", "backlog"),
     ("Planned", "planned"),
@@ -70,7 +70,7 @@ const STATUSES: &[(&str, &str)] = &[
 ];
 
 /// The settlement record's key on a destination item.
-const SETTLEMENT: &str = "onepipeline.settlement";
+pub(super) const SETTLEMENT: &str = "onepipeline.settlement";
 
 /// One run against the loopback Linear: the world, the endpoint, the issue each node lives in,
 /// and the directory the launch ran from, whose `onetaskgraph.yaml` every write-back reads.
@@ -88,7 +88,7 @@ fn task_text(id: &str) -> String {
 }
 
 /// The store configuration a launch directory holds: one `linear` source over the loopback.
-fn configuration(linear: &Linear) -> String {
+pub(super) fn configuration(linear: &Linear) -> String {
     format!(
         "sources:\n  {SOURCE}:\n    plugin: linear\n    config:\n      api_key_env: {KEY_ENV}\n      \
          team: {}\n      endpoint: {}\n{MAPPING}",
@@ -434,8 +434,10 @@ fn six_settlements(scenario: &Scenario, mut each: impl FnMut(usize, &Spent)) -> 
         assert!(
             written["description"]
                 .as_str()
-                .is_some_and(|description| description.starts_with(&task_text("work"))),
-            "settlement {step}'s mutation did not keep the issue's content: {written}"
+                .is_some_and(|description| description
+                    .starts_with(&crate::linear_loopback::linear_stores(&task_text("work")))),
+            "settlement {step}'s mutation did not keep the issue's content as Linear stores it: \
+             {written}"
         );
         assert_eq!(
             scenario.landed_work(),
@@ -485,8 +487,9 @@ fn every_mapped_state() -> Vec<(&'static str, &'static str)> {
 // `writeback_budget.rs`'s journeys do: a write held past its deadline cannot be observed sooner.
 /// Six consecutive settlements, each landing its own current values ([`six_settlements`]), on
 /// one store: each attempt sends one read of the issue — the description its metadata is merged
-/// into, which keeps whatever a person wrote there — and one `issueUpdate`, and no resolution
-/// read, because every name it writes was resolved by the run's first attempt. Its vocabulary
+/// into, which keeps whatever a person wrote there — and then one `issueUpdate`, no read after
+/// it, and no resolution read, because every name it writes was resolved by the run's first
+/// attempt. Its vocabulary
 /// is present before launch; the failure journey separately adds a state after the cache fills
 /// and proves that one refresh finds it.
 #[test]
@@ -511,35 +514,15 @@ fn consecutive_linear_settlements_each_land_their_own_status_and_metadata_in_the
             0,
             "a reused store resolved again: {sent:?}"
         );
+        // The write's own answer is what Linear stores, so the read is the one the metadata is
+        // merged into, and nothing reads the issue after it is written.
+        assert_eq!(
+            sent,
+            [Operation::Issue, Operation::IssueUpdate],
+            "settlement {step} read the issue after writing its metadata: {sent:?}"
+        );
     });
     scenario.finish();
-}
-
-/// The `linear-requests-per-writeback-settlement` budget's measure: the same six settlements,
-/// each held to landing its own current values and nothing about what it cost, and the most
-/// requests Linear was sent for one attempt after the run's first, which also resolves the
-/// vocabulary. Written to the file `ONEBUDGETSPEC_RESULT` names when the budget's command runs
-/// this journey; whether that figure is within the budget is the checker's to say, never this
-/// journey's, so an attempt that cost more is reported rather than failed.
-#[test]
-fn the_costliest_linear_settlement_after_the_first_is_reported_as_measured() {
-    let scenario = launched_with_states("linear-settlement-budget", &[], &every_mapped_state());
-    let costs = six_settlements(&scenario, |_, _| {});
-    scenario.finish();
-    let highest = costs.iter().skip(1).copied().max().unwrap_or_default();
-    let detail = format!(
-        "the most requests the loopback Linear served for one attempt over {} consecutive \
-         settlements after the run's first, each in its own attempt: {:?}",
-        costs.len() - 1,
-        &costs[1..]
-    );
-    if let Some(result) = std::env::var_os("ONEBUDGETSPEC_RESULT") {
-        std::fs::write(
-            result,
-            crate::budget_result::reported(highest, &detail).to_string(),
-        )
-        .expect("the budget's result is written");
-    }
 }
 
 /// Each way a Linear call fails leaves the next attempt landing the values current when it is
@@ -1221,7 +1204,79 @@ impl GitHubEndpoint {
     }
 
     fn serve_with_replace_refusal(world: &World, seeded: &Value, refuse_replace: bool) -> Self {
-        Self::start(world, seeded, refuse_replace, None).listening(world)
+        Self::start(world, seeded, refuse_replace, None, None, None).listening(world)
+    }
+
+    /// Serve the board under `world` with the numbered issues and boards `issues` states, in
+    /// the shape `github_loopback.py`'s `GITHUB_LOOPBACK_ISSUES` reads.
+    pub(super) fn serve_issues(world: &World, issues: &Value) -> Self {
+        Self::start(world, &json!({}), false, None, Some(issues), None).listening(world)
+    }
+
+    /// Serve the board under `world` with its plan reshaped as `plan` states, in the shape
+    /// `github_loopback.py`'s `GITHUB_LOOPBACK_PLAN` reads.
+    pub(super) fn serve_plan(world: &World, plan: &Value) -> Self {
+        Self::start(world, &json!({}), false, None, None, Some(plan)).listening(world)
+    }
+
+    /// Answer every later Status write of the plan's home with `fault`: `refuse`, `fail`,
+    /// `fail-once` or `pass`.
+    pub(super) fn home_fault(&self, fault: &str) {
+        self.post("/home-fault", &json!({"fault": fault}));
+    }
+
+    /// The GraphQL endpoint the source of board `number` names, so the request log says which
+    /// board sent each request.
+    pub(super) fn board(&self, number: u64) -> String {
+        format!("{}/board/{number}/graphql", self.url.trim())
+    }
+
+    /// Answer the next Status write of a numbered card with `fault`: `refuse`, `fail-once`,
+    /// `transient` or `hold`.
+    pub(super) fn fault(&self, fault: &str) {
+        self.faults(&[fault]);
+    }
+
+    /// Answer the next Status writes of numbered cards with `faults`, one each, in order.
+    pub(super) fn faults(&self, faults: &[&str]) {
+        self.post("/fault", &json!({"status": faults}));
+    }
+
+    /// Answer the next reads of numbered issues by reference with `reads`, one each, in order:
+    /// `pass`, or `refuse`.
+    pub(super) fn reads(&self, reads: &[&str]) {
+        self.post("/reads", &json!({"reads": reads}));
+    }
+
+    /// Let every held Status write go.
+    pub(super) fn release(&self) {
+        self.post("/release", &json!({}));
+    }
+
+    fn post(&self, path: &str, body: &Value) {
+        use std::io::{Read, Write};
+        let address = self
+            .url
+            .trim()
+            .strip_prefix("http://")
+            .expect("a loopback URL");
+        let mut socket = std::net::TcpStream::connect(address).expect("the endpoint listens");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(120)))
+            .expect("a read backstop");
+        let body = body.to_string();
+        write!(
+            socket,
+            "POST {path} HTTP/1.0\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("the control request");
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .expect("the control response");
+        assert!(response.starts_with("HTTP/1.0 200 "), "{response}");
     }
 
     /// Start the endpoint without waiting for it to publish its URL; `publish_hold` names the
@@ -1231,11 +1286,23 @@ impl GitHubEndpoint {
         seeded: &Value,
         refuse_replace: bool,
         publish_hold: Option<&Path>,
+        issues: Option<&Value>,
+        plan: Option<&Value>,
     ) -> StartedEndpoint {
         let dir = world.root.join("github-endpoint");
         std::fs::create_dir_all(&dir).expect("endpoint directory");
         let seed = dir.join("seeded.json");
         std::fs::write(&seed, seeded.to_string()).expect("seeded metadata");
+        let numbered = issues.map(|issues| {
+            let path = dir.join("issues.json");
+            std::fs::write(&path, issues.to_string()).expect("the numbered issues");
+            path
+        });
+        let shaped = plan.map(|plan| {
+            let path = dir.join("plan.json");
+            std::fs::write(&path, plan.to_string()).expect("the plan's shape");
+            path
+        });
         let held_state = refuse_replace.then(|| {
             let mut options = std::fs::OpenOptions::new();
             options.read(true).write(true).create_new(true);
@@ -1275,6 +1342,12 @@ runpy.run_path(sys.argv[0], run_name='__main__')
         // llmlint: ignore-end[tests_mirror_real_usage]
         if let Some(hold) = publish_hold {
             command.env("GITHUB_LOOPBACK_PUBLISH_HOLD", hold);
+        }
+        if let Some(numbered) = &numbered {
+            command.env("GITHUB_LOOPBACK_ISSUES", numbered);
+        }
+        if let Some(shaped) = &shaped {
+            command.env("GITHUB_LOOPBACK_PLAN", shaped);
         }
         let child = command
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_loopback.py"))
@@ -1369,7 +1442,7 @@ fn the_github_endpoint_url_is_readable_only_once_completely_written() {
     let world = World::new("github-endpoint-publication");
     let hold = world.root.join("publish-hold");
     std::fs::create_dir_all(&hold).expect("publication hold directory");
-    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold));
+    let mut started = GitHubEndpoint::start(&world, &json!({}), false, Some(&hold), None, None);
     world.until("the endpoint's publication to be held", |_| {
         started.assert_running("its publication was held");
         hold.join("held").is_file()
@@ -1722,6 +1795,111 @@ urllib.request.urlopen(urllib.request.Request(sys.argv[1] + "/graphql", data=bod
         Some(&("HOST".to_owned(), json!({"text": FOLLOW_UP_HOST})))
     );
     assert_eq!(served.state()["issues"]["other"]["host"], FOLLOW_UP_HOST);
+}
+
+/// A run whose home is a Linear project marks that project `done` once its one node has settled
+/// and the run reached `SETTLED`: one `projectUpdate` carrying only `statusId`, the workspace's
+/// status the per-kind mapping gives a project's `done`, after which nothing more is written —
+/// no member project, and no issue beyond the settlement — and one `home-status` record.
+#[test]
+fn a_settled_run_marks_its_linear_home_done_with_one_status_write() {
+    let name = "linear-home";
+    let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve(
+        STATES,
+        STATUSES,
+        name,
+        &described(
+            "",
+            &json!({
+                "onepipeline.schema_version": onepipeline::plan::PLAN_SCHEMA_VERSION,
+                "onepipeline.concurrency": 1,
+                "onepipeline.goal": {"text": format!("Deliver {name}")},
+            }),
+        ),
+        "In Progress",
+    );
+    let only = linear.file(
+        "chore: only",
+        &described(
+            &task_text("only"),
+            &json!({"onepipeline.id": "only", "onepipeline.persona": "engineer"}),
+        ),
+        "Todo",
+    );
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(launch.join("onetaskgraph.yaml"), configuration(&linear))
+        .expect("the launch directory's store configuration");
+    let project = format!("{SOURCE}:{PROJECT}");
+    let start = from_the_launch_directory(&world, &launch, &["start", &project, "--detach"]);
+    world.run_on(start, "start --detach").exited(0);
+    world.until("the run to settle and record its home", |world| {
+        !world.events_of(name, "home-status").is_empty()
+            && !world.events_of(name, "driver-exited").is_empty()
+    });
+
+    // So a failure names the write that left the status it saw.
+    let status_writes: Vec<(usize, Option<String>)> = linear
+        .log()
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::IssueUpdate && request.variables["id"] == only.as_str()
+        })
+        .filter_map(|(at, request)| {
+            request.variables["input"]["stateId"]
+                .as_str()
+                .map(|state| (at, linear.state_named(state)))
+        })
+        .collect();
+    assert_eq!(
+        linear.state_of(&only),
+        "Done",
+        "the issue's status writes, as (request, state set), the last of which left the status seen: {status_writes:?}. A projection's write comes from writeback::worker -> writeback::project -> Engine::copy -> Linear IssueUpdate, and a landing's closure from writeback::closer; the journal says which ran. Requests name each operation and its input: {:#?}\nprojections: {}\njournal: {:#?}",
+        linear.log(),
+        std::fs::read_to_string(world.run_file(name, "writeback-projections.jsonl"))
+            .unwrap_or_default(),
+        world.journal(name),
+    );
+    assert_eq!(linear.project_status(), "Completed");
+    let log = linear.log();
+    let written: Vec<usize> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| {
+            request.operation == Operation::ProjectUpdate
+                && request.variables["input"].get("statusId").is_some()
+        })
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(written.len(), 1, "{log:#?}");
+    assert_eq!(
+        log[written[0]].variables,
+        json!({"id": PROJECT, "input": {"statusId": linear.status_id("Completed")}})
+    );
+    for request in &log[written[0] + 1..] {
+        assert!(
+            !matches!(
+                request.operation,
+                Operation::IssueUpdate | Operation::ProjectUpdate
+            ),
+            "the run wrote Linear after its home: {request:#?}"
+        );
+    }
+    let homes = world.events_of(name, "home-status");
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(
+        homes[0]["payload"],
+        json!({
+            "project": project, "outcome": "written",
+            "status": {"category": "done", "name": "Completed"}, "class": null, "reason": null,
+        })
+    );
+    world
+        .run(&["results", name])
+        .exited(0)
+        .out_has(&format!("home {project} — written: Completed"));
 }
 
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]

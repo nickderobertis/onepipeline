@@ -1771,6 +1771,20 @@ fn seconds_since_activity(status: &str, node: &str) -> u64 {
         .unwrap_or_else(|| panic!("`{line}` carries no readable age in seconds"))
 }
 
+/// The latest heartbeat the run's `liveness.json` holds for one node's members, in
+/// epoch milliseconds.
+fn last_beat(world: &World, run: &str, node: &str) -> Option<u64> {
+    let document: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(world.run_file(run, "liveness.json")).ok()?).ok()?;
+    document["members"]
+        .as_array()?
+        .iter()
+        .filter(|member| member["node"] == node)
+        .filter_map(|member| member["last_heartbeat_at"].as_str())
+        .map(crate::harness::epoch_millis)
+        .max()
+}
+
 /// A dispatch that is only heartbeating is aged by the work it has done, not by
 /// the heartbeat.
 ///
@@ -1798,19 +1812,18 @@ fn status_ages_a_dispatch_by_its_work_rather_than_by_its_heartbeat() {
     // Long enough that an age reading the heartbeat and one reading the work
     // cannot be confused: the turn was announced once, and the beats have gone
     // on for seconds since.
+    // The beats are kept in the run's liveness file rather than its journal, so
+    // the wait is read there: both members heard from, and then heard from again
+    // seconds later.
+    world.until("both dispatches to heartbeat", |world| {
+        last_beat(world, "beating", "stuck").is_some()
+            && last_beat(world, "beating", "mute").is_some()
+    });
+    let heard = crate::harness::now_millis();
     world.until("both dispatches to heartbeat for a while", |world| {
-        world
-            .events_of("beating", "member-heartbeat")
+        ["stuck", "mute"]
             .iter()
-            .filter(|event| event["labels"]["onepipeline.node"] == "stuck")
-            .count()
-            >= 30
-            && world
-                .events_of("beating", "member-heartbeat")
-                .iter()
-                .filter(|event| event["labels"]["onepipeline.node"] == "mute")
-                .count()
-                >= 30
+            .all(|node| last_beat(world, "beating", node).is_some_and(|at| at >= heard + 3_000))
     });
 
     let status = world.run(&["status", "beating"]);
@@ -2047,12 +2060,8 @@ fn status_keeps_the_last_placeable_beat_when_the_clock_stops_being_readable() {
     // Long enough that a liveness taken from the newest beat and one taken from
     // the last placeable beat cannot be confused.
     world.until("the clock to have been unreadable for a while", |world| {
-        world
-            .events_of("lostclock", "member-heartbeat")
-            .iter()
-            .filter(|event| event["labels"]["onepipeline.node"] == "fading")
-            .count()
-            >= 30
+        last_beat(world, "lostclock", "fading")
+            .is_some_and(|at| crate::harness::now_millis().saturating_sub(at) >= 3_000)
     });
 
     let status = world.run(&["status", "lostclock"]);

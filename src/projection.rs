@@ -338,6 +338,79 @@ pub struct RunState {
     // named above; making it the fold's boundary instead would silently discard a
     // reason a newer driver wrote, which is the bug this field exists to avoid.
     pub holds: BTreeMap<String, Vec<Value>>,
+    /// When each node's open hold of each kind began, by the kind's word — and
+    /// [`RELEASE_AWAITED`] for a hold awaiting a release — as the run's own
+    /// `node-held` records date it: a hold of a kind starts at the first record
+    /// carrying it, and ends at one that does not, at `node-unheld`, or at the
+    /// node's dispatch. Folded so a reader dates a hold without reading the run's
+    /// history for it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `holds` beside it is: by the graph-validated node id the record carries, and by the kind's own wire word.
+    pub(crate) held_since: BTreeMap<String, BTreeMap<String, u64>>,
+    /// The stamp of the latest node dispatch or settlement: what an elapsed watch
+    /// reports as the run's last progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_progress_at: Option<u64>,
+    /// Every record of the few rare kinds a driver reads back whole when it starts
+    /// — a release a node adopted or that arrived for it, and the attempts a
+    /// landing superseded — kept as written and in the order folded, so their
+    /// readers decide from them exactly as they did from the journal without
+    /// reading the run's history for them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) recalled: Vec<Envelope>,
+    /// The nodes a note was delivered to or withdrawn from, by any commit folded:
+    /// whose dispatches [`recalled`](Self::recalled) keeps, so a fold of a node's
+    /// notes over those records resets where a fold over the whole journal does.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] by the node id each note record carries, as `held_since` is keyed.
+    pub(crate) noted: BTreeSet<String>,
+    /// Where the latest `oneagentgraph` record of each node said its turn was:
+    /// what a note to a node with no turn in flight is addressed to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed as `held_since` beside it is, by the node id the record carries.
+    pub(crate) last_turns: BTreeMap<String, crate::agentgraph::TurnAddress>,
+    /// Every node a `node-dispatched` of this crate's named, whatever became of it
+    /// since: what `status` counts a run's own dispatches by.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-dispatched` records carry, which the graph validated when it dispatched them, as `held_since` is keyed.
+    pub(crate) dispatched_nodes: BTreeSet<String>,
+    /// The `detail` each node's newest `node-settled` carried, where it carried one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the settlement's own prose, quoted and never parsed.
+    pub(crate) settled_details: BTreeMap<String, String>,
+    /// The releases each node's newest `node-settled` said it still awaits, where it
+    /// named any this build can read: what `status --json` lists for a node held
+    /// for a release, read off the fold rather than the run's history.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `settled_details` beside it is.
+    pub(crate) settled_awaiting: BTreeMap<String, Vec<crate::views::AwaitedRelease>>,
+    /// The first record of each node's latest session `onevcs` opened: what the
+    /// write-back pins a dispatch in flight to.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is.
+    pub(crate) sessions_opened: BTreeMap<String, SessionOpened>,
+    /// Every node an `edit-committed` added, as the newest addition wrote it —
+    /// removed nodes included, which the graph no longer holds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the id of the node it holds, which the graph validated when the edit was committed.
+    pub(crate) nodes_added: BTreeMap<String, crate::plan::Node>,
+    /// Each node's settlement as the write-back board holds it: the newest
+    /// `node-settled`'s payload, less a clean restack's or readjustment's that left
+    /// the draft where it was.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] keyed by the node id the record carries, as `held_since` is; the value is the producer's own payload, kept as written for the reason `holds` keeps its reasons so.
+    pub(crate) board_settlements: BTreeMap<String, serde_json::Map<String, Value>>,
+    /// The nodes whose next settlement ends a restack or readjustment no agent turn
+    /// was spent on. See [`board_settlements`](Self::board_settlements).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    // llmlint: ignore[invalid_states_unrepresentable] the node ids `node-settled` records carry, as `board_settlements` beside it is keyed.
+    pub(crate) settled_clean: BTreeSet<String>,
+    /// The run-end hook's marker the epoch the run is now in carries, if it carries
+    /// one: what [`crate::hooks::adoption_starts_epoch`] asks, folded as each
+    /// record arrives by the one rule [`crate::hooks`] reads a journal by, so an
+    /// adoption decides it without walking the run's history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hook_marker: Option<crate::hooks::FiredOver>,
     /// The completion reasons the planner has journalled.
     pub completion_requests: Vec<String>,
     /// Surfaces sent, and surfaces a planner actually read.
@@ -569,7 +642,7 @@ pub struct NodeActivity {
     /// has recorded something without naming a tool is not a dispatch doing
     /// "nothing", and reporting it as one is the misreading this whole readout
     /// exists to prevent.
-    pub doing: Option<String>,
+    pub doing: Option<Doing>,
     /// What this node's dispatch has done, once it has done anything.
     ///
     /// Named for progress rather than for events because a heartbeat is an event
@@ -582,6 +655,60 @@ pub struct NodeActivity {
     /// Held apart from [`progress`](Self::progress) because the two answer
     /// opposite questions, and their union answers neither.
     pub last_heartbeat_at: Option<u64>,
+}
+
+/// What a node's dispatch last said it was doing: words read off the record,
+/// or the reference whose description says it.
+///
+/// One value rather than a text beside an optional reference, because the two
+/// are never both the answer. Serialized as the text itself, or as the
+/// reference, so a checkpoint carries whichever the record did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Doing {
+    /// Words the record carried, or a step this crate named.
+    Said(String),
+    /// The last `turn-activity` this dispatch recorded, where it referenced its
+    /// history rather than carrying a copy: described when the readout is drawn
+    /// rather than when the record is folded — a fold reads no history file,
+    /// so a state resumed from a checkpoint never carries an answer the file
+    /// has since changed.
+    Referenced(ActivityReference),
+}
+
+/// A `turn-activity`'s reference into its history, and nothing else: a copy, or
+/// a reference of another kind, is not what a dispatch's last activity can be.
+///
+/// Serialized as `{"activity": …}`, the spelling the same reference has as a
+/// [`crate::views::transcript::TranscriptRef`], so a checkpoint reads the same
+/// either way — and one naming anything else is refused rather than read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityReference {
+    activity: oneagentgraph::event::ActivityTranscript,
+}
+
+impl ActivityReference {
+    /// Wrap the reference a `turn-activity` carried.
+    pub fn new(activity: oneagentgraph::event::ActivityTranscript) -> Self {
+        Self { activity }
+    }
+
+    /// The reference, as the resolver reads one.
+    pub fn transcript(&self) -> crate::views::transcript::TranscriptRef {
+        crate::views::transcript::TranscriptRef::Activity(self.activity.clone())
+    }
+}
+
+impl Doing {
+    /// The words, where the record carried words.
+    #[must_use]
+    pub fn said(&self) -> Option<&str> {
+        match self {
+            Self::Said(said) => Some(said),
+            Self::Referenced(_) => None,
+        }
+    }
 }
 
 /// What one node's dispatch has done that this build can date: how many
@@ -1137,14 +1264,24 @@ pub fn fold(events: &[Envelope]) -> RunState {
 }
 
 pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
+    let marked = crate::hooks::Marked::before(state, event);
+    fold_record(state, event);
+    marked.after(state, event);
+}
+
+/// [`fold_one`], short of the run-end hook's marker it keeps beside the fold.
+fn fold_record(state: &mut RunState, event: &Envelope) {
+    #[cfg(test)]
+    crate::readprobe::folded(event);
     // A driver's account of its own ending, and nothing the run is: no node, no
     // edit, no claim — and not a write that keeps the run looking busy either,
-    // so a run reads exactly as it would without it. Only `status` reads it, off
-    // the store.
+    // so a run reads exactly as it would without it. Only `status` reads it, and
+    // it reads it whole off `recalled`, where nothing else looks for one.
     if event.source == Source::Pipeline
         && journal::PipelineKind::from_wire(&event.kind)
             == Some(journal::PipelineKind::DriverExited)
     {
+        state.recalled.push(event.clone());
         return;
     }
     state.last_write_at = Some(
@@ -1159,11 +1296,26 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         // evidence of which identity refused when it stops running, and the only
         // evidence of where it is doing it.
         fold_activity(state, event);
+        fold_addresses(state, event);
         fold_refusal(state, event);
         fold_invocation(state, event);
         fold_session(state, event);
         fold_landing_commit(state, event);
         fold_push(state, event);
+        // A landing that closes issues, kept whole for the closure watch a driver
+        // starts on its first pass: it is owed until a `landing-closures` names it,
+        // and a run holds one per landing. Kept on what the record says of itself;
+        // the watch reads its `closes` through `onevcs`'s own reader when it takes it.
+        if event.labels.node.is_some()
+            && crate::vcs::is_landing(&event.kind)
+            && event
+                .payload
+                .get("closes")
+                .and_then(Value::as_array)
+                .is_some_and(|closes| !closes.is_empty())
+        {
+            state.recalled.push(event.clone());
+        }
         return;
     }
     // This library's own record, at an envelope schema this build does not know.
@@ -1190,6 +1342,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
         return;
     } // llmlint: ignore-end[changed_behavior_has_e2e]
     let payload = &event.payload;
+    fold_recall(state, event);
     match journal::PipelineKind::from_wire(&event.kind) {
         Some(journal::PipelineKind::RunStarted) => {
             if journal::owed_until_closed(payload) {
@@ -1589,6 +1742,7 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             let operations = payload
                 .get("operations")
                 .and_then(|value| serde_json::from_value::<Vec<Operation>>(value.clone()).ok());
+            fold_commit(state, event, kind, operations.as_deref());
             let Some(operations) = operations else {
                 // An `edit-committed` whose operations this build cannot fold
                 // might have been an authoritative graph mutation.
@@ -1628,10 +1782,16 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
             // clearing the record returns it to the frontier on the branch its own
             // settlement pinned it to, so the dispatch that takes the note
             // continues the published branch rather than cutting a fresh one
-            // beside a draft nothing would then lift. Only that status — clearing
-            // any other would dispatch finished work all over again.
-            if state.recorded.get(node).copied().map(Recorded::status)
-                == Some(NodeStatus::CompleteDraft)
+            // beside a draft nothing would then lift — or, for a node held
+            // unlanded, so the branch it kept on its origin is the one that lands.
+            // Only those statuses — clearing any other would dispatch finished
+            // work all over again.
+            if state
+                .recorded
+                .get(node)
+                .copied()
+                .map(Recorded::status)
+                .is_some_and(NodeStatus::awaits_release)
             {
                 state.recorded.remove(node);
             }
@@ -1838,6 +1998,302 @@ pub(crate) fn fold_one(state: &mut RunState, event: &Envelope) {
     }
 }
 
+/// What a node's session's first `session-opened` said:
+/// [`RunState::sessions_opened`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SessionOpened {
+    /// The session's token, where the record named one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) token: Option<onevcs::SessionToken>,
+    /// The base it opened against.
+    pub(crate) base: crate::vcs::BranchName,
+    /// The record's own `ts`.
+    // llmlint: ignore[invalid_states_unrepresentable] the journal record's own `ts`, which onemessagebus's `Envelope` declares as a `String` holding an RFC 3339 instant, copied onto the store verbatim as `StoredDispatch::opened_at`; this crate has no timestamp type to parse it into and back out of, and every other `ts` it reads stays a string.
+    pub(crate) at: String,
+}
+
+/// Fold where a sibling's record says its node's turn is, and what session it
+/// opened: [`RunState::last_turns`] and [`RunState::sessions_opened`].
+fn fold_addresses(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    if event.source == Source::Agentgraph {
+        let address = event
+            .labels
+            .run_id
+            .as_deref()
+            .zip(event.labels.member.as_deref())
+            .and_then(|(run, member)| crate::agentgraph::TurnAddress::of(run, member));
+        if let Some(address) = address {
+            state.last_turns.insert(node.clone(), address);
+        }
+    }
+    if event.source != Source::Vcs || !crate::vcs::is_session_opened(&event.kind) {
+        return;
+    }
+    let token = event
+        .payload
+        .get("token")
+        .and_then(Value::as_str)
+        .map(|token| onevcs::SessionToken(token.to_owned()));
+    // One open is journalled twice — as the dispatch relays it and as `onevcs`
+    // streams it — and the first of them is the one kept.
+    if token.is_some()
+        && state
+            .sessions_opened
+            .get(node)
+            .is_some_and(|held| held.token == token)
+    {
+        return;
+    }
+    if let Some(base) = event
+        .payload
+        .get("base")
+        .and_then(Value::as_str)
+        .and_then(crate::vcs::BranchName::checked)
+    {
+        state.sessions_opened.insert(
+            node.clone(),
+            SessionOpened {
+                token,
+                base,
+                at: event.ts.clone(),
+            },
+        );
+    }
+}
+
+/// Fold what a commit says that only its readers read back: the notes it
+/// carries, kept whole in [`RunState::recalled`], and the nodes it adds.
+///
+/// A commit whose operations this build cannot read is kept too, so a reader that
+/// refuses one still meets it.
+fn fold_commit(
+    state: &mut RunState,
+    event: &Envelope,
+    kind: journal::PipelineKind,
+    operations: Option<&[Operation]>,
+) {
+    let Some(operations) = operations else {
+        state.recalled.push(event.clone());
+        return;
+    };
+    let mut noted = false;
+    for operation in operations {
+        match operation {
+            Operation::NoteDelivered { node, .. } | Operation::NoteWithdrawn { node, .. } => {
+                state.noted.insert(node.clone());
+                noted = true;
+            }
+            Operation::NodeAdded { node, .. } if kind == journal::PipelineKind::EditCommitted => {
+                state.nodes_added.insert(node.id.clone(), (**node).clone());
+            }
+            _ => {}
+        }
+    }
+    if noted {
+        state.recalled.push(event.clone());
+    }
+}
+
+/// Fold a node's settlement as the write-back board holds it:
+/// [`RunState::board_settlements`].
+fn fold_board_settlement(state: &mut RunState, event: &Envelope) {
+    let Some(node) = event.labels.node.as_ref() else {
+        return;
+    };
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeRestacked | journal::PipelineKind::NodeReadjusted) => {
+            if event.payload.get("agent_dispatched") == Some(&Value::Bool(false)) {
+                state.settled_clean.insert(node.clone());
+            }
+        }
+        Some(journal::PipelineKind::NodeSettled) => {
+            // The settlement as the node reached it: which launch read it back from
+            // the store is this run's record, and the board's settlement is what the
+            // next launch continues — the same fields, whoever carried them.
+            let mut settlement = event.payload.clone();
+            settlement.remove("continued");
+            // A clean restack or readjustment that left the draft where it was
+            // moves only its head and its unread verdict, and neither is the
+            // board's to hold. One that moved the draft's base or stack is.
+            let placed = |settled: &serde_json::Map<String, Value>| {
+                settled.get("stack").map(|stack| {
+                    let mut stack = stack.clone();
+                    if let Some(parents) = stack.get_mut("parents").and_then(Value::as_array_mut) {
+                        for parent in parents {
+                            // Where it stands is its branch: a parent's head moves
+                            // with every push, and its node with every rework of
+                            // that same branch.
+                            if let Some(parent) = parent.as_object_mut() {
+                                parent.remove("head");
+                                parent.remove("node");
+                            }
+                        }
+                    }
+                    stack
+                })
+            };
+            let unmoved = |before: &serde_json::Map<String, Value>| {
+                ["base", "status", "branch", "change_url", "landing"]
+                    .iter()
+                    .all(|key| before.get(*key) == settlement.get(*key))
+                    && placed(before) == placed(&settlement)
+            };
+            if state.settled_clean.remove(node)
+                && state.board_settlements.get(node).is_some_and(unmoved)
+            {
+                return;
+            }
+            state.board_settlements.insert(node.clone(), settlement);
+        }
+        _ => {}
+    }
+}
+
+/// The hold kind [`RunState::held_since`] dates a release hold under: a reason
+/// awaiting a dependency's release.
+pub(crate) const RELEASE_AWAITED: &str = "release-awaited";
+
+/// Fold what a reader dates a node's holds and a run's progress by, off one of
+/// this crate's own records: [`RunState::held_since`] and
+/// [`RunState::last_progress_at`].
+fn fold_recall(state: &mut RunState, event: &Envelope) {
+    let at = millis_of(&event.ts);
+    if recalled_whole(state, event) {
+        state.recalled.push(event.clone());
+    }
+    fold_board_settlement(state, event);
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeDispatched) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.dispatched_nodes.insert(node.clone());
+            }
+        }
+        Some(journal::PipelineKind::NodeSettled) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                match event.payload.get("detail").and_then(Value::as_str) {
+                    Some(detail) => {
+                        state
+                            .settled_details
+                            .insert(node.clone(), detail.to_owned());
+                    }
+                    None => {
+                        state.settled_details.remove(node);
+                    }
+                }
+                match event
+                    .payload
+                    .get(journal::SETTLED_AWAITING)
+                    .and_then(|awaiting| serde_json::from_value(awaiting.clone()).ok())
+                {
+                    Some(awaiting) => {
+                        state.settled_awaiting.insert(node.clone(), awaiting);
+                    }
+                    None => {
+                        state.settled_awaiting.remove(node);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    match journal::PipelineKind::from_wire(&event.kind) {
+        Some(journal::PipelineKind::NodeDispatched | journal::PipelineKind::NodeSettled) => {
+            if let Some(at) = at {
+                state.last_progress_at = Some(state.last_progress_at.map_or(at, |was| was.max(at)));
+            }
+            if journal::PipelineKind::from_wire(&event.kind)
+                == Some(journal::PipelineKind::NodeDispatched)
+            {
+                if let Some(node) = event.labels.node.as_ref() {
+                    state.held_since.remove(node);
+                }
+            }
+        }
+        Some(journal::PipelineKind::NodeUnheld) => {
+            if let Some(node) = event.labels.node.as_ref() {
+                state.held_since.remove(node);
+            }
+        }
+        Some(journal::PipelineKind::NodeHeld) => {
+            let Some(node) = event.labels.node.as_ref() else {
+                return;
+            };
+            let reasons = event
+                .payload
+                .get("reasons")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut kinds: std::collections::BTreeSet<&str> = reasons
+                .iter()
+                .filter_map(crate::engine::hold_kind)
+                .map(crate::views::HoldKind::as_str)
+                .collect();
+            if reasons
+                .iter()
+                .any(|reason| crate::engine::release_awaited(reason).is_some())
+            {
+                kinds.insert(RELEASE_AWAITED);
+            }
+            let since = state.held_since.entry(node.clone()).or_default();
+            since.retain(|kind, _| kinds.contains(kind.as_str()));
+            for kind in kinds {
+                if !since.contains_key(kind) {
+                    if let Some(at) = at {
+                        since.insert(kind.to_string(), at);
+                    }
+                }
+            }
+            if since.is_empty() {
+                state.held_since.remove(node);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether [`RunState::recalled`] keeps one of this crate's records whole.
+///
+/// Every kind here is one a run writes a handful of — a release told or arrived,
+/// a landing's supersessions, a shutdown and what it stopped, an adoption or a
+/// takeover, a refusal, a continuation off the store, a scratch ending, a
+/// landing's closures, the run's home's status — or, for a dispatch,
+/// one of a node some note was ever written for, whose notes reset there.
+/// Commits are kept by [`fold_commit`], which reads their operations once.
+fn recalled_whole(state: &RunState, event: &Envelope) -> bool {
+    use journal::PipelineKind as K;
+    match K::from_wire(&event.kind) {
+        Some(
+            K::ReleaseAdopted
+            | K::ReleaseArrived
+            | K::BranchesSuperseded
+            | K::DriverAdopted
+            | K::DispatchStopped
+            | K::HostShutdown
+            | K::ScratchRemoved
+            | K::ScratchRetained
+            | K::LandingClosures
+            | K::DriverTakenOver
+            | K::HomeStatus,
+        ) => true,
+        Some(K::EditRejected) => event.payload.contains_key("envelope"),
+        Some(K::NodeSettled) => event.payload.contains_key("continued"),
+        Some(K::NodeDispatched) => {
+            event.payload.contains_key(crate::note::CARRIED_KEY)
+                || event
+                    .labels
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| state.noted.contains(node))
+        }
+        _ => false,
+    }
+}
+
 /// Record where each dispatch an adoption is clearing was working, and pin its
 /// node there.
 ///
@@ -2029,8 +2485,10 @@ fn preserves_its_branch(status: NodeStatus) -> bool {
             // rather than waiting to be sent back: the release it awaits lifts
             // the draft and puts a worker on the branch again to move the pin.
             // Unpinned, that worker would cut a fresh branch and republish it
-            // beside the draft change request nobody would then ever lift.
+            // beside the draft change request nobody would then ever lift — or,
+            // for a held node, land a fresh branch and strand the held one.
             | NodeStatus::CompleteDraft
+            | NodeStatus::CompleteHeld
     )
 }
 
@@ -2271,12 +2729,42 @@ pub(crate) fn fold_operations(state: &mut RunState, operations: &[Operation], at
             Operation::NoteDelivered {
                 node,
                 text,
-                reached: crate::note::Reached::Carried,
+                reached: crate::note::Reached::Carried { .. },
                 ..
             } => {
-                state
-                    .pending_context
-                    .insert(node.clone(), text.as_str().to_string());
+                let carried = crate::note::with_carried(
+                    state.pending_context.get(node).map(String::as_str),
+                    text.as_str(),
+                );
+                state.pending_context.insert(node.clone(), carried);
+            }
+            // A carried note withdrawn before a dispatch took it is owed to
+            // nobody, and every other note carried beside it still is.
+            // A live one never was owed to a dispatch, so nothing comes off.
+            // llmlint: ignore[changed_behavior_has_e2e] a live note goes only to a node a
+            // dispatch already reached, for which `may_hold_a_note` answers from
+            // `dispatched_at` whatever this holds, so no journey can observe it; the graph's
+            // own fold beside it is driven by `tests/note`'s
+            // `a_live_withdrawal_leaves_an_identical_carried_note_to_the_nodes_next_dispatch`,
+            // and this one by the projection tests' live withdrawal beside a carried twin.
+            Operation::NoteWithdrawn {
+                node,
+                text,
+                alike_after,
+                from: crate::note::WithdrawnFrom::Carried,
+                ..
+            } => {
+                let left = state.pending_context.get(node).and_then(|context| {
+                    crate::note::without_carried(context, text.as_str(), *alike_after)
+                });
+                match left {
+                    Some(left) => {
+                        state.pending_context.insert(node.clone(), left);
+                    }
+                    None => {
+                        state.pending_context.remove(node);
+                    }
+                }
             }
             _ => {}
         }
@@ -2351,7 +2839,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         // end to end by `tests/e2e/views.rs`.
         if !crate::vcs::is_session_opened(&event.kind) {
             if let Some(step) = crate::vcs::usable(&event.kind.0) {
-                activity.doing = Some(format!("publication {step}"));
+                activity.doing = Some(Doing::Said(format!("publication {step}")));
             }
         } // llmlint: ignore-end[changed_behavior_has_e2e]
         return;
@@ -2366,13 +2854,33 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
             .and_then(Value::as_str)
             .unwrap_or_default()
     };
+    // A record referencing its history carries no copy to read, so what it is
+    // doing is the reference itself, described when the readout is drawn. A
+    // result answers the call already on the line, as below; a reference this
+    // build cannot read says so rather than leaving the last line standing.
+    if event.payload.contains_key("transcript") {
+        if text("kind") == crate::report::TOOL_RESULT {
+            return;
+        }
+        // An activity's `transcript` reads as an activity reference or not at
+        // all, so no other answer reaches the last arm.
+        match crate::views::transcript::TranscriptRef::of(TURN_ACTIVITY, &event.payload) {
+            Some(Ok(crate::views::transcript::TranscriptRef::Activity(reference))) => {
+                activity.doing = Some(Doing::Referenced(ActivityReference::new(reference)));
+            }
+            // llmlint: ignore[changed_behavior_has_e2e] a `transcript` that is not a reference is a record no producer in this stack writes — the linked sibling serializes it from its own typed `ActivityTranscript` — so only a store something wearing a producer's clothes left behind reaches this, the ground `fold_refusal` suppresses its own `None` half on; the diagnostic it renders is the resolver's, held by `views::transcript`'s `unreadable_history_names_the_file_and_says_so`.
+            Some(Err(unresolved)) => activity.doing = Some(Doing::Said(unresolved.to_string())),
+            Some(Ok(_)) | None => {}
+        }
+        return;
+    }
     // The agent's own words name no tool, and are what it is doing all the
     // same: its text or its reasoning, on the line oneharness draws it on, so a
     // node thinking between two calls reads as thinking rather than as still
     // running the last one.
     if let Some(voice) = crate::report::Voice::of(text("kind")) {
         if let Some(said) = voice.line(text("output")) {
-            activity.doing = Some(said);
+            activity.doing = Some(Doing::Said(said));
         }
         return;
     }
@@ -2391,7 +2899,7 @@ fn fold_activity(state: &mut RunState, event: &Envelope) {
         .collect::<Vec<_>>()
         .join(" ");
     if !summary.is_empty() {
-        activity.doing = Some(summary);
+        activity.doing = Some(Doing::Said(summary));
     }
 }
 
@@ -3174,12 +3682,16 @@ mod tests {
                         routed_to: Vec::new(),
                         reached,
                         envelope: None,
+                        index: None,
                     }]),
                 )],
             )
         };
 
-        let carried = fold(&[started.clone(), delivered(crate::note::Reached::Carried)]);
+        let carried = fold(&[
+            started.clone(),
+            delivered(crate::note::Reached::Carried { reason: None }),
+        ]);
         assert_eq!(carried.pending_context["build"], "the fixture moved");
         assert_eq!(
             carried
@@ -3192,12 +3704,127 @@ mod tests {
             "a note no turn took did not reach the node it is still owed to"
         );
 
-        let taken = fold(&[started, delivered(crate::note::Reached::Worker)]);
+        let taken = fold(&[
+            started,
+            delivered(crate::note::Reached::Worker { turn: None }),
+        ]);
         assert!(
             taken.pending_context.is_empty(),
             "a note a running turn read was also owed to the dispatch after it"
         );
         assert_eq!(taken.graph.get("build").expect("build").context, None);
+    }
+
+    /// Replay reaches the planner context the live driver composed: two notes
+    /// carried to one node are both owed to its next dispatch, and withdrawing
+    /// either — the first or the last — leaves exactly the other, in the graph
+    /// the dispatch renders and in what the run says is pending.
+    #[test]
+    fn a_withdrawn_carried_note_leaves_the_other_carried_note_owed_on_replay() {
+        let plan = plan_of_nodes(vec![agent("build", &[])]);
+        let started = pipeline(
+            journal::PipelineKind::RunStarted,
+            0,
+            None,
+            &[("plan", json!(plan))],
+        );
+        let carried = |seq: u64, text: &str| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                seq,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteDelivered {
+                        node: "build".into(),
+                        addressee: crate::note::Addressee::Worker,
+                        text: text.parse().expect("a usable note"),
+                        criterion: None,
+                        shown_to: Vec::new(),
+                        routed_to: Vec::new(),
+                        reached: crate::note::Reached::Carried { reason: None },
+                        envelope: Some(seq),
+                        index: Some(0),
+                    }]),
+                )],
+            )
+        };
+        let withdrawn_from = |envelope: u64, text: &str, from| {
+            pipeline(
+                journal::PipelineKind::EditCommitted,
+                3,
+                None,
+                &[(
+                    "operations",
+                    json!([Operation::NoteWithdrawn {
+                        node: "build".into(),
+                        envelope,
+                        index: 0,
+                        reason: crate::note::WithdrawalReason::try_from(
+                            "the fixture moved back".to_string(),
+                        )
+                        .expect("a reason"),
+                        from,
+                        text: text.parse().expect("a usable note"),
+                        alike_after: 0,
+                    }]),
+                )],
+            )
+        };
+        let withdrawn = |envelope: u64, text: &str| {
+            withdrawn_from(envelope, text, crate::note::WithdrawnFrom::Carried)
+        };
+        let both = [
+            started.clone(),
+            carried(1, "the fixture moved"),
+            carried(2, "keep the loader"),
+        ];
+        let owed = fold(&both);
+        // A live note of the same text, withdrawn, was carried onto nothing, so
+        // both carried notes stay owed to the node's next dispatch.
+        let mut beside_live = both.to_vec();
+        beside_live.push(withdrawn_from(
+            4,
+            "the fixture moved",
+            crate::note::WithdrawnFrom::Live,
+        ));
+        let kept = fold(&beside_live);
+        assert_eq!(
+            kept.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        assert_eq!(
+            kept.graph.get("build").expect("build").context.as_deref(),
+            Some("the fixture moved\n\nkeep the loader")
+        );
+        assert_eq!(
+            owed.pending_context["build"],
+            "the fixture moved\n\nkeep the loader"
+        );
+        for (envelope, gone, left) in [
+            (1, "the fixture moved", "keep the loader"),
+            (2, "keep the loader", "the fixture moved"),
+        ] {
+            let mut journal = both.to_vec();
+            journal.push(withdrawn(envelope, gone));
+            let replayed = fold(&journal);
+            assert_eq!(replayed.pending_context["build"], left);
+            assert_eq!(
+                replayed
+                    .graph
+                    .get("build")
+                    .expect("build")
+                    .context
+                    .as_deref(),
+                Some(left),
+                "replay did not leave the other carried note in the planner context"
+            );
+        }
+        let mut alone = vec![started, carried(1, "the fixture moved")];
+        alone.push(withdrawn(1, "the fixture moved"));
+        let none = fold(&alone);
+        assert!(none.pending_context.is_empty());
+        assert_eq!(none.graph.get("build").expect("build").context, None);
     }
 
     /// An arrival note the running turn could not take is owed to the node's next
@@ -3828,7 +4455,8 @@ mod tests {
     /// A `driver-exited` changes nothing the run is: folded with and without
     /// one — after a settlement, a pause, and a reported error alike — the state
     /// is the same, down to when the run last wrote, so every view and verdict
-    /// read off the fold reads the same.
+    /// read off the fold reads the same. The record itself is kept whole among
+    /// [`RunState::recalled`] and nowhere else, for the one view that quotes it.
     #[test]
     fn a_driver_exit_folds_to_the_state_the_run_had_without_it() {
         let plan = plan_of_nodes(vec![agent("build", &[]), agent("ship", &["build"])]);
@@ -3869,8 +4497,14 @@ mod tests {
                     ("last_answered_command", Value::Null),
                 ],
             ));
+            let mut folded = fold(&with);
             assert_eq!(
-                serde_json::to_value(fold(&with)).expect("a state serializes"),
+                folded.recalled.pop().map(|kept| kept.seq),
+                Some(seq),
+                "the {settlement} driver-exited is not kept for the view that quotes it"
+            );
+            assert_eq!(
+                serde_json::to_value(folded).expect("a state serializes"),
                 unchanged,
                 "a {settlement} driver-exited changed the fold"
             );
@@ -3910,6 +4544,44 @@ mod tests {
         );
     }
 
+    /// A dispatch's last activity is an activity reference or words, and a
+    /// checkpoint naming anything else — a copy, or a turn's instruction — is
+    /// refused rather than read back as a reference it cannot be.
+    #[test]
+    fn a_referenced_doing_holds_an_activity_reference_and_nothing_else() {
+        let reference = json!({
+            "history_dir": "/state/oneharness/history",
+            "history_project": "project",
+            "history_session": "session",
+            "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            "index": 0,
+            "tool_call_id": "call-1",
+        });
+        let doing = Doing::Referenced(ActivityReference::new(
+            serde_json::from_value(reference.clone()).expect("a reference"),
+        ));
+        let written = serde_json::to_value(&doing).expect("a doing serializes");
+        assert_eq!(written, json!({"activity": reference}));
+        assert_eq!(
+            serde_json::from_value::<Doing>(written).expect("an activity reference reads"),
+            doing
+        );
+        for other in [
+            json!({"copy": {"text": {"message": "copied"}, "cut": false}}),
+            json!({"instruction": {
+                "history_dir": "/state/oneharness/history",
+                "history_project": "project",
+                "history_session": "session",
+                "history_id": "01a12345-6789-7000-8000-0123456789ab",
+            }}),
+        ] {
+            assert!(
+                serde_json::from_value::<Doing>(other.clone()).is_err(),
+                "a checkpoint read {other} as what a dispatch was doing"
+            );
+        }
+    }
+
     /// The readout an operator decides between cancel, retry, and wait on. A
     /// node in flight for half an hour reads identically to a wedged one
     /// without it, and a healthy node has been reported dead on exactly that.
@@ -3940,7 +4612,10 @@ mod tests {
         ]);
 
         let seen = &state.activity["build"];
-        assert_eq!(seen.doing.as_deref(), Some("Read src/engine.rs"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Read src/engine.rs")
+        );
         assert_eq!(
             seen.progress.expect("the activities counted").events(),
             2,
@@ -4088,7 +4763,7 @@ mod tests {
 
         let seen = &state.activity["build"];
         assert_eq!(
-            seen.doing.as_deref(),
+            seen.doing.as_ref().and_then(Doing::said),
             Some("publication push"),
             "a kind carrying a newline reached the line a supervisor reads"
         );
@@ -4148,7 +4823,10 @@ mod tests {
             step(3, closed),
         ]);
         assert_eq!(
-            after_closing.activity["build"].doing.as_deref(),
+            after_closing.activity["build"]
+                .doing
+                .as_ref()
+                .and_then(Doing::said),
             Some("publication session-closed"),
             "the last step of a publication was read as the bracket around it"
         );
@@ -4230,7 +4908,7 @@ mod tests {
 
         let state = fold(&[named, nameless]);
         assert_eq!(
-            state.activity["build"].doing.as_deref(),
+            state.activity["build"].doing.as_ref().and_then(Doing::said),
             Some("Bash just check")
         );
         assert_eq!(
@@ -4309,7 +4987,10 @@ mod tests {
         );
         // And it does not overwrite what the node was last seen doing: a turn
         // that is wedged is still wedged doing something.
-        assert_eq!(seen.doing.as_deref(), Some("Bash just check"));
+        assert_eq!(
+            seen.doing.as_ref().and_then(Doing::said),
+            Some("Bash just check")
+        );
     }
 
     /// A cancel of a *running* node leaves a dispatch behind it; a cancel of one

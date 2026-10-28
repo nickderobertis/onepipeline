@@ -44,8 +44,8 @@ use onetaskgraph_core::{
     SourceFailure, TaskRequest,
 };
 use onetaskgraph_plugin_api::{
-    Classification, DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project,
-    SourceName, Task,
+    DependencyKind, Direction, ItemKind, MetadataKey, NativeId, Project, SourceName,
+    StatusCategory, Task,
 };
 use serde_json::{Map, Value};
 
@@ -82,6 +82,12 @@ const ID_KEY: &str = "onepipeline.id";
 /// It shares the consumer's reserved namespace but is not a plan field: relaunching a
 /// project that a previous run updated must read the same node definition it launched.
 pub(crate) const SETTLEMENT_KEY: &str = "onepipeline.settlement";
+
+/// Projection-only metadata naming the word the engine last projected onto a settled task's
+/// status, beside [`SETTLEMENT_KEY`]: the one record of whether the engine closed the task, a
+/// park's `parked` and a stop's `cancelled` both settling `cancelled`. Entry 137 of
+/// `docs/contract-divergences.md` names it.
+pub(crate) const PROJECTED_STATUS_KEY: &str = "onepipeline.projected_status";
 
 /// Projection-only metadata naming the lineage head a destination item carries — the
 /// attempt whose fields it renders — beside [`SUPERSEDES_KEY`]; entry 80 of
@@ -135,6 +141,7 @@ pub(crate) const PUBLISHING_KEY: &str = "onepipeline.publishing";
 /// entry 119, every project a published node had closed on, naming `landing`.
 const PROJECTION_ONLY: &[&str] = &[
     SETTLEMENT_KEY,
+    PROJECTED_STATUS_KEY,
     NODE_KEY,
     SUPERSEDES_KEY,
     REWORK_KEY,
@@ -152,6 +159,10 @@ const PROJECT_PROJECTION_ONLY: &[&str] = &[DRIVER_KEY, PUBLISHING_KEY];
 /// from — so a project stating it is told which end to edit rather than having
 /// its value silently lose to the task's own.
 const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
+    (
+        "assets_from",
+        "a live edit only; this is not a plan node field",
+    ),
     ("title", "the task's own `title`"),
     ("task", "the task's own `content`"),
     ("delivers", "the task's own `delivers`"),
@@ -161,7 +172,7 @@ const FILLED_FROM_THE_TASK: &[(&str, &str)] = &[
     ),
     (
         "classification",
-        "the task's own `classification`, tightened by its project's",
+        "the task's own `classification`, never its project's",
     ),
 ];
 
@@ -248,6 +259,20 @@ impl Store {
         }
     }
 
+    /// Whether this store's configuration declares `source` `visibility: private` — the
+    /// declaration the store's own boundary reads. A configuration that cannot be read, and
+    /// a source it does not configure, declare nothing private.
+    pub(crate) fn source_declared_private(&self, source: &str) -> bool {
+        let Ok(name) = onetaskgraph_plugin_api::SourceName::new(source) else {
+            return false;
+        };
+        self.validate(&Layer::default()).is_ok_and(|config| {
+            config.sources().get(&name).is_some_and(|configured| {
+                configured.visibility() == onetaskgraph_core::config::SourceVisibility::Private
+            })
+        })
+    }
+
     /// Load this store's configuration, `flags` layered last, and build the engine it
     /// describes — afresh, every time.
     ///
@@ -309,15 +334,22 @@ impl Store {
         let global = id.global();
         let (content, metadata) = match kind {
             StoredKind::Document => {
+                // llmlint: ignore[changed_behavior_has_e2e] a document is read here only by `template check --item`, which runs outside any run: nothing attaches it, so its count is held and dropped with the process by design (`storeops`'s module says why), and no run's record could show it. The seam it goes through, `Reader::call`, is the one every run journey's store operations are counted at.
                 let read = reader
-                    .call(reader.engine.document(&global))
+                    .call(
+                        crate::storeops::Operation::Document,
+                        reader.engine.document(&global),
+                    )
                     .map_err(|error| failed("document show", id.as_str(), &error))?;
                 let found = one(&global, "document show", read)?;
                 (found.item.content, found.item.metadata)
             }
             StoredKind::Project => {
                 let read = reader
-                    .call(reader.engine.project(&global))
+                    .call(
+                        crate::storeops::Operation::Project,
+                        reader.engine.project(&global),
+                    )
                     .map_err(|error| failed("project show", id.as_str(), &error))?;
                 let found = one(&global, "project show", read)?;
                 (found.item.content, found.item.metadata)
@@ -345,6 +377,21 @@ impl Store {
         id: &QualifiedId,
         within: std::time::Duration,
     ) -> Result<BTreeMap<String, Value>> {
+        self.project_metadata_asking(id, within)
+            .map_err(|refused| refused.error)
+    }
+
+    /// [`project_metadata_within`](Self::project_metadata_within), answering a read that
+    /// failed with the wait its source asked for before it is asked again, where it named one.
+    ///
+    /// # Errors
+    ///
+    /// As [`project_metadata_within`](Self::project_metadata_within).
+    pub(crate) fn project_metadata_asking(
+        &self,
+        id: &QualifiedId,
+        within: std::time::Duration,
+    ) -> std::result::Result<BTreeMap<String, Value>, ReadRefused> {
         let built = self
             .engine(&Layer::default())
             .map_err(|error| Error::Sibling {
@@ -357,7 +404,9 @@ impl Store {
         let reader = Reader::over(built)?;
         let global = id.global();
         let read = reader
-            .call(async { tokio::time::timeout(within, reader.engine.project(&global)).await })
+            .call(crate::storeops::Operation::Project, async {
+                tokio::time::timeout(within, reader.engine.project(&global)).await
+            })
             .map_err(|_| Error::Sibling {
                 tool: STORE,
                 message: format!(
@@ -366,8 +415,13 @@ impl Store {
                     within.as_secs()
                 ),
             })?
-            .map_err(|error| failed("project show", id.as_str(), &error))?;
-        let found = one(&global, "project show", read)?;
+            .map_err(|error| ReadRefused {
+                error: failed("project show", id.as_str(), &error),
+                wait: crate::writeback::engine_wait(&error),
+            })?;
+        let wait = crate::writeback::failures_wait(&read.errors);
+        let found =
+            one(&global, "project show", read).map_err(|error| ReadRefused { error, wait })?;
         Ok(found.item.metadata.into_iter().collect())
     }
 
@@ -412,7 +466,7 @@ impl Store {
         })?;
         let global = id.global();
         reader
-            .call(async {
+            .call(crate::storeops::Operation::ProjectMetadataSet, async {
                 tokio::time::timeout(
                     within,
                     reader.engine.set_project_metadata(&global, &named, value),
@@ -435,6 +489,11 @@ impl Store {
     /// was launched from `project`: what a run holding a node its launch could not read whole
     /// asks, to learn whether every source now answers and what the node's edges then say.
     ///
+    /// `asked` names, beside each node, the sources it is held on. Nodes are read in id order,
+    /// and once one source refuses a read, no node held on it is read again in this pass: the
+    /// pass costs a source that is still refusing one request, however many nodes wait on it.
+    /// A node passed over is absent from the answer, and its hold stands.
+    ///
     /// A node is found by the task its `task_record` names — in its own `source`, or the
     /// project's where it names none — and an edge's far end is resolved against every node
     /// of `nodes` the same way, so a prerequisite reads back as the node id the run knows it
@@ -448,7 +507,7 @@ impl Store {
         &self,
         project: &QualifiedId,
         nodes: &[Node],
-        asked: &BTreeSet<String>,
+        asked: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<BTreeMap<String, Reread>> {
         let built = self
             .engine(&Layer::default())
@@ -475,11 +534,29 @@ impl Store {
             .filter_map(|node| Some((task_of(node)?.to_string(), node.id.clone())))
             .collect();
         let mut read = BTreeMap::new();
-        for node in nodes.iter().filter(|node| asked.contains(&node.id)) {
+        let mut refused: BTreeSet<String> = BTreeSet::new();
+        let by_id: BTreeMap<&str, &Node> =
+            nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+        for (id, held_on) in asked {
+            let Some(node) = by_id.get(id.as_str()) else {
+                continue;
+            };
+            if !held_on.is_disjoint(&refused) {
+                continue;
+            }
             let Some(task) = task_of(node) else {
                 continue;
             };
-            let (deps, unanswered) = reader.deps(&task, &ids).map_err(Error::from)?;
+            // The graph is the launched one: what it withdrew was settled at its read.
+            let (deps, unanswered) = crate::storeops::about(
+                crate::storeops::Scope::Reread {
+                    node: &node.id,
+                    held_on,
+                },
+                || reader.deps(&task, &ids, &Withdrawn::new()),
+            )
+            .map_err(Error::from)?;
+            refused.extend(unanswered.iter().map(|unasked| unasked.name()));
             read.insert(node.id.clone(), Reread { deps, unanswered });
         }
         Ok(read)
@@ -495,7 +572,9 @@ impl Store {
                     self.dir.display()
                 ),
             })?;
-        Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
+        crate::storeops::about(crate::storeops::Scope::Launch, || {
+            Reader::over(built)?.load(project, &mut crate::boundary::Onevcs::default())
+        })
     }
 }
 
@@ -562,8 +641,10 @@ impl Reader {
         })
     }
 
-    /// Drive one of the engine's futures to its end on this read's runtime.
-    fn call<T>(&self, future: impl Future<Output = T>) -> T {
+    /// Drive one of the engine's futures to its end on this read's runtime, counting it as
+    /// the store operation `operation`.
+    fn call<T>(&self, operation: crate::storeops::Operation, future: impl Future<Output = T>) -> T {
+        crate::storeops::record(operation);
         self.runtime.block_on(future)
     }
 
@@ -578,7 +659,7 @@ impl Reader {
                 tool: STORE,
                 message: why,
             })?;
-        let tasks = self.tasks(project, &members)?;
+        let (tasks, withdrawn) = partition(self.tasks(project, &members)?)?;
 
         let mut document = Map::new();
         for (key, value) in &held.item.metadata {
@@ -629,7 +710,7 @@ impl Reader {
         let mut nodes = Vec::with_capacity(tasks.len());
         let mut unanswered: BTreeMap<String, Vec<Unanswered>> = BTreeMap::new();
         for task in &tasks {
-            let (node, unasked) = self.node(task, project, held.item.classification, &ids)?;
+            let (node, unasked) = self.node(task, project, &ids, &withdrawn)?;
             if !unasked.is_empty() {
                 unanswered.insert(ids[&task.id.to_string()].clone(), unasked);
             }
@@ -757,8 +838,8 @@ impl Reader {
         &self,
         task: &Qualified<Task>,
         home: &QualifiedId,
-        project_classification: Classification,
         ids: &Ids,
+        withdrawn: &Withdrawn,
     ) -> std::result::Result<(Value, Vec<Unanswered>), Load> {
         let whole = task.id.to_string();
         let mut node = Map::new();
@@ -848,8 +929,11 @@ impl Reader {
             );
         }
         node.insert("task_record".to_owned(), Value::Object(record));
-        // A private project keeps every task in it private, whatever the task says.
-        let classification = task.item.classification.strictest(project_classification);
+        // The task's own visibility, as the store answers it: a task is classified by its
+        // own declaration and its own repositories, never by the project it is filed under,
+        // so a public task of a private coordinating project stays public. Its repositories
+        // still decide its clearance (`crate::boundary`).
+        let classification = task.item.classification;
         if !classification.is_public() {
             node.insert(
                 "classification".to_owned(),
@@ -878,7 +962,7 @@ impl Reader {
             (None, _) => {}
         }
 
-        let (mut deps, unanswered) = self.deps(&task.id, ids)?;
+        let (mut deps, unanswered) = self.deps(&task.id, ids, withdrawn)?;
         // A cross-DAG reference names another run's DAG, which is an item of no
         // source at all, so it is the one dependency that cannot be an edge.
         if let Some(carried) = node.remove("deps") {
@@ -920,10 +1004,19 @@ impl Reader {
         &self,
         task: &GlobalId,
         ids: &Ids,
+        withdrawn: &Withdrawn,
     ) -> std::result::Result<(Vec<String>, Vec<Unanswered>), Load> {
         let whole = task.to_string();
         let mut deps = Vec::new();
         let (edges, unasked) = self.edges(task)?;
+        // A far end outside the plan in a source that could not be asked is the store's to
+        // name and not this read's to resolve: asking that source for it would be refused the
+        // same way, and the node is held on that source until a read finds it answering.
+        let unasked_sources: BTreeSet<&str> = unasked
+            .iter()
+            .filter_map(|entry| entry.source())
+            .map(|failure| failure.source.as_str())
+            .collect();
         for edge in edges {
             if edge.from.kind != ItemKind::Task {
                 return Err(Error::Sibling {
@@ -957,6 +1050,11 @@ impl Reader {
             if edge.kind != DependencyKind::Blocks {
                 continue;
             }
+            if unasked_sources.contains(edge.to.id.source.as_str())
+                && !ids.contains_key(&edge.to.id.to_string())
+            {
+                continue;
+            }
             let far = &edge.to;
             let both = format!("'{}' depends on '{}'", task, far.id);
             // A plan node is a task, so a `project` end — which the store's edges may
@@ -967,6 +1065,20 @@ impl Reader {
                     format!(
                         "{both}, which is a {} and not a node of a plan",
                         kind(far.kind)
+                    ),
+                )
+                .field("deps")
+                .into());
+            }
+            // A withdrawn prerequisite is refused rather than released: dropping the edge
+            // would start this task without the work it was written to wait for.
+            if let Some(status) = withdrawn.get(&far.id.to_string()) {
+                return Err(refused(
+                    &whole,
+                    format!(
+                        "{both}, which is withdrawn — the store reports it cancelled, as \
+                         '{status}' — so no node is made of it; withdraw '{task}' too, or \
+                         remove the dependency"
                     ),
                 )
                 .field("deps")
@@ -991,20 +1103,23 @@ impl Reader {
             };
             deps.push(resolved);
         }
-        Ok((deps, Unanswered::of(&unasked)))
+        Ok((deps, Unanswered::of(&unasked, crate::sys::now_millis())))
     }
 
     fn project(&self, project: &QualifiedId) -> Result<Qualified<Project>> {
         let id = project.global();
         let read = self
-            .call(self.engine.project(&id))
+            .call(
+                crate::storeops::Operation::Project,
+                self.engine.project(&id),
+            )
             .map_err(|error| failed("project show", project.as_str(), &error))?;
         one(&id, "project show", read)
     }
 
     fn show(&self, task: &GlobalId) -> Result<Qualified<Task>> {
         let read = self
-            .call(self.engine.task(task))
+            .call(crate::storeops::Operation::Task, self.engine.task(task))
             .map_err(|error| failed("task show", &task.to_string(), &error))?;
         one(task, "task show", read)
     }
@@ -1026,25 +1141,30 @@ impl Reader {
     /// still be named.
     fn tasks(&self, project: &QualifiedId, members: &[GlobalId]) -> Result<Vec<Qualified<Task>>> {
         let selector = selector(&self.engine, project);
-        let tasks = self.paged("task list", project.as_str(), |token| {
-            let request = TaskRequest {
-                sources: Vec::new(),
-                filters: Filters::default(),
-                priorities: Vec::new(),
-                metadata: Vec::new(),
-                origin: None,
-                project: selector.clone(),
-                commented_since: None,
-                // Asked only of a home that names members: the store learns them by reading the
-                // home again, and a plan of one source needs no second read of it.
-                include_members: !members.is_empty(),
-                paging: Paging {
-                    limit: self.page,
-                    token,
-                },
-            };
-            async move { self.engine.tasks(&request).await }
-        })?;
+        let tasks = self.paged(
+            crate::storeops::Operation::Tasks,
+            "task list",
+            project.as_str(),
+            |token| {
+                let request = TaskRequest {
+                    sources: Vec::new(),
+                    filters: Filters::default(),
+                    priorities: Vec::new(),
+                    metadata: Vec::new(),
+                    origin: None,
+                    project: selector.clone(),
+                    commented_since: None,
+                    // Asked only of a home that names members: the store learns them by reading the
+                    // home again, and a plan of one source needs no second read of it.
+                    include_members: !members.is_empty(),
+                    paging: Paging {
+                        limit: self.page,
+                        token,
+                    },
+                };
+                async move { self.engine.tasks(&request).await }
+            },
+        )?;
         for task in &tasks {
             if let Some(elsewhere) = stranger(task, project, members) {
                 return Err(Error::Sibling {
@@ -1062,19 +1182,27 @@ impl Reader {
 
     /// One task's dependency edges, and the sources declared private that could not be asked
     /// what they record of it.
-    fn edges(&self, task: &GlobalId) -> Result<(Vec<QualifiedEdge>, Vec<SourceFailure>)> {
-        self.walk("task deps", &task.to_string(), |token| {
-            let request = DependencyRequest {
-                id: task.clone(),
-                direction: Direction::DependsOn,
-                completeness: Completeness::NamingUnasked,
-                paging: Paging {
-                    limit: self.page,
-                    token,
-                },
-            };
-            async move { self.engine.task_dependencies(&request).await }
-        })
+    fn edges(
+        &self,
+        task: &GlobalId,
+    ) -> Result<(Vec<QualifiedEdge>, Vec<onetaskgraph_core::Unanswered>)> {
+        self.walk(
+            crate::storeops::Operation::Dependencies,
+            "task deps",
+            &task.to_string(),
+            |token| {
+                let request = DependencyRequest {
+                    id: task.clone(),
+                    direction: Direction::DependsOn,
+                    completeness: Completeness::NamingUnasked,
+                    paging: Paging {
+                        limit: self.page,
+                        token,
+                    },
+                };
+                async move { self.engine.task_dependencies(&request).await }
+            },
+        )
     }
 
     /// Every page of one query, walked to its end.
@@ -1086,13 +1214,33 @@ impl Reader {
     /// A partial answer is not accepted: a source that could not answer is a plan this
     /// process cannot read, and a launch that proceeded on the sources that did answer
     /// would execute a graph missing whatever the absent one held.
-    fn paged<T, F, Fut>(&self, query: &str, about: &str, page: F) -> Result<Vec<T>>
+    fn paged<T, F, Fut>(
+        &self,
+        operation: crate::storeops::Operation,
+        query: &str,
+        about: &str,
+        page: F,
+    ) -> Result<Vec<T>>
     where
         F: Fn(Option<PageToken>) -> Fut,
         Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
     {
-        let (all, unasked) = self.walk(query, about, page)?;
-        partial(query, about, &unasked)?;
+        let (all, unasked) = self.walk(operation, query, about, page)?;
+        // Only a dependency read fills `unanswered`, so a query answering one anyway is
+        // answering in part, and refused as one.
+        if !unasked.is_empty() {
+            let named: Vec<String> = unasked
+                .iter()
+                .map(|entry| format!("{entry} could not be asked"))
+                .collect();
+            return Err(Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "`{query}` of '{about}' answered in part: {}",
+                    named.join("; ")
+                ),
+            });
+        }
         Ok(all)
     }
 
@@ -1101,10 +1249,11 @@ impl Reader {
     /// than refusing them. A failure in `errors` is refused as it is there.
     fn walk<T, F, Fut>(
         &self,
+        operation: crate::storeops::Operation,
         query: &str,
         about: &str,
         page: F,
-    ) -> Result<(Vec<T>, Vec<SourceFailure>)>
+    ) -> Result<(Vec<T>, Vec<onetaskgraph_core::Unanswered>)>
     where
         F: Fn(Option<PageToken>) -> Fut,
         Fut: Future<Output = std::result::Result<QueryResponse<T>, EngineError>>,
@@ -1115,7 +1264,7 @@ impl Reader {
         let mut walked: std::collections::HashSet<PageToken> = std::collections::HashSet::new();
         loop {
             let response = self
-                .call(page(token.clone()))
+                .call(operation, page(token.clone()))
                 .map_err(|error| failed(query, about, &error))?;
             partial(query, about, &response.errors)?;
             all.extend(response.items);
@@ -1140,6 +1289,20 @@ impl Reader {
             }
             token = Some(next);
         }
+    }
+}
+
+/// A store read that was not answered, with how long its source asked to be left alone
+/// first: `None` where it named no wait.
+#[derive(Debug)]
+pub(crate) struct ReadRefused {
+    pub(crate) error: Error,
+    pub(crate) wait: Option<std::time::Duration>,
+}
+
+impl From<Error> for ReadRefused {
+    fn from(error: Error) -> Self {
+        Self { error, wait: None }
     }
 }
 
@@ -1258,6 +1421,50 @@ fn kind(kind: ItemKind) -> &'static str {
 /// is one thing said twice — with only one of them in the type.
 type Ids = BTreeMap<String, String>;
 
+/// The tasks of one project a person withdrew, by the **whole** qualified id of each, with
+/// the status name the store reports its cancellation under.
+type Withdrawn = BTreeMap<String, String>;
+
+/// Split a project's tasks into the ones that become nodes and the ones a person withdrew.
+///
+/// Partition before claiming IDs or reading edges: excluded items must never enter the
+/// write-back baseline. Entry 137 of `docs/contract-divergences.md` defines membership.
+fn partition(
+    tasks: Vec<Qualified<Task>>,
+) -> std::result::Result<(Vec<Qualified<Task>>, Withdrawn), Load> {
+    let mut kept = Vec::with_capacity(tasks.len());
+    let mut withdrawn = Withdrawn::new();
+    for task in tasks {
+        if task.item.status.category != StatusCategory::Cancelled {
+            kept.push(task);
+            continue;
+        }
+        let whole = task.id.to_string();
+        let metadata: Map<String, Value> = task.item.metadata.clone().into_iter().collect();
+        let projected = match metadata.get(PROJECTED_STATUS_KEY) {
+            None => None,
+            Some(value) => Some(
+                serde_json::from_value::<crate::writeback::ProjectedStatus>(value.clone())
+                    .map_err(|why| {
+                        refused(
+                            &whole,
+                            format!("`{PROJECTED_STATUS_KEY}` is not a projected status: {why}"),
+                        )
+                    })?,
+            ),
+        };
+        let closed_by_the_engine = projected
+            .is_none_or(|word| word == crate::writeback::ProjectedStatus::Cancelled)
+            && crate::continuation::cancelled_by_the_engine(&whole, &metadata)?;
+        if closed_by_the_engine {
+            kept.push(task);
+        } else {
+            withdrawn.insert(whole, task.item.status.name.clone());
+        }
+    }
+    Ok((kept, withdrawn))
+}
+
 /// The reserved id one task carries, or why it has none.
 ///
 /// The reason alone, phrased to follow a subject, because both callers name a
@@ -1327,33 +1534,170 @@ pub(crate) struct Read {
     pub unanswered: BTreeMap<String, Vec<Unanswered>>,
 }
 
-/// A source declared private that a dependency read could not ask, and why.
+/// What a dependency read could not ask, and why: a source declared private, or a tracker an
+/// opaque edge names that no source configured here is.
 ///
-/// The store's own [`SourceFailure`], reduced to what a run records and says: the source's
-/// name and the store's own account of why it did not answer — a credential absent or
-/// refused, a source unreachable or rate-limited.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// The store's own [`onetaskgraph_core::Unanswered`], kept structured rather than reduced to
+/// text: the hold record's `cause` and, for a rate limit naming its reset, the instant the
+/// source may be asked again are what the run decides when to read it again by.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Unanswered {
-    /// The source's name, as its configuration spells it.
-    pub source: SourceName,
+    /// Who could not be asked, and what kind of not answering it was.
+    pub who: Unasked,
     /// Why it did not answer, in the store's own words.
     pub reason: String,
 }
 
-impl Unanswered {
-    /// Each source the failures name, once, in name order: a read that walked several pages
-    /// meets the same source on each.
-    fn of(failures: &[SourceFailure]) -> Vec<Self> {
-        let mut named: BTreeMap<SourceName, String> = BTreeMap::new();
-        for failure in failures {
-            named
-                .entry(failure.source.clone())
-                .or_insert_with(|| failure.error.to_string());
+/// Who a dependency read could not ask, each with only the account its kind can carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Unasked {
+    /// A configured source, and why it could not be asked.
+    Source {
+        source: SourceName,
+        cause: SourceCause,
+    },
+    /// The tracker an opaque edge names, which no source configured here is.
+    Tracker(onetaskgraph_plugin_api::Designator),
+    /// A source a hold a build before the cause was recorded names: read and said as it was
+    /// written, with no cause and no reset.
+    Recorded(SourceName),
+}
+
+/// Why a configured source could not be asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceCause {
+    /// It asked the reader to slow down, naming — where it did — the epoch milliseconds it may
+    /// be asked again at: the read's instant plus its `retry_after_seconds`.
+    RateLimited { retry_at_ms: Option<u64> },
+    /// Its credential was absent, malformed or refused.
+    Auth,
+    /// It could not be reached, or answered in a way no wait or credential is known to fix.
+    Unavailable,
+}
+
+/// Why something could not be asked, as a `node-held` record's `cause` spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum Cause {
+    /// It asked the reader to slow down.
+    RateLimited,
+    /// Its credential was absent, malformed or refused.
+    Auth,
+    /// It could not be reached, or answered in a way no wait or credential is known to fix.
+    Unavailable,
+    /// The tracker an edge names is no source configured here.
+    Unconfigured,
+}
+
+impl Cause {
+    /// Every cause, in the order the record's vocabulary lists them.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::RateLimited,
+        Self::Auth,
+        Self::Unavailable,
+        Self::Unconfigured,
+    ];
+
+    /// The word the record carries.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate-limited",
+            Self::Auth => "auth",
+            Self::Unavailable => "unavailable",
+            Self::Unconfigured => "unconfigured",
         }
-        named
-            .into_iter()
-            .map(|(source, reason)| Self { source, reason })
-            .collect()
+    }
+
+    /// The cause a recorded word names, or `None` for a word this build does not know.
+    pub(crate) fn of_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|cause| cause.as_str() == word)
+    }
+}
+
+impl SourceCause {
+    /// The cause of one source failure, and a rate limit's reset counted from `now_ms`. A
+    /// configuration the source refused, or an answer it could not give, is `unavailable`: no
+    /// wait and no credential is known to change it.
+    fn of_error(error: &onetaskgraph_plugin_api::SourceError, now_ms: u64) -> Self {
+        use onetaskgraph_plugin_api::SourceError;
+        match error {
+            SourceError::RateLimited {
+                retry_after_seconds,
+                ..
+            } => Self::RateLimited {
+                retry_at_ms: retry_after_seconds
+                    .map(|seconds| now_ms.saturating_add(seconds.saturating_mul(1_000))),
+            },
+            SourceError::Auth { .. } => Self::Auth,
+            // The store names in `unanswered` only a source that could not answer — refused
+            // its credential, unreachable, rate limited — and fails the read on any other
+            // error, so these three arms are the match's exhaustiveness, which
+            // `taskgraph::tests::an_unanswered_source_keeps_its_cause_and_a_rate_limit_its_reset`
+            // holds.
+            SourceError::Unavailable { .. }
+            | SourceError::Refused { .. }
+            | SourceError::Malformed { .. }
+            | SourceError::Config { .. } => Self::Unavailable,
+        }
+    }
+}
+
+impl Unanswered {
+    /// Each source or tracker the store's answer names, once, in name order: a read that
+    /// walked several pages meets the same source on each, and the first account of it
+    /// stands. A rate limit naming how long to wait is stamped with the instant that ends,
+    /// counted from `now_ms`.
+    pub(crate) fn of(unanswered: &[onetaskgraph_core::Unanswered], now_ms: u64) -> Vec<Self> {
+        let mut named: BTreeMap<String, Self> = BTreeMap::new();
+        for entry in unanswered {
+            let read = match entry {
+                onetaskgraph_core::Unanswered::Source(failure) => Self {
+                    who: Unasked::Source {
+                        source: failure.source.clone(),
+                        cause: SourceCause::of_error(&failure.error, now_ms),
+                    },
+                    reason: failure.error.to_string(),
+                },
+                onetaskgraph_core::Unanswered::Designator(unresolved) => Self {
+                    who: Unasked::Tracker(unresolved.designator.clone()),
+                    reason: unresolved.reason.as_str().to_owned(),
+                },
+            };
+            named.entry(read.name()).or_insert(read);
+        }
+        named.into_values().collect()
+    }
+
+    /// What the record's `source` names it by: the source's configured name, or the
+    /// designator of a tracker no configured source is.
+    pub(crate) fn name(&self) -> String {
+        match &self.who {
+            Unasked::Source { source, .. } | Unasked::Recorded(source) => source.to_string(),
+            Unasked::Tracker(designator) => designator.to_string(),
+        }
+    }
+
+    /// The record's `cause`, or `None` for a hold journalled before it was recorded.
+    pub(crate) fn cause(&self) -> Option<Cause> {
+        match &self.who {
+            Unasked::Source { cause, .. } => Some(match cause {
+                SourceCause::RateLimited { .. } => Cause::RateLimited,
+                SourceCause::Auth => Cause::Auth,
+                SourceCause::Unavailable => Cause::Unavailable,
+            }),
+            Unasked::Tracker(_) => Some(Cause::Unconfigured),
+            Unasked::Recorded(_) => None,
+        }
+    }
+
+    /// The reset a rate-limited source named, as the epoch milliseconds it falls at.
+    pub(crate) fn retry_at_ms(&self) -> Option<u64> {
+        match &self.who {
+            Unasked::Source {
+                cause: SourceCause::RateLimited { retry_at_ms },
+                ..
+            } => *retry_at_ms,
+            _ => None,
+        }
     }
 }
 
@@ -1563,6 +1907,7 @@ fn one<T>(
 #[cfg(test)]
 mod tests {
     use onetaskgraph_core::Config;
+    use onetaskgraph_plugin_api::Classification;
     use serde_json::json;
 
     use super::*;
@@ -1711,6 +2056,87 @@ mod tests {
             Err(Load::Unreadable(error)) => panic!("the project was unreadable: {error}"),
             Ok(read) => panic!("the project was read: {:?}", read.plan.tasks),
         }
+    }
+
+    /// A status a person closes a task with, under the name the store gives it.
+    fn not_planned() -> Value {
+        json!({"category": "cancelled", "name": "Not planned"})
+    }
+
+    /// A cancelled task the engine closed — settled `cancelled` and projected `cancelled`, as a
+    /// stopped dispatch is — is a node still, and so is one settled `cancelled` before the
+    /// projected word was recorded. One a person closed is left out: carrying no settlement,
+    /// one the engine never projects as cancelled, or the `parked` a park projected, which the
+    /// person's close came after. A task in any other status is a node whatever it carries.
+    #[test]
+    fn a_project_read_leaves_out_every_task_a_person_withdrew() {
+        let settled = |id: &str, status: &str, projected: Option<&str>, category: Value| {
+            let mut metadata = node(id);
+            metadata[SETTLEMENT_KEY] = json!({"status": status, "branch": "me/b"});
+            if let Some(word) = projected {
+                metadata[PROJECTED_STATUS_KEY] = json!(word);
+            }
+            task(&format!("t-{id}"), metadata, json!({"status": category}))
+        };
+        let read = load(store(
+            json!({}),
+            vec![
+                task("t-build", node("build"), json!({})),
+                // Withdrawn before it ever ran, and carrying no node id: it claims none.
+                task(
+                    "t-withdrawn",
+                    json!({"onepipeline.persona": "engineer"}),
+                    json!({"status": not_planned()}),
+                ),
+                settled("stopped", "cancelled", Some("cancelled"), not_planned()),
+                settled("older", "cancelled", None, not_planned()),
+                settled("parked-closed", "cancelled", Some("parked"), not_planned()),
+                settled("failed-closed", "failed", Some("failed"), not_planned()),
+                settled(
+                    "parked",
+                    "cancelled",
+                    Some("parked"),
+                    json!({"category": "unknown", "name": "parked"}),
+                ),
+            ],
+            vec![],
+        ))
+        .unwrap_or_else(|_| panic!("the project reads as a plan"));
+        let kept = ["build", "stopped", "older", "parked"];
+        let ids: BTreeSet<&str> = read
+            .plan
+            .tasks
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(ids, BTreeSet::from(kept));
+        assert_eq!(
+            read.tasks
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(kept),
+            "a withdrawn task is in the write-back's baseline"
+        );
+    }
+
+    /// A task depending on a withdrawn one refuses the read, naming both tasks and the
+    /// status the store reports the cancellation under, rather than releasing it.
+    #[test]
+    fn a_task_depending_on_a_withdrawn_task_refuses_the_read() {
+        let message = refusal(load(store(
+            json!({}),
+            vec![
+                task("t-design", node("design"), json!({"status": not_planned()})),
+                task("t-build", node("build"), json!({})),
+            ],
+            vec![json!({"from": "t-build", "to": "t-design", "kind": "blocks"})],
+        )));
+        assert!(
+            message.contains("'plans:t-build' depends on 'plans:t-design', which is withdrawn"),
+            "{message}"
+        );
+        assert!(message.contains("'Not planned'"), "{message}");
     }
 
     /// Project = plan, task = node, dependency edge = dependency: the mapping read off the
@@ -1869,7 +2295,7 @@ mod tests {
 
     /// The boundary's three record fields reach the plan from where the store keeps them:
     /// the export edges from the project's reserved key, a node's classification from its
-    /// task's own field — tightened by a private project — and every repository a task
+    /// task's own field — never its project's — and every repository a task
     /// names beyond its `repo` onto its record.
     #[test]
     fn the_boundary_fields_reconcile_with_the_records_they_are_read_from() {
@@ -1937,8 +2363,13 @@ mod tests {
         let written = serde_json::to_value(nodes["consume"]).expect("a node serializes");
         assert!(written.get("classification").is_none(), "{written}");
 
-        // A private project keeps every task in it private, whatever the task says.
-        let mut private = store(json!({}), vec![task("t-a", node("a"), json!({}))], vec![]);
+        // A private coordinating project classifies none of its tasks: each keeps its own
+        // visibility, so a public task under it stays public and a private one private.
+        let tasks = vec![
+            task("t-a", node("a"), json!({})),
+            task("t-b", node("b"), json!({"classification": "private"})),
+        ];
+        let mut private = store(json!({}), tasks.clone(), vec![]);
         private.config = Config::from_document(json!({
             "sources": {"plans": {"plugin": "in-memory", "config": {
                 "projects": [{
@@ -1949,7 +2380,7 @@ mod tests {
                     "classification": "private",
                     "metadata": {"onepipeline.schema_version": crate::plan::PLAN_SCHEMA_VERSION},
                 }],
-                "tasks": [task("t-a", node("a"), json!({}))],
+                "tasks": tasks,
                 "task_dependencies": [],
             }}},
         }))
@@ -1959,7 +2390,19 @@ mod tests {
             &onetaskgraph_core::Secrets::load(Environment::default()).expect("no secrets"),
         );
         let read = load(private).unwrap_or_else(|_| panic!("the project reads as a plan"));
-        assert_eq!(read.plan.tasks[0].classification, Classification::Private);
+        let classes: BTreeMap<&str, Classification> = read
+            .plan
+            .tasks
+            .iter()
+            .map(|node| (node.id.as_str(), node.classification))
+            .collect();
+        assert_eq!(
+            classes,
+            BTreeMap::from([
+                ("a", Classification::Public),
+                ("b", Classification::Private)
+            ])
+        );
 
         // And the field is the task's, never a reserved key.
         let refused = load(store(
@@ -2663,19 +3106,24 @@ mod tests {
     /// meets one twice, and nothing in its contract promises it never will.
     #[test]
     fn a_source_named_on_several_pages_is_one_unanswered_source() {
-        let failure = |source: &str, message: &str| SourceFailure {
-            source: SourceName::new(source).expect("a source name"),
-            error: onetaskgraph_plugin_api::SourceError::Auth {
-                message: message.to_owned(),
-            },
+        let failure = |source: &str, message: &str| {
+            onetaskgraph_core::Unanswered::Source(SourceFailure {
+                source: SourceName::new(source).expect("a source name"),
+                error: onetaskgraph_plugin_api::SourceError::Auth {
+                    message: message.to_owned(),
+                },
+            })
         };
-        let named: Vec<(String, String)> = Unanswered::of(&[
-            failure("vault", "first page"),
-            failure("archive", "first page"),
-            failure("vault", "second page"),
-        ])
+        let named: Vec<(String, String)> = Unanswered::of(
+            &[
+                failure("vault", "first page"),
+                failure("archive", "first page"),
+                failure("vault", "second page"),
+            ],
+            0,
+        )
         .into_iter()
-        .map(|unanswered| (unanswered.source.to_string(), unanswered.reason))
+        .map(|unanswered| (unanswered.name(), unanswered.reason))
         .collect();
         assert_eq!(
             named,
@@ -2688,6 +3136,94 @@ mod tests {
                     "vault".to_owned(),
                     "authentication for this source failed: first page".to_owned()
                 ),
+            ]
+        );
+    }
+
+    /// The store's structured answer is kept: each source's cause, a rate limit's reset as the
+    /// instant it falls at, and a designator no configured source is as `unconfigured`.
+    #[test]
+    fn an_unanswered_source_keeps_its_cause_and_a_rate_limit_its_reset() {
+        use onetaskgraph_plugin_api::SourceError;
+        let source = |name: &str, error: SourceError| {
+            onetaskgraph_core::Unanswered::Source(SourceFailure {
+                source: SourceName::new(name).expect("a source name"),
+                error,
+            })
+        };
+        let designator =
+            onetaskgraph_plugin_api::Designator::of_alias("an-alias-of-sixteen").expect("an alias");
+        let read = Unanswered::of(
+            &[
+                source(
+                    "limited",
+                    SourceError::RateLimited {
+                        retry_after_seconds: Some(1_800),
+                        message: None,
+                    },
+                ),
+                source(
+                    "unreset",
+                    SourceError::RateLimited {
+                        retry_after_seconds: None,
+                        message: None,
+                    },
+                ),
+                source(
+                    "down",
+                    SourceError::Unavailable {
+                        message: "no route".to_owned(),
+                    },
+                ),
+                source(
+                    "refusing",
+                    SourceError::Refused {
+                        message: "no".to_owned(),
+                    },
+                ),
+                source(
+                    "garbled",
+                    SourceError::Malformed {
+                        message: "not JSON".to_owned(),
+                    },
+                ),
+                source(
+                    "misconfigured",
+                    SourceError::Config {
+                        message: "no root".to_owned(),
+                    },
+                ),
+                onetaskgraph_core::Unanswered::Designator(
+                    onetaskgraph_core::UnresolvedDesignator {
+                        designator: designator.clone(),
+                        reason: onetaskgraph_core::UnresolvedReason::NotConfigured,
+                    },
+                ),
+            ],
+            1_000,
+        );
+        let said: Vec<(String, Option<Cause>, Option<u64>)> = read
+            .iter()
+            .map(|unasked| (unasked.name(), unasked.cause(), unasked.retry_at_ms()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    "alias/an-alias-of-sixteen".to_owned(),
+                    Some(Cause::Unconfigured),
+                    None
+                ),
+                ("down".to_owned(), Some(Cause::Unavailable), None),
+                ("garbled".to_owned(), Some(Cause::Unavailable), None),
+                (
+                    "limited".to_owned(),
+                    Some(Cause::RateLimited),
+                    Some(1_801_000)
+                ),
+                ("misconfigured".to_owned(), Some(Cause::Unavailable), None),
+                ("refusing".to_owned(), Some(Cause::Unavailable), None),
+                ("unreset".to_owned(), Some(Cause::RateLimited), None),
             ]
         );
     }

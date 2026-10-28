@@ -20,8 +20,8 @@
 //! | queue | policy | files |
 //! | --- | --- | --- |
 //! | [`SURFACES`] | held pending, blocking first, a waiting check-in superseded, projected | `surfaces.jsonl`, `queue.json` |
-//! | [`REPLIES`] | plain, numbered, a claim passing over a commands-only reply | `replies.jsonl`, `replies-cursor.json` |
-//! | [`COMMANDS`] | plain, numbered | `commands.jsonl`, `commands-cursor.json` |
+//! | [`REPLIES`] | plain, numbered, a claim passing over a commands-only reply | `replies.jsonl`, `replies.jsonl.count`, `replies-cursor.json`, `replies-cursor.json.offset` |
+//! | [`COMMANDS`] | plain, numbered | `commands.jsonl`, `commands.jsonl.count`, `commands-cursor.json`, `commands-cursor.json.offset` |
 //! | [`COMMAND_OUTCOMES`] | plain | `command-outcomes.jsonl` |
 //!
 //! Three rulings the bus's `docs/queues.md` recorded, each now this crate's and
@@ -73,15 +73,22 @@ pub const PROJECTION: &str = "queue.json";
 
 /// Every file a channel directory of this layout holds, in the order a
 /// comparison reports them: each queue's log, the surfaces queue's
-/// [`PROJECTION`], and a cursor for each queue a single reader claims from.
-/// Held to what the queues actually write by this module's tests.
-pub const FILES: [&str; 7] = [
+/// [`PROJECTION`], and a cursor for each queue a single reader claims from —
+/// with the core's own derived state beside them: the record count it keeps
+/// beside each numbered queue's log once that log is counted with a record in
+/// it, and the byte offset it keeps beside each cursor. Held to what the queues
+/// actually write by this module's tests.
+pub const FILES: [&str; 11] = [
     "surfaces.jsonl",
     PROJECTION,
     "replies.jsonl",
+    "replies.jsonl.count",
     "replies-cursor.json",
+    "replies-cursor.json.offset",
     "commands.jsonl",
+    "commands.jsonl.count",
     "commands-cursor.json",
+    "commands-cursor.json.offset",
     "command-outcomes.jsonl",
 ];
 
@@ -384,7 +391,7 @@ impl Message for QueuedCommands {
     const SCHEMA: SchemaId = QUEUED_COMMANDS_SCHEMA;
 }
 
-/// The four things that can become of one command of an envelope.
+/// The five things that can become of one command of an envelope.
 ///
 /// One field rather than a boolean and a sentence, because "not applied" was two
 /// facts wearing one word: a command that was wrong and a command that was fine.
@@ -417,13 +424,21 @@ pub enum CommandVerdict {
     Delivered,
     /// It refused, and [`reason`](CommandResult::reason) is what it said.
     Refused,
+    /// A live `note` handed to its receiver's inbox, waiting for that
+    /// receiver's turn to take it.
+    ///
+    /// The envelope is answered as its notes are handed off rather than once
+    /// each receiver's turn ends, which can be hours later. What the receiver's
+    /// turn later makes of the note — taken, carried or refused — is that note's
+    /// own record in the run's journal, and never rewrites this answer.
+    Queued,
 }
 
 /// What became of **one** command of an envelope.
 ///
 /// Every command is evaluated, whatever the ones before it said, so each entry is
 /// that command's **own** answer. The envelope is still atomic — a refusal
-/// anywhere in it applies none of it — and the four words of [`CommandVerdict`]
+/// anywhere in it applies none of it — and the words of [`CommandVerdict`]
 /// are what tells apart the facts a single boolean could not: which commands
 /// were wrong, which were fine and went down with them, and which of those had
 /// already been read by a conversation that cannot unread it. A manager reading
@@ -451,6 +466,13 @@ pub struct CommandResult {
     // llmlint: ignore[invalid_states_unrepresentable] the manager's ruling on this node fixes the wire shape: an optional `refusal` beside `reason`, `reason` its display text, every existing outcome reading unchanged — so it cannot fold into the verdict or replace `reason` without changing bytes this layout reads and writes; the reconciler sets both from one refusal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<crate::channel::Refusal>,
+    /// How the live turn that took a `note` took it: `interrupted`, or
+    /// `turn-end`. Present exactly where an applied note reached the worker or
+    /// the supervisor, as that note's `note-delivered` record says, and omitted
+    /// otherwise — so every outcome written before it existed reads unchanged.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan node `op-interrupting-notes` fixes this wire shape: an optional `turn` beside `outcome`, omitted where absent so every outcome written before it reads unchanged, as `reason` and `refusal` beside it are. Folding it into the verdict would change the bytes `command-outcomes.jsonl` holds; the reconciler writes it only from an applied note's own `note-delivered` record (`engine::turn_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<crate::note::NoteTurn>,
 }
 
 /// The reconciler's answer to one submitted envelope, as
@@ -535,6 +557,8 @@ pub enum Op {
     Amend,
     /// Deliver a note into a node's dispatch.
     Note,
+    /// Take back a note no turn has read yet.
+    WithdrawNote,
     /// Settle a node from evidence.
     Settle,
     /// Rework a node settled as a review draft, on its own branch.
@@ -547,7 +571,7 @@ pub enum Op {
 
 impl Op {
     /// Every op, in the order the contract lists them.
-    pub const ALL: [Op; 19] = [
+    pub const ALL: [Op; 20] = [
         Op::SetNodeSets,
         Op::SetRunNodeSets,
         Op::Add,
@@ -561,6 +585,7 @@ impl Op {
         Op::Finding,
         Op::Amend,
         Op::Note,
+        Op::WithdrawNote,
         Op::Settle,
         Op::Rework,
         Op::Retitle,
@@ -586,6 +611,7 @@ impl Op {
             Op::Finding => "finding",
             Op::Amend => "amend",
             Op::Note => "note",
+            Op::WithdrawNote => "withdraw-note",
             Op::Settle => "settle",
             Op::Rework => "rework",
             Op::Retitle => "retitle",
@@ -1197,6 +1223,7 @@ impl Channel {
     /// could be this envelope's answer, and "not answered yet" would then be a
     /// wrong answer rather than an unknown one.
     pub fn outcome_of(&self, id: u64) -> Result<Option<CommandOutcome>, QueueError> {
+        let mut answered = None;
         for (record, _) in self.outcomes.raw().log(None)? {
             let outcome = serde_json::from_value::<CommandOutcome>(record).map_err(|failure| {
                 QueueError::Shape {
@@ -1204,11 +1231,13 @@ impl Channel {
                     why: failure.to_string(),
                 }
             })?;
+            // The latest answer stands: an envelope a later `withdraw-note` took a
+            // note of is answered again.
             if outcome.id == id {
-                return Ok(Some(outcome));
+                answered = Some(outcome);
             }
         }
-        Ok(None)
+        Ok(answered)
     }
 }
 
@@ -1388,6 +1417,24 @@ mod tests {
                 results: Vec::new(),
             })
             .expect("answered");
+        // A numbered queue's record count is kept once the queue is counted with a
+        // record already in it, as every queue of a run past its first is: a second
+        // reply and a second command, so the directory holds what a run's does.
+        channel
+            .answer(
+                &ReplyEnvelope {
+                    message: Some("again".to_owned()),
+                    ..ReplyEnvelope::default()
+                },
+                3,
+            )
+            .expect("answered again");
+        let mut again = Map::new();
+        again.insert("op".to_owned(), Value::from("finding"));
+        again.insert("message".to_owned(), Value::from("n"));
+        channel
+            .submit(planner(), vec![again])
+            .expect("submitted again");
         let mut written: Vec<String> = std::fs::read_dir(&dir)
             .expect("the channel directory")
             .flatten()
