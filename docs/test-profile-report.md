@@ -9,9 +9,10 @@ The records come from `onepipeline_testfakes::profile` (`crates/testfakes/src/pr
 This branch, `nick/959/onepipeline-test-profile-r9`, replaces `nick/959/onepipeline-test-profile-r2` and its pull request, onepipeline [#978](https://github.com/nickderobertis/onepipeline/pull/978). Every commit hash named in the sections after this one is a commit of r2. r2 cannot be published: its history carries merges of main, and onevcs's boundary check refuses one of them. This branch is cut from main at 6212751 (#1256) and carries no merge of main. Its outgoing commits:
 - **eff0ef2** carries r2's net change (`git merge --squash` of r2's head bd81161 over its merge base c962121) as one commit. 79 of its 82 files are byte-identical to bd81161. The other three, `.github/workflows/ci.yml`, `tests/ci_workflows.rs` and `tests/e2e/linear_writeback.rs`, were also changed by main after c962121. In each, r2's added and removed lines are exactly the ones this branch applies over main's.
 - **652235d** is lockfile-only. It moves `pulldown-cmark` from 0.13.4 to 0.13.5, past [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414), so that the required `deny` check passes. Nothing else in `Cargo.lock` moves, so the lock is otherwise main's at 6212751.
-- The commit that adds this section changes only this document.
+- **d907f7c** adds this section and changes only this document.
+- The next commit corrects `scripts/crate-split/proposed.json` for main's #1256, and updates this document. #1256's new `linear_writeback` journeys call `crate::publication_boundary::mixed_world`, `producer`, `public` and `mixed_plan`. That makes `e2e-store`, which owns `linear_writeback`, compile `publication_boundary` and, through it, `malformed_envelopes`, `driver` and `dispatch`. With the mapping unchanged, the mapping test (`npm/test/crate-split-replay.test.mjs`) refused the proposal: `e2e-store compiles publication_boundary but does not list tests/e2e/publication_boundary.rs`. The correction lists those four modules' files in `e2e-store`'s paths, plus the recorded run `dispatch` reads (`tests/recorded/run-root/run-labels` and `/**`), as the other suites that compile `dispatch` already do. It only adds paths. One window pull request, #611 (8115843, *remove the orderings behind three intermittent watch and driver e2e failures*), touches one of them without touching another `e2e-store` input, so the replay now runs `e2e-store` on 138 of the 144 rather than 137 (see **Replay over the 144**). Run F's records and the scripts that read them are unchanged.
 
-**The profile stands at r2's 7a017fa.** Between 7a017fa and this branch's head, nothing differs in the harness's recording, the analysis scripts, the mapping or the golden: `crates/testfakes/`, `scripts/test-profile-report.mjs`, `scripts/crate-split-replay.mjs`, `scripts/crate-split/proposed.json`, `tests/e2e/profiling.rs` and `tests/golden/test-profile-record-v2.json` are byte-identical. Outside this document and `Cargo.lock`, every file that differs is one main changed between c962121 and 6212751, and each differs by exactly main's lines: `tests/e2e/linear_writeback.rs` (+256), `tests/e2e/linear_loopback.rs`, `tests/ci_workflows.rs`, the npm launcher, its tests and `scripts/npm-build.mjs`, `.github/workflows/`, `Cargo.toml`, `README.md`, `AGENTS.md`, `CHANGELOG.md` and `justfile`. `Cargo.lock` is main's plus 652235d. So the profile is a snapshot of 7a017fa, as described below. Main's #1240 and #1256 change `linear_writeback`'s and `linear_loopback`'s journeys, and no figure here holds for those tests on this head.
+**The profile stands at r2's 7a017fa.** Between 7a017fa and this branch's head, nothing differs in the harness's recording, the analysis scripts or the golden: `crates/testfakes/`, `scripts/test-profile-report.mjs`, `scripts/crate-split-replay.mjs`, `tests/e2e/profiling.rs` and `tests/golden/test-profile-record-v2.json` are byte-identical. The mapping, `scripts/crate-split/proposed.json`, is not an input of the profile; its correction is listed above. Outside this document, the mapping and `Cargo.lock`, every file that differs is one main changed between c962121 and 6212751, and each differs by exactly main's lines: `tests/e2e/linear_writeback.rs` (+256), `tests/e2e/linear_loopback.rs`, `tests/ci_workflows.rs`, the npm launcher, its tests and `scripts/npm-build.mjs`, `.github/workflows/`, `Cargo.toml`, `README.md`, `AGENTS.md`, `CHANGELOG.md` and `justfile`. `Cargo.lock` is main's plus 652235d. So the profile is a snapshot of 7a017fa, as described below. Main's #1240 and #1256 change `linear_writeback`'s and `linear_loopback`'s journeys, and no figure here holds for those tests on this head.
 
 **Engines.** On this head, `just engines-current` passes: oneagentgraph 0.9.0, onevcs 0.57.0, onevcs-testing 0.19.22, onejudge 0.22.0, oneharness-core 0.29.1, the onetaskgraph crates at 0.12.8, onemessagebus 0.9.4 and onebudgetspec-core 0.1.5 are each the newest their own requirement permits. Main already links them, so this branch adds no engine refresh.
 
@@ -973,17 +974,17 @@ Both affect every suite under the proposed mapping. With them back in, the regen
 
 ### Replay over the 144, weighted by the current records
 
-The mapping is ff335de's: fc3c597's, which added #935's `review_reply` and `review_round` modules, plus the six modules main's c962121 added (see the commit list above). Over the CI Linux dd2e5d6 records, which predate all eight, the result is identical to the mapping at dd2e5d6 and at fc3c597.
+The mapping is this branch's head's. That is ff335de's (fc3c597's, which added #935's `review_reply` and `review_round` modules, plus the six modules main's c962121 added; see the commit list above), with one correction for main's #1256 (see **This branch, and the branch it replaces**). Over the CI Linux dd2e5d6 records, which predate all eight modules, ff335de's mapping gave the same result as the mapping at dd2e5d6 and at fc3c597. The correction moves one pull request's `e2e-store` run from skipped to run, so the figures below are one suite run lower than ff335de's mapping gave. ff335de's figures were 58 of 1,296 suite runs (4.5%), and test-seconds of 4.2% (63,440.7 by dd2e5d6 and 219,230.3 by run F).
 
 **By the CI Linux records of dd2e5d6:**
 
-144 merged changes, 9 suites: 58 of 1296 suite runs skipped (4.5%).
-Test-seconds: 10407.2 per full run; 63440.7 skipped over the window (4.2%).
+144 merged changes, 9 suites: 57 of 1296 suite runs skipped (4.4%).
+Test-seconds: 10407.2 per full run; 60483.9 skipped over the window (4.0%).
 
 | suite | changes it runs on | unaffected | test-s per run |
 | --- | ---: | ---: | ---: |
 | e2e-landing | 139 | 3.5% | 3903.0 |
-| e2e-store | 137 | 4.9% | 2956.8 |
+| e2e-store | 138 | 4.2% | 2956.8 |
 | e2e-views | 136 | 5.6% | 743.4 |
 | e2e-dispatch | 137 | 4.9% | 581.9 |
 | e2e-channel | 137 | 4.9% | 242.3 |
@@ -996,13 +997,13 @@ Today's shape, the same records: 144 merged changes, 1 suites: 3 of 144 suite ru
 
 **By the local Linux records of 7a017fa** (run F, `c49dda5e`, all 1,912 tests, with the six re-runs as their second attempts and `host_view`'s cold read as run F recorded it), `node scripts/crate-split-replay.mjs --mapping scripts/crate-split/proposed.json --since 2026-09-15T00:00:00Z --until 2026-10-16T00:00:00Z --records <run F records> --out <file>`:
 
-144 merged changes, 9 suites: 58 of 1296 suite runs skipped (4.5%).
-Test-seconds: 36615.1 per full run; 219230.3 skipped over the window (4.2%).
+144 merged changes, 9 suites: 57 of 1296 suite runs skipped (4.4%).
+Test-seconds: 36615.1 per full run; 211505.4 skipped over the window (4.0%).
 
 | suite | changes it runs on | unaffected | test-s per run |
 | --- | ---: | ---: | ---: |
 | e2e-landing | 139 | 3.5% | 15042.7 |
-| e2e-store | 137 | 4.9% | 7724.9 |
+| e2e-store | 138 | 4.2% | 7724.9 |
 | e2e-views | 136 | 5.6% | 2089.0 |
 | e2e-dispatch | 137 | 4.9% | 3526.8 |
 | e2e-channel | 137 | 4.9% | 645.2 |
@@ -1038,7 +1039,7 @@ Today's shape, the same records (`--today` in place of `--mapping`): 144 merged 
 | e2e-maintenance | 140 | 2.8% | 191.9 |
 | e2e-harness | 136 | 5.6% | 29.6 |
 
-- **Share of e2e suite runs Nx would skip: 4.5%** (58 of 1296), and **4.2% of e2e test-seconds** (57,558 of 1,354,608 over the window). Today's shape skips **2.1%**.
+- **Share of e2e suite runs Nx would skip: 4.5%** (58 of 1296), and **4.2% of e2e test-seconds** (57,558 of 1,354,608 over the window). That was the figure for the mapping at dd2e5d6. Under this branch's head's mapping it is 4.4% and 4.0% (above). Today's shape skips **2.1%**.
 - **Ceiling.** Only **8 of 144** PRs touch none of `src/` (106 do), the shared inputs (85 do), or the harness and testfakes (75 do). Every suite drives the whole binary, so no split of this kind can skip much beyond about 5.6%.
 
 ### Compile and incremental build, measured on a prototype (f6a526e)
@@ -1087,8 +1088,8 @@ Per-unit `--timings` (cold, `-j20`) show where the extra CPU goes. The e2e test 
 
 | | effect of the proposed split | evidence |
 | --- | --- | --- |
-| e2e suite runs Nx skips | **4.5%** (58 of 1,296), against **2.1%** for today's shape; ceiling about 5.6% | replay of the 144: the mapping at ff335de on CI-Linux dd2e5d6 and local 7a017fa (run F) weights, the mapping at dd2e5d6 on CI-Linux a94701b weights |
-| e2e test-seconds skipped | **4.2%**: 63,441 of 1,498,637 by CI-Linux dd2e5d6, 219,230 of 5,272,574 by local 7a017fa (run F), 57,558 of 1,354,608 by CI-Linux a94701b | the same replay |
+| e2e suite runs Nx skips | **4.4%** (57 of 1,296), against **2.1%** for today's shape; ceiling about 5.6% | replay of the 144 under this branch's head's mapping, weighted by CI-Linux dd2e5d6 and by local 7a017fa (run F). ff335de's mapping gave 4.5% (58), as did the mapping at dd2e5d6 on CI-Linux a94701b weights |
+| e2e test-seconds skipped | **4.0%**: 60,484 of 1,498,637 by CI-Linux dd2e5d6, 211,505 of 5,272,574 by local 7a017fa (run F). Earlier mappings gave 4.2%: 63,441 and 219,230 by ff335de's, 57,558 of 1,354,608 by dd2e5d6's on CI-Linux a94701b | the same replay |
 | compile per CI job | **+38% CPU** for a whole-job build (every suite, which 95% of PRs need); -18% to -30% only for a job that builds one suite | prototype of f6a526e, local Linux, uninstrumented |
 | incremental local rebuild | **+36-38%** CPU for a source edit, **+45%** for a one-area test edit | the same prototype |
 | per-test cost | **unchanged**: every test spawns the same binary and does the same work | the records: per-test work is the binary's, not the crate layout's |
