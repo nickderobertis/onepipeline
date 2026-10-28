@@ -2705,9 +2705,13 @@ fn a_sweep_records_its_maintenance_before_its_retirement_pass_ends() {
     world.until("the sweeper to settle", |world| {
         world.run_file("sweeper", "result.json").is_file()
     });
-    assert!(retired(&world, "sweeper")
-        .iter()
-        .any(|entry| entry["branch"] == "done/published"));
+    assert!(
+        retired(&world, "sweeper")
+            .iter()
+            .any(|entry| entry["branch"] == "done/published"),
+        "{}",
+        world.dump()
+    );
     assert!(!holds(&world, &repo.origin, "done/published"));
     let kinds: Vec<Value> = world
         .journal("sweeper")
