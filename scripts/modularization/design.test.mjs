@@ -392,6 +392,25 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
     modular.crates["cmd-fresh"] = { files: [], deps: [] };
     put(root, "layout.json", modular);
     assert.equal(run().status, 0);
+    put(
+      root,
+      "src/cli.rs",
+      readFileSync(join(root, "src/cli.rs"), "utf8").replace(
+        "    Fresh(Args),",
+        "    Fresh(Args),\n    Monitor(Args),",
+      ),
+    );
+    put(root, "tests/e2e/b.rs", 'fn helper() { run(&["monitor"]); }');
+    put(root, "layout.json", modular);
+    assert.match(run().stderr, /missing command mapping: cmd-observer-view/);
+    modular.crates["cmd-observer-view"] = { files: [], deps: [] };
+    put(root, "layout.json", modular);
+    assert.equal(run().status, 0);
+    assert.ok(
+      JSON.parse(readFileSync(join(root, "layout.json"), "utf8")).suites.a.crates.includes(
+        "cmd-observer-view",
+      ),
+    );
     modular.suites.a.modules = ["missing"];
     put(root, "layout.json", modular);
     const failed = run();

@@ -50,6 +50,8 @@ export function suiteInputs(modules, root = ".") {
 /** Conservative command roots named literally by test modules and borrowed helpers. */
 export function commandCrates(modules, available, root = ".") {
   const roots = new Set();
+  const commandCrate = (command) =>
+    command === "monitor" ? "cmd-observer-view" : `cmd-${command}`;
   const cli = readFileSync(join(root, "src/cli.rs"), "utf8");
   const kebab = (word) =>
     word.replace(/[a-z0-9][A-Z]/g, (pair) => `${pair[0]}-${pair[1]}`).toLowerCase();
@@ -61,20 +63,20 @@ export function commandCrates(modules, available, root = ".") {
   );
   if (!enums.has("Command")) throw new Error("src/cli.rs has no Command enum");
   const families = new Map();
-  for (const variant of enums.get("Command").matchAll(/^    ([A-Z]\w*)(?:\((\w+)\))?[, ]/gm)) {
+  for (const variant of enums.get("Command").matchAll(/^ {4}([A-Z]\w*)(?:\((\w+)\))?[, ]/gm)) {
     const parent = kebab(variant[1]);
     const children = enums.get(variant[2]);
     families.set(
       parent,
       children
-        ? [...children.matchAll(/^    ([A-Z]\w*)(?:\(| \{)/gm)].map(
+        ? [...children.matchAll(/^ {4}([A-Z]\w*)(?:\(| \{)/gm)].map(
             (child) => `cmd-${parent}-${kebab(child[1])}`,
           )
         : [],
     );
   }
   for (const [parent, children] of families) {
-    const parentCrate = `cmd-${parent}`;
+    const parentCrate = commandCrate(parent);
     if (
       !available.has(parentCrate) &&
       (children.length === 0 || children.some((child) => !available.has(child)))
@@ -89,7 +91,7 @@ export function commandCrates(modules, available, root = ".") {
   )) {
     const source = readFileSync(join(root, file), "utf8");
     for (const match of source.matchAll(/"([a-z][a-z-]*)"/g)) {
-      for (const name of [`cmd-${match[1]}`, ...(families.get(match[1]) ?? [])])
+      for (const name of [commandCrate(match[1]), ...(families.get(match[1]) ?? [])])
         if (available.has(name)) roots.add(name);
     }
   }

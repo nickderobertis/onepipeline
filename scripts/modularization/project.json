@@ -8,6 +8,15 @@
     "lang:js"
   ],
   "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write scripts/modularization"
+    },
     "test": {
       "command": "node --test scripts/modularization/design.test.mjs",
       "inputs": [
