@@ -7552,10 +7552,7 @@ fn write_hook_script(world: &World) -> PathBuf {
 /// the same bytes again is not harmless then, because `std::fs::write` truncates
 /// before it writes, and `cmd.exe` reopens a batch file at every `goto` — so a
 /// `wait-for` turning through its loop can find the file empty, lose its label, and
-/// end the hook with a failure git reads as the merge path refusing the push. That
-/// is how `a_restack_starts_before_its_reworked_parent_s_checks_have_settled` lost
-/// the rework's push on the Windows leg and then held the retry at the restack's
-/// rendezvous until its wait ran out.
+/// end the hook with a failure git reads as the merge path refusing the push.
 fn write_hook_script_once(path: &Path, body: &str) -> PathBuf {
     if std::fs::read(path).ok().as_deref() != Some(body.as_bytes()) {
         std::fs::write(path, body).expect("the hook script is written");
