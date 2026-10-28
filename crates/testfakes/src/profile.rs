@@ -426,7 +426,7 @@ fn record_file(name: &str) -> Option<String> {
     valid.then(|| format!("{}.json", identifiers.collect::<Vec<_>>().join(".")))
 }
 
-/// Write this process's record, once.
+/// Replace the provisional record until this process's record is finalized once.
 fn write(ended: Ended) {
     let Some(name) = test_name() else {
         return;
