@@ -19,8 +19,8 @@
 // real compiled binary against a real run store; `harness.rs` carries the same suppression
 // and the full rationale. Every claim below is read off that binary's own streams.
 
+use onepipeline_testfakes::profile::process::Child;
 use std::path::PathBuf;
-use std::process::Child;
 
 use serde_json::{json, Value};
 

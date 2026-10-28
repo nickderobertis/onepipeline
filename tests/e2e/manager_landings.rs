@@ -25,8 +25,8 @@
 
 #![cfg(unix)]
 
+use onepipeline_testfakes::profile::process::{Child, Stdio};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Stdio};
 
 use serde_json::{json, Value};
 

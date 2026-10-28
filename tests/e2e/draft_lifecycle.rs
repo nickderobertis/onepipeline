@@ -843,19 +843,21 @@ fn a_held_draft_s_work_finishes_once_reported_running_and_never_on_a_clock() {
         "build completed success advisory\nlint completed success required",
     );
     let view = |fields: &str| {
-        let output = std::process::Command::new(crate::harness::double("fake-gh"))
-            .args([
-                "pr",
-                "view",
-                "1",
-                "--repo",
-                "owner/service",
-                "--json",
-                fields,
-            ])
-            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
-            .output()
-            .expect("fake-gh starts");
+        let output = onepipeline_testfakes::profile::process::Command::new(crate::harness::double(
+            "fake-gh",
+        ))
+        .args([
+            "pr",
+            "view",
+            "1",
+            "--repo",
+            "owner/service",
+            "--json",
+            fields,
+        ])
+        .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+        .output()
+        .expect("fake-gh starts");
         assert!(output.status.success(), "{output:?}");
         serde_json::from_slice::<Value>(&output.stdout).expect("GitHub JSON")
     };
@@ -879,7 +881,7 @@ fn a_held_draft_s_work_finishes_once_reported_running_and_never_on_a_clock() {
     // rollup, spread past a second, leave it running.
     for _ in 0..3 {
         assert_eq!(view("isDraft")["isDraft"], true);
-        std::thread::sleep(std::time::Duration::from_millis(600));
+        onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_millis(600));
     }
     let late = view(rollup);
     assert_eq!(names(&late), running, "{late}");
@@ -928,11 +930,13 @@ fn activity_finishes_after_check_read(repo_numbering: bool) {
         "Some App in_progress - 1\nEmpty App queued - 0",
     );
     let invoke = |args: &[&str]| {
-        let output = std::process::Command::new(crate::harness::double("fake-gh"))
-            .args(args)
-            .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
-            .output()
-            .expect("fake-gh starts");
+        let output = onepipeline_testfakes::profile::process::Command::new(crate::harness::double(
+            "fake-gh",
+        ))
+        .args(args)
+        .env("ONEPIPELINE_FAKE_DIR", &world.fakes)
+        .output()
+        .expect("fake-gh starts");
         assert!(output.status.success(), "{:?}", output);
         output
     };

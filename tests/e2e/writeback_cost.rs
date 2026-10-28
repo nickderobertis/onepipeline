@@ -121,7 +121,7 @@ fn at_rest(world: &World, what: &str) {
             "the write-back did not come to rest after {what}; the runs root held:\n{}",
             world.dump()
         );
-        std::thread::sleep(Duration::from_millis(50));
+        onepipeline_testfakes::profile::thread::sleep(Duration::from_millis(50));
     }
 }
 

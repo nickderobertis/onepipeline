@@ -1712,7 +1712,7 @@ fn a_settled_run_records_a_closure_the_board_answers_past_the_projection_window(
         !world.events_of(run, "node-settled").is_empty()
     });
     // Past the projection's close-out window, with the driver still waiting.
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(5));
     assert!(
         world.events_of(run, "driver-exited").is_empty(),
         "the settled run ended inside the projection's window, leaving its closure"

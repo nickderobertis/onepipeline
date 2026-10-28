@@ -4,7 +4,7 @@
 // model turn behind `oneagentgraph` uses the repository's established subprocess seam;
 // scripting it holds the first real owner process and real `onevcs` session open.
 
-use std::process::{Command, Stdio};
+use onepipeline_testfakes::profile::process::{Command, Stdio};
 
 use serde_json::{json, Value};
 
@@ -517,7 +517,7 @@ fn a_dependency_on_one_node_of_a_run_does_not_acknowledge_another_of_its_nodes()
 
 /// A live session with no `run`/`node` labels, held open by the
 /// `session-holder` program until its stdin is closed.
-fn unattributed_session(world: &World) -> (std::process::Child, String) {
+fn unattributed_session(world: &World) -> (onepipeline_testfakes::profile::process::Child, String) {
     let mut held = Command::new(crate::harness::double("session-holder"))
         .arg("service")
         .env("ONEVCS_HOME", world.onevcs_home())

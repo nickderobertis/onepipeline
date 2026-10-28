@@ -50,7 +50,8 @@
         "{workspaceRoot}/target/budget-records/stacked-spikes-stage.json",
         "{workspaceRoot}/target/budget-records/host-view-debug.json",
         "{workspaceRoot}/target/budget-records/review-round-quota.json",
-        "{workspaceRoot}/target/budget-records/store-operations"
+        "{workspaceRoot}/target/budget-records/store-operations",
+        "{workspaceRoot}/target/test-profile/e2e"
       ],
       "parallelism": false
     },
@@ -69,6 +70,9 @@
           ],
           "target": "test-quick-archive"
         }
+      ],
+      "outputs": [
+        "{workspaceRoot}/target/test-profile/e2e"
       ],
       "parallelism": false
     },

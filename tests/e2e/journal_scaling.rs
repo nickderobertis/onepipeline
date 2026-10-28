@@ -1681,7 +1681,7 @@ fn what_the_claimer_may_not_answer_waits_for_the_loop_in_order_and_a_failure_is_
     let refused =
         answered(next).expect("the failing envelope was answered while the pass was held");
     assert_eq!(refused["applied"], json!(false), "{refused}");
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    onepipeline_testfakes::profile::thread::sleep(std::time::Duration::from_secs(2));
     assert!(
         answered(next + 1).is_none() && answered(next + 2).is_none(),
         "an envelope behind one naming a running dispatch was answered before the loop: {:?}",
