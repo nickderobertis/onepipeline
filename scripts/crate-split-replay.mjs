@@ -133,7 +133,9 @@ export function compileMapping(mapping) {
   }
   // Cargo refuses a cycle among a workspace's crates, so a mapping with one is not a
   // split that could be built.
+  const checked = new Set();
   const visit = (name, path) => {
+    if (checked.has(name)) return;
     if (path.includes(name)) {
       throw new Refusal(
         `crates ${[...path.slice(path.indexOf(name)), name].join(" -> ")} depend on each other in a cycle`,
@@ -141,6 +143,7 @@ export function compileMapping(mapping) {
       );
     }
     for (const dep of crates[name].deps ?? []) visit(dep, [...path, name]);
+    checked.add(name);
   };
   for (const name of Object.keys(crates)) visit(name, []);
   if (

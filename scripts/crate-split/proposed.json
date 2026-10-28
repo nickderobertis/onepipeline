@@ -1,5 +1,5 @@
 {
-  "//": "The proposed split. Crates: onepipeline-sys is the five src modules outside the one dependency cycle the other 68 form; onepipeline-core is that cycle; onepipeline is the binary; onepipeline-testfakes is the doubles. Every e2e suite drives the compiled binary, so it exercises the binary crate and through it every crate. The e2e binary splits into the suites below, each with the module files its binary compiles \u2014 its own and those they reach through `crate::<module>::` \u2014 and the runtime files they read; the harness and what it reads are every suite's.",
+  "//": "The proposed split. Crates: onepipeline-sys is the five src modules outside the one dependency cycle the other 68 form; onepipeline-core is that cycle; onepipeline is the binary; onepipeline-testfakes is the doubles. Every e2e suite drives the compiled binary, so it exercises the binary crate and through it every crate. The e2e binary splits into the suites below, each with the module files its binary compiles — its own and those they reach through `crate::<module>::` — and the runtime files they read; the harness and what it reads are every suite's.",
   "shared": [
     "Cargo.toml",
     "Cargo.lock",
@@ -188,7 +188,12 @@
         "tests/e2e/linear_launch.rs",
         "tests/e2e/withdrawn.rs",
         "tests/recorded/run-root",
-        "tests/recorded/run-root/source-hold-before-cause/**"
+        "tests/recorded/run-root/source-hold-before-cause/**",
+        "tests/e2e/review.rs",
+        "tests/e2e/review_reply.rs",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/golden/review-results-v2.json",
+        "tests/recorded/run-root/**"
       ],
       "crates": [
         "onepipeline"
@@ -342,7 +347,8 @@
         "tests/recorded/**",
         "tests/e2e/recorded_support.rs",
         "tests/e2e/stop_guard.rs",
-        "docs/stop-guard.md"
+        "docs/stop-guard.md",
+        "tests/recorded"
       ],
       "crates": [
         "onepipeline"
@@ -387,7 +393,8 @@
         "tests/e2e/malformed_envelopes.rs",
         "tests/e2e/recorded_support.rs",
         "tests/recorded/**",
-        "tests/e2e/journal_scaling.rs"
+        "tests/e2e/journal_scaling.rs",
+        "tests/recorded"
       ],
       "crates": [
         "onepipeline"

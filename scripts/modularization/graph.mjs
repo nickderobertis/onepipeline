@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -15,10 +15,52 @@ export function rustFiles(root = "src") {
 
 /** Erase comments and literals, preserving offsets for diagnostic line numbers. */
 export function codeOnly(text) {
-  return text.replace(
-    /\/\*[\s\S]*?\*\/|\/\/[^\n]*|r(#+)?"[\s\S]*?"\1|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'/g,
-    (value) => value.replace(/[^\n]/g, " "),
-  );
+  const parts = [];
+  let at = 0;
+  while (at < text.length) {
+    let end = at;
+    if (text.startsWith("//", at)) {
+      end = text.indexOf("\n", at);
+      if (end < 0) end = text.length;
+    } else if (text.startsWith("/*", at)) {
+      end = at + 2;
+      let depth = 1;
+      while (end < text.length && depth) {
+        if (text.startsWith("/*", end)) {
+          depth++;
+          end += 2;
+        } else if (text.startsWith("*/", end)) {
+          depth--;
+          end += 2;
+        } else end++;
+      }
+    } else {
+      const raw =
+        (at === 0 || !/[a-zA-Z0-9_]/.test(text[at - 1])) &&
+        /^(?:b)?r(#{0,255})"/.exec(text.slice(at));
+      if (raw) {
+        const close = `"${raw[1]}`;
+        const found = text.indexOf(close, at + raw[0].length);
+        end = found < 0 ? text.length : found + close.length;
+      } else if (text[at] === '"') {
+        end = at + 1;
+        while (end < text.length) {
+          if (text[end] === "\\") end += 2;
+          else if (text[end++] === '"') break;
+        }
+      } else if (text[at] === "'") {
+        const literal = /^'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'/u.exec(
+          text.slice(at),
+        );
+        if (literal) end = at + literal[0].length;
+      }
+    }
+    if (end > at) {
+      parts.push(text.slice(at, end).replace(/[^\n]/g, " "));
+      at = end;
+    } else parts.push(text[at++]);
+  }
+  return parts.join("");
 }
 
 /** Conservative syntactic graph: root module paths and grouped crate imports. */
@@ -42,6 +84,10 @@ export function moduleGraph(root = ".") {
       if (!edge.sites.includes(site)) edge.sites.push(site);
       edges.set(key, edge);
     };
+    if (from === "lib") {
+      for (const match of code.matchAll(/^(?:pub\s+)?mod\s+([a-z][a-z0-9_]*);/gm))
+        add(match[1], match.index);
+    }
     for (const match of code.matchAll(/\b(?:crate|onepipeline)::([a-z][a-z0-9_]*)/g))
       add(match[1], match.index);
     for (const match of code.matchAll(/\b(?:crate|super)::\s*\{([\s\S]*?)\};/g)) {
@@ -105,6 +151,75 @@ export function assertAcyclic(crates) {
 
 /** Validate exact file ownership and account for every source edge across crates. */
 export function validate(mapping, graph) {
+  const object = (value, keys, where) => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error(`${where} must be an object`);
+    for (const key of Object.keys(value))
+      if (!keys.includes(key)) throw new Error(`unknown ${where} field: ${key}`);
+  };
+  const strings = (value, where) => {
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item))
+      throw new Error(`${where} must contain nonempty strings`);
+  };
+  object(
+    mapping,
+    ["schema", "evidenceRevision", "crates", "edges", "suites", "assets", "auxiliarySuites"],
+    "layout",
+  );
+  if (mapping.schema !== 1) throw new Error("layout must use schema 1");
+  if (mapping.evidenceRevision !== undefined && !/^[a-f0-9]{40}$/.test(mapping.evidenceRevision))
+    throw new Error("invalid evidenceRevision");
+  if (!mapping.crates || typeof mapping.crates !== "object" || Array.isArray(mapping.crates))
+    throw new Error("crates must be an object");
+  for (const [name, crate] of Object.entries(mapping.crates)) {
+    if (!/^[a-z][a-z0-9-]*$/.test(name)) throw new Error(`invalid crate: ${name}`);
+    object(crate, ["files", "deps", "extract"], `crate ${name}`);
+    strings(crate.files, `${name}.files`);
+    strings(crate.deps, `${name}.deps`);
+    if (crate.extract !== undefined && typeof crate.extract !== "string")
+      throw new Error(`${name}.extract must be text`);
+  }
+  if (!mapping.edges || typeof mapping.edges !== "object" || Array.isArray(mapping.edges))
+    throw new Error("edges must be an object");
+  for (const [name, edge] of Object.entries(mapping.edges)) {
+    object(edge, ["kind", "fix"], `edge ${name}`);
+    if (
+      !["move", "shared", "seam"].includes(edge.kind) ||
+      typeof edge.fix !== "string" ||
+      !edge.fix.trim()
+    )
+      throw new Error(`invalid edge ${name}`);
+  }
+  for (const field of ["suites", "auxiliarySuites"]) {
+    const suites = mapping[field] ?? {};
+    if (!suites || typeof suites !== "object" || Array.isArray(suites))
+      throw new Error(`${field} must be an object`);
+    const owned = new Set();
+    for (const [name, suite] of Object.entries(suites)) {
+      object(suite, ["paths", "crates", "modules", "reason"], `suite ${name}`);
+      strings(suite.paths, `${name}.paths`);
+      strings(suite.crates, `${name}.crates`);
+      for (const crate of suite.crates)
+        if (!Object.hasOwn(mapping.crates, crate))
+          throw new Error(`suite ${name}: unknown crate ${crate}`);
+      if (suite.reason !== undefined && typeof suite.reason !== "string")
+        throw new Error(`${name}.reason must be text`);
+      if (suite.modules !== undefined) {
+        strings(suite.modules, `${name}.modules`);
+        for (const module of suite.modules) {
+          if (owned.has(module)) throw new Error(`duplicate suite module: ${module}`);
+          owned.add(module);
+        }
+      }
+    }
+  }
+  const assets = mapping.assets ?? {};
+  if (!assets || typeof assets !== "object" || Array.isArray(assets))
+    throw new Error("assets must be an object");
+  for (const [name, paths] of Object.entries(assets)) {
+    if (!Object.hasOwn(mapping.crates, name)) throw new Error(`asset owner is unknown: ${name}`);
+    strings(paths, `assets.${name}`);
+  }
   assertAcyclic(mapping.crates);
   for (const file of Object.keys(graph.files)) {
     const owners = Object.entries(mapping.crates).filter(([, crate]) => crate.files.includes(file));
@@ -125,7 +240,7 @@ export function validate(mapping, graph) {
     const fix = mapping.edges[`${edge.from}->${edge.to}`];
     if (!fix?.fix || !["move", "shared", "seam"].includes(fix.kind))
       throw new Error(`unclassified edge ${edge.from}->${edge.to}`);
-    if (fix.kind !== "seam" && !mapping.crates[from].deps.includes(to))
+    if (fix.kind === "shared" && !mapping.crates[from].deps.includes(to))
       throw new Error(`missing dependency ${from}->${to}`);
   }
   return {
@@ -141,9 +256,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const mapping = JSON.parse(
       readFileSync(process.argv[2] ?? "scripts/modularization/layout.json", "utf8"),
     );
-    console.log(JSON.stringify(validate(mapping, moduleGraph()), null, 2));
+    const result = validate(mapping, moduleGraph());
+    if (process.argv[3]) writeFileSync(process.argv[3], `${JSON.stringify(result, null, 2)}\n`);
+    console.log(
+      `module graph: ${result.files} files, ${result.crates} crates, ${result.edges} source edges; crate graph acyclic${process.argv[3] ? `; wrote ${process.argv[3]}` : ""}`,
+    );
   } catch (error) {
-    console.error(error.message);
+    console.error(
+      `${error.message}\nnext: correct the named layout entry and rerun node scripts/modularization/graph.mjs MAPPING.json [REPORT.json]`,
+    );
     process.exitCode = 1;
   }
 }
