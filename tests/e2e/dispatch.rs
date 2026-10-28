@@ -7345,24 +7345,60 @@ fn a_delayed_observer_teardown_still_ends_its_judge_before_the_driver_exits() {
 #[cfg(unix)]
 #[test]
 fn a_settled_runs_observer_that_cannot_be_signalled_still_has_its_judge_ended() {
+    settled_unsignalled_observer(false);
+}
+
+/// Force the judge's PID to arrive before the driver's observer identity does.
+#[cfg(unix)]
+#[test]
+fn an_unsignalled_observer_started_before_its_launch_record_still_has_its_judge_ended() {
+    settled_unsignalled_observer(true);
+}
+
+#[cfg(unix)]
+fn settled_unsignalled_observer(delay_record: bool) {
     use crate::harness::process_ended;
 
     let (world, path, judges) = observed_by_a_command_judge("settled-observer-unsignalled");
-    let owner = world
-        .agentgraph_cmd(&[
-            "start",
-            &path,
-            "--attach",
-            "--dag-graph",
-            &world.dag_graph(),
-        ])
+    let unrecorded = crate::harness::Rendezvous::failpoint();
+    let mut start = world.agentgraph_cmd(&[
+        "start",
+        &path,
+        "--attach",
+        "--dag-graph",
+        &world.dag_graph(),
+    ]);
+    // llmlint: ignore-block[tests_mirror_real_usage] Hold only the real driver's
+    // launch-record write, forcing the CI interleaving without a timed sleep.
+    if delay_record {
+        start.env(
+            "ONEPIPELINE_TEST_OBSERVER_UNRECORDED_GATE",
+            unrecorded.address(),
+        );
+    }
+    let owner = start
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("the attached engine starts");
+    let mut pending = delay_record.then(|| {
+        unrecorded.arrived_within_a_step(&world, "the observer's launch record to be held")
+    });
     world.until("the observer command provider to start", |_| {
         !judges_started(&judges).is_empty()
     });
+    // A judge's PID does not fence the driver's later launch-record write.
+    world.until("the observer run to be recorded", |world| {
+        let recorded = world.run_json("command-stop", "launch.json")["graph_run"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty());
+        if let Some(held) = pending.take() {
+            assert!(!recorded, "the held driver already recorded its graph ID");
+            held.release();
+        }
+        recorded
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let graph = world.run_json("command-stop", "launch.json")["graph_run"]
         .as_str()
         .expect("the observer has an ID")
