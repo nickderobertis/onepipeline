@@ -349,15 +349,32 @@ export function configChanges(file, before, after, suites, recipeEntries) {
           ...testRecipes(after, recipeEntries?.after),
         ])
       : null;
+  // Every section either side carries must be one this file may hold, in that section's shape, whether or not it
+  // changed: an unknown or malformed section is unresolved even when both snapshots agree on it.
+  if (file !== "justfile")
+    for (const [key, value] of [...Object.entries(a), ...Object.entries(b)]) {
+      if (key.startsWith("profile.")) continue;
+      const known = file === ".cargo/config.toml" ? cargoSections : nextestSections;
+      if (!Object.hasOwn(known, key) && !(file === ".config/nextest.toml" && key === "scripts"))
+        throw unresolved("configuration section", key, file);
+      const shaped =
+        file === ".config/nextest.toml" && key === "nextest-version"
+          ? typeof value === "string" || record(value)
+          : file === ".config/nextest.toml" && key === "experimental"
+            ? Array.isArray(value) || record(value)
+            : record(value);
+      if (!shaped)
+        throw new Error(`invalid configuration section ${key} in ${file}: unexpected shape`);
+    }
   const profiles = file === ".config/nextest.toml" ? nextestProfiles([a, b]) : null;
   const scripts = profiles ? nextestScripts([a, b], profiles) : null;
+  // Runners build with Cargo's dev/test profiles. The same runner-body scan that resolves nextest profiles refuses
+  // a runner selecting any other (--release, --cargo-profile), so run it for Cargo configuration too.
+  if (file === ".cargo/config.toml") nextestProfiles([]);
   const consumed = changed.filter((key) => {
     if (recipes) return recipes.has(key);
     if (file === ".cargo/config.toml") {
-      // Runners build with the dev/test profiles; selecting any other is refused in nextestProfiles.
       if (key.startsWith("profile.")) return ["profile.dev", "profile.test"].includes(key);
-      if (!Object.hasOwn(cargoSections, key))
-        throw unresolved("configuration section", key, ".cargo/config.toml");
       return cargoSections[key];
     }
     if (key.startsWith("profile.")) return profiles.has(key);
@@ -368,8 +385,6 @@ export function configChanges(file, before, after, suites, recipeEntries) {
             JSON.stringify(a.scripts?.[kind]?.[name]) !== JSON.stringify(b.scripts?.[kind]?.[name]),
         ),
       );
-    if (!Object.hasOwn(nextestSections, key))
-      throw unresolved("configuration section", key, ".config/nextest.toml");
     return nextestSections[key];
   });
   return consumed.length ? suites.map((suite) => `migrated-tests/${suite}/config/${file}`) : [];

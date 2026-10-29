@@ -1749,7 +1749,6 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
       "refs/remotes/origin/main",
       execFileSync("git", ["rev-parse", "origin/main"], { encoding: "utf8" }).trim(),
     );
-    // Run the actual revised CLI in the scratch checkout, including its source/schema inputs.
     for (const name of [
       "command-replay.mjs",
       "catalog.mjs",
@@ -3070,7 +3069,41 @@ test("configuration projection refuses an unresolved configuration section", () 
       "[made-up]\nx=1",
       /unresolved configuration section made-up \(read from .cargo\/config.toml\)/,
     );
+    // An unknown section refuses even when both snapshots agree on it, and a known one must have its shape.
+    refused(
+      ".cargo/config.toml",
+      "[made-up]\nx=1\n[env]\nA='1'",
+      "[made-up]\nx=1\n[env]\nA='2'",
+      /unresolved configuration section made-up \(read from .cargo\/config.toml\)/,
+    );
+    refused(
+      ".cargo/config.toml",
+      "build=42",
+      "build=42",
+      /invalid configuration section build in .cargo\/config.toml/,
+    );
+    // Runners build with Cargo's dev/test profiles, so a runner selecting another refuses Cargo projection too.
+    put(root, "justfile", "_e2e-test:\n    cargo nextest run --release\n");
+    refused(
+      ".cargo/config.toml",
+      "[env]\nA='1'",
+      "[env]\nA='2'",
+      /unresolved cargo profile selection --release/,
+    );
+    put(root, "justfile", 'tool := "1"\n_e2e-test:\n    cargo nextest run {{tool}}\n');
     const nextest = (body) => `[profile.ci]\n${body}`;
+    refused(
+      ".config/nextest.toml",
+      nextest('[store]\ndir="a"\n[made-up]\nx=1'),
+      nextest('[store]\ndir="b"\n[made-up]\nx=1'),
+      /unresolved configuration section made-up \(read from .config\/nextest.toml\)/,
+    );
+    refused(
+      ".config/nextest.toml",
+      nextest("").replace("[profile.ci]", 'store="x"\n[profile.ci]'),
+      nextest("").replace("[profile.ci]", 'store="x"\n[profile.ci]'),
+      /invalid configuration section store/,
+    );
     assert.equal(
       selected(
         ".config/nextest.toml",
