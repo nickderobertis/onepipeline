@@ -4,11 +4,13 @@
 // Windows (`launcher.yml`) they go through cmd.exe and a real batch file.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { delimiter, join, win32 } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { installInto, pack, run } from "./install-support.mjs";
 import { preloading, resolveWindows, spawnable } from "./spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
@@ -119,6 +121,109 @@ describe("outside Windows, a command is", () => {
   });
 });
 
+// Keep the fixture's echo mode observable on hosts without cmd.exe.
+function windowsEchoEntry(layout, script) {
+  const invoke = `"${process.execPath}" "${script}" %*`;
+  const line =
+    layout === "installed"
+      ? `@${invoke}`
+      : `@ECHO off\r\nsetlocal\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ${invoke}`;
+  return `${line}\r\n`;
+}
+
+it("the Windows journey fixture suppresses command echo before its compound invocation", () => {
+  const batch = windowsEchoEntry(join("node_modules", ".bin"), "echo-args.cjs");
+  assert.match(batch, /^@ECHO off\r\n/i);
+  assert.match(batch, /endLocal & goto .* & ".*" "echo-args.cjs" %\*\r\n$/);
+});
+
+it("npm's Windows bin shims forward only engine stdout and its status through the launcher", async () => {
+  const project = join(work, "windows-install");
+  const out = join(work, "packages");
+  const launcherDir = run("node", ["scripts/npm-build.mjs", "launcher", "--out", out]).trim();
+  installInto(project, [pack(launcherDir, work)]);
+  const launcher = join(project, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+  const entry = join(project, "node_modules", ".bin", "onepipeline");
+  // Use the very writer bundled with the npm doing the install, including on
+  // Linux where npm normally makes a symlink instead of Windows' three files.
+  const npmEnvironment = run("npm", ["run", "env", "--silent"]);
+  const npmCli = npmEnvironment.match(/^npm_execpath=(.+)\r?$/m)?.[1].trim();
+  assert.ok(npmCli, "npm run env must identify the npm CLI doing the install");
+  const npmRequire = createRequire(npmCli);
+  const cmdShim = npmRequire("cmd-shim");
+  await cmdShim(launcher, entry);
+  const cmd = readFileSync(`${entry}.cmd`, "utf8");
+  const sh = readFileSync(entry, "utf8");
+  const ps = readFileSync(`${entry}.ps1`, "utf8");
+  assert.match(cmd, /^@ECHO off\r\n/i);
+  assert.match(
+    cmd,
+    /endLocal & goto #_undefined_# 2>NUL \|\| title %COMSPEC% & "%_prog%"\s+"%dp0%\\..\\onepipeline-cli\\bin\\onepipeline.js" %\*\r\n$/,
+  );
+  const target = '"$basedir/../onepipeline-cli/bin/onepipeline.js"';
+  assert.deepEqual(
+    sh
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("exec ")),
+    [`exec "$basedir/node"  ${target} "$@"`, `exec node  ${target} "$@"`],
+  );
+  assert.deepEqual(
+    ps
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.includes(" | & ") || line.startsWith("& ")),
+    [
+      `$input | & "$basedir/node$exe"  ${target} $args`,
+      `& "$basedir/node$exe"  ${target} $args`,
+      `$input | & "node$exe"  ${target} $args`,
+      `& "node$exe"  ${target} $args`,
+    ],
+  );
+  assert.match(cmd, /SET "_prog=%dp0%\\node.exe"/);
+  assert.match(cmd, /SET "_prog=node"/);
+  assert.match(ps, /\$ret=\$LASTEXITCODE/);
+  assert.match(ps, /exit \$ret\n$/);
+
+  const platform = join(project, "node_modules", "onepipeline-cli-win32-x64");
+  mkdirSync(join(platform, "bin"), { recursive: true });
+  writeFileSync(join(platform, "package.json"), '{"name":"onepipeline-cli-win32-x64"}');
+  // A real executable engine: Node emits JSON and exits with the requested code.
+  copyFileSync(process.execPath, join(platform, "bin", "onepipeline.exe"));
+  const preload = join(project, "windows.cjs");
+  writeFileSync(preload, 'Object.defineProperty(process, "platform", {value: "win32"});\n');
+  const sent = ["two words", 'say "hi"', "a&b|c", "", "trailing\\"];
+  for (const status of [0, 3]) {
+    const args = [
+      "-e",
+      `process.stdout.write(JSON.stringify(process.argv.slice(1))); process.exit(${status});`,
+      "--",
+      ...sent,
+    ];
+    // The native shells are unavailable on Linux. Check their exact forwarding
+    // commands above, then execute the Node command each reaches, through the
+    // real Windows launcher/keeper and executable engine. Run sh itself too.
+    for (const command of [entry, launcher]) {
+      const ran = spawnSync(
+        ...(command === entry
+          ? spawnable(entry, args, {
+              encoding: "utf8",
+              env: { ...process.env, NODE_OPTIONS: preloading(preload) },
+            })
+          : [
+              process.execPath,
+              [launcher, ...args],
+              { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: preloading(preload) } },
+            ]),
+      );
+      assert.equal(ran.error, undefined);
+      assert.equal(ran.status, status, ran.stderr);
+      assert.equal(ran.stdout, JSON.stringify(sent));
+      assert.equal(ran.stderr, "");
+    }
+  }
+});
+
 describe("on this host, a command started through it", () => {
   it("is npm itself, found however this platform installs it", () => {
     const ran = spawnSync(...spawnable("npm", ["--version"], { encoding: "utf8" }));
@@ -139,13 +244,7 @@ describe("on this host, a command started through it", () => {
       );
       const script = join(work, "echo-args.cjs");
       if (WINDOWS) {
-        // npm's bin shim uses this compound line, which cmd.exe parses again.
-        const invoke = `"${process.execPath}" "${script}" %*`;
-        const line =
-          layout === "installed"
-            ? `@${invoke}`
-            : `@setlocal\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & ${invoke}`;
-        writeFileSync(join(bin, "echo-args.cmd"), `${line}\r\n`);
+        writeFileSync(join(bin, "echo-args.cmd"), windowsEchoEntry(layout, script));
       } else {
         writeFileSync(
           join(bin, "echo-args"),
