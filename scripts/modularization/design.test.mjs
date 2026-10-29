@@ -911,3 +911,280 @@ test("graph CLI transforms source edges, enforces command ownership and routing-
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("command lock projection CLI matches Nx on transitive source, resolved lock and toolchain commits", {
+  timeout: 120000,
+}, () => {
+  const root = scratch();
+  const env = { ...process.env, NX_DAEMON: "false", NX_ISOLATE_PLUGINS: "false" };
+  const git = (...args) =>
+    execFileSync("git", args, {
+      cwd: root,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  const cli = resolve("scripts/modularization/command-replay.mjs");
+  const lock = (version) =>
+    `version = 4\n\n[[package]]\nname = "record-lib"\nversion = "${version}"\n\n[[package]]\nname = "reader-lib"\nversion = "1.0.0"\ndependencies = ["record-lib"]\n\n[[package]]\nname = "template-lib"\nversion = "1.0.0"\n`;
+  try {
+    symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
+    put(root, ".gitignore", "node_modules\n.nx\n");
+    put(root, "package.json", { private: true });
+    put(root, "nx.json", { namedInputs: { default: ["{projectRoot}/**/*"] } });
+    const crates = {
+      record: {
+        paths: ["record/**", "resolved/record/**"],
+        deps: [],
+        external: ["record-lib"],
+        toolchain: true,
+      },
+      reader: {
+        paths: ["reader/**", "resolved/reader/**"],
+        deps: ["record"],
+        external: ["reader-lib"],
+        toolchain: true,
+      },
+      status: {
+        paths: ["status/**", "resolved/status/**"],
+        deps: ["reader"],
+        external: [],
+        toolchain: true,
+      },
+      template: {
+        paths: ["template/**", "resolved/template/**"],
+        deps: [],
+        external: ["template-lib"],
+        toolchain: true,
+      },
+    };
+    const suites = {
+      "status-e2e": { paths: ["status-e2e/**"], crates: ["status"] },
+      "template-e2e": { paths: ["template-e2e/**"], crates: ["template"] },
+    };
+    const mapping = compileMapping({
+      crates: Object.fromEntries(
+        Object.entries(crates).map(([name, c]) => [name, { paths: c.paths, deps: c.deps }]),
+      ),
+      suites,
+    });
+    for (const [name, item] of [...Object.entries(crates), ...Object.entries(suites)]) {
+      put(root, `${name}/project.json`, {
+        name,
+        root: name,
+        implicitDependencies: item.deps ?? item.crates,
+        targets: {
+          test: {
+            executor: "nx:noop",
+            inputs: ["default", "^default", `{workspaceRoot}/resolved/${name}/**`],
+          },
+        },
+      });
+      put(root, `${name}/source.rs`, "initial");
+      if (crates[name]) {
+        put(root, `resolved/${name}/project.json`, {
+          name: `resolved-${name}`,
+          root: `resolved/${name}`,
+        });
+        // Nx's affected graph follows these explicit generated-input projects.
+        const project = JSON.parse(readFileSync(join(root, `${name}/project.json`)));
+        project.implicitDependencies.push(`resolved-${name}`);
+        put(root, `${name}/project.json`, project);
+        put(root, `resolved/${name}/lock.json`, "initial");
+        put(root, `resolved/${name}/toolchain.json`, "initial");
+      }
+    }
+    put(root, "Cargo.lock", lock("1.0.0"));
+    put(root, "rust-toolchain.toml", '[toolchain]\nchannel = "1.90.0"\n');
+    git("init", "-b", "main");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "user.name", "Fixture");
+    git("add", ".");
+    git("commit", "-m", "test: initial command graph");
+    // Projection inputs live outside the workspace: only materialized effective inputs join its graph.
+    const inputs = scratch();
+    try {
+      put(
+        inputs,
+        "crates.json",
+        Object.fromEntries(
+          Object.entries(crates).map(([name, c]) => [
+            name,
+            { external: c.external, toolchain: c.toolchain },
+          ]),
+        ),
+      );
+      put(inputs, "before.lock", lock("1.0.0"));
+      put(inputs, "after.lock", lock("1.1.0"));
+      put(inputs, "before-tool", '[toolchain]\nchannel = "1.90.0"\n');
+      put(inputs, "after-tool", '[toolchain]\nchannel = "1.91.0"\n');
+      const project = (afterLock, afterTool) => {
+        const result = spawnSync(
+          process.execPath,
+          [
+            cli,
+            "--resolve",
+            join(inputs, "crates.json"),
+            join(inputs, "before.lock"),
+            join(inputs, afterLock),
+            join(inputs, "before-tool"),
+            join(inputs, afterTool),
+            join(inputs, "changes.json"),
+          ],
+          { encoding: "utf8" },
+        );
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(readFileSync(join(inputs, "changes.json"), "utf8"));
+      };
+      const cases = [
+        ["status/source.rs"],
+        ["record/source.rs"],
+        project("after.lock", "before-tool"),
+        project("before.lock", "after-tool"),
+      ];
+      assert.deepEqual(cases[2], ["resolved/record/lock.json", "resolved/reader/lock.json"]);
+      assert.equal(cases[3].length, 4);
+      for (const [index, projected] of cases.entries()) {
+        const paths = [...projected];
+        if (index === 2) {
+          put(root, "Cargo.lock", lock("1.1.0"));
+          paths.push("Cargo.lock");
+        }
+        if (index === 3) {
+          put(root, "rust-toolchain.toml", '[toolchain]\nchannel = "1.91.0"\n');
+          paths.push("rust-toolchain.toml");
+        }
+        for (const path of projected)
+          put(root, path, `${readFileSync(join(root, path), "utf8")}changed\n`);
+        git("add", ".");
+        git("commit", "-m", "test: projected input change");
+        const nx = JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              resolve("node_modules/nx/dist/bin/nx.js"),
+              "show",
+              "projects",
+              "--affected",
+              "--base=HEAD~1",
+              "--head=HEAD",
+              "--json",
+            ],
+            { cwd: root, env, encoding: "utf8" },
+          ),
+        )
+          .filter((name) => Object.hasOwn(suites, name))
+          .sort();
+        assert.deepEqual(affectedSuites(mapping, paths).affected.sort(), nx, paths.join(","));
+        assert.ok(nx.includes("status-e2e"));
+        assert.equal(
+          nx.includes("template-e2e"),
+          paths.some((p) => p.includes("toolchain")),
+        );
+      }
+      put(inputs, "after.lock", lock("1.0.0"));
+      assert.deepEqual(project("after.lock", "before-tool"), []);
+      put(inputs, "after.lock", lock("1.0.0").replace('"record-lib"]', '"missing-lib"]'));
+      const refused = spawnSync(
+        process.execPath,
+        [
+          cli,
+          "--resolve",
+          join(inputs, "crates.json"),
+          join(inputs, "before.lock"),
+          join(inputs, "after.lock"),
+          join(inputs, "before-tool"),
+          join(inputs, "before-tool"),
+          join(inputs, "changes.json"),
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /unresolved lock dependency missing-lib/);
+      put(inputs, "after.lock", lock("1.1.0"));
+      assert.equal(project("after.lock", "before-tool").length, 2);
+    } finally {
+      rmSync(inputs, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("command replay CLI retains every individual test and renders a fresh evidence appendix", {
+  timeout: 180000,
+}, async () => {
+  const root = scratch();
+  try {
+    const { commandAppendix, COMMAND_MARKER } = await import("./command-report.mjs");
+    const { commandMapping } = await import("./command-replay.mjs");
+    const layout = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
+    const catalog = JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8"));
+    const result = spawnSync(
+      process.execPath,
+      ["scripts/modularization/command-replay.mjs", join(root, "report.json")],
+      { encoding: "utf8" },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const report = JSON.parse(readFileSync(join(root, "report.json"), "utf8"));
+    assert.equal(report.rows.length, 144);
+    const declared = [...readFileSync("tests/e2e/main.rs", "utf8").matchAll(/^mod (\w+);/gm)].map(
+      (m) => m[1],
+    );
+    const count = declared.reduce(
+      (sum, module) =>
+        sum +
+        [
+          ...codeOnly(readFileSync(`tests/e2e/${module}.rs`, "utf8")).matchAll(
+            /#\s*\[\s*test\s*\]/g,
+          ),
+        ].length,
+      0,
+    );
+    assert.equal(report.tests, count);
+    const all = Object.values(report.mapping.suites).flatMap((suite) => suite.tests);
+    assert.equal(new Set(all).size, count);
+    assert.equal(all.length, count);
+    assert.ok(Object.values(report.mapping.suites).every((suite) => suite.tests.length > 0));
+    for (const [name, suite] of Object.entries(report.mapping.suites))
+      if (name !== "cross-command") {
+        assert.deepEqual(suite.crates, [`runner-${name}`]);
+        assert.deepEqual(report.mapping.crates[`runner-${name}`].deps, [name]);
+      }
+    const compiled = compileMapping(report.mapping.selection);
+    for (const row of report.rows)
+      assert.deepEqual(affectedSuites(compiled, row.effectiveFiles).affected, row.affected);
+    assert.equal(report.platforms.local.secondsPerRun.toFixed(0), "36620");
+    assert.equal(report.platforms.linux.secondsPerRun.toFixed(0), "10409");
+    assert.ok(report.platforms.windows.missingModules.length > 0);
+    assert.equal(report.migration.at(-1).suiteSkip, report.platforms.linux.suiteSkip);
+    const doc = readFileSync("docs/modularization-command-replay.md", "utf8");
+    assert.equal(doc.split(COMMAND_MARKER).length, 2);
+    assert.equal(
+      `${COMMAND_MARKER}${doc.split(COMMAND_MARKER)[1]}`,
+      commandAppendix(report, layout, catalog),
+    );
+    const broken = structuredClone(catalog);
+    const first = Object.keys(broken.tests)[0];
+    broken.tests[first].suite = "cmd-not-a-command";
+    assert.throws(() => commandMapping(layout, broken), /invalid test owner/);
+    const withCommands = Object.keys(catalog.tests).find(
+      (name) => catalog.tests[name].commands.length > 0,
+    );
+    broken.tests[withCommands] = { ...catalog.tests[withCommands], commands: [] };
+    assert.throws(() => commandMapping(layout, broken), /test command attribution drift/);
+    broken.tests[withCommands] = catalog.tests[withCommands];
+    broken.tests[first] = catalog.tests[first];
+    const badArguments = spawnSync(
+      process.execPath,
+      ["scripts/modularization/command-replay.mjs", "--bogus"],
+      { encoding: "utf8" },
+    );
+    assert.equal(badArguments.status, 1);
+    assert.match(badArguments.stderr, /usage: command-replay/);
+    broken.typo = true;
+    assert.throws(() => commandMapping(layout, broken), /unknown command catalog field/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

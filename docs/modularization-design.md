@@ -1,5 +1,7 @@
 # Modular crate layout: dependency design and conservative replay
 
+The subsequent [command-suite and resolved-input replay](modularization-command-replay.md) inventories individual tests, projects lockfile changes per crate, and records the remaining test-decomposition decision. The 88-module-suite figures below remain the original conservative comparison; they are not the command-suite result.
+
 This is a design, not a source refactor. It preserves the current command behavior, public `onepipeline` API, tests, platforms, release cadence and coverage floor. The proposed DAG is mechanically acyclic, but the conservative replay does **not** establish a useful gate speedup or the 30-minute goal. Do not schedule the whole extraction on the premise that it does.
 
 The executable inputs are `scripts/modularization/layout.json` and the current source. Run:
