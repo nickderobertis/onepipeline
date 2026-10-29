@@ -94,23 +94,29 @@ export function appendix({ layout: l, graph: g, report: r }) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  let recovery =
+    "correct the named input or command arguments, then rerun node scripts/modularization/render.mjs";
   try {
     if (process.argv.length > 3 || (process.argv[2] && process.argv[2] !== "--write"))
       throw new Error("usage: node scripts/modularization/render.mjs [--write]");
     const file = "docs/modularization-design.md";
     const current = readFileSync(file, "utf8");
-    if (current.split(MARKER).length !== 2)
+    if (current.split(MARKER).length !== 2) {
+      recovery = `restore exactly one generation marker (${MARKER}) in ${file}, then run node scripts/modularization/render.mjs --write and review the generated diff`;
       throw new Error("expected exactly one generation marker in design document");
+    }
     const expected = `${current.split(MARKER)[0].trimEnd()}\n\n${appendix(evidence())}`;
     if (process.argv[2] === "--write") writeFileSync(file, expected);
-    else if (current !== expected) throw new Error("design tables are stale");
+    else if (current !== expected) {
+      recovery =
+        "run node scripts/modularization/render.mjs --write, review the generated diff, then rerun without --write";
+      throw new Error("design tables are stale");
+    }
     console.log(
       `modularization design: ${process.argv[2] === "--write" ? "updated" : "verified"} ${file}`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: run node scripts/modularization/render.mjs --write, review the generated diff, then rerun without --write`,
-    );
+    console.error(`${error.message}\nnext: ${recovery}`);
     process.exitCode = 1;
   }
 }

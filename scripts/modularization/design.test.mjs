@@ -797,6 +797,7 @@ test("render CLI refuses missing or repeated generation markers without writing"
         );
         assert.equal(result.status, 1);
         assert.match(result.stderr, /expected exactly one generation marker/);
+        assert.match(result.stderr, /restore exactly one generation marker/);
         assert.equal(readFileSync(join(root, "docs/modularization-design.md"), "utf8"), document);
       }
     }
