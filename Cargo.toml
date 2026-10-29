@@ -1265,6 +1265,11 @@ onevcs-testing = "0.19.22"
 onetaskgraph-core = "=0.12.12"
 onetaskgraph-plugin-api = "=0.12.12"
 onetaskgraph-local-md = "=0.12.12"
+# Test-support only: the Linear plugin the store links through its `linear` feature, named
+# directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
+# GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
+# the loopback Linear answers. Exact and at the family's one release, like the three above.
+onetaskgraph-linear = "=0.12.12"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1498,6 +1503,9 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
+# The store's Linear plugin, at the release `onetaskgraph-core` links — see
+# `[workspace.dependencies]`.
+onetaskgraph-linear = { workspace = true }
 onevcs-testing = { workspace = true }
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the

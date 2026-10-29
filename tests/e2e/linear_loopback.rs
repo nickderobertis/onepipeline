@@ -582,40 +582,59 @@ impl Linear {
             Operation::Resolution => world.resolution(),
             Operation::IssueResolved => {
                 let mut data = world.resolution();
-                data["issue"] = world.related(world.issue(id), query);
+                data["issue"] = match world.related(world.issue(id), query) {
+                    Ok(issue) => issue,
+                    Err(why) => return refusal(&why),
+                };
                 data
             }
             Operation::CounterpartLookups => {
                 // Every issue and the project, whatever the filters: the plugin confirms each
                 // row against the origin it looks up, as it does a listing's.
                 let mut data = world.resolution();
-                data["originIssues"] = json!({
-                    "nodes": world.issues.iter().map(|held| world.related(world.render(held), query)).collect::<Vec<_>>(),
-                    "pageInfo": {"hasNextPage": false, "endCursor": null},
-                });
+                data["originIssues"] = match world.listed(query) {
+                    Ok(issues) => page(issues),
+                    Err(why) => return refusal(&why),
+                };
                 data["originProjects"] = json!({
                     "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
                 });
                 data
             }
-            Operation::Issue => json!({"issue": world.related(world.issue(id), query)}),
+            Operation::Issue => match world.related(world.issue(id), query) {
+                Ok(issue) => json!({"issue": issue}),
+                Err(why) => return refusal(&why),
+            },
             Operation::IssueRelations => {
                 let description = world
                     .issues
                     .iter()
                     .find(|held| held.id == id)
                     .map(|held| held.description.clone());
-                json!({"issue": description.map(|description| json!({
-                    "description": description,
-                    "relations": world.relations_of(id),
-                    "inverseRelations": world.inverse_relations_of(id),
-                }))})
+                match description {
+                    None => json!({"issue": null}),
+                    Some(description) => {
+                        // The relation connections are what this document selects beside the
+                        // description, so the issue's own id is not among them.
+                        let issue = json!({"id": id, "description": description});
+                        match world.related(issue, query) {
+                            Ok(mut issue) => {
+                                issue
+                                    .as_object_mut()
+                                    .expect("an issue is an object")
+                                    .remove("id");
+                                json!({"issue": issue})
+                            }
+                            Err(why) => return refusal(&why),
+                        }
+                    }
+                }
             }
-            Operation::Issues => json!({"issues": {
-                "nodes": world.issues.iter().map(|held| world.related(world.render(held), query)).collect::<Vec<_>>(),
-                "pageInfo": {"hasNextPage": false, "endCursor": null},
-            }}),
+            Operation::Issues => match world.listed(query) {
+                Ok(issues) => json!({"issues": page(issues)}),
+                Err(why) => return refusal(&why),
+            },
             Operation::Projects => json!({"projects": {
                 "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
                 "pageInfo": {"hasNextPage": false, "endCursor": null},
@@ -635,9 +654,10 @@ impl Linear {
                 };
                 match world.update(id, input) {
                     // A rewrite reads the issue's relations back in its own answer.
-                    Ok(issue) => {
-                        json!({"issueUpdate": {"success": true, "issue": world.related(issue, query)}})
-                    }
+                    Ok(issue) => match world.related(issue, query) {
+                        Ok(issue) => json!({"issueUpdate": {"success": true, "issue": issue}}),
+                        Err(why) => return refusal(&why),
+                    },
                     Err(why) => return refusal(&why),
                 }
             }
@@ -759,7 +779,6 @@ impl Linear {
                     Err(why) => return refusal(&why),
                 }
             }
-            // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the relation wire shapes are Linear's GraphQL schema, which no artifact this crate depends on carries; what holds them to it is that the real onetaskgraph-linear plugin parses every answer here and refuses a malformed one (failing the journey), every request this endpoint does not recognise is refused by name, and drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
             Operation::IssueRelationCreate => {
                 let Some(input) = variables["input"].as_object() else {
                     return refusal("an issueRelationCreate carries an `input` object");
@@ -779,7 +798,6 @@ impl Linear {
                 }
                 json!({"issueRelationDelete": {"success": true}})
             }
-            // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
         json!({"data": data})
@@ -1014,7 +1032,6 @@ impl World {
         Ok(self.render(&issue))
     }
 
-    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the relation wire shapes are Linear's GraphQL schema, which no artifact this crate depends on carries; what holds them to it is that the real onetaskgraph-linear plugin parses every answer here and refuses a malformed one (failing the journey), every request this endpoint does not recognise is refused by name, and drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
     /// File one dependency between two issues this endpoint holds, and answer its id.
     fn relate(&mut self, input: &Map<String, Value>) -> Result<String, String> {
         let text = |field: &str| input.get(field).and_then(Value::as_str);
@@ -1050,49 +1067,156 @@ impl World {
         Ok(id)
     }
 
-    /// The relations an issue's own writes filed, as its `relations` connection pages them.
-    fn relations_of(&self, issue: &str) -> Value {
-        page(
-            self.relations
-                .iter()
-                .filter(|held| held.issue == issue)
-                .map(|held| json!({"id": held.id, "type": held.kind, "relatedIssue": {"id": held.related}}))
-                .collect(),
-        )
+    /// Every issue, each with the relation connections `query` selects.
+    fn listed(&self, query: &str) -> Result<Vec<Value>, String> {
+        self.issues
+            .iter()
+            .map(|held| self.related(self.render(held), query))
+            .collect()
     }
 
-    /// The relations naming an issue across them, as its `inverseRelations` connection pages
-    /// them.
-    fn inverse_relations_of(&self, issue: &str) -> Value {
-        page(
-            self.relations
-                .iter()
-                .filter(|held| held.related == issue)
-                .map(|held| json!({"id": held.id, "type": held.kind, "issue": {"id": held.issue}}))
-                .collect(),
-        )
-    }
-
-    /// A rendered issue with each relation connection `query` selects, as Linear answers only
-    /// what a document asks for.
-    fn related(&self, mut issue: Value, query: &str) -> Value {
+    /// A rendered issue with each relation connection `query` selects, every node holding
+    /// exactly the fields that document names for it: the plugin's own documents are the one
+    /// statement of what a relation answers, and a field this endpoint cannot fill is refused by
+    /// name rather than left out.
+    fn related(&self, mut issue: Value, query: &str) -> Result<Value, String> {
         let Some(id) = issue.get("id").and_then(Value::as_str).map(str::to_owned) else {
-            return issue;
+            return Ok(issue);
         };
-        if query.contains("relations(") {
-            issue["relations"] = self.relations_of(&id);
+        for connection in [Connection::Relations, Connection::InverseRelations] {
+            let Some(selection) = node_selection(query, connection.field()) else {
+                continue;
+            };
+            let nodes = self
+                .relations
+                .iter()
+                .filter(|held| connection.holds(held, &id))
+                .map(|held| relation_node(held, selection))
+                .collect::<Result<Vec<_>, _>>()?;
+            issue[connection.field()] = page(nodes);
         }
-        if query.contains("inverseRelations(") {
-            issue["inverseRelations"] = self.inverse_relations_of(&id);
-        }
-        issue
+        Ok(issue)
     }
+}
+
+/// The two connections an issue's relations are read through.
+#[derive(Clone, Copy)]
+enum Connection {
+    /// What the issue depends on: the relations its own writes filed.
+    Relations,
+    /// What depends on the issue: the relations naming it across them.
+    InverseRelations,
+}
+
+impl Connection {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Relations => "relations",
+            Self::InverseRelations => "inverseRelations",
+        }
+    }
+
+    fn holds(self, relation: &Relation, issue: &str) -> bool {
+        match self {
+            Self::Relations => relation.issue == issue,
+            Self::InverseRelations => relation.related == issue,
+        }
+    }
+}
+
+/// What `query` selects of each node of its `field` connection, as written between that
+/// connection's `nodes{` and the brace closing it, or `None` where it selects no such connection.
+fn node_selection<'q>(query: &'q str, field: &str) -> Option<&'q str> {
+    let mut from = 0;
+    while let Some(at) = query[from..].find(field) {
+        let start = from + at;
+        from = start + field.len();
+        let named = !query[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|before| before.is_ascii_alphanumeric());
+        let rest = &query[from..];
+        if !named || !(rest.starts_with('(') || rest.starts_with('{')) {
+            continue;
+        }
+        let body = rest.split_once('{')?.1.trim_start();
+        let nodes = body.strip_prefix("nodes")?.trim_start().strip_prefix('{')?;
+        return Some(&nodes[..closing(nodes)?]);
+    }
+    None
+}
+
+/// Where the brace closing an already opened one sits in `text`.
+fn closing(text: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (at, character) in text.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The fields one selection names, in order, each with what it selects of its own value.
+fn fields(selection: &str) -> Result<Vec<(&str, Option<&str>)>, String> {
+    let mut named = Vec::new();
+    let mut rest = selection.trim_start();
+    while !rest.is_empty() {
+        let end = rest
+            .find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+            .unwrap_or(rest.len());
+        if end == 0 {
+            return Err(format!("the loopback reads no selection {selection:?}"));
+        }
+        let (field, after) = rest.split_at(end);
+        let after = after.trim_start();
+        match after.strip_prefix('{') {
+            Some(inner) => {
+                let close = closing(inner)
+                    .ok_or_else(|| format!("an unclosed selection in {selection:?}"))?;
+                named.push((field, Some(&inner[..close])));
+                rest = inner[close + 1..].trim_start();
+            }
+            None => {
+                named.push((field, None));
+                rest = after;
+            }
+        }
+    }
+    Ok(named)
+}
+
+/// One relation as a node of the selection the plugin's document names for it.
+fn relation_node(relation: &Relation, selection: &str) -> Result<Value, String> {
+    let mut node = Map::new();
+    for (field, nested) in fields(selection)? {
+        let nested = nested.map(fields).transpose()?;
+        let value = match (field, nested.as_deref()) {
+            ("id", None) => json!(relation.id),
+            ("type", None) => json!(relation.kind),
+            ("relatedIssue", Some([("id", None)])) => json!({"id": relation.related}),
+            ("issue", Some([("id", None)])) => json!({"id": relation.issue}),
+            _ => {
+                return Err(format!(
+                    "the loopback answers no relation field {field} of {selection:?}"
+                ))
+            }
+        };
+        node.insert(field.to_owned(), value);
+    }
+    Ok(Value::Object(node))
 }
 
 fn page(nodes: Vec<Value>) -> Value {
     json!({"nodes": nodes, "pageInfo": {"hasNextPage": false, "endCursor": null}})
 }
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 fn empty_page() -> Value {
     page(Vec::new())
@@ -1735,4 +1859,191 @@ fn the_loopback_stores_every_rewrite_the_spike_measured() {
     ] {
         assert_eq!(content_of(stored), content, "{stored:?}");
     }
+}
+
+/// The Linear plugin the store links files, reads and replaces a dependency through this endpoint
+/// by its own public `TaskSource`, and its GraphQL documents are what fix the relation shapes
+/// answered here: each relation document it sends is one this endpoint names, every relation node
+/// those documents select is one it fills, and a field one selects that it cannot fill is refused
+/// by name. A plugin release that writes or reads relations differently fails here.
+#[test]
+fn the_linked_linear_plugin_files_reads_and_replaces_a_dependency_through_this_endpoint() {
+    use onetaskgraph_linear::graphql;
+    use onetaskgraph_plugin_api::{
+        DependencyEdge, DependencyEndpoint, DependencyKind, Direction, ItemKind, ItemWrite,
+        PageRequest, SourceName, SourcePlugin, Task,
+    };
+
+    // The plugin's own documents: each lands on the operation this endpoint answers it as, and
+    // each relation node it or a cached page selects is one this endpoint fills.
+    for (document, operation) in [
+        (
+            graphql::ISSUE_RELATION_CREATE,
+            Operation::IssueRelationCreate,
+        ),
+        (
+            graphql::ISSUE_RELATION_DELETE,
+            Operation::IssueRelationDelete,
+        ),
+        (graphql::ISSUE_RELATIONS, Operation::IssueRelations),
+        (graphql::ISSUE_REWRITE, Operation::IssueUpdate),
+    ] {
+        assert_eq!(Operation::of(document), operation, "{document}");
+    }
+    let sample = Relation {
+        id: "relation".to_owned(),
+        issue: "near".to_owned(),
+        related: "far".to_owned(),
+        kind: "blocks".to_owned(),
+    };
+    for (document, connection) in [
+        (graphql::ISSUE_RELATIONS, Connection::Relations),
+        (graphql::ISSUE_RELATIONS, Connection::InverseRelations),
+        (graphql::ISSUE_REWRITE, Connection::Relations),
+        (graphql::RELATIONS_PAGE, Connection::Relations),
+        (
+            graphql::INVERSE_RELATIONS_PAGE,
+            Connection::InverseRelations,
+        ),
+    ] {
+        let selection = node_selection(document, connection.field())
+            .unwrap_or_else(|| panic!("{document} selects no {} nodes", connection.field()));
+        relation_node(&sample, selection).unwrap_or_else(|why| panic!("{why}"));
+    }
+
+    let linear = Linear::serve(
+        &[("Todo", "unstarted")],
+        &[("Planned", "planned")],
+        "generic",
+        "",
+        "Planned",
+    );
+    let [near, first, second] = ["near", "first", "second"]
+        .map(|title| linear.file(title, &format!("Do {title}."), "Todo"));
+    let key = "ONEPIPELINE_LOOPBACK_LINEAR_KEY";
+    let secrets = onetaskgraph_core::Secrets::load(onetaskgraph_core::Environment::from_pairs(
+        vec![(key.to_owned(), "a-loopback-key".to_owned())],
+    ))
+    .expect("the loopback key resolves");
+    let source = onetaskgraph_linear::Plugin
+        .build(
+            &SourceName::new("tracker").expect("a source name"),
+            &json!({
+                "api_key_env": key,
+                "team": TEAM,
+                "endpoint": linear.endpoint(),
+                "status_mapping": {"todo": "Todo"},
+            }),
+            &secrets,
+        )
+        .unwrap_or_else(|error| panic!("the plugin builds over this endpoint: {error}"));
+    let task: Task = serde_json::from_value(json!({
+        "id": near, "title": "near", "content": "Do near.",
+        "status": {"category": "todo", "name": "Todo"},
+        "labels": [], "project": PROJECT, "repositories": [], "metadata": {},
+    }))
+    .expect("a task");
+    let depending_on = |far: &str| ItemWrite {
+        target: Some(near.clone().into()),
+        item: task.clone(),
+        depends_on: vec![DependencyEdge {
+            from: DependencyEndpoint::from_native(near.clone().into(), ItemKind::Task),
+            to: DependencyEndpoint::from_native(far.to_owned().into(), ItemKind::Task),
+            kind: DependencyKind::Blocks,
+        }],
+    };
+    let runtime = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime for one plugin call")
+    };
+    let edges = |issue: &str, direction: Direction| -> Vec<(String, String)> {
+        let page = runtime().block_on(source.task_dependencies(
+            &issue.to_owned().into(),
+            direction,
+            &PageRequest {
+                cursor: None,
+                limit: 10,
+            },
+        ));
+        page.unwrap_or_else(|error| panic!("the plugin reads {issue}'s dependencies: {error}"))
+            .items
+            .into_iter()
+            .map(|edge| (edge.from.id().to_owned(), edge.to.id().to_owned()))
+            .collect()
+    };
+
+    runtime()
+        .block_on(source.write_task(&depending_on(&first)))
+        .unwrap_or_else(|error| panic!("the plugin files the dependency: {error}"));
+    assert_eq!(
+        linear.relations(),
+        [(near.clone(), first.clone(), "blocks".to_owned())]
+    );
+    let filed = vec![(near.clone(), first.clone())];
+    assert_eq!(edges(&near, Direction::DependsOn), filed);
+    assert_eq!(edges(&first, Direction::DependedOnBy), filed);
+
+    // Replaced: the rewrite's own answer names the held relation, which is taken back, and the
+    // new one filed in its place.
+    runtime()
+        .block_on(source.write_task(&depending_on(&second)))
+        .unwrap_or_else(|error| panic!("the plugin replaces the dependency: {error}"));
+    assert_eq!(
+        linear.relations(),
+        [(near.clone(), second.clone(), "blocks".to_owned())]
+    );
+    assert_eq!(
+        edges(&near, Direction::DependsOn),
+        [(near.clone(), second.clone())]
+    );
+    assert!(edges(&first, Direction::DependedOnBy).is_empty());
+    let sent: Vec<Operation> = linear
+        .log()
+        .iter()
+        .map(|request| request.operation)
+        .collect();
+    for operation in [
+        Operation::IssueRelationCreate,
+        Operation::IssueRelationDelete,
+    ] {
+        assert!(sent.contains(&operation), "{sent:?}");
+    }
+    assert!(!sent.contains(&Operation::Unknown), "{sent:?}");
+
+    // A relation field no document of the plugin selects is refused by name, not left out.
+    let mut stream =
+        TcpStream::connect(("127.0.0.1", linear.port)).expect("connect to the loopback");
+    let body = json!({
+        "query": "query($id:String!){ issue(id:$id){ id relations(first:10){nodes{id createdAt} pageInfo{hasNextPage}} } }",
+        "variables": {"id": near},
+    })
+    .to_string();
+    write!(
+        stream,
+        "POST /graphql HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    )
+    .expect("the request is sent");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("the request is whole");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("bounded response read");
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("the endpoint answers and closes");
+    let (_, answered) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("an HTTP response: {response:?}"));
+    let answered: Value = serde_json::from_str(answered).expect("a JSON answer");
+    assert!(
+        answered["errors"][0]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("createdAt")),
+        "{answered}"
+    );
 }
