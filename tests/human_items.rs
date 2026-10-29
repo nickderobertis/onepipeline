@@ -786,4 +786,16 @@ fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
     assert!(output.stdout.is_empty());
     refuse(output, "no affected-node context for run-1 / deploy");
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+
+    // Resolution clears a hold's impact, so a resolved hold on the same
+    // run/node is no context for a new one.
+    let world = World::new();
+    world.json(&["dismiss", "item-2"], "HumanItemReceipt");
+    let before = std::fs::read(world.sample()).unwrap();
+    input["block"] = original["items"][1]["item"]["block"].clone();
+    std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let output = world.run(&["raise", "--input", path.to_str().unwrap()]);
+    assert!(output.stdout.is_empty());
+    refuse(output, "no affected-node context for run-1 / build");
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
 }
