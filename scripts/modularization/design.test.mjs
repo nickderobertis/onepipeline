@@ -65,6 +65,19 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
     layout.edges = {};
     put(root, "layout.json", layout);
     assert.match(run().stderr, /unclassified edge command->record/);
+    layout.edges["command->record"] = { kind: "shared", fix: "Restore the shared record edge." };
+    layout.edges["command->record"].interface = {
+      owner: "command",
+      trait: "Reader",
+      adapter: "missing",
+    };
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /invalid interface command->record/);
+    delete layout.edges["command->record"].interface;
+    layout.edges["command->record"].movedTo = 2;
+    put(root, "layout.json", layout);
+    assert.match(run().stderr, /invalid movedTo command->record/);
+    delete layout.edges["command->record"].movedTo;
     layout.typo = true;
     put(root, "layout.json", layout);
     assert.match(run().stderr, /unknown layout field: typo/);
@@ -348,6 +361,7 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
       crates: {
         onepipeline: { files: ["src/main.rs", "src/cli.rs"], deps: [] },
         "cmd-template": { files: [], deps: [] },
+        "cmd-watch": { files: [], deps: [] },
         "cmd-template-list": { files: [], deps: [] },
         "cmd-template-resolve": { files: [], deps: [] },
         "cmd-template-check": { files: [], deps: [] },
@@ -630,7 +644,11 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
 test("graph CLI discovers composition declarations and direct/grouped diagnostic aliases", () => {
   const root = scratch();
   try {
-    put(root, "src/lib.rs", "pub mod direct;\nmod grouped;\npub mod error;\n");
+    put(
+      root,
+      "src/lib.rs",
+      "pub mod direct;\nmod grouped;\npub mod error;\npub use error::{Error, Result};\n",
+    );
     put(root, "src/direct.rs", "fn run() -> crate::Result<()> { let _: crate::Error; }");
     put(root, "src/grouped.rs", "use crate::{Error, Result};\nfn run() -> Result<()> {}");
     put(root, "src/error.rs", "pub struct Error;\npub type Result<T> = T;");
@@ -669,6 +687,16 @@ test("graph CLI discovers composition declarations and direct/grouped diagnostic
       });
     assert.equal(run().status, 0);
     assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 5);
+    put(
+      root,
+      "src/lib.rs",
+      "pub mod direct;\nmod grouped;\npub mod error;\npub use error::{Error as Fault, Result};\n",
+    );
+    put(root, "src/direct.rs", "fn run() -> crate::Result<()> { let _: crate::Fault; }");
+    assert.deepEqual(
+      moduleGraph(root).edges.map(({ from, to }) => `${from}->${to}`),
+      expected,
+    );
     delete layout.edges["direct->error"];
     put(root, "layout.json", layout);
     const refused = run();
@@ -852,6 +880,46 @@ test("graph CLI transforms source edges, enforces command ownership and routing-
         (e) => e.from === "record" && e.to === "record" && e.via === "StatusProvider",
       ),
     );
+    put(root, "src/main.rs", "fn main() {}\nfn read_lock() {}\n");
+    layout.dispatcher.functionMoves = { "src/main.rs::read_lock": "record" };
+    assert.equal(run().status, 0);
+    assert.ok(
+      JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).transformedEdges.some(
+        (edge) => edge.source === "src/main.rs::read_lock" && edge.to === "record",
+      ),
+    );
+    delete layout.dispatcher.functionMoves;
+    put(root, "src/main.rs", "fn main() {}\n");
+    layout.edges["record->status"] = {
+      kind: "move",
+      fix: "Move command-owned rendering out of the record.",
+      movedTo: "record",
+    };
+    assert.match(run().stderr, /move must land in command owner cmd-status/);
+    layout.edges["record->status"].movedTo = "cmd-status";
+    assert.equal(run().status, 0);
+    const moved = JSON.parse(readFileSync(join(root, "graph.json"), "utf8"));
+    assert.ok(
+      moved.transformedEdges.some(
+        (edge) =>
+          edge.source === "record->status" &&
+          edge.from === "cmd-status" &&
+          edge.to === "cmd-status",
+      ),
+    );
+    layout.edges["record->status"] = {
+      kind: "seam",
+      fix: "Restore the provider seam.",
+      interface: { owner: "record", trait: "StatusProvider", adapter: "dispatcher" },
+    };
+    put(root, "src/record/child.rs", "pub struct Child;\n");
+    layout.crates["cmd-status"].files.push("src/record/child.rs");
+    assert.match(run().stderr, /module record: split ownership/);
+    layout.crates["cmd-status"].files.pop();
+    rmSync(join(root, "src/record"), { recursive: true });
+    layout.crates.dispatcher.files.push("src/missing.rs");
+    assert.match(run().stderr, /stale source file src\/missing.rs/);
+    layout.crates.dispatcher.files.pop();
     const savePort = layout.edges["record->status"].interface;
     for (const moves of [
       null,
@@ -1187,4 +1255,534 @@ test("command replay CLI retains every individual test and renders a fresh evide
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("target graph applies named source moves and refuses a broken extraction then recovers", async () => {
+  const { targetGraph } = await import("./target-graph.mjs");
+  const base = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
+  const moves = JSON.parse(readFileSync("scripts/modularization/target-moves.json", "utf8"));
+  const mapped = targetGraph(base, moves);
+  const graph = compileMapping({
+    crates: Object.fromEntries(
+      Object.entries(mapped.crates).map(([name, crate]) => [
+        name,
+        { paths: crate.files, deps: crate.deps },
+      ]),
+    ),
+    suites: Object.fromEntries(
+      Object.keys(mapped.crates)
+        .filter((name) => name.startsWith("cmd-"))
+        .map((name) => [name, { paths: [], crates: [name] }]),
+    ),
+  });
+  for (const [name, suite] of Object.entries(graph.suites))
+    assert.deepEqual(
+      [...suite.crates].filter((crate) => crate.startsWith("cmd-")),
+      [name],
+    );
+  const broken = structuredClone(moves);
+  broken.commandSlices[0].symbols.push("nonexistent_renderer");
+  assert.throws(() => targetGraph(base, broken), /missing extraction symbol.*nonexistent_renderer/);
+  broken.commandSlices[0].symbols.pop();
+  assert.deepEqual(targetGraph(base, broken).crates, mapped.crates);
+  broken.wholeModules[0].file = "src/branchname.rs";
+  broken.wholeModules[0].symbols = ["render"];
+  assert.throws(() => targetGraph(base, broken), /unmodeled production dependency/);
+  broken.wholeModules = structuredClone(moves.wholeModules);
+  broken.renames = {};
+  assert.throws(() => targetGraph(base, broken), /actual CLI routes exactly/);
+  broken.renames = true;
+  assert.throws(() => targetGraph(base, broken), /invalid target field renames/);
+  broken.renames = structuredClone(moves.renames);
+  broken.edgeMoves[1].replacement = "onepipeline";
+  assert.throws(() => targetGraph(base, broken), /cycle.*onepipeline|onepipeline.*->/);
+  const root = scratch();
+  try {
+    const refused = spawnSync(
+      process.execPath,
+      [resolve("scripts/modularization/target-graph.mjs"), "out.json", "extra"],
+      { cwd: root, encoding: "utf8" },
+    );
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /usage: target-graph.mjs/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("decomposition CLI separates setup, preserves live ownership, derives argv slots and recovers from invalid inputs", async () => {
+  const root = scratch();
+  try {
+    const { expandCatalog } = await import("./catalog.mjs");
+    const config = {
+      schema: 1,
+      paths: { start: "cmd-start", status: "cmd-status", stop: "cmd-stop", watch: "cmd-watch" },
+    };
+    put(root, "scripts/modularization/cli-commands.json", config);
+    put(
+      root,
+      "src/cli.rs",
+      "pub enum Command {\n    Start(StartArgs),\n    Status(StatusArgs),\n    Stop(StopArgs),\n    Watch(WatchArgs),\n}\n",
+    );
+    const source = `use crate::harness::World;
+#[test] fn setup_then_status() { let w = World; w.run(&["start"]); w.run(&["status"]); }
+#[test] fn stop_while_running() { let w = World; w.run(&["start"]); w.run(&["stop"]); w.wait(); }
+#[test] fn dynamic_family() { let w = World; let args = unresolvable(); w.run(&args); }
+#[test] fn support_only() { assert!(true); }
+#[test] fn public_view() { let _ = onepipeline::verbs::status(root, None); }
+#[test] fn simple_view() { let w = World; w.run(&["status"]); }
+#[test] fn causal_control() { let w = World; w.run(&["start"]); w.run(&["stop"]); w.until(|| true); }
+#[test] fn observer_pair() { let w = World; w.run(&["start"]); w.cmd(&["watch"]).spawn(); }
+#[test] fn generic_args() { let w = World; let args = unresolvable(); w.run(&args); }
+#[test] fn external_program() { let w = World; w.cmd_on(program, &["leave-a-descendant"]).spawn(); }
+#[test] fn explicit_binary() { Command::new(env!("CARGO_BIN_EXE_onepipeline")).args(["unknown"]).output(); }
+`;
+    put(
+      root,
+      "tests/e2e/harness.rs",
+      "pub struct World; impl World { pub fn run(&self, args: &[&str]) {} pub fn cmd(&self, args: &[&str]) {} pub fn cmd_on(&self, program: &Path, args: &[&str]) {} }",
+    );
+    put(root, "tests/e2e/example.rs", source);
+    const baseline = {
+      schema: 1,
+      tests: {
+        "example::explicit_binary": {
+          suite: "cross-command",
+          commands: [],
+          reason: "compiled parser refusal",
+        },
+        "example::external_program": {
+          suite: "cross-command",
+          commands: [],
+          reason: "real subprocess support boundary",
+        },
+        "example::support_only": {
+          suite: "cross-command",
+          commands: [],
+          reason: "fixture support",
+        },
+        "example::public_view": {
+          suite: "cross-command",
+          commands: ["cmd-status"],
+          reason: "library area fallback",
+        },
+        "example::simple_view": {
+          suite: "cmd-status",
+          commands: ["cmd-status"],
+          reason: "one real command",
+        },
+        "example::causal_control": {
+          suite: "cross-command",
+          commands: ["cmd-start", "cmd-stop"],
+          reason: "live control",
+        },
+        "example::observer_pair": {
+          suite: "cross-command",
+          commands: ["cmd-start", "cmd-watch"],
+          reason: "armed watcher",
+        },
+        "example::generic_args": {
+          suite: "cmd-status",
+          commands: ["cmd-status"],
+          reason: "unresolved actual argv",
+        },
+        "example::dynamic_family": {
+          suite: "cross-command",
+          commands: ["cmd-template", "cmd-start"],
+          reason: "legacy profile bucket with dynamic argv",
+        },
+        "example::setup_then_status": {
+          suite: "cross-command",
+          commands: ["cmd-start", "cmd-status"],
+          reason: "setup and read",
+        },
+        "example::stop_while_running": {
+          suite: "cross-command",
+          commands: ["cmd-start", "cmd-stop"],
+          reason: "live stop",
+        },
+      },
+    };
+    put(root, "scripts/modularization/layout.json", {
+      schema: 1,
+      crates: {
+        "cmd-start": { files: ["src/cli.rs"], deps: [] },
+        "cmd-status": { files: [], deps: [] },
+        "cmd-stop": { files: [], deps: [] },
+        "cmd-template": { files: [], deps: [] },
+      },
+      edges: {},
+    });
+    const baselinePath = "scripts/modularization/command-tests.json";
+    const outputPath = "scripts/modularization/command-tests-target.json";
+    put(root, baselinePath, baseline);
+    const cli = resolve("scripts/modularization/decompose.mjs");
+    const run = (...args) =>
+      spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: "utf8" });
+    const expectFailure = (pattern, ...args) => {
+      const result = run(...args);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, pattern);
+    };
+    const good = run();
+    assert.equal(good.status, 0, good.stderr);
+    assert.match(good.stdout, /11 original tests classified/);
+    const result = expandCatalog(JSON.parse(readFileSync(join(root, outputPath), "utf8")));
+    assert.equal(result.dispositions["example::setup_then_status"].kind, "decompose");
+    assert.equal(result.dispositions["example::dynamic_family"].kind, "dispatch");
+    assert.equal(result.tests["example::dynamic_family"].suite, "full-dispatch");
+    assert.deepEqual(result.tests["example::dynamic_family"].commands, []);
+    assert.equal(result.dispositions["example::support_only"].kind, "support");
+    assert.equal(result.dispositions["example::external_program"].kind, "support");
+    assert.equal(result.dispositions["example::explicit_binary"].kind, "dispatch");
+    assert.equal(result.dispositions["example::public_view"].kind, "library");
+    assert.equal(result.dispositions["example::simple_view"].kind, "isolated");
+    assert.equal(result.dispositions["example::generic_args"].kind, "dispatch");
+    assert.equal(result.dispositions["example::causal_control"].reason, "live-control");
+    assert.equal(result.dispositions["example::observer_pair"].reason, "live-observer");
+    assert.equal(result.dispositions["example::stop_while_running"].kind, "integration");
+    assert.deepEqual(result.dispositions["example::setup_then_status"].originalCommands, [
+      "cmd-start",
+      "cmd-status",
+    ]);
+    for (const id of Object.keys(baseline.tests))
+      assert.equal(
+        Object.values(result.tests)
+          .filter((t) => t.original === id)
+          .reduce((n, t) => n + t.share, 0),
+        1,
+      );
+    expectFailure(/usage: decompose.mjs/, "extra");
+    for (const bad of [
+      { ...baseline, typo: true },
+      { schema: 1, tests: 42 },
+    ]) {
+      put(root, baselinePath, bad);
+      expectFailure(/invalid baseline test catalog/);
+    }
+    put(root, baselinePath, {
+      ...baseline,
+      tests: {
+        ...baseline.tests,
+        "example::dynamic_family": {
+          ...baseline.tests["example::dynamic_family"],
+          commands: ["cmd-imaginary"],
+        },
+      },
+    });
+    expectFailure(/unmapped baseline command crate/);
+    put(root, baselinePath, baseline);
+    for (const bad of [
+      { ...config, schema: 2 },
+      { ...config, typo: true },
+      { schema: 1, paths: 42 },
+      { schema: 1, paths: { start: "missing" } },
+    ]) {
+      put(root, "scripts/modularization/cli-commands.json", bad);
+      expectFailure(/invalid CLI command mapping/);
+    }
+    put(root, "scripts/modularization/cli-commands.json", {
+      schema: 1,
+      paths: { ...config.paths, unknown: "cmd-start" },
+    });
+    expectFailure(/CLI path mapping differs/);
+    put(root, "scripts/modularization/cli-commands.json", {
+      schema: 1,
+      paths: { ...config.paths, status: "cmd-unknown" },
+    });
+    expectFailure(/unmapped CLI command crate/);
+    put(root, "scripts/modularization/cli-commands.json", config);
+    put(
+      root,
+      "tests/e2e/harness.rs",
+      "pub struct World; impl World { pub fn run(&self, cwd: &Path, args: &[&str]) {} pub fn cmd(&self, args: &[&str]) {} pub fn cmd_on(&self, program: &Path, args: &[&str]) {} }",
+    );
+    put(root, "tests/e2e/example.rs", source.replaceAll("w.run(&[", "w.run(path, &["));
+    assert.equal(run().status, 0);
+    assert.deepEqual(
+      expandCatalog(JSON.parse(readFileSync(join(root, outputPath), "utf8"))).dispositions,
+      result.dispositions,
+    );
+    rmSync(join(root, outputPath));
+    mkdirSync(join(root, outputPath));
+    expectFailure(/EISDIR/);
+    rmSync(join(root, outputPath), { recursive: true });
+    assert.equal(run().status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// expandCatalog is the public in-process input boundary; these assertions drive that parser directly.
+test("catalog expansion refuses malformed records, inherited reason names and duplicate owners", async () => {
+  const { expandCatalog, baselineHash } = await import("./catalog.mjs");
+  const good = {
+    schema: 3,
+    baselineSha256: baselineHash({ schema: 1, tests: {} }),
+    dispositions: {
+      "example::works": {
+        kind: "decompose",
+        originalCommands: ["cmd-start", "cmd-status"],
+        reason: "command-phases",
+      },
+    },
+  };
+  assert.equal(Object.keys(expandCatalog(JSON.parse(JSON.stringify(good))).tests).length, 2);
+  for (const dispositions of [true, 42, [], null])
+    assert.throws(() => expandCatalog({ ...good, dispositions }), /invalid decomposition catalog/);
+  assert.throws(() => expandCatalog({ ...good, schema: 4 }), /invalid decomposition catalog/);
+  for (const reason of ["constructor", "toString", 42]) {
+    const broken = structuredClone(good);
+    broken.dispositions["example::works"].reason = reason;
+    assert.throws(() => expandCatalog(broken), /invalid disposition/);
+  }
+  for (const originalCommands of [["cmd-start", "cmd-start"], []]) {
+    const broken = structuredClone(good);
+    broken.dispositions["example::works"].originalCommands = originalCommands;
+    assert.throws(() => expandCatalog(broken), /no unique owners/);
+  }
+  const broken = structuredClone(good);
+  broken.dispositions["example::works"].typo = true;
+  assert.throws(() => expandCatalog(broken), /invalid disposition/);
+  assert.equal(Object.keys(expandCatalog(good).tests).length, 2);
+});
+
+test("inventory and documentation CLIs preserve prefixes and refuse missing/duplicate markers", {
+  timeout: 180000,
+}, () => {
+  const root = scratch();
+  try {
+    execFileSync("git", ["clone", "--quiet", "--shared", "--no-hardlinks", ".", root], {
+      stdio: "pipe",
+    });
+    const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8" });
+    git(
+      "update-ref",
+      "refs/remotes/origin/main",
+      execFileSync("git", ["rev-parse", "origin/main"], { encoding: "utf8" }).trim(),
+    );
+    // Run the actual revised CLI in the scratch checkout, including its source/schema inputs.
+    for (const name of [
+      "command-replay.mjs",
+      "catalog.mjs",
+      "rust-syntax.mjs",
+      "phase-inputs.mjs",
+      "source-projection.mjs",
+      "manifest-projection.mjs",
+      "cli-commands.json",
+      "graph.mjs",
+    ])
+      put(
+        root,
+        `scripts/modularization/${name}`,
+        readFileSync(`scripts/modularization/${name}`, "utf8"),
+      );
+    const run = (...args) =>
+      spawnSync(process.execPath, ["scripts/modularization/command-replay.mjs", ...args], {
+        cwd: root,
+        encoding: "utf8",
+      });
+    assert.equal(run("--inventory").status, 0);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(root, "scripts/modularization/command-tests.json"), "utf8")),
+      JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8")),
+    );
+    const doc = "docs/modularization-command-replay.md";
+    const marker = "<!-- BEGIN COMMAND REPLAY -->";
+    put(root, doc, "prefix retained exactly\n");
+    assert.match(run("out.json", "--write-doc").stderr, /expected one command replay marker/);
+    put(root, doc, `prefix retained exactly\n${marker}\n${marker}\n`);
+    assert.match(run("out.json", "--write-doc").stderr, /expected one command replay marker/);
+    put(root, doc, `prefix retained exactly\n${marker}\n`);
+    const repaired = run("out.json", "--write-doc");
+    assert.equal(repaired.status, 0, repaired.stderr);
+    assert.ok(
+      readFileSync(join(root, doc), "utf8").startsWith(`prefix retained exactly\n${marker}\n`),
+    );
+    assert.equal(JSON.parse(readFileSync(join(root, "out.json"), "utf8")).rows.length, 144);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("target replay CLI covers 144 PRs and every original assertion in fresh target documentation", {
+  timeout: 600000,
+}, async () => {
+  const root = scratch();
+  try {
+    const { decompose, expandCatalog } = await import("./decompose.mjs");
+    const { targetAppendix, TARGET_MARKER } = await import("./target-report.mjs");
+    const baseline = JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8"));
+    const catalog = JSON.parse(
+      readFileSync("scripts/modularization/command-tests-target.json", "utf8"),
+    );
+    assert.deepEqual(catalog, decompose(baseline));
+    const output = join(root, "target.json");
+    const run = spawnSync(process.execPath, ["scripts/modularization/target-replay.mjs", output], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const evidence = JSON.parse(readFileSync(output, "utf8"));
+    assert.equal(evidence.result.rows.length, 144);
+    assert.equal(evidence.result.originalTests, 1920);
+    assert.equal(evidence.result.tests, Object.keys(evidence.catalog.tests).length);
+    const expanded = expandCatalog(catalog);
+    for (const id of Object.keys(baseline.tests)) {
+      const pieces = Object.values(expanded.tests).filter((test) => test.original === id);
+      const expected =
+        catalog.dispositions[id].kind === "decompose"
+          ? catalog.dispositions[id].originalCommands.length
+          : 1;
+      assert.equal(pieces.length, expected, id);
+      assert.ok(
+        pieces.every((piece) => piece.share === 1 / expected),
+        id,
+      );
+    }
+    assert.equal(
+      evidence.result.migration.at(-1).suiteSkip,
+      evidence.result.platforms.linux.suiteSkip,
+    );
+    const doc = readFileSync("docs/modularization-target-layout.md", "utf8");
+    assert.equal(doc.split(TARGET_MARKER).length, 2);
+    assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
+    symlinkSync(resolve("src"), join(root, "src"), "dir");
+    mkdirSync(join(root, "tests"), { recursive: true });
+    symlinkSync(resolve("tests/e2e"), join(root, "tests/e2e"), "dir");
+    for (const name of [
+      "command-tests.json",
+      "cli-commands.json",
+      "command-tests-target.json",
+      "target-moves.json",
+    ])
+      put(
+        root,
+        `scripts/modularization/${name}`,
+        readFileSync(`scripts/modularization/${name}`, "utf8"),
+      );
+    const renderer = resolve("scripts/modularization/target-report.mjs");
+    const render = () =>
+      spawnSync(process.execPath, [renderer, output], { cwd: root, encoding: "utf8" });
+    const targetDoc = "docs/modularization-target-layout.md";
+    put(root, targetDoc, "prefix\n");
+    assert.match(render().stderr, /expected one target layout marker/);
+    put(root, targetDoc, `prefix\n${TARGET_MARKER}\n${TARGET_MARKER}\n`);
+    assert.match(render().stderr, /expected one target layout marker/);
+    put(root, targetDoc, `prefix\n${TARGET_MARKER}\n`);
+    evidence.typo = true;
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /unknown target evidence field/);
+    delete evidence.typo;
+    const oldFile = evidence.moves.extractions[0].file;
+    evidence.moves.extractions[0].file = "../../outside.rs";
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /differs from the current reviewed moves/);
+    evidence.moves.extractions[0].file = oldFile;
+    for (const key of ["originalTests", "tests"]) {
+      evidence.result[key]--;
+      put(root, "target.json", evidence);
+      assert.match(render().stderr, /target test\/phase count mismatch/);
+      evidence.result[key]++;
+    }
+    put(root, "target.json", evidence);
+    const repaired = render();
+    assert.equal(repaired.status, 0, repaired.stderr);
+    assert.equal(
+      readFileSync(join(root, targetDoc), "utf8"),
+      `prefix\n${targetAppendix(evidence)}`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolution CLI refuses malformed maps, lock identities and compiler pins, then recovers", () => {
+  const root = scratch();
+  try {
+    const cli = resolve("scripts/modularization/command-replay.mjs");
+    const crates = { record: { external: ["record-lib"], toolchain: true } };
+    const lock = 'version = 4\n[[package]]\nname = "record-lib"\nversion = "1.0.0"\n';
+    const pin = '[toolchain]\nchannel = "1.90.0"\n';
+    put(root, "crates.json", crates);
+    put(root, "before.lock", lock);
+    put(root, "after.lock", lock);
+    put(root, "before-tool", pin);
+    put(root, "after-tool", pin);
+    const run = () =>
+      spawnSync(
+        process.execPath,
+        [
+          cli,
+          "--resolve",
+          ...[
+            "crates.json",
+            "before.lock",
+            "after.lock",
+            "before-tool",
+            "after-tool",
+            "out.json",
+          ].map((file) => join(root, file)),
+        ],
+        { encoding: "utf8" },
+      );
+    const failure = (pattern) => {
+      const result = run();
+      assert.equal(result.status, 1, result.stdout);
+      assert.match(result.stderr, pattern);
+    };
+    assert.equal(run().status, 0);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, "out.json"), "utf8")), []);
+    for (const bad of [null, true, 42, []]) {
+      put(root, "crates.json", JSON.stringify(bad));
+      failure(/resolution configuration must be an object/);
+    }
+    for (const entry of [
+      { external: [], toolchain: true, typo: true },
+      { external: 42, toolchain: true },
+      { external: [], toolchain: "true" },
+    ]) {
+      put(root, "crates.json", { record: entry });
+      failure(/invalid resolution inputs/);
+    }
+    put(root, "crates.json", { record: { external: ["missing"], toolchain: true } });
+    failure(/unresolved external root/);
+    put(root, "crates.json", crates);
+    for (const [bad, pattern] of [
+      ["version = 4\n", /no packages/],
+      ['[[package]]\nname = "record-lib"\n', /needs name and version/],
+      [lock + lock.slice(lock.indexOf("[[package]]")), /duplicate lock package identity/],
+    ]) {
+      put(root, "after.lock", bad);
+      failure(pattern);
+    }
+    for (const dependencies of ['"not an array"', '["record-lib", 42]']) {
+      put(root, "after.lock", `${lock}dependencies = ${dependencies}\n`);
+      failure(/lock package dependencies must be a string array/);
+    }
+    put(root, "after.lock", lock);
+    for (const bad of [
+      '[toolchain]\nchannel = "stable"\nprofile = 42\n',
+      '[toolchain]\nchannel = 42\npath = "/toolchain"\n',
+      '[toolchain]\nchannel = "stable"\npath = 42\n',
+      '[toolchain]\nchannel = "stable"\nprofile = "other"\n',
+    ]) {
+      put(root, "after-tool", bad);
+      failure(/invalid toolchain/);
+    }
+    put(root, "after-tool", pin);
+    assert.equal(run().status, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The report's source-intent reader is a public in-process file boundary, exercised against real test source.
+test("test intent comes from the existing journey and refuses path-like ids", async () => {
+  const { intentFor } = await import("./target-report.mjs");
+  assert.match(
+    intentFor("adoption::the_three_release_kinds_reach_a_planner_through_the_shipped_profile"),
+    /The three kinds this crate emits reach a planner through the \*\*shipped profile with no filter change/,
+  );
+  assert.throws(() => intentFor("../outside::read"), /invalid test intent id/);
+  assert.throws(() => intentFor("adoption::nonexistent_test"), /missing test intent source/);
 });

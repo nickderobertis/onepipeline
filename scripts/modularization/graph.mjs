@@ -76,6 +76,16 @@ export function moduleGraph(root = ".") {
           .split(/[/.]/)[0],
     ),
   );
+  const aliases = new Map();
+  const lib = files.find((file) => file === join(root, "src/lib.rs"));
+  if (lib) {
+    const exports = codeOnly(readFileSync(lib, "utf8"));
+    for (const match of exports.matchAll(/pub\s+use\s+(?:crate::)?(\w+)::\{([^}]+)\}/g))
+      for (const item of match[2].split(",")) {
+        const symbol = /^\s*(\w+)(?:\s+as\s+(\w+))?\s*$/.exec(item);
+        if (symbol && names.has(match[1])) aliases.set(symbol[2] ?? symbol[1], match[1]);
+      }
+  }
   const edges = new Map();
   const owners = {};
   for (const file of files) {
@@ -100,11 +110,11 @@ export function moduleGraph(root = ".") {
     for (const match of code.matchAll(/\b(?:crate|super)::\s*\{([\s\S]*?)\};/g)) {
       for (const item of match[1].matchAll(/\b([a-z][a-z0-9_]*)\b/g)) add(item[1], match.index);
     }
-    // The root's Error/Result aliases otherwise hide every module's error edge.
-    for (const match of code.matchAll(
-      /\bcrate::(?:Error|Result)\b|\buse\s+crate::\{[^;]*\b(?:Error|Result)\b/g,
-    ))
-      add("error", match.index);
+    for (const [alias, module] of aliases)
+      for (const match of code.matchAll(
+        new RegExp(`\\bcrate::${alias}\\b|\\buse\\s+crate::\\{[^;]*\\b${alias}\\b`, "g"),
+      ))
+        add(module, match.index);
   }
   return {
     files: owners,
@@ -207,6 +217,23 @@ export function validate(mapping, graph, root = ".") {
       !edge.fix.trim()
     )
       throw new Error(`invalid edge ${name}`);
+    if (edge.interface !== undefined) {
+      object(edge.interface, ["owner", "trait", "adapter"], `interface ${name}`);
+      const port = edge.interface;
+      if (
+        ![port.owner, port.adapter].every(
+          (value) => typeof value === "string" && Object.hasOwn(mapping.crates, value),
+        ) ||
+        typeof port.trait !== "string" ||
+        !/^[A-Z][A-Za-z0-9]*$/.test(port.trait)
+      )
+        throw new Error(`invalid interface ${name}`);
+    }
+    if (
+      edge.movedTo !== undefined &&
+      (typeof edge.movedTo !== "string" || !Object.hasOwn(mapping.crates, edge.movedTo))
+    )
+      throw new Error(`invalid movedTo ${name}`);
   }
   if (mapping.schema === 2) {
     if (
@@ -229,6 +256,8 @@ export function validate(mapping, graph, root = ".") {
       mapping.dispatcher.functionMoves === undefined ? {} : mapping.dispatcher.functionMoves;
     if (!moves || typeof moves !== "object" || Array.isArray(moves))
       throw new Error("invalid dispatcher functionMoves object");
+    for (const file of mapping.crates[mapping.dispatcher.crate]?.files ?? [])
+      if (!Object.hasOwn(graph.files, file)) throw new Error(`stale source file ${file}`);
     const functions = new Set(
       mapping.crates[mapping.dispatcher.crate]?.files.flatMap((file) =>
         [...codeOnly(readFileSync(join(root, file), "utf8")).matchAll(/\bfn\s+(\w+)\s*[(<]/g)].map(
@@ -257,18 +286,6 @@ export function validate(mapping, graph, root = ".") {
     const sourceEdges = new Set(graph.edges.map((edge) => `${edge.from}->${edge.to}`));
     for (const [name, edge] of Object.entries(mapping.edges)) {
       if (!sourceEdges.has(name)) throw new Error(`stale source edge ${name}`);
-      if (edge.interface !== undefined) {
-        object(edge.interface, ["owner", "trait", "adapter"], `interface ${name}`);
-        const port = edge.interface;
-        if (
-          ![port.owner, port.adapter].every(
-            (value) => typeof value === "string" && Object.hasOwn(mapping.crates, value),
-          ) ||
-          typeof port.trait !== "string" ||
-          !/^[A-Z][A-Za-z0-9]*$/.test(port.trait)
-        )
-          throw new Error(`invalid interface ${name}`);
-      }
       if (edge.kind === "move" && typeof edge.movedTo !== "string")
         throw new Error(`edge ${name}: movedTo is required`);
     }

@@ -1,0 +1,742 @@
+{
+  "schema": 3,
+  "extractions": [
+    {
+      "command": "cmd-telemetry",
+      "shared": "run-metrics",
+      "file": "src/telemetry.rs",
+      "symbols": [
+        "RunTelemetry",
+        "of_run",
+        "duration",
+        "UNMEASURED",
+        "Aggregate",
+        "Bucket",
+        "BucketName",
+        "Party",
+        "Usage"
+      ],
+      "reason": "Move the telemetry fold, metrics DTOs and duration formatting used by driver and host into run-metrics. Keep telemetry argument handling and command-only presentation in cmd-telemetry; preserve facade re-exports."
+    },
+    {
+      "command": "cmd-flow",
+      "shared": "flow-session",
+      "file": "src/flow.rs",
+      "symbols": [
+        "FlowRecord",
+        "FlowEnding",
+        "paths",
+        "registration_lock",
+        "Flow",
+        "Standing",
+        "LandingSubject",
+        "Landing",
+        "is_terminal_landing_kind",
+        "LandingOperation",
+        "inherited",
+        "register",
+        "LandingRequest",
+        "FLOW_SCHEMA_VERSION",
+        "LANDINGS_DIR",
+        "record_ending",
+        "LandingTransition",
+        "LandingOperationRecord",
+        "LandingTerminal",
+        "LandingEnding",
+        "every_landing",
+        "of_session",
+        "FlowId",
+        "FlowAcknowledgement"
+      ],
+      "reason": "Move flow records, registration and flow-scoped channel operations into flow-session, used by ask, publication and debt readers. Keep flow run CLI execution in cmd-flow."
+    },
+    {
+      "command": "cmd-watch",
+      "shared": "watch-lease",
+      "file": "src/watch.rs",
+      "symbols": [
+        "Cursor",
+        "Request",
+        "Outcome",
+        "monitored",
+        "watch",
+        "Lines",
+        "DEADLINE_CHECK",
+        "deadline",
+        "wake_within",
+        "tail",
+        "resolve_cursor",
+        "surface_waiting",
+        "settlement_of"
+      ],
+      "reason": "Move cursor/lease watching and typed frames into watch-lease for run and flow observers; keep CLI stream/log formatting and argument handling in cmd-watch. Move the associated watcher record types with the lease protocol."
+    },
+    {
+      "command": "cmd-unpublished",
+      "shared": "publication-debt",
+      "file": "src/unpublished.rs",
+      "symbols": [
+        "Target",
+        "Verdict",
+        "UnpublishedRequest",
+        "Unpublished",
+        "unpublished",
+        "render"
+      ],
+      "reason": "Move publication-debt discovery, acknowledgement DTOs and the debt explanation shared with stop-guard into publication-debt. Keep unpublished CLI parsing and exit handling in its command crate."
+    },
+    {
+      "command": "cmd-unwatched",
+      "shared": "observation-debt",
+      "file": "src/unwatched.rs",
+      "symbols": [
+        "WakeBudget",
+        "Unwatched",
+        "asked",
+        "acknowledge_flow"
+      ],
+      "reason": "Move observation-debt classification, wake budget and acknowledgements used by stop-guard into observation-debt. Keep unwatched command argument/session policy in cmd-unwatched."
+    },
+    {
+      "command": "cmd-template",
+      "shared": "plan-template",
+      "file": "src/templates.rs",
+      "symbols": [
+        "Registry",
+        "Search",
+        "resolve",
+        "check_plan",
+        "ROOT_KEY",
+        "CONFIG_SCHEMA_VERSION",
+        "REQUIRE_RENDERED_KEY",
+        "Launch",
+        "resolve_root",
+        "resolve_require_rendered"
+      ],
+      "reason": "Move template registry, resolution and plan validation to plan-template, used by launch and all three template subcommands. There is no template-family command crate; command-only list/check/resolve argument handling and rendering stay in their respective command crates.",
+      "assets": [
+        "src/templates/onepipeline/plan-task.md.j2"
+      ]
+    },
+    {
+      "command": "cmd-publish-branch",
+      "shared": "branch-publication",
+      "file": "src/land.rs",
+      "symbols": [
+        "Verb",
+        "land",
+        "Supervision",
+        "settle_death",
+        "PR_AUTHOR_GRAPH_FLAG",
+        "NO_DRAFT_FLAG"
+      ],
+      "reason": "Move the common branch-publication workflow and supervision protocol used by publish-branch, recover and integrate to branch-publication. Each command owns its verb selection, argument translation and exit handling."
+    },
+    {
+      "command": "cmd-drive-run",
+      "shared": "run-control",
+      "file": "src/driver.rs",
+      "symbols": [
+        "drive_run",
+        "retain_driver"
+      ],
+      "reason": "Retained runners re-enter a hidden drive-run route that calls the shared run-control entry point. start/adopt own that runner route without linking another command crate; the published drive-run adapter calls the same implementation."
+    }
+  ],
+  "edgeMoves": [
+    {
+      "from": "cmd-scratch-discard",
+      "to": "plan-template",
+      "replacement": "processes",
+      "file": "src/templates.rs",
+      "symbols": [
+        "plain_on",
+        "plain"
+      ],
+      "reason": "plain_on is platform path normalization, not template policy. Move it into processes and forward its old path."
+    },
+    {
+      "from": "run-views",
+      "to": "scheduler",
+      "replacement": "run-projection",
+      "file": "src/engine.rs",
+      "symbols": [
+        "RunResult",
+        "PRESERVED",
+        "DISPATCH_DIED",
+        "PROVIDER_FAILED",
+        "release_awaited",
+        "workspace_held",
+        "source_held",
+        "hold_kind"
+      ],
+      "reason": "Move result DTOs, outcome constants and pure recorded-hold readers into run-projection. Scheduler and readers use the identical definitions; rendering does not import the reconcile loop."
+    }
+  ],
+  "recordFiles": {
+    "crate": "run-files",
+    "file": "src/ledger.rs",
+    "symbols": [
+      "RunPaths",
+      "runs_root",
+      "RUNS_DIR_ENV",
+      "DEFAULT_RUNS_DIR",
+      "is_valid_run_id",
+      "read_json",
+      "read_json_opt",
+      "write_json",
+      "write_json_derived",
+      "write_atomic",
+      "Durability",
+      "append_line",
+      "append_line_healed"
+    ],
+    "deps": [
+      "diagnostics",
+      "processes",
+      "render-cost"
+    ],
+    "external": [
+      "serde",
+      "serde_json",
+      "libc",
+      "windows-sys"
+    ],
+    "reason": "Move run paths and generic durable JSON/line IO, including their private IO helpers, to run-files. Typed launch/result DTOs remain in run-record. Production writers and phase fixtures call these same IO functions; no producer is mocked and old public paths re-export the identical types/functions."
+  },
+  "commandSlices": [
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-runs",
+      "symbols": [
+        "runs",
+        "runs_of",
+        "runs_row"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-status",
+      "symbols": [
+        "status",
+        "status_of",
+        "status_reporting",
+        "status_listed",
+        "status_row",
+        "status_run_lines",
+        "Providers"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-host",
+      "symbols": [
+        "host"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-results",
+      "symbols": [
+        "results"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-goals",
+      "symbols": [
+        "goals",
+        "goals_grouped",
+        "goals_of"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-transcript",
+      "symbols": [
+        "transcript",
+        "nodes_with_agent_records"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/views.rs",
+      "crate": "cmd-observer-view",
+      "symbols": [
+        "monitor",
+        "monitor_of"
+      ],
+      "reason": "Command-only presentation moves with its command; public views paths forward to the identical implementation. Shared snapshot loading remains run-reading."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-runs",
+      "symbols": [
+        "runs",
+        "render_runs"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-status",
+      "symbols": [
+        "Status",
+        "RunStatus",
+        "status",
+        "render_status"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-host",
+      "symbols": [
+        "Host",
+        "host",
+        "render_host"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-goals",
+      "symbols": [
+        "Goals",
+        "goals",
+        "render_goals"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-results",
+      "symbols": [
+        "Results",
+        "results",
+        "render_results",
+        "render_results_json"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-transcript",
+      "symbols": [
+        "Transcript",
+        "transcript",
+        "render_transcript"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-agents",
+      "symbols": [
+        "agents",
+        "project_agents",
+        "render_agents"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-telemetry",
+      "symbols": [
+        "telemetry",
+        "render_telemetry",
+        "change_telemetry",
+        "render_change_telemetry",
+        "render_telemetry_breakdown"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-observer-view",
+      "symbols": [
+        "monitor",
+        "render_monitor"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-watch",
+      "symbols": [
+        "watch",
+        "render_watch_frame"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-unwatched",
+      "symbols": [
+        "unwatched",
+        "render_unwatched"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-unpublished",
+      "symbols": [
+        "unpublished",
+        "render_unpublished",
+        "acknowledge_unpublished",
+        "render_unpublished_acknowledged"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-next",
+      "symbols": [
+        "NextStatus",
+        "Next",
+        "next",
+        "render_next"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-channel-queue",
+      "symbols": [
+        "ChannelQueue",
+        "channel",
+        "render_channel"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-reply",
+      "symbols": [
+        "reply"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-attest",
+      "symbols": [
+        "attest"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-surface",
+      "symbols": [
+        "Surfaced",
+        "surface",
+        "render_surfaced"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-stop",
+      "symbols": [
+        "StopRequest",
+        "Stopped",
+        "stop",
+        "render_stopped"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-shutdown",
+      "symbols": [
+        "shutdown",
+        "render_shutdown"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-adopt",
+      "symbols": [
+        "Retain",
+        "Adopt",
+        "Adopted",
+        "adopt",
+        "adopt_with_writeback_item_budget",
+        "render_adopted"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-drive-run",
+      "symbols": [
+        "drive_run"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-template-list",
+      "symbols": [
+        "template_list",
+        "render_template_list"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-template-resolve",
+      "symbols": [
+        "template_resolve",
+        "render_template_resolved"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-template-check",
+      "symbols": [
+        "template_check",
+        "render_template_checked"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-scratch-discard",
+      "symbols": [
+        "ScratchDiscard",
+        "scratch_discard",
+        "render_scratch_discard",
+        "render_scratch_discard_errors"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-review",
+      "symbols": [
+        "ReviewReceipt",
+        "review",
+        "render_review",
+        "outstanding_clause"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-readjust",
+      "symbols": [
+        "ReadjustReceipt",
+        "readjust",
+        "render_readjust"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "cmd-label",
+      "symbols": [
+        "LabelRequest",
+        "label",
+        "render_labelled"
+      ],
+      "reason": "Move typed command entry point, command DTO and rendering together. The compatibility verbs module re-exports the same Rust items; exit/output parity stays asserted by tests/parity.rs."
+    }
+  ],
+  "sharedSlices": [
+    {
+      "file": "src/verbs.rs",
+      "crate": "run-files",
+      "symbols": [
+        "resolved"
+      ],
+      "deps": [],
+      "reason": "Validated run-path lookup is shared by post-launch command adapters."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "run-views",
+      "symbols": [
+        "Grouping"
+      ],
+      "deps": [],
+      "reason": "Grouping is shared presentation vocabulary used by run and goal listings."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "channel-submission",
+      "symbols": [
+        "VerdictHalf",
+        "ReplyOutcome",
+        "Receipt",
+        "render_receipt",
+        "submit",
+        "note_verdicts"
+      ],
+      "deps": [
+        "run-control",
+        "planner-channel",
+        "diagnostics",
+        "event-payloads",
+        "journal",
+        "run-record",
+        "processes"
+      ],
+      "reason": "Reply and attest share submission receipts, admission and delivery; an attest adapter must not import cmd-reply."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "run-control",
+      "symbols": [
+        "teardown_refusal"
+      ],
+      "deps": [],
+      "reason": "Shutdown/stop share the same process teardown refusal description."
+    },
+    {
+      "file": "src/verbs.rs",
+      "crate": "diagnostics",
+      "symbols": [
+        "to_json"
+      ],
+      "deps": [],
+      "reason": "Generic serialization-to-diagnostic conversion is shared by typed renderers; the facade re-exports command items rather than keeping this implementation."
+    },
+    {
+      "file": "src/branchname.rs",
+      "crate": "branch-template",
+      "symbols": [
+        "FLAG",
+        "ENVIRONMENT",
+        "KEY",
+        "DEFAULT_TEMPLATE",
+        "environment",
+        "BranchTemplate",
+        "resolve",
+        "render"
+      ],
+      "deps": [
+        "diagnostics"
+      ],
+      "reason": "The template parser/renderer and precedence form branch-template; plan-specific Naming and node variables remain with plan-model. Keep identical facade aliases, minijinja semantics and blank-template refusal."
+    }
+  ],
+  "commandDeps": {
+    "cmd-attest": [
+      "channel-submission"
+    ],
+    "cmd-reply": [
+      "channel-submission"
+    ],
+    "cmd-surface": [
+      "run-control",
+      "journal",
+      "event-payloads",
+      "diagnostics"
+    ],
+    "cmd-next": [
+      "run-views",
+      "run-projection",
+      "run-record"
+    ],
+    "cmd-channel-queue": [
+      "run-views",
+      "run-record"
+    ],
+    "cmd-label": [
+      "diagnostics"
+    ],
+    "cmd-stop": [
+      "diagnostics"
+    ],
+    "cmd-review": [
+      "diagnostics"
+    ],
+    "cmd-readjust": [
+      "diagnostics"
+    ],
+    "cmd-start": [
+      "branch-template"
+    ]
+  },
+  "wholeModules": [
+    {
+      "file": "src/yaml.rs",
+      "from": "plan-model",
+      "crate": "yaml-codec",
+      "symbols": [
+        "from_str",
+        "to_string"
+      ],
+      "external": [
+        "serde",
+        "serde-saphyr"
+      ],
+      "reason": "Generic strict YAML parsing/serialization is shared across configuration documents, not part of the plan model. Move cross-document cfg(test) assertions to the existing test-only compatibility/contract suite with every assertion retained."
+    },
+    {
+      "file": "src/watchers.rs",
+      "from": "cmd-watch",
+      "crate": "watch-lease",
+      "symbols": [
+        "WatcherRecord",
+        "WatchTerms",
+        "WatchStanding",
+        "Watchers",
+        "Leases",
+        "Wake",
+        "Armed",
+        "nonce"
+      ],
+      "deps": [
+        "run-record",
+        "processes",
+        "cli-schema"
+      ],
+      "reason": "All watcher registration, holder identity and lease-record logic is shared with flow and debt readers. Move the entire module to watch-lease; CLI-only stdout/log handling remains cmd-watch. Cross-command unit assertions remain in test-only integration coverage."
+    }
+  ],
+  "conceptLinks": {
+    "plan-model": [
+      "branch-template",
+      "yaml-codec"
+    ],
+    "executor-rules": [
+      "yaml-codec"
+    ],
+    "event-filter": [
+      "yaml-codec"
+    ],
+    "run-control": [
+      "yaml-codec"
+    ],
+    "task-store": [
+      "yaml-codec"
+    ],
+    "planner-channel": [
+      "yaml-codec"
+    ],
+    "agent-execution": [
+      "yaml-codec"
+    ],
+    "run-record": [
+      "yaml-codec"
+    ],
+    "plan-template": [
+      "yaml-codec"
+    ]
+  },
+  "renames": {
+    "cmd-note": "planner-notes",
+    "cmd-template": "plan-template"
+  }
+}

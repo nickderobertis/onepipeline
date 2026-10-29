@@ -1,8 +1,18 @@
 #!/usr/bin/env node
+import { baselineHash, expandCatalog } from "./catalog.mjs";
+import { functions } from "./rust-syntax.mjs";
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { codeOnly } from "./graph.mjs";
+import {
+  cargoManifest,
+  dependencyDefinitions,
+  manifestChanges,
+  toolchainFingerprint,
+} from "./manifest-projection.mjs";
+import { phaseInputs } from "./phase-inputs.mjs";
+import { cliPaths, declarations, commandPaths } from "./source-projection.mjs";
+import { codeOnly, moduleGraph, validate } from "./graph.mjs";
 import { suiteInputs } from "./suite-inputs.mjs";
 import { COMMAND_MARKER, commandAppendix } from "./command-report.mjs";
 import { evidence } from "./replay.mjs";
@@ -13,30 +23,7 @@ const sorted = (items) => [...new Set(items)].sort();
 const git = (...args) =>
   execFileSync("git", args, { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
 
-/** Offsets come from comment/literal-erased Rust; bodies retain their original bytes. */
-export function functions(source) {
-  const code = codeOnly(source);
-  return [...code.matchAll(/\bfn\s+(\w+)\s*(?:<[^{}]*>)?\s*\(/g)].flatMap((match) => {
-    const start = code.indexOf("{", match.index);
-    if (start < 0) return [];
-    let end = start + 1;
-    let depth = 1;
-    while (end < code.length && depth) {
-      if (code[end] === "{") depth++;
-      if (code[end] === "}") depth--;
-      end++;
-    }
-    const preceding = code.slice(code.lastIndexOf("}", match.index) + 1, match.index);
-    return [
-      {
-        name: match[1],
-        test: /#\s*\[\s*test\s*\]/.test(preceding),
-        body: source.slice(start, end),
-        code: code.slice(start, end),
-      },
-    ];
-  });
-}
+export { functions } from "./rust-syntax.mjs";
 
 /** Explicit extraction inventory, used for review; never silently regenerate ownership at replay time. */
 export function inventory(layout) {
@@ -44,20 +31,24 @@ export function inventory(layout) {
   const sources = Object.fromEntries(modules.map((m) => [m, read(`tests/e2e/${m}.rs`)]));
   const parsed = Object.fromEntries(modules.map((m) => [m, functions(sources[m])]));
   const commands = Object.keys(layout.crates).filter((name) => name.startsWith("cmd-"));
-  const aliases = Object.fromEntries(commands.map((name) => [name.slice(4), name]));
-  aliases.monitor = "cmd-observer-view";
-  aliases.plan = "cmd-plan-check";
-  aliases.boundary = "cmd-boundary-guidance";
-  aliases.channel = "cmd-channel-queue";
-  aliases.scratch = "cmd-scratch-discard";
+  const configured = {
+    paths: commandPaths(JSON.parse(read("scripts/modularization/cli-commands.json"))),
+  };
+  cliPaths(read("src/cli.rs"), configured.paths);
+  const aliases = {};
+  for (const [path, owner] of Object.entries(configured.paths)) {
+    if (!commands.includes(owner)) throw new Error(`unmapped CLI command crate: ${path}`);
+    const parent = path.split(" ")[0];
+    aliases[parent] ??= commands.includes(`cmd-${parent}`) ? `cmd-${parent}` : owner;
+  }
   // A family token alone is conservative; literal child tokens narrow it below.
   const detect = (body) => {
     const roots = new Set();
     for (const match of body.matchAll(
       /(?:run|cmd|args|run_with_stdin|run_from|run_in|run_on_agentgraph|run_recording_renders|run_with_file_ceiling)\s*\(\s*&?\[\s*"([a-z][a-z-]*)"(?:\s*,\s*"([a-z-]+)")?/g,
     )) {
-      const child = `cmd-${match[1]}-${match[2]}`;
-      if (commands.includes(child)) roots.add(child);
+      const child = configured.paths[`${match[1]} ${match[2]}`];
+      if (child) roots.add(child);
       else if (aliases[match[1]]) roots.add(aliases[match[1]]);
     }
     return [...roots];
@@ -68,7 +59,6 @@ export function inventory(layout) {
       const reached = new Map([[`${module}::${fn.name}`, fn]]);
       for (const [key, held] of reached) {
         const owner = key.split("::")[0];
-        // Follow named helpers in this module and explicitly qualified borrowed helpers.
         for (const helper of parsed[owner].filter((f) => !f.test))
           if (new RegExp(`\\b${helper.name}\\s*\\(`).test(held.code))
             reached.set(`${owner}::${helper.name}`, helper);
@@ -78,7 +68,7 @@ export function inventory(layout) {
         }
       }
       let roots = sorted([...reached.values()].flatMap((f) => detect(f.body)));
-      // Imported helper functions may launch commands; retain their module's existing union until split.
+      // A borrowed helper is attributed only when the test actually calls it; its full module remains a file input.
       const borrowed = [...sources[module].matchAll(/use crate::(?!harness\b)(\w+)::/g)].map(
         (m) => m[1],
       );
@@ -107,27 +97,48 @@ export function inventory(layout) {
 
 /** Full package records, with version-qualified dependency closure (both sides of a lock diff). */
 export function lockPackages(text) {
+  const records = cargoManifest(text).package ?? [];
+  if (!Array.isArray(records)) throw new Error("lockfile packages must be an array");
   const packages = text
     .split(/^\[\[package\]\]\s*$/m)
     .slice(1)
-    .map((block) => {
-      const field = (name) =>
-        JSON.parse(new RegExp(`^${name} = (".*")$`, "m").exec(block)?.[1] ?? '""');
-      const name = field("name");
-      const version = field("version");
-      if (!name || !version) throw new Error("lock package needs name and version");
-      const deps = [
-        ...(/dependencies = \[([\s\S]*?)\]/.exec(block)?.[1] ?? "").matchAll(/"([^"]+)"/g),
-      ].map((m) => m[1]);
-      return { name, version, key: `${name} ${version}`, block: block.trim(), deps };
+    .map((block, index) => {
+      const record = records[index];
+      const name = record?.name;
+      const version = record?.version;
+      const source = record?.source ?? "";
+      if (
+        typeof name !== "string" ||
+        !name.trim() ||
+        typeof version !== "string" ||
+        !version.trim()
+      )
+        throw new Error("lock package needs name and version");
+      if (typeof source !== "string") throw new Error("lock package source must be text");
+      const deps = record.dependencies ?? [];
+      if (!Array.isArray(deps) || !deps.every((dep) => typeof dep === "string" && dep.trim()))
+        throw new Error("lock package dependencies must be a string array");
+      return {
+        name,
+        version,
+        key: `${name} ${version} ${source}`,
+        source,
+        block: block.trim(),
+        deps,
+      };
     });
   if (!packages.length) throw new Error("lockfile contains no packages");
   const result = new Map(packages.map((p) => [p.key, p]));
+  if (result.size !== packages.length) throw new Error("duplicate lock package identity");
   for (const p of packages)
     p.deps = p.deps.flatMap((dep) => {
       const [name, version] = dep.split(" ");
+      const source = /^[^ ]+ [^ ]+ \((.*)\)$/.exec(dep)?.[1];
       const found = packages.filter(
-        (candidate) => candidate.name === name && (!version || candidate.version === version),
+        (candidate) =>
+          candidate.name === name &&
+          (!version || candidate.version === version) &&
+          (!source || candidate.source === source),
       );
       if (!found.length) throw new Error(`unresolved lock dependency ${dep}`);
       return found.map((item) => item.key);
@@ -136,6 +147,9 @@ export function lockPackages(text) {
 }
 
 export function resolution(packages, roots) {
+  for (const root of roots)
+    if (![...packages.values()].some((pkg) => pkg.name === root))
+      throw new Error(`unresolved external root ${root}`);
   const reached = new Set(
     [...packages.values()].filter((p) => roots.includes(p.name)).map((p) => p.key),
   );
@@ -146,41 +160,120 @@ export function resolution(packages, roots) {
     .join("\n");
 }
 
-/** Materialize resolved inputs as owned Nx files, not workspace-global lockfile edges. */
+/** Compute changed owned input paths; the Nx preparation step must materialize them. */
 export function resolvedChanges(crates, before, after, toolBefore, toolAfter) {
   const a = lockPackages(before);
   const b = lockPackages(after);
+  const toolChanged = toolchainFingerprint(toolBefore) !== toolchainFingerprint(toolAfter);
   return Object.entries(crates).flatMap(([name, crate]) => {
+    for (const root of crate.external)
+      if (![...a.values(), ...b.values()].some((pkg) => pkg.name === root))
+        throw new Error(`unresolved external root ${name}:${root}`);
     const changed = [];
-    if (resolution(a, crate.external) !== resolution(b, crate.external))
+    const present = (packages) =>
+      crate.external.filter((root) => [...packages.values()].some((pkg) => pkg.name === root));
+    if (resolution(a, present(a)) !== resolution(b, present(b)))
       changed.push(`resolved/${name}/lock.json`);
-    if (toolBefore !== toolAfter && crate.toolchain)
-      changed.push(`resolved/${name}/toolchain.json`);
+    if (toolChanged && crate.toolchain) changed.push(`resolved/${name}/toolchain.json`);
     return changed;
   });
 }
 
 export function commandMapping(layout, catalog) {
-  if (catalog.schema !== 1) throw new Error("command test catalog must use schema 1");
-  if (Object.keys(catalog).some((key) => !["schema", "tests"].includes(key)))
+  if (![1, 3].includes(catalog.schema))
+    throw new Error("command test catalog must use schema 1 or 3");
+  if (
+    Object.keys(catalog).some(
+      (key) =>
+        !(
+          catalog.schema === 3
+            ? ["schema", "baselineSha256", "tests", "dispositions"]
+            : ["schema", "tests"]
+        ).includes(key),
+    )
+  )
     throw new Error("unknown command catalog field");
   if (!catalog.tests || Array.isArray(catalog.tests) || typeof catalog.tests !== "object")
     throw new Error("catalog.tests must be an object");
   for (const [name, entry] of Object.entries(catalog.tests))
-    if (!entry || Object.keys(entry).some((key) => !["suite", "commands", "reason"].includes(key)))
+    if (
+      !entry ||
+      Object.keys(entry).some(
+        (key) =>
+          !(
+            catalog.schema === 3
+              ? ["original", "suite", "commands", "reason", "share"]
+              : ["suite", "commands", "reason"]
+          ).includes(key),
+      )
+    )
       throw new Error(`unknown test catalog field: ${name}`);
   const expected = inventory(layout);
-  if (JSON.stringify(Object.keys(expected.tests)) !== JSON.stringify(Object.keys(catalog.tests)))
-    throw new Error("test inventory drift: regenerate and review the command test catalog");
-  for (const [name, entry] of Object.entries(expected.tests)) {
+  if (catalog.schema === 1) {
+    if (JSON.stringify(Object.keys(expected.tests)) !== JSON.stringify(Object.keys(catalog.tests)))
+      throw new Error("test inventory drift: regenerate and review the command test catalog");
+    for (const [name, entry] of Object.entries(expected.tests))
+      if (
+        !Array.isArray(catalog.tests[name].commands) ||
+        entry.commands.some((command) => !catalog.tests[name].commands.includes(command))
+      )
+        throw new Error(`test command attribution drift: ${name}`);
+  } else {
+    const normalized = expandCatalog({
+      schema: 3,
+      baselineSha256: catalog.baselineSha256,
+      dispositions: catalog.dispositions,
+    });
+    if (JSON.stringify(normalized.tests) !== JSON.stringify(catalog.tests))
+      throw new Error("decomposition entries differ from their dispositions");
     if (
-      !Array.isArray(catalog.tests[name].commands) ||
-      entry.commands.some((command) => !catalog.tests[name].commands.includes(command))
+      catalog.baselineSha256 !==
+      baselineHash(JSON.parse(read("scripts/modularization/command-tests.json")))
     )
-      throw new Error(`test command attribution drift: ${name}`);
+      throw new Error("decomposition baseline fingerprint differs");
+    const originals = new Map();
+    for (const [name, entry] of Object.entries(catalog.tests)) {
+      if (
+        !expected.tests[entry.original] ||
+        !Number.isFinite(entry.share) ||
+        entry.share <= 0 ||
+        entry.share > 1
+      )
+        throw new Error(`invalid original test/share: ${name}`);
+      originals.set(entry.original, (originals.get(entry.original) ?? 0) + entry.share);
+    }
+    if (
+      originals.size !== Object.keys(expected.tests).length ||
+      [...originals.values()].some((share) => Math.abs(share - 1) > 1e-9)
+    )
+      throw new Error("decomposition loses or duplicates an original test's weight");
+    for (const id of Object.keys(expected.tests)) {
+      const pieces = Object.values(catalog.tests).filter((entry) => entry.original === id);
+      const roots = new Set(pieces.flatMap((entry) => entry.commands));
+      const disposition = catalog.dispositions?.[id];
+      if (!disposition) throw new Error(`missing disposition: ${id}`);
+      if (disposition.originalCommands.some((command) => !roots.has(command)))
+        throw new Error(`decomposition loses command assertions: ${id}`);
+    }
   }
-  const manifest = read("Cargo.toml");
-  const external = sorted([...manifest.matchAll(/^([\w-]+)\s*=\s*(?:"|\{)/gm)].map((m) => m[1]));
+  const manifest = cargoManifest(read("Cargo.toml"));
+  const externalDefinitions = dependencyDefinitions(manifest);
+  const external = sorted(externalDefinitions.map((entry) => entry.alias));
+  const packageName = (alias) =>
+    externalDefinitions.find((entry) => entry.alias === alias)?.packageName ?? alias;
+  const phases =
+    catalog.schema === 3
+      ? Object.fromEntries(
+          Object.entries(catalog.tests).map(([name, entry]) => [
+            name,
+            phaseInputs(
+              entry,
+              catalog.dispositions[entry.original],
+              commandPaths(JSON.parse(read("scripts/modularization/cli-commands.json"))),
+            ),
+          ]),
+        )
+      : {};
   const testCode = new Map();
   const moduleCode = (module) => {
     if (!testCode.has(module)) testCode.set(module, codeOnly(read(`tests/e2e/${module}.rs`)));
@@ -188,9 +281,36 @@ export function commandMapping(layout, catalog) {
   };
   const crates = {};
   for (const [name, crate] of Object.entries(layout.crates)) {
-    const code = crate.files.map((file) => codeOnly(read(file))).join("\n");
+    const code = [
+      ...crate.files.map((file) => codeOnly(read(file))),
+      ...(layout.symbolSources?.[name] !== undefined
+        ? layout.symbolSources[name].map(({ file, symbols }) => {
+            const text = read(file);
+            const decls = declarations(text);
+            const selected = new Set(symbols);
+            for (const symbol of selected)
+              for (const decl of decls.filter((entry) => entry.name === symbol))
+                for (const helper of decls)
+                  if (
+                    helper.kind === "fn" &&
+                    helper.private &&
+                    new RegExp(`\\b${helper.name}\\b`).test(decl.code)
+                  )
+                    selected.add(helper.name);
+            return [
+              ...decls.filter((entry) => selected.has(entry.name)).map((entry) => entry.code),
+              ...codeOnly(text).matchAll(/(?:^|\n)use\s+[^;]+;/g),
+            ].join("\n");
+          })
+        : (layout.historicalPaths?.[name] ?? []).map((file) => codeOnly(read(file)))),
+    ].join("\n");
     crates[name] = {
-      paths: [...crate.files, ...(layout.assets?.[name] ?? []), `resolved/${name}/**`],
+      paths: [
+        ...crate.files,
+        ...(layout.assets?.[name] ?? []),
+        `moved/${name}/**`,
+        `resolved/${name}/**`,
+      ],
       deps: crate.deps,
       external: external.filter((dep) =>
         new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(code),
@@ -209,6 +329,16 @@ export function commandMapping(layout, catalog) {
     modules: [],
     tests: [],
   };
+  if (catalog.schema === 3) {
+    suites["test-support"] = { paths: [], crates: [], modules: [], tests: [] };
+    suites["public-api"] = { paths: [], crates: ["onepipeline"], modules: [], tests: [] };
+    suites["full-dispatch"] = {
+      paths: [],
+      crates: ["cli-dispatcher", "onepipeline"],
+      modules: [],
+      tests: [],
+    };
+  }
   for (const [name, test] of Object.entries(catalog.tests)) {
     if (
       !suites[test.suite] ||
@@ -218,7 +348,7 @@ export function commandMapping(layout, catalog) {
     )
       throw new Error(`invalid test owner: ${name}`);
     if (
-      test.suite !== "cross-command" &&
+      !["cross-command", "test-support", "public-api", "full-dispatch"].includes(test.suite) &&
       (test.commands.length !== 1 || test.commands[0] !== test.suite)
     )
       throw new Error(`command suite has foreign root: ${name}`);
@@ -232,28 +362,66 @@ export function commandMapping(layout, catalog) {
       delete suites[name];
       continue;
     }
+    if (catalog.schema === 3 && layout.crates["run-files"])
+      suite.crates.push("run-files", "processes");
     suite.crates = sorted(suite.crates);
     suite.modules = sorted(suite.modules);
-    suite.paths = suiteInputs(suite.modules);
+    suite.paths =
+      catalog.schema === 3
+        ? sorted(suite.tests.flatMap((id) => phases[id].paths))
+        : [...suiteInputs(suite.modules), `migrated-tests/${name}/**`];
     // Migrated helpers are linked per command; source attribution remains conservative.
     suite.paths = suite.paths.filter((path) => !path.startsWith("src/"));
+    if (catalog.schema === 3) {
+      const reaches = (crate, target, seen = new Set()) => {
+        if (crate === target) return true;
+        if (seen.has(crate)) return false;
+        seen.add(crate);
+        return (crates[crate]?.deps ?? []).some((dep) => reaches(dep, target, seen));
+      };
+      if (suite.crates.some((crate) => reaches(crate, "agent-execution")))
+        suite.paths.push("crates/testfakes/src/bin/fake-oneagentgraph.rs");
+      if (suite.crates.some((crate) => reaches(crate, "publication")))
+        suite.paths.push("crates/testfakes/src/bin/fake-gh.rs");
+      suite.paths.push("crates/testfakes/src/profile.rs", "crates/testfakes/src/profile/**");
+    }
+    const phaseExternal = new Set(
+      catalog.schema === 3 ? suite.tests.flatMap((id) => phases[id].external) : [],
+    );
+    const usesProcessDouble =
+      catalog.schema === 3 &&
+      (phaseExternal.has("onepipeline_testfakes") ||
+        suite.paths.some((path) => path.startsWith("crates/testfakes/src/bin/")));
+    if (usesProcessDouble)
+      suite.paths.push("crates/testfakes/Cargo.toml", "crates/testfakes/src/lib.rs");
     crates[`runner-${name}`] = {
       paths: [`resolved/runner-${name}/**`],
       deps: suite.crates,
       external: sorted([
         "serde",
         "serde_json",
-        "onepipeline-testfakes",
-        ...external.filter((dep) =>
-          suite.modules.some((module) =>
-            new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(moduleCode(module)),
-          ),
+        ...(catalog.schema === 1
+          ? ["onepipeline-testfakes"]
+          : [
+              ...(usesProcessDouble ? ["onepipeline-testfakes"] : []),
+              ...(name === "test-support" ? ["oneagentgraph", "oneharness-core", "onejudge"] : []),
+            ]),
+        ...external.filter(
+          (dep) =>
+            (catalog.schema === 1 || dep !== "onepipeline-testfakes") &&
+            (catalog.schema === 3
+              ? phaseExternal.has(dep.replaceAll("-", "_"))
+              : suite.modules.some((module) =>
+                  new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(moduleCode(module)),
+                )),
         ),
       ]),
       toolchain: true,
     };
     suite.crates = [`runner-${name}`];
   }
+  for (const [name, crate] of Object.entries(crates))
+    crate.external = sorted((layout.externalRoots?.[name] ?? crate.external).map(packageName));
   const selection = {
     shared: [
       "nx.json",
@@ -262,8 +430,7 @@ export function commandMapping(layout, catalog) {
       "justfile",
       ".cargo/config.toml",
       ".config/nextest.toml",
-      "tests/e2e/harness.rs",
-      "crates/testfakes/**",
+      ...(catalog.schema === 1 ? ["tests/e2e/harness.rs", "crates/testfakes/**"] : []),
     ],
     sources: ["src/**"],
     fallback: "onepipeline",
@@ -278,44 +445,94 @@ export function commandMapping(layout, catalog) {
     ),
   };
   compileMapping(selection);
-  return { selection, crates, suites };
+  return {
+    selection,
+    crates,
+    suites,
+    ...(catalog.schema === 3
+      ? {
+          helperConsumers: Object.fromEntries(
+            Object.entries(suites).map(([name, suite]) => [
+              name,
+              sorted(suite.tests.flatMap((id) => phases[id].helpers)),
+            ]),
+          ),
+        }
+      : {}),
+  };
 }
 
-export function run(layout, catalog, weights, changes) {
+export function run(layout, catalog, weights, changes, projector) {
   const mapping = commandMapping(layout, catalog);
   const compiled = compileMapping(mapping.selection);
   const moduleCounts = {};
-  for (const test of Object.keys(catalog.tests)) {
+  const originals = new Set(
+    Object.entries(catalog.tests).map(([name, entry]) => entry.original ?? name),
+  );
+  for (const test of originals) {
     const module = test.split("::")[0];
     moduleCounts[module] = (moduleCounts[module] ?? 0) + 1;
   }
   const rows = changes.map((change) => {
-    let files = change.files.filter(
+    const sourceProjection = projector ? projector(change) : { files: change.files };
+    let files = sourceProjection.files.filter(
       (file) => !["Cargo.lock", "rust-toolchain.toml"].includes(file),
     );
     const reasons = [];
     if (change.files.includes("Cargo.lock") || change.files.includes("rust-toolchain.toml")) {
       const get = (revision, file) => git("show", `${revision}:${file}`);
-      const resolved = resolvedChanges(
-        mapping.crates,
-        get(`${change.commit}^`, "Cargo.lock"),
-        get(change.commit, "Cargo.lock"),
-        get(`${change.commit}^`, "rust-toolchain.toml"),
-        get(change.commit, "rust-toolchain.toml"),
+      const before = get(`${change.commit}^`, "Cargo.lock");
+      const after = get(change.commit, "Cargo.lock");
+      const known = new Set(
+        [...lockPackages(before).values(), ...lockPackages(after).values()].map((pkg) => pkg.name),
       );
+      const uncertain = [];
+      const historical = Object.fromEntries(
+        Object.entries(mapping.crates).map(([name, crate]) => {
+          if (crate.external.some((root) => !known.has(root)))
+            uncertain.push(`resolved/${name}/unresolved.json`);
+          return [name, { ...crate, external: crate.external.filter((root) => known.has(root)) }];
+        }),
+      );
+      const resolved = [
+        ...resolvedChanges(
+          historical,
+          before,
+          after,
+          get(`${change.commit}^`, "rust-toolchain.toml"),
+          get(change.commit, "rust-toolchain.toml"),
+        ),
+        ...uncertain,
+      ];
+      if (uncertain.length)
+        reasons.push(
+          "historically unresolvable modern dependency roots: conservatively select their consumers",
+        );
       files = [...files, ...resolved];
       if (resolved.length)
         reasons.push(
           `resolved dependencies/toolchain: ${sorted(resolved.map((p) => p.split("/")[1])).join(", ")}`,
         );
     }
-    // The workspace manifest contains package metadata too; until manifests are split, keep it conservative.
-    if (files.includes("Cargo.toml"))
-      files.push(...Object.keys(mapping.crates).map((name) => `resolved/${name}/manifest.json`));
+    if (files.includes("Cargo.toml")) {
+      if (catalog.schema === 3)
+        files.push(
+          ...manifestChanges(
+            mapping.crates,
+            git("show", `${change.commit}^:Cargo.toml`),
+            git("show", `${change.commit}:Cargo.toml`),
+          ),
+        );
+      else
+        files.push(...Object.keys(mapping.crates).map((name) => `resolved/${name}/manifest.json`));
+    }
     const selected = affectedSuites(compiled, files);
     return {
       ...change,
       effectiveFiles: files,
+      ...(sourceProjection.projected?.length
+        ? { sourceProjection: sourceProjection.projected }
+        : {}),
       ...selected,
       reasons: [
         ...reasons,
@@ -337,7 +554,10 @@ export function run(layout, catalog, weights, changes) {
           name,
           suite.tests.reduce((sum, test) => {
             const module = test.split("::")[0];
-            return sum + (seconds.get(module) ?? 0) / moduleCounts[module];
+            return (
+              sum +
+              ((seconds.get(module) ?? 0) / moduleCounts[module]) * (catalog.tests[test].share ?? 1)
+            );
           }, 0),
         ]),
       );
@@ -410,10 +630,11 @@ export function run(layout, catalog, weights, changes) {
     });
   }
   return {
-    schema: 1,
+    schema: catalog.schema === 3 ? 2 : 1,
     migration,
     suites: Object.keys(mapping.suites).length,
     tests: Object.keys(catalog.tests).length,
+    ...(catalog.schema === 3 ? { originalTests: originals.size } : {}),
     platforms,
     rows,
     mapping,
@@ -428,12 +649,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           "usage: command-replay.mjs --resolve CRATES.json BEFORE.lock AFTER.lock BEFORE-tool AFTER-tool OUTPUT.json",
         );
       const crates = JSON.parse(read(process.argv[3]));
+      if (!crates || typeof crates !== "object" || Array.isArray(crates))
+        throw new Error("resolution configuration must be an object");
       for (const [name, crate] of Object.entries(crates))
         if (
           !/^[a-z][a-z0-9-]*$/.test(name) ||
           !Array.isArray(crate.external) ||
-          !crate.external.every((dep) => typeof dep === "string") ||
-          typeof crate.toolchain !== "boolean"
+          !crate.external.every((dep) => typeof dep === "string" && /^[A-Za-z0-9_-]+$/.test(dep)) ||
+          typeof crate.toolchain !== "boolean" ||
+          Object.keys(crate).some((key) => !["external", "toolchain"].includes(key))
         )
           throw new Error(`invalid resolution inputs for ${name}`);
       writeFileSync(
@@ -451,11 +675,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           (process.argv[3] && process.argv[3] !== "--write-doc")
     )
       throw new Error("usage: command-replay.mjs OUTPUT.json [--write-doc] | --inventory");
-    const { layout } = evidence();
+    const doc = "docs/modularization-command-replay.md";
+    const prefix = process.argv[3] === "--write-doc" ? read(doc).split(COMMAND_MARKER) : undefined;
+    if (prefix && prefix.length !== 2) throw new Error("expected one command replay marker");
     const file = "scripts/modularization/command-tests.json";
-    if (process.argv[2] === "--inventory")
+    if (process.argv[2] === "--inventory") {
+      const layout = JSON.parse(read("scripts/modularization/layout.json"));
+      validate(layout, moduleGraph());
       writeFileSync(file, `${JSON.stringify(inventory(layout), null, 2)}\n`);
-    else {
+    } else {
+      const { layout } = evidence();
       const { profileTable } = await import("./replay.mjs");
       const changes = mergedChanges(".", {
         ref: "origin/main",
@@ -475,21 +704,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           "usage: node scripts/modularization/command-replay.mjs OUTPUT.json | --inventory",
         );
       writeFileSync(process.argv[2], `${JSON.stringify(result, null, 2)}\n`);
-      if (process.argv[3] === "--write-doc") {
-        const doc = "docs/modularization-command-replay.md";
-        const prefix = read(doc).split(COMMAND_MARKER);
-        if (prefix.length !== 2) throw new Error("expected one command replay marker");
+      if (prefix)
         writeFileSync(
           doc,
-          `${prefix[0].trimEnd()}\n\n${commandAppendix(result, layout, JSON.parse(read(file)))}`,
+          `${prefix[0]}${commandAppendix(result, layout, JSON.parse(read(file)))}`,
         );
-      }
       console.log(
-        JSON.stringify(
-          { suites: result.suites, tests: result.tests, platforms: result.platforms },
-          null,
-          2,
-        ),
+        `command replay: ${result.rows.length} PRs; ${result.tests} test pieces; ${(result.platforms.linux.suiteSkip * 100).toFixed(2)}% suite runs skipped; wrote ${process.argv[2]}`,
       );
     }
   } catch (error) {

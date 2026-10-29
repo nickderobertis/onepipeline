@@ -11,7 +11,7 @@ export function commandAppendix(result, layout, catalog) {
     "",
     "## Command replay output",
     "",
-    `${result.tests} existing tests, ${result.suites} nonempty suites, 144 historical PRs. Empty command runners are excluded from the savings denominator. Test-second figures below are estimates obtained by dividing each measured module's seconds equally among its tests; they are not per-test measurements. Missing timings are excluded, never zero-duration observations.`,
+    `${result.originalTests ?? result.tests} existing tests${result.originalTests ? `, ${result.tests} assertion-preserving command phases` : ""}, ${result.suites} nonempty suites, 144 historical PRs. Empty command runners are excluded from the savings denominator. Test-second figures below are estimates obtained by dividing each measured module's seconds equally among its tests; they are not per-test measurements. Missing timings are excluded, never zero-duration observations.`,
     "",
     "| Platform | Suite runs skipped | Estimated observed test-seconds skipped | Observed module-seconds/full run |",
     "| --- | ---: | ---: | ---: |",
