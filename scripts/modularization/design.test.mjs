@@ -1645,6 +1645,9 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     );
     const doc = readFileSync("docs/modularization-target-layout.md", "utf8");
     assert.equal(doc.split(TARGET_MARKER).length, 2);
+    assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \|/);
+    assert.match(doc, /frees at least one suite on \*\*12 PRs\*\*/);
+    assert.match(doc, /removes \*\*87 suite runs\*\*/);
     assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
     symlinkSync(resolve("src"), join(root, "src"), "dir");
     mkdirSync(join(root, "tests"), { recursive: true });
@@ -1804,4 +1807,136 @@ test("test intent comes from the existing journey and refuses path-like ids", as
   );
   assert.throws(() => intentFor("../outside::read"), /invalid test intent id/);
   assert.throws(() => intentFor("adoption::nonexistent_test"), /missing test intent source/);
+});
+
+test("narrow docs/scripts inputs free only unreachable suites, matching real Nx", async () => {
+  const { compareGlobInputs } = await import("./glob-impact.mjs");
+  const changes = [
+    "docs/unrelated.md",
+    "docs/status.md",
+    "scripts/unrelated.js",
+    "scripts/status.js",
+    "record/source.rs",
+  ];
+  const selection = {
+    crates: {
+      record: { paths: ["record/**"], deps: [] },
+      status: { paths: ["status/**"], deps: ["record"] },
+      template: { paths: ["template/**"], deps: [] },
+    },
+    suites: {
+      "status-e2e": {
+        paths: ["status-e2e/**", "docs/status.md", "scripts/status.js"],
+        crates: ["status"],
+      },
+      "template-e2e": { paths: ["template-e2e/**"], crates: ["template"] },
+    },
+  };
+  const rows = changes.map((path, index) => ({
+    commit: String(index),
+    subject: `fixture #${index}`,
+    files: [path],
+    effectiveFiles: [path],
+  }));
+  const compared = compareGlobInputs(selection, rows);
+  assert.equal(compared.freed.length, 4);
+  assert.equal(compared.fullyFreed, 2);
+  assert.equal(compared.suiteRunsSaved, 6);
+  assert.equal(compared.wideSkip, 0.1);
+  assert.equal(compared.narrowSkip, 0.7);
+  for (const wide of [true, false]) {
+    const root = scratch();
+    try {
+      symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
+      put(root, ".gitignore", "node_modules\n.nx\n");
+      put(root, "package.json", { private: true });
+      put(root, "nx.json", {
+        namedInputs: {
+          default: [
+            "{projectRoot}/**/*",
+            ...(wide ? ["{workspaceRoot}/docs/**/*", "{workspaceRoot}/scripts/**/*"] : []),
+          ],
+        },
+      });
+      for (const [name, crate] of Object.entries(selection.crates)) {
+        put(root, `${name}/source.rs`, "// initial\n");
+        put(root, `${name}/project.json`, {
+          name,
+          root: name,
+          implicitDependencies: crate.deps,
+          targets: { test: { executor: "nx:noop", inputs: ["default", "^default"] } },
+        });
+      }
+      for (const [name, suite] of Object.entries(selection.suites))
+        put(root, `${name}/project.json`, {
+          name,
+          root: name,
+          implicitDependencies: suite.crates,
+          namedInputs: {
+            default: [
+              "{projectRoot}/**/*",
+              ...(wide
+                ? ["{workspaceRoot}/docs/**/*", "{workspaceRoot}/scripts/**/*"]
+                : suite.paths
+                    .filter((path) => !path.startsWith(name))
+                    .map((path) => `{workspaceRoot}/${path}`)),
+            ],
+          },
+          targets: { test: { executor: "nx:noop", inputs: ["default", "^default"] } },
+        });
+      for (const path of changes) put(root, path, "initial\n");
+      const git = (...args) =>
+        execFileSync("git", args, {
+          cwd: root,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+      git("init", "-q");
+      git("config", "user.email", "fixture@example.invalid");
+      git("config", "user.name", "Fixture");
+      git("add", ".");
+      git("commit", "-qm", "test: glob fixture");
+      for (const [index, path] of changes.entries()) {
+        put(root, path, "changed\n");
+        git("add", ".");
+        git("commit", "-qm", `test: changed ${index}`);
+        const actual = JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              resolve("node_modules/nx/dist/bin/nx.js"),
+              "show",
+              "projects",
+              "--affected",
+              "--base=HEAD~1",
+              "--head=HEAD",
+              "--json",
+            ],
+            {
+              cwd: root,
+              encoding: "utf8",
+              env: { ...process.env, NX_DAEMON: "false", NX_ISOLATE_PLUGINS: "false" },
+            },
+          ),
+        )
+          .filter((name) => Object.hasOwn(selection.suites, name))
+          .sort();
+        const expected = affectedSuites(
+          compileMapping({ ...selection, ...(wide ? { shared: ["docs/**", "scripts/**"] } : {}) }),
+          [path],
+        ).affected.sort();
+        assert.deepEqual(actual, expected, `${wide ? "blanket" : "narrow"}: ${path}`);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  assert.throws(() => compareGlobInputs(selection, []), /needs validated PR rows/);
+  assert.throws(
+    () =>
+      compareGlobInputs(selection, [
+        { commit: "x", subject: "bad", files: [], effectiveFiles: 42 },
+      ]),
+    /needs validated PR rows/,
+  );
 });

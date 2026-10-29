@@ -10,6 +10,7 @@ import { commandMapping } from "./command-replay.mjs";
 import { commandPaths } from "./source-projection.mjs";
 import { expandCatalog } from "./catalog.mjs";
 import { functions } from "./rust-syntax.mjs";
+import { compareGlobInputs } from "./glob-impact.mjs";
 
 export const TARGET_MARKER = "<!-- BEGIN TARGET LAYOUT -->";
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -165,6 +166,41 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     )
       throw new Error("invalid target platform data");
   const baseline = JSON.parse(reviewed("scripts/modularization/command-tests.json"));
+  const baselineMetrics = [
+    ...reviewed("docs/modularization-command-replay.md").matchAll(
+      /^\| (local|linux|macos|windows) \| ([\d.]+)% \| ([\d.]+)% \|/gm,
+    ),
+  ];
+  if (baselineMetrics.length !== 4 || new Set(baselineMetrics.map((match) => match[1])).size !== 4)
+    throw new Error("baseline comparison requires four unique platform rows");
+  const baselineByPlatform = new Map(baselineMetrics.map((match) => [match[1], match]));
+  const comparison = [
+    "## Baseline beside the target",
+    "",
+    "The 6.61% unsplit-test baseline is committed at bffb01b3. Suite denominators differ (31 baseline versus the target count below); both seconds columns allocate the same observed module totals and are estimates, not new timings.",
+    "",
+    "| Platform | Baseline suite runs skipped | Baseline estimated seconds skipped | Target suite runs skipped | Target estimated seconds skipped |",
+    "| --- | ---: | ---: | ---: | ---: |",
+    ...Object.entries(result.platforms).map(
+      ([name, value]) =>
+        `| ${name} | ${baselineByPlatform.get(name)[2]}% | ${baselineByPlatform.get(name)[3]}% | ${(value.suiteSkip * 100).toFixed(2)}% | ${(value.secondsSkip * 100).toFixed(2)}% |`,
+    ),
+    "",
+  ];
+  const glob = compareGlobInputs(result.mapping.selection, result.rows);
+  const globLines = [
+    "## What narrowing the docs/scripts globs frees",
+    "",
+    `Holding this proposed ${glob.suites}-suite graph fixed, ${glob.globPRs} of the 144 PRs edit docs/ or scripts/. Retaining blanket docs/** and scripts/** inputs selects every suite for those edits. Replacing those blanket inputs with each suite's actual fixture/script inputs frees at least one suite on **${glob.freed.length} PRs**; **${glob.fullyFreed}** of those can skip all suites. It removes **${glob.suiteRunsSaved} suite runs** across the cohort. Suite-run skipping is ${(glob.wideSkip * 100).toFixed(2)}% with blanket inputs and ${(glob.narrowSkip * 100).toFixed(2)}% with the proposed inputs. This isolates the glob effect on the same graph; it is not a claim that today's single binary already has the proposed isolation. Required real fixture inputs remain.`,
+    "",
+    "| PR / revision freed by narrower inputs | Changed docs/scripts inputs | Blanket selected | Proposed selected |",
+    "| --- | --- | ---: | ---: |",
+    ...glob.freed.map(
+      (row) =>
+        `| ${/#(\d+)\)/.exec(row.subject)?.[0]?.replace(")", "") ?? row.commit.slice(0, 8)} / ${row.commit.slice(0, 8)} | ${cell(row.files.join(", "))} | ${row.before.length} | ${row.after.length} |`,
+    ),
+    "",
+  ];
   const partition = {};
   for (const [id, disposition] of Object.entries(catalog.dispositions))
     if (baseline.tests[id].suite === "cross-command")
@@ -180,6 +216,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
         "; ",
       )}. All ${Object.keys(catalog.dispositions).length} original tests remain represented below.`,
     "",
+    ...comparison,
     commandAppendix(
       {
         ...result,
@@ -221,6 +258,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
         "Unrelated manifest edits: yes, split manifests; shared requirement/source changes: no.",
         "Unrelated manifest edits are already projected; actual shared requirements/source changes: no.",
       ),
+    ...globLines,
     "## Crates, direct edges and primary source ownership",
     "",
     "Every Rust source file has exactly one primary owner in layout.json. Symbol extractions below override the primary owner for the named items, including their private helpers; source wrappers become re-exports. Dependencies retained from a former whole module are conservative: this graph proves reachability and acyclicity, not a compiled refactor.",

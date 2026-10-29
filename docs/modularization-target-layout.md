@@ -43,11 +43,26 @@ The first migration row combines render-cost with the fingerprint materializer/N
 
 For every row: preserve clap defaults/help/exit codes and the exact stdout/stderr contract by the existing compiled-binary/parity assertions; preserve type identity through re-exports rather than new wrappers; retain serialized versions/goldens unchanged; move every listed assertion before removing its original container; keep live integrations intact. Publish implementation packages and facade in lockstep only under the approved packaging plan; this task makes no publication change. The canonical template asset moves to plan-template; the facade source archive must continue carrying it through a generated package copy with a drift check, rather than maintaining two editable templates. Each step must pass its real Rust compilation and existing tests before landing. The design graph's acyclicity does not substitute for those future checks.
 
+## Local verification scope
+
+Planner reply 214 confirms that this design-only dispatch owes the research project's checks and judged diff lint locally. Current Nx docs/scripts globs additionally select `onepipeline`, `pool-maintenance`, `onepipeline-contract`, `onepipeline-e2e` and `onepipeline-npm`; their gating journeys remain with the change request's required checks. `onepipeline-visual-docs` is also selected but remains advisory under the repository's existing policy. No live input, test command, coverage threshold or enforcement rule changes here.
+
 <!-- BEGIN TARGET LAYOUT -->
 
 ## Target replay
 
 The original 1,273 cross-command assignments partition as dispatch: 336; support: 43; library: 7; integration: 217; decompose: 580; isolated: 90. All 1920 original tests remain represented below.
+
+## Baseline beside the target
+
+The 6.61% unsplit-test baseline is committed at bffb01b3. Suite denominators differ (31 baseline versus the target count below); both seconds columns allocate the same observed module totals and are estimates, not new timings.
+
+| Platform | Baseline suite runs skipped | Baseline estimated seconds skipped | Target suite runs skipped | Target estimated seconds skipped |
+| --- | ---: | ---: | ---: | ---: |
+| local | 6.61% | 2.53% | 8.01% | 4.81% |
+| linux | 6.61% | 2.55% | 8.01% | 4.78% |
+| macos | 6.61% | 2.57% | 8.01% | 4.84% |
+| windows | 6.61% | 2.69% | 8.01% | 4.90% |
 
 
 ## Command replay output
@@ -347,6 +362,25 @@ Every extraction preserves the facade's public paths and type identities through
 | planner-notes | 8.01% |
 | onepipeline | 8.01% |
 | cli-dispatcher | 8.01% |
+
+## What narrowing the docs/scripts globs frees
+
+Holding this proposed 39-suite graph fixed, 83 of the 144 PRs edit docs/ or scripts/. Retaining blanket docs/** and scripts/** inputs selects every suite for those edits. Replacing those blanket inputs with each suite's actual fixture/script inputs frees at least one suite on **12 PRs**; **1** of those can skip all suites. It removes **87 suite runs** across the cohort. Suite-run skipping is 6.46% with blanket inputs and 8.01% with the proposed inputs. This isolates the glob effect on the same graph; it is not a claim that today's single binary already has the proposed isolation. Required real fixture inputs remain.
+
+| PR / revision freed by narrower inputs | Changed docs/scripts inputs | Blanket selected | Proposed selected |
+| --- | --- | ---: | ---: |
+| #318 / 693a9110 | docs/contract-divergences.md | 39 | 38 |
+| #433 / 17248bea | docs/contract.md | 39 | 38 |
+| #470 / 66303818 | scripts/llmlint-diff.sh, scripts/llmlint-judge.sh | 39 | 0 |
+| #472 / 74b66de1 | docs/contract-divergences.md, docs/contract.md | 39 | 38 |
+| #517 / b70285e2 | docs/contract-divergences.md | 39 | 38 |
+| #519 / cf1c8276 | docs/contract-divergences.md, docs/stop-guard.md | 39 | 38 |
+| #591 / a36a02f6 | docs/contract-divergences.md, docs/contract.md | 39 | 38 |
+| #667 / 9102e12e | docs/contract-divergences.md | 39 | 26 |
+| #685 / aeb6acb5 | docs/contract-divergences.md, docs/contract.md | 39 | 38 |
+| #723 / 4d2ab8dd | docs/contract-divergences.md | 39 | 14 |
+| #725 / 09ea3f8f | docs/contract-divergences.md, docs/contract.md | 39 | 38 |
+| #819 / edb2dfbe | docs/contract-divergences.md | 39 | 37 |
 
 ## Crates, direct edges and primary source ownership
 
