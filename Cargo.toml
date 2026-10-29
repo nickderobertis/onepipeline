@@ -1255,9 +1255,12 @@ onevcs-testing = "0.19.22"
 # drives one through a run.
 # It also adds `task locate`, whose two refusals `src/writeback.rs`'s exhaustive match must
 # name, in the store's words.
-onetaskgraph-core = "=0.12.9"
-onetaskgraph-plugin-api = "=0.12.9"
-onetaskgraph-local-md = "=0.12.9"
+# **0.12.11 files a private GitHub Projects home's public-repository task privately**
+# (onetaskgraph #3804): its canonical issue goes to a private repository instead of the copy
+# being refused.
+onetaskgraph-core = "=0.12.11"
+onetaskgraph-plugin-api = "=0.12.11"
+onetaskgraph-local-md = "=0.12.11"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
