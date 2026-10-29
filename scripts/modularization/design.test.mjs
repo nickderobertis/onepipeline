@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
 import { moduleGraph, codeOnly } from "./graph.mjs";
+import { manifestChanges } from "./manifest-projection.mjs";
 import { replayMapping, buildReport } from "./replay.mjs";
 
 const timingHeader =
@@ -2061,4 +2062,168 @@ test("reviewed argv attribution keeps release transitions, agents identities and
     ].originalCommands,
     ["cmd-template-resolve"],
   );
+});
+
+test("manifest edits select exactly their dependency, inherited metadata, version, feature and profile consumers in real Nx", () => {
+  const root = scratch();
+  const env = { ...process.env, NX_DAEMON: "false", NX_ISOLATE_PLUGINS: "false" };
+  const git = (...args) =>
+    execFileSync("git", args, {
+      cwd: root,
+      env,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  try {
+    symlinkSync(resolve("node_modules"), join(root, "node_modules"), "junction");
+    put(root, ".gitignore", "node_modules\n.nx\n");
+    put(root, "package.json", { private: true });
+    put(root, "nx.json", { namedInputs: { default: ["{projectRoot}/**/*"] } });
+    const crates = {
+      record: { external: ["serde"], deps: [] },
+      start: { external: [], deps: ["record"] },
+      template: { external: ["minijinja"], deps: [] },
+      onepipeline: { external: [], deps: ["start", "template"] },
+      "cli-dispatcher": { external: [], deps: ["onepipeline"] },
+    };
+    const suites = {
+      "start-e2e": { paths: ["start-e2e/**"], crates: ["start"] },
+      "template-e2e": { paths: ["template-e2e/**"], crates: ["template"] },
+      "routing-e2e": { paths: ["routing-e2e/**"], crates: ["cli-dispatcher"] },
+    };
+    const mapping = compileMapping({
+      crates: Object.fromEntries(
+        Object.entries(crates).map(([name, crate]) => [
+          name,
+          { paths: [`${name}/**`, `resolved/${name}/**`], deps: crate.deps },
+        ]),
+      ),
+      suites,
+    });
+    for (const [name, item] of [...Object.entries(crates), ...Object.entries(suites)]) {
+      put(root, `${name}/project.json`, {
+        name,
+        root: name,
+        implicitDependencies: [
+          ...(item.deps ?? item.crates),
+          ...(crates[name] ? [`resolved-${name}`] : []),
+        ],
+        targets: { test: { executor: "nx:noop", inputs: ["default", "^default"] } },
+      });
+      if (crates[name]) {
+        put(root, `resolved/${name}/project.json`, {
+          name: `resolved-${name}`,
+          root: `resolved/${name}`,
+        });
+        put(root, `resolved/${name}/manifest.json`, "initial");
+      }
+    }
+    const manifest = `[package]
+name = "onepipeline"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+[workspace]
+resolver = "2"
+[workspace.package]
+edition = "2021"
+rust-version = "1.90"
+[workspace.dependencies]
+serde = "1.0"
+[dependencies]
+serde.workspace = true
+minijinja = "2.0"
+unused = "1.0"
+[features]
+default = []
+[profile.dev]
+opt-level = 0
+`;
+    put(root, "Cargo.toml", manifest);
+    git("init", "-b", "main");
+    git("config", "user.email", "fixture@example.invalid");
+    git("config", "user.name", "Fixture");
+    git("add", ".");
+    git("commit", "-m", "test: manifest graph");
+    const base = git("rev-parse", "HEAD").trim();
+    const all = ["routing-e2e", "start-e2e", "template-e2e"];
+    const cases = [
+      [
+        "inherited dependency",
+        manifest.replace('serde = "1.0"', 'serde = "1.1"'),
+        ["resolved/record/manifest.json"],
+        ["routing-e2e", "start-e2e"],
+      ],
+      [
+        "direct dependency",
+        manifest.replace('minijinja = "2.0"', 'minijinja = "2.1"'),
+        ["resolved/template/manifest.json"],
+        ["routing-e2e", "template-e2e"],
+      ],
+      ["unused dependency", manifest.replace('unused = "1.0"', 'unused = "1.1"'), [], []],
+      [
+        "inherited edition",
+        manifest.replace('edition = "2021"', 'edition = "2024"'),
+        Object.keys(crates).map((name) => `resolved/${name}/manifest.json`),
+        all,
+      ],
+      [
+        "inherited rust version",
+        manifest.replace('rust-version = "1.90"', 'rust-version = "1.91"'),
+        Object.keys(crates).map((name) => `resolved/${name}/manifest.json`),
+        all,
+      ],
+      [
+        "package version",
+        manifest.replace('version = "0.1.0"', 'version = "0.2.0"'),
+        ["resolved/onepipeline/manifest.json", "resolved/cli-dispatcher/manifest.json"],
+        ["routing-e2e"],
+      ],
+      [
+        "features",
+        manifest.replace("default = []", 'default = ["serde/derive"]'),
+        Object.keys(crates).map((name) => `resolved/${name}/manifest.json`),
+        all,
+      ],
+      [
+        "profile",
+        manifest.replace("opt-level = 0", "opt-level = 1"),
+        Object.keys(crates).map((name) => `resolved/${name}/manifest.json`),
+        all,
+      ],
+    ];
+    for (const [name, after, expectedPaths, expectedSuites] of cases) {
+      const effective = manifestChanges(crates, manifest, after);
+      assert.deepEqual([...effective].sort(), [...expectedPaths].sort(), name);
+      assert.deepEqual(affectedSuites(mapping, effective).affected.sort(), expectedSuites, name);
+      put(root, "Cargo.toml", after);
+      for (const path of effective) put(root, path, `${name}\n`);
+      git("add", ".");
+      git("commit", "-m", `test: ${name}`);
+      const selected = JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            resolve("node_modules/nx/dist/bin/nx.js"),
+            "show",
+            "projects",
+            "--affected",
+            `--base=${base}`,
+            "--head=HEAD",
+            "--with-target=test",
+            "--json",
+          ],
+          { cwd: root, env, encoding: "utf8" },
+        ),
+      )
+        .filter((name) => Object.hasOwn(suites, name))
+        .sort();
+      assert.deepEqual(selected, expectedSuites, name);
+      git("reset", "--hard", base);
+    }
+    assert.throws(() => manifestChanges(crates, manifest, "[package"));
+    assert.deepEqual(manifestChanges(crates, manifest, manifest), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
