@@ -1004,7 +1004,18 @@ onemessagebus = "0.9.3"
 # requires it. A requirement for the same pre-1.0 reason: `^0.21` admits no
 # 0.22.x. `src/note.rs` re-exports its `note` shapes through `oneagentgraph::note`
 # unchanged.
-onejudge = "0.22.0"
+#
+# **0.22.1 is the floor** because it never puts a turn its own observer's stop
+# cancelled to a command judge as lost (onejudge #203): it answers that stop
+# before asking the judge to recover the turn, so a host bus judging the
+# dag-scope monitor raises no `monitor-failed` for the run's own settlement,
+# which below it it did about one settlement in two. It answers only a stop the
+# member saw first, which is why `GraphHandle::stop` asks before it ends anything.
+# `dispatch::an_observer_stopped_at_settlement_mid_turn_raises_no_monitor_failure`
+# holds both through the linked graph. Inside `^0.22.0`, so `oneagentgraph` 0.9.x
+# resolves this one copy, over the same `oneharness-core`; the requirement moves
+# so the floor says the fix is in.
+onejudge = "0.22.1"
 # **Test-support only**, and named for one reason: `crates/testfakes`'s
 # `oneharness` double writes the report onejudge reads back, and that report is
 # oneharness's own typed contract. Written by hand it would be fifty fields of
