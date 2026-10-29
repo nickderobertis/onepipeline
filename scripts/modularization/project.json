@@ -23,6 +23,7 @@
         "default",
         "rustBuild",
         "{workspaceRoot}/tests/e2e/**/*",
+        "{workspaceRoot}/tests/**/*.rs",
         "{workspaceRoot}/scripts/crate-split-replay.mjs",
         "{workspaceRoot}/scripts/crate-split/**/*",
         "{workspaceRoot}/docs/test-profile-report.md",

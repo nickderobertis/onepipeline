@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { globToRegExp } from "../crate-split-replay.mjs";
 import { codeOnly } from "./graph.mjs";
 import { cargoManifest, dependencyDefinitions } from "./manifest-projection.mjs";
 import { declarations } from "./source-projection.mjs";
 
+// The split names files exactly or as a directory's whole tree (dir/**); nothing else.
+const claims = (pattern, file) =>
+  pattern.endsWith("/**") ? file.startsWith(pattern.slice(0, -2)) : file === pattern;
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const strings = (value) => Array.isArray(value) && value.every((item) => typeof item === "string");
 const crateKeys = ["files", "items", "modules", "selection", "interface"];
@@ -94,7 +96,7 @@ export function testFakes(root = ".", path = "scripts/modularization/test-fakes.
       )
         throw new Error(`invalid test-fake selection ${name}.${key}: expected a stated reason`);
     for (const pattern of entry.files) {
-      const matches = tracked.filter((file) => globToRegExp(pattern).test(file));
+      const matches = tracked.filter((file) => claims(pattern, file));
       if (!matches.length && !pattern.endsWith("/**"))
         throw new Error(`test-fake crate ${name} names a missing file ${pattern}`);
       for (const file of matches) {

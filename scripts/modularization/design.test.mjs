@@ -1832,7 +1832,7 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     const doc = readFileSync("docs/modularization-target-layout.md", "utf8");
     assert.equal(doc.split(TARGET_MARKER).length, 2);
     assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \|/);
-    assert.match(doc, /frees at least one suite on \*\*37 PRs\*\*/);
+    assert.match(doc, /frees at least one suite on \*\*40 PRs\*\*/);
     assert.match(doc, /removes \*\*\d+ suite runs\*\*/);
     assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
     const agentsRow = doc.split("\n").find((line) => line.startsWith("| agents | cmd-agents |"));
