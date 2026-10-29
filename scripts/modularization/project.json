@@ -18,24 +18,17 @@
       "command": "node node_modules/@biomejs/biome/bin/biome format --write scripts/modularization"
     },
     "test": {
-      "command": "node --test scripts/modularization/design.test.mjs",
+      "command": "node scripts/modularization/pinned.mjs",
       "inputs": [
         "default",
-        "rustBuild",
-        "{workspaceRoot}/tests/e2e/**/*",
-        "{workspaceRoot}/tests/**/*.rs",
         "{workspaceRoot}/scripts/crate-split-replay.mjs",
         "{workspaceRoot}/scripts/crate-split/**/*",
-        "{workspaceRoot}/docs/test-profile-report.md",
         "{workspaceRoot}/docs/modularization-design.md",
-        {
-          "runtime": "git rev-parse origin/main HEAD"
-        },
-        "{workspaceRoot}/tests/**/project.json",
         "{workspaceRoot}/docs/modularization-target-layout.md",
         "{workspaceRoot}/docs/modularization-command-replay.md",
-        "{workspaceRoot}/project.json",
-        "{workspaceRoot}/.github/workflows/ci.yml"
+        {
+          "runtime": "git rev-parse origin/main HEAD"
+        }
       ]
     },
     "lint": {

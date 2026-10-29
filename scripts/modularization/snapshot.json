@@ -1,0 +1,11 @@
+{
+  "commit": "51eb9aa2765fb1ba61c99c819587a88a401a3591",
+  "design": [
+    "docs/modularization-command-replay.md",
+    "docs/modularization-design.md",
+    "docs/modularization-target-layout.md",
+    "scripts/crate-split",
+    "scripts/crate-split-replay.mjs",
+    "scripts/modularization"
+  ]
+}

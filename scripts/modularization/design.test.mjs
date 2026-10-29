@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -1783,8 +1791,9 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
         cwd: root,
         encoding: "utf8",
       });
-    // scripts/modularization/project.json targets.test runs this file and its targets.check depends on
-    // test; justfile's check runs Nx check targets, so this regeneration comparison gates the catalog.
+    // scripts/modularization/project.json targets.test runs this file through pinned.mjs and its
+    // targets.check depends on test; justfile's check runs Nx check targets, so this regeneration
+    // comparison gates the catalog against the pinned reviewed source.
     const inventoried = run("--inventory");
     assert.equal(inventoried.status, 0, inventoried.stderr);
     assert.deepEqual(
@@ -1875,7 +1884,7 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     assert.match(doc, /frees at least one suite on \*\*40 PRs\*\*/);
     assert.match(doc, /removes \*\*\d+ suite runs\*\*/);
     assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
-    const agentsRow = doc.split("\n").find((line) => line.startsWith("| agents | cmd-agents |"));
+    const agentsRow = doc.split("\n").find((line) => line.startsWith("| `agents` | cmd-agents |"));
     assert(agentsRow);
     assert.match(
       agentsRow,
@@ -2103,11 +2112,124 @@ test("resolution CLI refuses malformed maps, lock identities and compiler pins, 
 
 // The CLI enumerates known test IDs itself, so it cannot receive an arbitrary intentFor ID.
 // Direct API refusal checks cover that caller boundary; target-report CLI tests prove rendered source intent.
+test("pinned runs a command over the reviewed source with the working tree's design files, and refuses a snapshot it cannot pin", () => {
+  const root = scratch();
+  const clones = scratch();
+  const env = { ...process.env, ONEPIPELINE_NODE_SCRATCH_DIR: clones };
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: root, encoding: "utf8", stdio: "pipe" },
+    ).trim();
+  const pinned = (...args) =>
+    spawnSync(process.execPath, ["scripts/modularization/pinned.mjs", ...args], {
+      cwd: root,
+      env,
+      encoding: "utf8",
+    });
+  try {
+    git("init", "--quiet");
+    put(root, "src/lib.rs", "reviewed\n");
+    put(root, "docs/design.md", "committed design\n");
+    git("add", "-A");
+    git("commit", "--quiet", "-m", "reviewed");
+    const reviewed = git("rev-parse", "HEAD");
+    put(root, "src/lib.rs", "a later change\n");
+    put(
+      root,
+      "scripts/modularization/pinned.mjs",
+      readFileSync("scripts/modularization/pinned.mjs", "utf8"),
+    );
+    put(root, "scripts/modularization/snapshot.json", {
+      commit: reviewed,
+      design: ["docs/design.md", "scripts/modularization"],
+    });
+    git("add", "-A");
+    git("commit", "--quiet", "-m", "later");
+    git("update-ref", "refs/remotes/origin/main", "HEAD");
+    // An uncommitted edit to a design file is what the command sees.
+    put(root, "docs/design.md", "working design\n");
+    const report = [
+      "const { execFileSync } = require('node:child_process');",
+      "const { readFileSync, writeFileSync } = require('node:fs');",
+      "const git = (...a) => execFileSync('git', a, { encoding: 'utf8' }).trim();",
+      "console.log(JSON.stringify({ parent: git('rev-parse', 'HEAD^'), main: git('rev-parse', 'origin/main'),",
+      "  src: readFileSync('src/lib.rs', 'utf8'), design: readFileSync('docs/design.md', 'utf8') }));",
+      "if (process.argv[1] === 'regenerate') writeFileSync('docs/design.md', 'regenerated\\n');",
+      "process.exit(Number(process.argv[2] ?? 0));",
+    ].join("\n");
+    const seen = pinned("--", process.execPath, "-e", report);
+    assert.equal(seen.status, 0, seen.stderr);
+    assert.deepEqual(JSON.parse(seen.stdout), {
+      parent: reviewed,
+      main: git("rev-parse", "origin/main"),
+      src: "reviewed\n",
+      design: "working design\n",
+    });
+    // The command's exit status is the runner's, the clone is removed, and without --write-back a
+    // regenerated design file stays in the clone.
+    const failed = pinned("--", process.execPath, "-e", report, "regenerate", "3");
+    assert.equal(failed.status, 3, failed.stderr);
+    assert.equal(readFileSync(join(root, "docs/design.md"), "utf8"), "working design\n");
+    assert.deepEqual(readdirSync(clones), []);
+    const regenerated = pinned("--write-back", "--", process.execPath, "-e", report, "regenerate");
+    assert.equal(regenerated.status, 0, regenerated.stderr);
+    assert.equal(readFileSync(join(root, "docs/design.md"), "utf8"), "regenerated\n");
+    assert.equal(readFileSync(join(root, "src/lib.rs"), "utf8"), "a later change\n");
+    assert.match(pinned("extra").stderr, /usage: pinned.mjs/);
+    put(root, "scripts/modularization/snapshot.json", {
+      commit: reviewed,
+      design: ["docs/design.md"],
+      typo: true,
+    });
+    const typo = pinned("--", "true");
+    assert.equal(typo.status, 1);
+    assert.match(typo.stderr, /invalid design snapshot scripts\/modularization\/snapshot.json/);
+    put(root, "scripts/modularization/snapshot.json", {
+      commit: reviewed,
+      design: ["../outside"],
+    });
+    assert.match(pinned("--", "true").stderr, /invalid design snapshot/);
+    put(root, "scripts/modularization/snapshot.json", {
+      commit: "0".repeat(40),
+      design: ["docs/design.md"],
+    });
+    const missing = pinned("--", "true");
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /design snapshot commit 0{40} is not in this repository/);
+    assert.deepEqual(readdirSync(clones), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(clones, { recursive: true, force: true });
+  }
+});
+
 test("test intent comes from the existing journey and refuses path-like ids", async () => {
   const { intentFor } = await import("./target-report.mjs");
   assert.match(
     intentFor("adoption::the_three_release_kinds_reach_a_planner_through_the_shipped_profile"),
     /The three kinds this crate emits reach a planner through the \*\*shipped profile with no filter change/,
+  );
+  // docs/ may not carry an observer-graph member word (tests/contract.rs), so an excerpt using one is
+  // cited by location, and a test without documentation is named by its identifier.
+  assert.equal(
+    intentFor(
+      "driver::a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding",
+    ),
+    "documented above `a_detached_observers_unclassified_provider_death_reaches_the_manager_as_a_finding` in tests/e2e/driver.rs; not excerpted here because it names an observer-graph member, which docs/ may not",
+  );
+  assert.equal(
+    intentFor("shipped::the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in"),
+    "`the_dag_scope_graph_is_the_monitor_and_the_resettable_check_in`",
   );
   assert.throws(() => intentFor("../outside::read"), /invalid test intent id/);
   assert.throws(() => intentFor("adoption::nonexistent_test"), /missing test intent source/);

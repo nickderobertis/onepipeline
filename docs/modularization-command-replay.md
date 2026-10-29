@@ -11,12 +11,12 @@ Manager ruling 205 subsequently authorized setup/consumer decomposition while re
 ## Reproduction and input projection
 
 ```sh
-node scripts/modularization/graph.mjs
-node scripts/modularization/command-replay.mjs "$ONEPIPELINE_NODE_SCRATCH_DIR/command-replay.json" --write-doc
+node scripts/modularization/pinned.mjs -- node scripts/modularization/graph.mjs
+node scripts/modularization/pinned.mjs --write-back -- node scripts/modularization/command-replay.mjs "$ONEPIPELINE_NODE_SCRATCH_DIR/command-replay.json" --write-doc
 just nx run onepipeline-modularization:check
 ```
 
-The 144 PRs and source graph come from the same local first-parent history and profile report as the original design. No new benchmark is substituted for the spike. The module timing snapshots are 7a017fa (local) and dd2e5d6 (CI); the source assignment snapshot remains b0ce59cc40484264fe42adf27b89a32bd345be0e. The candidate test inventory is checked against the source files in the finished tree. Module seconds are equally allocated across that module's existing tests to estimate command weights. That is deliberately labelled an estimate: a slow integration test and a fast CLI refusal will not actually take equal time. The report lists missing platform measurements in its JSON. CI platform selection uses the conservative union of cfg branches; it does not infer Windows-only savings from missing records.
+The 144 PRs and source graph come from the same local first-parent history and profile report as the original design. No new benchmark is substituted for the spike. The module timing snapshots are 7a017fa (local) and dd2e5d6 (CI); the source assignment snapshot remains b0ce59cc40484264fe42adf27b89a32bd345be0e. The candidate test inventory is checked against the source files of the pinned reviewed commit (see [the source-graph report](modularization-design.md)). Module seconds are equally allocated across that module's existing tests to estimate command weights. That is deliberately labelled an estimate: a slow integration test and a fast CLI refusal will not actually take equal time. The report lists missing platform measurements in its JSON. CI platform selection uses the conservative union of cfg branches; it does not infer Windows-only savings from missing records.
 
 Today's historical figure is 2.1% suite runs skipped. The earlier four-crate profile reported 4.7%; its corrected replay and platform test-seconds are in the original design's comparison table. These are different suite denominators: the current binary is one suite, the profile has nine areas, and this candidate counts only nonempty command runners plus the integration suite. Percentages of suite runs cannot stand in for time saved.
 

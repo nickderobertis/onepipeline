@@ -203,6 +203,7 @@ export function currentDigests() {
 }
 const cell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 const sourceTests = new Map();
+const MEMBER_WORD = /(?<![\p{L}\p{N}_])(?:monitor|pacemaker)(?![\p{L}\p{N}_])/iu;
 export function intentFor(id) {
   if (typeof id !== "string" || !/^[a-z][a-z0-9_]*::[A-Za-z_]\w*$/.test(id))
     throw new Error("invalid test intent id");
@@ -237,7 +238,11 @@ export function intentFor(id) {
   }
   const intent = sourceTests.get(module).get(name);
   if (intent === undefined) throw new Error(`missing test intent source ${id}`);
-  return intent || name.replaceAll("_", " ");
+  // tests/contract.rs keeps the observer-graph member words out of docs/; tests/ is exempt, so an
+  // excerpt that uses one is cited by location rather than copied.
+  if (MEMBER_WORD.test(intent))
+    return `documented above \`${name}\` in tests/e2e/${module}.rs; not excerpted here because it names an observer-graph member, which docs/ may not`;
+  return intent || `\`${name}\``;
 }
 
 function validateMigration(steps, crates) {
@@ -743,7 +748,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     ...(moves.commandSlices ?? []),
   ])
     lines.push(
-      `| ${move.file} | ${move.symbols.join(", ")} | ${move.shared ?? move.replacement ?? move.crate} | ${cell(move.reason)} |`,
+      `| ${move.file} | ${move.symbols.map((symbol) => `\`${symbol}\``).join(", ")} | ${move.shared ?? move.replacement ?? move.crate} | ${cell(move.reason)} |`,
     );
   lines.push(
     "",
@@ -766,7 +771,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       )
       .map(([id, test]) => `${id} (${test.suite})`);
     lines.push(
-      `| ${path} | ${crate} | ${tests.join(", ") || "none"} | ${retained.join(", ") || "none"} | ${[...(reach.suites[crate]?.crates ?? [])].sort().join(", ")} |`,
+      `| \`${path}\` | ${crate} | ${tests.join(", ") || "none"} | ${retained.join(", ") || "none"} | ${[...(reach.suites[crate]?.crates ?? [])].sort().join(", ")} |`,
     );
   }
   lines.push("", "| Exception suite | Complete runner crate closure |", "| --- | --- |");

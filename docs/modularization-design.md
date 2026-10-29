@@ -6,13 +6,15 @@ The subsequent [command-suite and resolved-input replay](modularization-command-
 
 This is a design, not a source refactor. It preserves the current command behavior, public `onepipeline` API, tests, platforms, release cadence and coverage floor. The proposed DAG is mechanically acyclic, but the conservative replay does **not** establish a useful gate speedup or the 30-minute goal. Do not schedule the whole extraction on the premise that it does.
 
-The executable inputs are `scripts/modularization/layout.json` and the current source. Run:
+The executable inputs are `scripts/modularization/layout.json` and the reviewed source. Run:
 
 ```sh
-node scripts/modularization/graph.mjs
-node scripts/modularization/replay.mjs scripts/modularization/layout.json target/modularization.json
+node scripts/modularization/pinned.mjs -- node scripts/modularization/graph.mjs
+node scripts/modularization/pinned.mjs -- node scripts/modularization/replay.mjs scripts/modularization/layout.json "$ONEPIPELINE_NODE_SCRATCH_DIR/modularization.json"
 just nx run onepipeline-modularization:check
 ```
+
+**The reviewed source is pinned.** Every figure, mapping and hash in these documents describes the source tree at commit 51eb9aa2765fb1ba61c99c819587a88a401a3591, which `scripts/modularization/snapshot.json` names. `pinned.mjs` clones the repository, checks out that commit, commits the design's own files from the working tree on top, carries over this checkout's `origin/main`, runs the given command in that clone and removes it; `--write-back` copies the clone's design files back afterwards, for a command that regenerates a document. The project's `test` target runs `design.test.mjs` the same way. The checks would otherwise read the live `src/` and `tests/`: the attributions are pinned to function and module SHA-256s, so once this lands, any later pull request that edited an e2e test would select this project and fail its freshness checks without being wrong. Pinned, the target reads no live source, so such a pull request neither selects it nor is refused by it. The design files describe 51eb9aa2. Source added after it (`src/human_items.rs`, `tests/e2e/pool_hand_back.rs`, `tests/human_items.rs` and `tests/process_ended.rs` among them) is not yet assigned, and is assigned by moving the pin and reviewing again. The planner approved this in reply 228.
 
 `layout.json` is research data, schema 2 (the generated appendix below is its checked-in golden). It assigns each Rust file exactly once, names dependencies and the disposition of every discovered source edge, and maps test modules to suites. Empty `files` on a command crate means its adapter must be extracted from today's `driver::dispatch`/`verbs`, not that an implementation already exists. `assets` assigns the two non-Rust inputs under `src/`. `auxiliarySuites` inventories the other journey projects without pretending their timing is present in the e2e profile.
 

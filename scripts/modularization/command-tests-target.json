@@ -214,7 +214,7 @@
         "cmd-stop"
       ],
       "reason": "live-ownership",
-      "rationale": "start opens the held consumer, releases_at advances the real probe, until observes release-wait/arrived/adopted, then monitor default/all verifies the events from that very driver. Keep the live producer-to-profile relay; stop exit assertions remain in this journey."
+      "rationale": "start opens the held consumer, releases_at advances the real probe, until observes release-wait/arrived/adopted, then `monitor` and `monitor --all` verify the events from that very driver. Keep the live producer-to-profile relay; stop exit assertions remain in this journey."
     },
     "adoption::the_siblings_release_probed_is_relayed_exactly_as_its_producer_wrote_it": {
       "kind": "isolated",
@@ -771,7 +771,7 @@
         "cmd-status"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for an amendment binds every later dispatch and a second one replaces it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "amend::a_ruling_issued_while_the_node_runs_binds_its_next_dispatch_and_not_its_turn": {
       "kind": "integration",
@@ -1290,7 +1290,7 @@
         "cmd-status"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for an adoption ends a cancellation the driver it replaced was waiting on are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "cancellation::a_cancel_of_a_silent_dispatch_asks_nothing_and_still_carries_a_deadline": {
       "kind": "decompose",
@@ -1743,7 +1743,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the unread line names the kinds waiting so a question is not buried are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "channel::the_host_double_refuses_environment_it_cannot_act_on": {
       "kind": "isolated",
@@ -1761,7 +1761,7 @@
         "cmd-status"
       ],
       "reason": "live-observer",
-      "rationale": "The source's explicit argv alternatives for a surface whose server exited with its asker gone stops counting as unread are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "channel::a_decision_nobody_is_waiting_on_releases_its_subtree_and_reads_last": {
       "kind": "integration",
@@ -2002,7 +2002,7 @@
         "cmd-results"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for this build reads a journal carrying a monitor edit surface as the build that wrote it did are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `this_build_reads_a_journal_carrying_a_monitor_edit_surface_as_the_build_that_wrote_it_did` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "compatibility::this_build_renders_a_journal_of_bounded_copies_as_the_build_before_references_did": {
       "kind": "decompose",
@@ -2012,7 +2012,7 @@
         "cmd-watch"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for this build renders a journal of bounded copies as the build before references did are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `this_build_renders_a_journal_of_bounded_copies_as_the_build_before_references_did` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "checkpoint::a_read_through_a_usable_checkpoint_reports_what_a_full_fold_reports": {
       "kind": "decompose",
@@ -2137,7 +2137,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "publish branch closes the issues its landing closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`publish_branch_closes_the_issues_its_landing_closes` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::publish_branch_lands_whatever_the_board_answers": {
       "kind": "isolated",
@@ -2145,7 +2145,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "publish branch lands whatever the board answers selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`publish_branch_lands_whatever_the_board_answers` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::repo_recover_closes_the_issues_its_landing_closes": {
       "kind": "isolated",
@@ -2153,7 +2153,7 @@
         "cmd-repo-recover"
       ],
       "reason": "isolated-command",
-      "rationale": "repo recover closes the issues its landing closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`repo_recover_closes_the_issues_its_landing_closes` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::repo_recover_lands_whatever_the_board_answers": {
       "kind": "isolated",
@@ -2161,7 +2161,7 @@
         "cmd-repo-recover"
       ],
       "reason": "isolated-command",
-      "rationale": "repo recover lands whatever the board answers selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`repo_recover_lands_whatever_the_board_answers` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::integrate_closes_the_issues_its_train_lands": {
       "kind": "isolated",
@@ -2169,7 +2169,7 @@
         "cmd-integrate"
       ],
       "reason": "isolated-command",
-      "rationale": "integrate closes the issues its train lands selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`integrate_closes_the_issues_its_train_lands` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now": {
       "kind": "isolated",
@@ -2177,7 +2177,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "a landing verb relays past a read of its stream that fails for now selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_landing_verb_lands_where_the_store_configuration_does_not_load": {
       "kind": "isolated",
@@ -2185,7 +2185,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "a landing verb lands where the store configuration does not load selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_landing_verb_lands_where_the_store_configuration_does_not_load` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_landing_verb_ends_a_closure_the_board_never_answers_at_its_deadline": {
       "kind": "isolated",
@@ -2193,7 +2193,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "a landing verb ends a closure the board never answers at its deadline selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_landing_verb_ends_a_closure_the_board_never_answers_at_its_deadline` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::an_unowned_landing_closes_the_issues_it_closes": {
       "kind": "isolated",
@@ -2201,7 +2201,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "an unowned landing closes the issues it closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`an_unowned_landing_closes_the_issues_it_closes` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_late_landing_on_a_settled_node_s_session_stream_closes_its_issues_while_the_driver_runs": {
       "kind": "isolated",
@@ -2297,7 +2297,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "a board home is written done once its last node settles and not before selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_board_home_is_written_done_once_its_last_node_settles_and_not_before` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_failed_run_writes_its_home_only_once_a_settle_carries_it_to_success": {
       "kind": "decompose",
@@ -2307,7 +2307,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "a failed run writes its home only once a settle carries it to success selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_failed_run_writes_its_home_only_once_a_settle_carries_it_to_success` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_stopped_run_writes_its_home_nothing": {
       "kind": "integration",
@@ -2316,7 +2316,7 @@
         "cmd-stop"
       ],
       "reason": "live-control",
-      "rationale": "a stopped run writes its home nothing selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_stopped_run_writes_its_home_nothing` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::an_adoption_writes_the_home_a_settled_run_could_not_reach_once": {
       "kind": "decompose",
@@ -2326,7 +2326,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "an adoption writes the home a settled run could not reach once selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`an_adoption_writes_the_home_a_settled_run_could_not_reach_once` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_home_the_board_refuses_is_recorded_failed_and_surfaced_without_touching_the_run": {
       "kind": "decompose",
@@ -2336,7 +2336,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "a home the board refuses is recorded failed and surfaced without touching the run selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_home_the_board_refuses_is_recorded_failed_and_surfaced_without_touching_the_run` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_home_write_that_fails_for_now_is_asked_again_by_the_same_driver": {
       "kind": "isolated",
@@ -2344,7 +2344,7 @@
         "cmd-start"
       ],
       "reason": "isolated-command",
-      "rationale": "a home write that fails for now is asked again by the same driver selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
+      "rationale": "`a_home_write_that_fails_for_now_is_asked_again_by_the_same_driver` selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage."
     },
     "closures::a_home_whose_store_configuration_stops_loading_is_recorded_failed": {
       "kind": "isolated",
@@ -3015,7 +3015,7 @@
         "cmd-stop"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run id that climbs out of the runs root reaches nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "crossdag::a_plan_whose_upstream_climbs_out_of_the_runs_root_is_refused": {
       "kind": "decompose",
@@ -3551,13 +3551,13 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the siblings own refusals still exit with the codes this crate maps onto asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "dispatch::the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the model turn double refuses an argument the real claude does not take asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "dispatch::the_sibling_still_takes_its_harness_from_the_variable_this_crate_restates": {
       "kind": "isolated",
@@ -3716,19 +3716,19 @@
       "kind": "library",
       "originalCommands": [],
       "reason": "public-api",
-      "rationale": "a judged codex dispatch retires its shared server and sweeper drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
+      "rationale": "`a_judged_codex_dispatch_retires_its_shared_server_and_sweeper` drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
     },
     "dispatch::the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the codex doubles overload answer is the one the linked classifier reads asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "dispatch::the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the codex double answers each exec line oneharness builds and refuses each it does not asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "dispatch::a_persona_naming_artifacts_gives_its_judge_a_prompt_naming_them": {
       "kind": "isolated",
@@ -3817,7 +3817,7 @@
         "cmd-status"
       ],
       "reason": "live-ownership",
-      "rationale": "The source's explicit argv alternatives for a run whose observer graph is watching and then is killed reads as each are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::a_killed_observer_is_replaced_and_the_run_goes_on_being_watched": {
       "kind": "integration",
@@ -3827,7 +3827,7 @@
         "cmd-status"
       ],
       "reason": "live-ownership",
-      "rationale": "The source's explicit argv alternatives for a killed observer is replaced and the run goes on being watched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_killed_observer_is_replaced_and_the_run_goes_on_being_watched` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::a_settlement_record_is_still_attributable_to_the_observer_that_wrote_it": {
       "kind": "isolated",
@@ -3844,7 +3844,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run whose observer graph finished is reported unwatched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_whose_observer_graph_finished_is_reported_unwatched` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_driven": {
       "kind": "decompose",
@@ -3854,7 +3854,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run whose observer finished before its drivers first append is listed driven are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_driven` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::an_observer_records_its_ending_before_anything_reads_that_it_has_gone": {
       "kind": "decompose",
@@ -3864,7 +3864,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an observer records its ending before anything reads that it has gone are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_observer_records_its_ending_before_anything_reads_that_it_has_gone` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::a_dispatch_records_its_ending_before_its_launch_can_exit": {
       "kind": "isolated",
@@ -3892,7 +3892,7 @@
         "cmd-status"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for an observers monitor runs under its own config beside a launch config it cannot satisfy are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch::the_retained_driver_reads_its_own_event_filter_and_refuses_an_unusable_one": {
       "kind": "isolated",
@@ -4065,7 +4065,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for run labels foreign exit requires released ownership are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `run_labels_foreign_exit_requires_released_ownership` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "dispatch_env_hook::both_dispatch_env_hook_halves_number_an_invocation_the_same_way": {
       "kind": "support",
@@ -4375,7 +4375,7 @@
         "cmd-surface"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a live driver that has stopped writing reads parked driven and not adoptable are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "driver::a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one": {
       "kind": "decompose",
@@ -4386,7 +4386,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a parked run whose record names no pid is advised and refused without one are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "driver::a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended": {
       "kind": "decompose",
@@ -4397,7 +4397,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a live driver quiet over a settled graph reads parked driven and not ended are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "driver::a_quiet_driver_holding_a_decision_point_reads_as_active_rather_than_parked": {
       "kind": "decompose",
@@ -4788,7 +4788,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an observer that stops watching a driven run is started again within a bound are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_observer_that_stops_watching_a_driven_run_is_started_again_within_a_bound` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "driver::a_restart_the_observers_graph_refuses_is_reported_and_not_asked_again": {
       "kind": "decompose",
@@ -5408,7 +5408,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the flag beats the environment which beats the config are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_flag_beats_the_environment_which_beats_the_config` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "envelope_reviewer::a_bar_named_by_the_environment_or_the_launch_config_keeps_passes_as_the_flag_does": {
       "kind": "decompose",
@@ -5418,7 +5418,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a bar named by the environment or the launch config keeps passes as the flag does are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_bar_named_by_the_environment_or_the_launch_config_keeps_passes_as_the_flag_does` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "envelope_reviewer::the_ops_listed_as_changes_are_the_ones_the_record_names_and_no_others": {
       "kind": "decompose",
@@ -5447,7 +5447,7 @@
         "cmd-status"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for a blank rung names no reviewer and an unreadable variable is refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "envelope_reviewer::the_resolved_reviewer_is_in_the_launch_record_and_survives_an_adoption": {
       "kind": "decompose",
@@ -5484,7 +5484,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for monitor defaults to the planner profile and all bypasses it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `monitor_defaults_to_the_planner_profile_and_all_bypasses_it` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "filter::a_filter_flag_takes_an_inline_spec_as_well_as_a_profile_name": {
       "kind": "decompose",
@@ -5548,7 +5548,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for naming both a filter and all is refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `naming_both_a_filter_and_all_is_refused` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "filter::a_launch_refuses_a_filter_block_it_could_not_honour": {
       "kind": "decompose",
@@ -5706,7 +5706,7 @@
         "cmd-watch"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for the flow flags refuse what a flow cannot be asked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_flow_flags_refuse_what_a_flow_cannot_be_asked` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "flow::a_flow_whose_evidence_cannot_be_read_is_named_and_never_passed": {
       "kind": "decompose",
@@ -5736,7 +5736,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for ask gives way to a named run and waits the flows own window are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `ask_gives_way_to_a_named_run_and_waits_the_flows_own_window` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "flow::flow_run_records_every_ending_its_program_can_have": {
       "kind": "decompose",
@@ -5753,7 +5753,7 @@
         "cmd-watch"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a flow watch says what it waits on and where are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_flow_watch_says_what_it_waits_on_and_where` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "flow::a_flow_watch_qualifies_only_on_every_term_and_a_run_watch_keeps_the_reserve": {
       "kind": "decompose",
@@ -5868,7 +5868,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "the host view answers a host sized root steady cold and steady again reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone": {
       "kind": "isolated",
@@ -5876,7 +5876,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "a registry less runs last stop decides whether its dispatch is gone reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused": {
       "kind": "isolated",
@@ -5884,7 +5884,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "a journal past the bound is never opened and a run it leaves undecided is refused reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::an_adoption_racing_the_view_loses_no_record_and_its_dispatch_is_never_gone": {
       "kind": "integration",
@@ -5910,7 +5910,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "a reading that cannot be written is refused not panicked on reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`a_reading_that_cannot_be_written_is_refused_not_panicked_on` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::a_phase_record_that_cannot_be_written_costs_the_read_nothing": {
       "kind": "isolated",
@@ -5925,7 +5925,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "a legacy start token a second off is held and two seconds off is unproven reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`a_legacy_start_token_a_second_off_is_held_and_two_seconds_off_is_unproven` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held": {
       "kind": "isolated",
@@ -5933,7 +5933,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "a live dispatch recorded with a legacy ps start token is held reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "host_view::the_budget_measurement_records_what_each_scaling_read_opened": {
       "kind": "isolated",
@@ -5941,7 +5941,7 @@
         "cmd-host"
       ],
       "reason": "isolated-command",
-      "rationale": "the budget measurement records what each scaling read opened reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
+      "rationale": "`the_budget_measurement_records_what_each_scaling_read_opened` reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes."
     },
     "journal::a_runs_journal_is_one_ordered_merged_stream_with_per_stream_sequences": {
       "kind": "isolated",
@@ -6196,7 +6196,7 @@
         "cmd-transcript"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for a run in the shape an older build left is adopted with its history intact are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_in_the_shape_an_older_build_left_is_adopted_with_its_history_intact` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "journal_scaling::journalled_heartbeats_with_no_liveness_file_read_as_they_did": {
       "kind": "decompose",
@@ -6283,7 +6283,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a render asks the landing read once per node it prints and does nothing else per node are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_per_node` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "layout_document::the_bus_cli_linking_the_published_document_reads_and_writes_the_channel_the_engine_wrote": {
       "kind": "decompose",
@@ -6874,7 +6874,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a dispatch that died rather than failing its task settles naming what killed it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "lifecycle::a_dispatch_that_died_before_anything_was_committed_names_its_branch_and_no_commit": {
       "kind": "decompose",
@@ -6892,7 +6892,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a dispatch whose member died is settled from the classification its producer published are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "lifecycle::a_dispatch_that_failed_with_nothing_published_settles_as_a_plain_task_failure": {
       "kind": "isolated",
@@ -7142,7 +7142,7 @@
         "cmd-stop"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for the listing tells a driver this host can prove is gone from one merely quiet are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "listing::a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_was": {
       "kind": "decompose",
@@ -7154,7 +7154,7 @@
         "cmd-surface"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a listing groups runs by project newest first and keeps every run line as it was are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_was` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "listing::mine_renders_the_runs_this_session_owns_and_says_whose_the_rest_are": {
       "kind": "decompose",
@@ -7172,7 +7172,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a host sized runs root lists in seconds and ten times the journal bytes barely moves it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "listing::status_given_no_run_leaves_the_per_node_block_to_status_given_one": {
       "kind": "decompose",
@@ -7191,7 +7191,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for no listing command opens a run store that is there are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `no_listing_command_opens_a_run_store_that_is_there` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "live_edit::commands_only_set_replacements_replay_into_the_next_node_dispatch": {
       "kind": "integration",
@@ -7529,7 +7529,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an envelope whose second command refuses leaves no record of any of it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_envelope_whose_second_command_refuses_leaves_no_record_of_any_of_it` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "live_edit::an_envelope_whose_commands_all_succeed_applies_and_records_every_one": {
       "kind": "decompose",
@@ -7557,7 +7557,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a command after a refusal is still evaluated and answered on its own are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_command_after_a_refusal_is_still_evaluated_and_answered_on_its_own` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "live_edit::a_command_that_changes_no_graph_is_journalled_apart_from_one_that_does": {
       "kind": "decompose",
@@ -7863,7 +7863,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "publish branch is owned before it drafts and its watch wakes on milestones alone passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`publish_branch_is_owned_before_it_drafts_and_its_watch_wakes_on_milestones_alone` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::each_verb_held_mid_operation_is_supervised_and_finishes_under_its_owners_watch": {
       "kind": "integration",
@@ -7877,7 +7877,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "each verb held mid operation is supervised and finishes under its owners watch passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`each_verb_held_mid_operation_is_supervised_and_finishes_under_its_owners_watch` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::each_verb_refused_by_onevcs_ends_refused_and_owes_closure": {
       "kind": "integration",
@@ -7890,7 +7890,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "each verb refused by onevcs ends refused and owes closure passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`each_verb_refused_by_onevcs_ends_refused_and_owes_closure` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::each_verb_killed_mid_operation_is_reported_dead_and_closed_by_its_owner": {
       "kind": "integration",
@@ -7904,7 +7904,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "each verb killed mid operation is reported dead and closed by its owner passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`each_verb_killed_mid_operation_is_reported_dead_and_closed_by_its_owner` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_hosted_landing_wakes_its_owner_on_opened_and_settled_checks_and_not_on_their_progress": {
       "kind": "integration",
@@ -7915,7 +7915,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a hosted landing wakes its owner on opened and settled checks and not on their progress passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_hosted_landing_wakes_its_owner_on_opened_and_settled_checks_and_not_on_their_progress` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pending": {
       "kind": "integration",
@@ -7925,7 +7925,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a required check failing wakes the owner while its other checks are still pending passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pending` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_live_landing_refuses_every_acknowledgement_that_would_hide_it_across_owners": {
       "kind": "integration",
@@ -7938,7 +7938,7 @@
         "cmd-unwatched"
       ],
       "reason": "live-ownership",
-      "rationale": "a live landing refuses every acknowledgement that would hide it across owners passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_live_landing_refuses_every_acknowledgement_that_would_hide_it_across_owners` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_landing_in_a_longer_flow_keeps_its_own_liveness_beside_the_flows": {
       "kind": "integration",
@@ -7949,7 +7949,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a landing in a longer flow keeps its own liveness beside the flows passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landing_in_a_longer_flow_keeps_its_own_liveness_beside_the_flows` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_landing_in_another_sessions_flow_is_refused_and_does_no_work": {
       "kind": "integration",
@@ -7958,7 +7958,7 @@
         "cmd-publish-branch"
       ],
       "reason": "live-ownership",
-      "rationale": "a landing in another sessions flow is refused and does no work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landing_in_another_sessions_flow_is_refused_and_does_no_work` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::with_no_manager_session_a_landing_runs_unowned_and_says_so": {
       "kind": "isolated",
@@ -7976,7 +7976,7 @@
         "cmd-watch"
       ],
       "reason": "live-observer",
-      "rationale": "three managers landing at once are each supervised alone passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`three_managers_landing_at_once_are_each_supervised_alone` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_landing_reads_the_managers_checkout_without_taking_its_index_lock": {
       "kind": "isolated",
@@ -7984,7 +7984,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "a landing reads the managers checkout without taking its index lock passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landing_reads_the_managers_checkout_without_taking_its_index_lock` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::an_operators_own_optional_locks_setting_is_kept": {
       "kind": "isolated",
@@ -7992,7 +7992,7 @@
         "cmd-publish-branch"
       ],
       "reason": "isolated-command",
-      "rationale": "an operators own optional locks setting is kept passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`an_operators_own_optional_locks_setting_is_kept` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::an_integration_train_records_local_progress_and_wakes_its_owner_on_the_gates_refusal": {
       "kind": "integration",
@@ -8001,7 +8001,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "an integration train records local progress and wakes its owner on the gates refusal passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`an_integration_train_records_local_progress_and_wakes_its_owner_on_the_gates_refusal` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::unreadable_landing_state_fails_closed_and_records_from_before_landings_still_read": {
       "kind": "decompose",
@@ -8034,7 +8034,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a landing is owed a watch that wakes within the wake budget passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_branch_acknowledgement_and_a_landing_registration_never_interleave": {
       "kind": "integration",
@@ -8044,7 +8044,7 @@
         "cmd-unpublished"
       ],
       "reason": "live-ownership",
-      "rationale": "a branch acknowledgement and a landing registration never interleave passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_branch_acknowledgement_and_a_landing_registration_never_interleave` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::repo_recover_is_owned_before_it_drafts": {
       "kind": "integration",
@@ -8053,7 +8053,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "repo recover is owned before it drafts passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`repo_recover_is_owned_before_it_drafts` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_registration_that_cannot_be_kept_starts_no_work": {
       "kind": "integration",
@@ -8063,7 +8063,7 @@
         "cmd-watch"
       ],
       "reason": "live-observer",
-      "rationale": "a registration that cannot be kept starts no work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_registration_that_cannot_be_kept_starts_no_work` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::an_operation_that_cannot_be_prepared_forwards_nothing": {
       "kind": "integration",
@@ -8073,7 +8073,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "an operation that cannot be prepared forwards nothing passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`an_operation_that_cannot_be_prepared_forwards_nothing` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_relay_that_fails_keeps_the_verbs_status_and_fails_the_flow_closed": {
       "kind": "decompose",
@@ -8106,7 +8106,7 @@
         "cmd-integrate"
       ],
       "reason": "isolated-command",
-      "rationale": "integrate answers in onevcs integrates own words and status passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`integrate_answers_in_onevcs_integrates_own_words_and_status` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_dead_landings_unreadable_operation_record_refuses_rather_than_dropping_its_evidence": {
       "kind": "integration",
@@ -8116,7 +8116,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a dead landings unreadable operation record refuses rather than dropping its evidence passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_dead_landings_unreadable_operation_record_refuses_rather_than_dropping_its_evidence` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::an_operation_whose_id_cannot_be_kept_forwards_nothing": {
       "kind": "integration",
@@ -8125,7 +8125,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "an operation whose id cannot be kept forwards nothing passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`an_operation_whose_id_cannot_be_kept_forwards_nothing` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::each_spelling_onevcs_registers_an_origin_by_registers_a_landing": {
       "kind": "decompose",
@@ -8158,7 +8158,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a landing killed before its operation is written dead as coarse work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landing_killed_before_its_operation_is_written_dead_as_coarse_work` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_dead_landings_unreadable_operation_stream_is_named_in_its_death": {
       "kind": "integration",
@@ -8168,7 +8168,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a dead landings unreadable operation stream is named in its death passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_dead_landings_unreadable_operation_stream_is_named_in_its_death` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::monitor_flow_resumes_from_its_own_cursor": {
       "kind": "integration",
@@ -8178,7 +8178,7 @@
         "cmd-publish-branch"
       ],
       "reason": "live-ownership",
-      "rationale": "monitor flow resumes from its own cursor passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`monitor_flow_resumes_from_its_own_cursor` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_run_acknowledgement_and_a_landing_registration_never_interleave": {
       "kind": "integration",
@@ -8188,7 +8188,7 @@
         "cmd-unwatched"
       ],
       "reason": "live-ownership",
-      "rationale": "a run acknowledgement and a landing registration never interleave passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_run_acknowledgement_and_a_landing_registration_never_interleave` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_landings_progress_and_the_flows_own_conditions_are_each_reported_once": {
       "kind": "integration",
@@ -8201,7 +8201,7 @@
         "cmd-watch"
       ],
       "reason": "live-observer",
-      "rationale": "a landings progress and the flows own conditions are each reported once passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_landings_progress_and_the_flows_own_conditions_are_each_reported_once` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::a_relay_that_fails_inside_a_longer_flow_is_its_landings_blocker_and_the_flow_goes_on": {
       "kind": "integration",
@@ -8212,7 +8212,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "a relay that fails inside a longer flow is its landings blocker and the flow goes on passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`a_relay_that_fails_inside_a_longer_flow_is_its_landings_blocker_and_the_flow_goes_on` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::integrate_whose_report_cannot_be_written_exits_non_zero_and_says_why": {
       "kind": "isolated",
@@ -8230,7 +8230,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "landing progress is a flow watchs condition to name or leave out passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`landing_progress_is_a_flow_watchs_condition_to_name_or_leave_out` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "manager_landings::an_originating_run_that_refuses_its_mirror_fails_the_landing_closed": {
       "kind": "decompose",
@@ -8256,7 +8256,7 @@
         "cmd-watch"
       ],
       "reason": "live-ownership",
-      "rationale": "three hosted landings at once each relay their whole check sequence to their owner passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
+      "rationale": "`three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_owner` passes the listed landing argv through Started::spawn or Verb::start. The `watch`, `monitor` and guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar."
     },
     "malformed_envelopes::the_refusal_these_journeys_assert_is_the_one_the_contract_states": {
       "kind": "support",
@@ -8322,7 +8322,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a waiting approval reparented onto unfinished work waits for it again are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "malformed_envelopes::an_envelope_attesting_an_approval_then_reparenting_it_is_refused_whole": {
       "kind": "decompose",
@@ -8457,7 +8457,7 @@
       "kind": "library",
       "originalCommands": [],
       "reason": "public-api",
-      "rationale": "a private drafts document is filed under the boards copy of its plan drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
+      "rationale": "`a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan` drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
     },
     "multi_source::a_combined_private_route_homes_a_private_plan_and_its_live_adds_in_the_private_source": {
       "kind": "decompose",
@@ -8588,7 +8588,7 @@
       "kind": "library",
       "originalCommands": [],
       "reason": "public-api",
-      "rationale": "a private linear home copied through the linked store keeps its public projections drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
+      "rationale": "`a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections` drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
     },
     "node_validator::a_node_the_validator_refuses_is_refused_with_its_own_words_and_never_joins_the_graph": {
       "kind": "integration",
@@ -8626,7 +8626,7 @@
         "cmd-status"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for the flag beats the environment which beats the config and naming none runs nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_nothing` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "node_validator::the_resolved_validator_is_in_the_launch_record_and_survives_an_adoption": {
       "kind": "decompose",
@@ -8716,7 +8716,7 @@
         "cmd-repo-recover"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a green branch landed on a team repository reports the review draft word are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "out_of_band::an_unusable_bound_is_refused_before_a_landing_pushes_or_writes_to_the_host": {
       "kind": "decompose",
@@ -8725,7 +8725,7 @@
         "cmd-repo-recover"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an unusable bound is refused before a landing pushes or writes to the host are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_unusable_bound_is_refused_before_a_landing_pushes_or_writes_to_the_host` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "out_of_band::a_local_direct_identity_lands_with_no_drafting_turn_spent": {
       "kind": "isolated",
@@ -8762,7 +8762,7 @@
         "cmd-repo-recover"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the synopsis the register proposes is the one the binary prints are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_synopsis_the_register_proposes_is_the_one_the_binary_prints` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "out_of_band::repo_recover_drafts_only_where_publish_branch_would_and_lands_through_a_dead_draft": {
       "kind": "isolated",
@@ -8899,7 +8899,7 @@
         "cmd-repo-recover"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a named term scope reaches the landing it fronts are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_named_term_scope_reaches_the_landing_it_fronts` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "plan::a_cross_dag_dependency_is_accepted_and_gates_only_the_node_that_names_it": {
       "kind": "isolated",
@@ -9161,13 +9161,13 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a journeys processes git commands and sleeps are each counted once asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_journeys_processes_git_commands_and_sleeps_are_each_counted_once` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::a_profiled_journey_builds_a_fixture_and_a_binary_then_polls_and_writes": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a profiled journey builds a fixture and a binary then polls and writes asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_profiled_journey_builds_a_fixture_and_a_binary_then_polls_and_writes` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::a_profiled_journey_that_does_nothing": {
       "kind": "support",
@@ -9198,7 +9198,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a fixtures nested git and file work is its own and not the fixtures asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_fixtures_nested_git_and_file_work_is_its_own_and_not_the_fixtures` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::a_poll_inside_a_poll_is_one_poll_and_every_sleep_is_counted": {
       "kind": "support",
@@ -9214,7 +9214,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a process waited on is counted once and held for the wait asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_process_waited_on_is_counted_once_and_held_for_the_wait` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::a_failing_journey_leaves_its_record_too": {
       "kind": "support",
@@ -9245,7 +9245,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "nested work on a thread the test started is counted once asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`nested_work_on_a_thread_the_test_started_is_counted_once` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::each_filesystem_operation_counts_once_whether_or_not_it_succeeds": {
       "kind": "support",
@@ -9256,7 +9256,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a status and a program named by its path are counted as what they are asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_status_and_a_program_named_by_its_path_are_counted_as_what_they_are` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "profiling::a_record_names_the_run_and_attempt_it_belongs_to": {
       "kind": "support",
@@ -9503,7 +9503,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the worker file check refuses a missing worktree argument without panicking asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_worker_file_check_refuses_a_missing_worktree_argument_without_panicking` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "publication_boundary::the_guidance_coordinates_one_private_plan_by_each_tasks_own_visibility": {
       "kind": "isolated",
@@ -9701,7 +9701,7 @@
       "kind": "library",
       "originalCommands": [],
       "reason": "public-api",
-      "rationale": "a private plan whose public task carries an id anchor copies through the linked store drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
+      "rationale": "`a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store` drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion."
     },
     "publication_boundary::a_private_home_still_refuses_public_tasks_carrying_private_terms_and_private_context": {
       "kind": "integration",
@@ -10140,7 +10140,7 @@
         "cmd-supersessions"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the backfill verb answers and records from the journal alone are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_backfill_verb_answers_and_records_from_the_journal_alone` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "retirement::the_backfill_verb_refuses_to_record_a_run_a_driver_is_driving": {
       "kind": "decompose",
@@ -10374,7 +10374,7 @@
         "cmd-supersessions"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a died dispatchs branch a pass retired is named as retired are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_died_dispatchs_branch_a_pass_retired_is_named_as_retired` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "retirement::publication_and_idle_retirement_keep_open_changes_despite_foreign_merged_numbers": {
       "kind": "decompose",
@@ -10860,7 +10860,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for state comes from current host replies and rework provenance are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `state_comes_from_current_host_replies_and_rework_provenance` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "review::refuses_unknown_or_foreign_runs_and_keeps_a_failed_repository_read_atomic": {
       "kind": "decompose",
@@ -10872,7 +10872,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for refuses unknown or foreign runs and keeps a failed repository read atomic are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `refuses_unknown_or_foreign_runs_and_keeps_a_failed_repository_read_atomic` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "review::discovery_is_explicit_and_a_live_driver_answers_the_durable_request": {
       "kind": "decompose",
@@ -11128,7 +11128,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for both views on both hosts name the rework and commits that answered and the decline are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_decline` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "review_reply::the_launch_config_names_the_reply_drafter_the_flag_overrides_it_and_a_blank_names_none": {
       "kind": "decompose",
@@ -11304,7 +11304,7 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "the counted git counts each start and is the real git for it asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`the_counted_git_counts_each_start_and_is_the_real_git_for_it` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::a_failed_round_command_names_its_node_detail_and_event_order": {
       "kind": "decompose",
@@ -11318,49 +11318,49 @@
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a session close waits for an onevcs read working inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_session_close_waits_for_an_onevcs_read_working_inside_its_clone` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "a second onevcs read of an identity runs beside one held inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_refuses_a_hold_whose_clone_does_not_resolve": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git refuses a hold whose clone does not resolve asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_refuses_a_hold_whose_clone_does_not_resolve` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_answers_with_the_real_gits_failing_exit_code": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git answers with the real gits failing exit code asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_answers_with_the_real_gits_failing_exit_code` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_fails_when_the_real_git_is_killed_by_a_signal": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git fails when the real git is killed by a signal asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_fails_when_the_real_git_is_killed_by_a_signal` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_holds_only_the_first_start_inside_its_clone": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git holds only the first start inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_holds_only_the_first_start_inside_its_clone` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_gives_up_a_hold_whose_control_directory_is_removed": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git gives up a hold whose control directory is removed asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_gives_up_a_hold_whose_control_directory_is_removed` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::held_git_holds_a_git_that_names_the_clones_git_directory_from_outside": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary",
-      "rationale": "held git holds a git that names the clones git directory from outside asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
+      "rationale": "`held_git_holds_a_git_that_names_the_clones_git_directory_from_outside` asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted."
     },
     "review_round::the_round_quota_reporter_runs_its_shell_and_not_the_windows_wsl_launcher": {
       "kind": "support",
@@ -12380,7 +12380,7 @@
         "cmd-start"
       ],
       "reason": "live-ownership",
-      "rationale": "The source's explicit argv alternatives for a forced shutdown asks nothing and waits for nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_forced_shutdown_asks_nothing_and_waits_for_nothing` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "shutdown::nothing_new_starts_once_a_shutdown_has_begun": {
       "kind": "decompose",
@@ -12497,7 +12497,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a shutdown names exactly one scope or is refused before it signals anything are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_shutdown_names_exactly_one_scope_or_is_refused_before_it_signals_anything` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "shutdown::a_landed_nodes_branch_is_not_offered_and_the_work_in_flight_is": {
       "kind": "integration",
@@ -12784,7 +12784,7 @@
         "cmd-unwatched"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the documented claude code wiring reads real stop payloads and answers its decision shape are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_decision_shape` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "stop_guard::declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source": {
       "kind": "decompose",
@@ -12794,7 +12794,7 @@
         "cmd-unwatched"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for declared sources combine with the verbs own verdict and continue per source are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "stop_guard::a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuation_ends_the_turn": {
       "kind": "isolated",
@@ -12802,7 +12802,7 @@
         "cmd-stop-guard"
       ],
       "reason": "isolated-command",
-      "rationale": "The source's explicit argv alternatives for a hook rendering asks a source about the payloads session and its continuation ends the turn are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuation_ends_the_turn` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "stop_guard::a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_passes": {
       "kind": "isolated",
@@ -12810,7 +12810,7 @@
         "cmd-stop-guard"
       ],
       "reason": "isolated-command",
-      "rationale": "The source's explicit argv alternatives for a source that cannot be consulted refuses the stop naming itself and never passes are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_passes` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "stop_guard::declared_sources_are_consulted_together": {
       "kind": "isolated",
@@ -12818,7 +12818,7 @@
         "cmd-stop-guard"
       ],
       "reason": "isolated-command",
-      "rationale": "The source's explicit argv alternatives for declared sources are consulted together are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `declared_sources_are_consulted_together` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "stop_guard::a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_ends_the_turn": {
       "kind": "isolated",
@@ -12826,7 +12826,7 @@
         "cmd-stop-guard"
       ],
       "reason": "isolated-command",
-      "rationale": "The source's explicit argv alternatives for a source not delivered its whole input refuses the stop and its continuation ends the turn are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_ends_the_turn` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "store::a_run_launches_from_a_local_markdown_project_and_executes_the_graph_it_holds": {
       "kind": "decompose",
@@ -13559,19 +13559,19 @@
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "channel help does not offer the retired server and serve is unknown asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`channel_help_does_not_offer_the_retired_server_and_serve_is_unknown` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::help_lists_every_documented_command": {
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "help lists every documented command asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`help_lists_every_documented_command` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::version_reports_the_crate_version": {
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "version reports the crate version asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`version_reports_the_crate_version` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::every_command_the_contract_names_reaches_its_implementation": {
       "kind": "dispatch",
@@ -13594,7 +13594,7 @@
         "cmd-transcript"
       ],
       "reason": "dispatch-contract",
-      "rationale": "every command the contract names reaches its implementation asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`every_command_the_contract_names_reaches_its_implementation` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked": {
       "kind": "decompose",
@@ -13609,7 +13609,7 @@
         "cmd-transcript"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a verb that names a run nobody recorded refuses and says where it looked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "surface::every_optional_form_the_contract_names_reaches_the_binary": {
       "kind": "isolated",
@@ -13622,13 +13622,13 @@
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "a command outside the surface is a usage error asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`a_command_outside_the_surface_is_a_usage_error` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::a_missing_required_argument_is_a_usage_error": {
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "a missing required argument is a usage error asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`a_missing_required_argument_is_a_usage_error` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked": {
       "kind": "decompose",
@@ -13638,7 +13638,7 @@
         "cmd-surface"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a surface with nothing to say is refused whichever way it was asked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "surface::a_stdin_body_that_is_not_text_is_refused_rather_than_salvaged": {
       "kind": "integration",
@@ -13653,13 +13653,13 @@
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "a message argument and a message file cannot both be given asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`a_message_argument_and_a_message_file_cannot_both_be_given` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "surface::attach_and_detach_cannot_both_be_asked_for": {
       "kind": "dispatch",
       "originalCommands": [],
       "reason": "dispatch-contract",
-      "rationale": "attach and detach cannot both be asked for asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
+      "rationale": "`attach_and_detach_cannot_both_be_asked_for` asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv."
     },
     "templates::a_host_registers_names_beside_plan_task_and_each_bad_declaration_is_refused_by_name": {
       "kind": "decompose",
@@ -13848,7 +13848,7 @@
         "cmd-template-resolve"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a lower file that is not text is refused as that and never as not found are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "templates::a_layer_directory_holding_a_reserved_name_is_found_before_the_lower_layer": {
       "kind": "isolated",
@@ -14046,7 +14046,7 @@
         "cmd-unpublished"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a printed landing command runs this hosts drafter are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_printed_landing_command_runs_this_hosts_drafter` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "unpublished::the_documented_synopsis_is_the_verbs_own": {
       "kind": "isolated",
@@ -14097,7 +14097,7 @@
         "cmd-unpublished"
       ],
       "reason": "isolated-command",
-      "rationale": "The source's explicit argv alternatives for a printed acknowledging command records where its listing reads are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_printed_acknowledging_command_records_where_its_listing_reads` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "unpublished::flags_that_mean_nothing_together_are_refused": {
       "kind": "decompose",
@@ -14106,7 +14106,7 @@
         "cmd-unpublished"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for flags that mean nothing together are refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `flags_that_mean_nothing_together_are_refused` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "unreadable_sessions::a_launch_refuses_where_the_hosts_session_records_cannot_be_read": {
       "kind": "isolated",
@@ -14408,7 +14408,7 @@
         "cmd-transcript"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for monitor writes nothing and consumes nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `monitor_writes_nothing_and_consumes_nothing` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::results_reports_each_nodes_own_evidence": {
       "kind": "decompose",
@@ -14436,7 +14436,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an observer this host cannot ask about is never reported dead are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_observer_this_host_cannot_ask_about_is_never_reported_dead` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::goals_says_what_each_run_is_for_and_which_identities_it_holds": {
       "kind": "decompose",
@@ -14457,7 +14457,7 @@
         "cmd-telemetry"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for every scoped view takes the run id the launch record advertises are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `every_scoped_view_takes_the_run_id_the_launch_record_advertises` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::status_names_a_live_dispatch_and_flags_one_nothing_is_driving": {
       "kind": "decompose",
@@ -14484,7 +14484,7 @@
         "cmd-surface"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for status without providers omits the report asks for none and moves no other line are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_line` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::status_and_host_report_free_space_on_the_filesystem_holding_both_roots": {
       "kind": "decompose",
@@ -14697,7 +14697,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run root the views refuse is named with its reason are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_root_the_views_refuse_is_named_with_its_reason` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported": {
       "kind": "decompose",
@@ -14709,7 +14709,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run whose record carries a field this build never had is still reported are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::an_older_run_root_is_read_and_the_rest_are_counted_rather_than_listed_a_line_each": {
       "kind": "decompose",
@@ -14720,7 +14720,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for an older run root is read and the rest are counted rather than listed a line each are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_older_run_root_is_read_and_the_rest_are_counted_rather_than_listed_a_line_each` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::a_run_root_written_before_any_of_the_five_launch_keys_is_still_reported": {
       "kind": "decompose",
@@ -14732,7 +14732,7 @@
         "cmd-stop"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a run root written before any of the five launch keys is still reported are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_run_root_written_before_any_of_the_five_launch_keys_is_still_reported` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one": {
       "kind": "decompose",
@@ -14742,7 +14742,7 @@
         "cmd-status"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a root whose every run is refused does not read as an empty one are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::mine_filtering_everything_out_is_not_the_same_as_a_root_that_could_not_be_read": {
       "kind": "decompose",
@@ -14879,7 +14879,7 @@
         "cmd-telemetry"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for a view of a run with no events still renders are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `a_view_of_a_run_with_no_events_still_renders` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "views::a_ready_node_waiting_on_a_held_workspace_is_told_apart_from_one_merely_queued": {
       "kind": "decompose",
@@ -15190,7 +15190,7 @@
         "cmd-watch"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the stop guard page names the budget the binary reads are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_stop_guard_page_names_the_budget_the_binary_reads` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "watch::a_watch_reads_the_run_only_when_it_moves_and_reports_a_raised_surface_at_once": {
       "kind": "integration",
@@ -15210,7 +15210,7 @@
         "cmd-watch"
       ],
       "reason": "live-control",
-      "rationale": "The source's explicit argv alternatives for an edit a surface and a settlement each reach the watch as a line are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "watch::the_decision_completion_and_stop_records_reach_the_watch_as_lines_too": {
       "kind": "integration",
@@ -15700,7 +15700,7 @@
         "cmd-start"
       ],
       "reason": "command-phases",
-      "rationale": "The source's explicit argv alternatives for the flag beats the variable which beats the config and an adopt replays the launch are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
+      "rationale": "The source's explicit argv alternatives for `the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_launch` are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer."
     },
     "writeback_budget::a_budget_of_zero_is_refused_by_the_spelling_that_carried_it": {
       "kind": "isolated",
