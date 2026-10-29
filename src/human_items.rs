@@ -833,13 +833,33 @@ impl HumanItemSample {
                     .ok_or_else(|| conflict("sample approval authority has no evidence"))?
                     .clone();
                 if current != approval.key {
+                    // The replacement is checked before anything changes: a
+                    // dedup_key already held refuses with the fixture intact,
+                    // and an id already held moves to the next free suffix, so
+                    // the written bundle never carries a duplicate.
+                    let dedup_key = format!("{}:{current}", item.dedup_key);
+                    if let Some(held) = self.items.iter().find(|d| d.item.dedup_key == dedup_key) {
+                        return Err(conflict(format!(
+                            "Re-read the current document; replacement dedup_key {dedup_key} \
+                             is already held by {}",
+                            held.item.id
+                        )));
+                    }
+                    let mut suffix = self.items.len();
+                    let id = loop {
+                        let id = format!("{}-replacement-{suffix}", item.id);
+                        if !self.items.iter().any(|d| d.item.id == id) {
+                            break id;
+                        }
+                        suffix += 1;
+                    };
                     let mut replacement = self.items[index].clone();
                     replacement.item.approval = Some(HumanItemApproval {
                         board_copy: approval.board_copy.clone(),
                         key: current.clone(),
                     });
-                    replacement.item.id = format!("{}-replacement-{}", item.id, self.items.len());
-                    replacement.item.dedup_key = format!("{}:{current}", item.dedup_key);
+                    replacement.item.id = id;
+                    replacement.item.dedup_key = dedup_key;
                     replacement.item.created_at = "sample-replacement".into();
                     replacement.item.updated_at = "sample-replacement".into();
                     let obsolete = &mut self.items[index].item;

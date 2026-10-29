@@ -799,3 +799,139 @@ fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
     refuse(output, "no affected-node context for run-1 / build");
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
 }
+
+/// The documented exporter, run as documented: its stdout is the checked-in
+/// schema bundle, and each schema it prints accepts the shipped fixture.
+#[test]
+fn the_documented_schema_exporter_prints_the_published_schemas() {
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "run",
+            "--quiet",
+            "--locked",
+            "--example",
+            "human_items_schema",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let published: Value =
+        serde_json::from_str(include_str!("../schemas/human-items.schema.json")).unwrap();
+    assert_eq!(printed, published);
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/human-items.json")).unwrap();
+    jsonschema::validator_for(&printed["HumanItemSample"])
+        .unwrap()
+        .validate(&fixture)
+        .unwrap();
+    for detail in fixture["items"].as_array().unwrap() {
+        jsonschema::validator_for(&printed["HumanItemDetail"])
+            .unwrap()
+            .validate(detail)
+            .unwrap();
+        jsonschema::validator_for(&printed["HumanItem"])
+            .unwrap()
+            .validate(&detail["item"])
+            .unwrap();
+    }
+    let mut drifted = fixture["items"][0]["item"].clone();
+    drifted["priority"] = json!("P1");
+    assert!(!jsonschema::validator_for(&printed["HumanItem"])
+        .unwrap()
+        .is_valid(&drifted));
+}
+
+#[test]
+fn an_explicit_false_host_selector_selects_every_non_host_item() {
+    let world = World::new();
+    for verb in ["list", "report"] {
+        for args in [vec![verb, "--host=false"], vec![verb, "--host", "false"]] {
+            let mut json_args = args.clone();
+            json_args.push("--json");
+            let items: Value = serde_json::from_str(&world.ok(&json_args)).unwrap();
+            let ids: Vec<_> = items
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    assert_schema("HumanItemView", v);
+                    assert_ne!(v["item"]["block"]["scope"], "host");
+                    v["item"]["id"].as_str().unwrap().to_owned()
+                })
+                .collect();
+            assert_eq!(ids, ["item-2", "item-3", "item-4"], "{args:?}");
+            let text = world.ok(&args);
+            assert!(!text.contains("blocks all work on this host"), "{text}");
+            assert!(!text.contains("item-1  "), "{text}");
+        }
+        let host: Value =
+            serde_json::from_str(&world.ok(&[verb, "--host=true", "--json"])).unwrap();
+        assert_eq!(host.as_array().unwrap().len(), 1);
+        assert_eq!(host[0]["item"]["id"], "item-1");
+    }
+    refuse(world.run(&["list", "--host=maybe"]), "error:");
+}
+
+#[test]
+fn a_stale_design_replacement_never_duplicates_an_id_or_dedup_key() {
+    // An id already held: the replacement takes the next free suffix.
+    let world = World::new();
+    let mut state = world.state();
+    state["approval_keys"]["design.md"] = json!("v2");
+    state["items"][3]["item"]["id"] = json!("item-3-replacement-4");
+    world.write(&state);
+    refuse(
+        world.run(&["complete", "item-3"]),
+        "Re-read the current document",
+    );
+    let changed = world.state();
+    let ids: Vec<_> = changed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["item"]["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            "item-1",
+            "item-2",
+            "item-3",
+            "item-3-replacement-4",
+            "item-3-replacement-5"
+        ]
+    );
+    assert_eq!(changed["items"][2]["item"]["state"], "dismissed");
+    assert_eq!(changed["items"][4]["item"]["dedup_key"], "sample-3:v2");
+    let listed: Value = serde_json::from_str(&world.ok(&["list", "--json"])).unwrap();
+    assert!(listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["item"]["id"] == "item-3-replacement-5"));
+    world.json(&["complete", "item-3-replacement-5"], "HumanItemReceipt");
+    assert_eq!(world.state()["approvals"][0]["approval"]["key"], "v2");
+
+    // A dedup_key already held: a typed refusal, and the fixture is untouched.
+    let world = World::new();
+    let mut state = world.state();
+    state["approval_keys"]["design.md"] = json!("v2");
+    state["items"][3]["item"]["dedup_key"] = json!("sample-3:v2");
+    world.write(&state);
+    let before = std::fs::read(world.sample()).unwrap();
+    let output = world.run(&["complete", "item-3"]);
+    assert!(output.stdout.is_empty());
+    refuse(
+        output,
+        "replacement dedup_key sample-3:v2 is already held by item-4",
+    );
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+    let listed: Value = serde_json::from_str(&world.ok(&["list", "--json"])).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 4);
+    assert!(world.state().get("approvals").is_none());
+}
