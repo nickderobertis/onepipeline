@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "items": [
+    {
+      "item": {
+        "schema_version": 1,
+        "id": "item-1",
+        "dedup_key": "sample-1",
+        "kind": "task",
+        "title": "Restore the build service",
+        "body": "Restart the unavailable build service.",
+        "priority": "urgent",
+        "owner": {
+          "session": "manager",
+          "run": null,
+          "plan": null
+        },
+        "block": {
+          "scope": "host"
+        },
+        "state": "open",
+        "resolution": null,
+        "approval": null,
+        "tracker": null,
+        "created_at": "2026-10-29T00:00:00Z",
+        "updated_at": "2026-10-29T00:00:00Z"
+      },
+      "blocked": {
+        "total": 5,
+        "plans": [
+          {
+            "plan": "plan-1",
+            "count": 5,
+            "preview": [
+              {
+                "run": "run-1",
+                "node": "step-0",
+                "title": "Step 0"
+              },
+              {
+                "run": "run-1",
+                "node": "step-1",
+                "title": "Step 1"
+              },
+              {
+                "run": "run-1",
+                "node": "step-2",
+                "title": "Step 2"
+              }
+            ]
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "run": "run-1",
+          "node": "step-0",
+          "title": "Step 0"
+        },
+        {
+          "run": "run-1",
+          "node": "step-1",
+          "title": "Step 1"
+        },
+        {
+          "run": "run-1",
+          "node": "step-2",
+          "title": "Step 2"
+        },
+        {
+          "run": "run-1",
+          "node": "step-3",
+          "title": "Step 3"
+        },
+        {
+          "run": "run-1",
+          "node": "step-4",
+          "title": "Step 4"
+        }
+      ]
+    },
+    {
+      "item": {
+        "schema_version": 1,
+        "id": "item-2",
+        "dedup_key": "sample-2",
+        "kind": "question",
+        "title": "Which rollout should we use?",
+        "body": "Choose the gradual or immediate rollout.",
+        "priority": "high",
+        "owner": {
+          "session": "manager",
+          "run": "run-1",
+          "plan": "plan-1"
+        },
+        "block": {
+          "scope": "work",
+          "run": "run-1",
+          "node": "build"
+        },
+        "state": "open",
+        "resolution": null,
+        "approval": null,
+        "tracker": null,
+        "created_at": "2026-10-29T00:00:01Z",
+        "updated_at": "2026-10-29T00:00:01Z"
+      },
+      "blocked": {
+        "total": 5,
+        "plans": [
+          {
+            "plan": "plan-1",
+            "count": 5,
+            "preview": [
+              {
+                "run": "run-1",
+                "node": "step-0",
+                "title": "Step 0"
+              },
+              {
+                "run": "run-1",
+                "node": "step-1",
+                "title": "Step 1"
+              },
+              {
+                "run": "run-1",
+                "node": "step-2",
+                "title": "Step 2"
+              }
+            ]
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "run": "run-1",
+          "node": "step-0",
+          "title": "Step 0"
+        },
+        {
+          "run": "run-1",
+          "node": "step-1",
+          "title": "Step 1"
+        },
+        {
+          "run": "run-1",
+          "node": "step-2",
+          "title": "Step 2"
+        },
+        {
+          "run": "run-1",
+          "node": "step-3",
+          "title": "Step 3"
+        },
+        {
+          "run": "run-1",
+          "node": "step-4",
+          "title": "Step 4"
+        }
+      ]
+    },
+    {
+      "item": {
+        "schema_version": 1,
+        "id": "item-3",
+        "dedup_key": "sample-3",
+        "kind": "task",
+        "title": "Review the design",
+        "body": "Read the design and confirm it in chat.",
+        "priority": "medium",
+        "owner": {
+          "session": "manager",
+          "run": "run-1",
+          "plan": "plan-1"
+        },
+        "block": {
+          "scope": "plan",
+          "plan": "plan-1"
+        },
+        "state": "open",
+        "resolution": null,
+        "approval": {
+          "board_copy": "design.md",
+          "key": "v1"
+        },
+        "tracker": null,
+        "created_at": "2026-10-29T00:00:02Z",
+        "updated_at": "2026-10-29T00:00:02Z"
+      },
+      "blocked": {
+        "total": 5,
+        "plans": [
+          {
+            "plan": "plan-1",
+            "count": 5,
+            "preview": [
+              {
+                "run": "run-1",
+                "node": "step-0",
+                "title": "Step 0"
+              },
+              {
+                "run": "run-1",
+                "node": "step-1",
+                "title": "Step 1"
+              },
+              {
+                "run": "run-1",
+                "node": "step-2",
+                "title": "Step 2"
+              }
+            ]
+          }
+        ]
+      },
+      "nodes": [
+        {
+          "run": "run-1",
+          "node": "step-0",
+          "title": "Step 0"
+        },
+        {
+          "run": "run-1",
+          "node": "step-1",
+          "title": "Step 1"
+        },
+        {
+          "run": "run-1",
+          "node": "step-2",
+          "title": "Step 2"
+        },
+        {
+          "run": "run-1",
+          "node": "step-3",
+          "title": "Step 3"
+        },
+        {
+          "run": "run-1",
+          "node": "step-4",
+          "title": "Step 4"
+        }
+      ]
+    },
+    {
+      "item": {
+        "schema_version": 1,
+        "id": "item-4",
+        "dedup_key": "sample-4",
+        "kind": "question",
+        "title": "Which name fits?",
+        "body": "Choose a name for the release.",
+        "priority": "low",
+        "owner": {
+          "session": "manager",
+          "run": null,
+          "plan": null
+        },
+        "block": {
+          "scope": "nothing"
+        },
+        "state": "open",
+        "resolution": null,
+        "approval": null,
+        "tracker": null,
+        "created_at": "2026-10-29T00:00:03Z",
+        "updated_at": "2026-10-29T00:00:03Z"
+      },
+      "blocked": {
+        "total": 0,
+        "plans": []
+      },
+      "nodes": []
+    }
+  ],
+  "approval_keys": {
+    "design.md": "v1"
+  }
+}

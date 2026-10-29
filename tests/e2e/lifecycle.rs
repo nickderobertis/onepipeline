@@ -21,6 +21,12 @@
 // opened and merged offline. `harness.rs` carries the same suppression and the full
 // rationale.
 
+#[cfg(unix)]
+#[path = "pool_hand_back.rs"]
+mod pool_hand_back;
+#[cfg(unix)]
+use pool_hand_back::*;
+
 #[path = "pool_support.rs"]
 mod pool_support;
 use pool_support::*;
