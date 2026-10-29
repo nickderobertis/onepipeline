@@ -212,7 +212,7 @@ priority = 100
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
-filter = 'binary(e2e) or binary(note) or binary(release_channel)'
+filter = 'binary(e2e) or binary(pooled_slot) or binary(note) or binary(release_channel)'
 test-group = 'e2e'
 
 # Show the non-gating liveness timings in passing local and CI runs.

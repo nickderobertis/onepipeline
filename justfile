@@ -283,19 +283,20 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
+rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
+pooled-slot-tier := "binary(pooled_slot) and not test(/^harness::/)"
 note-tier := "binary(note) and not test(/^harness::/)"
 
-# Their union, and the whole offline tier, spelled once from the four parts so it
+# Their union, and the whole offline tier, spelled once from the five parts so it
 # cannot drift from them: what a check that the tiers partition the suite lists
 # against (`cargo nextest list -E "$(just --evaluate offline-tiers)"`).
-offline-tiers := "(" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ")"
+offline-tiers := "(" + pooled-slot-tier + ") or (" + rest-tier + ") or (" + e2e-tier + ") or (" + contract-tier + ") or (" + note-tier + ")"
 
 # 95% line coverage is the gate; lower it only with a documented reason in
-# AGENTS.md. It is measured over the **whole** offline tier, which is why the four
+# AGENTS.md. It is measured over the **whole** offline tier, which is why the five
 # tier runs below report nothing and one merge reports them all: each tier is its
 # own Nx project, and splitting the run must not split the floor.
 
@@ -400,6 +401,8 @@ _e2e-test: _strace-preflight _onetaskgraph-preflight (_tier-test "e2e" e2e-tier)
 
 _contract-test: (_tier-test "contract" contract-tier)
 
+_pooled_slot-test: (_tier-test "pooled_slot" pooled-slot-tier)
+
 _note-test: (_tier-test "note" note-tier)
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
@@ -431,6 +434,8 @@ _crate-test-quick: (_tier-test-quick rest-tier)
 _e2e-test-quick: _strace-preflight _onetaskgraph-preflight (_tier-test-quick e2e-tier)
 
 _contract-test-quick: (_tier-test-quick contract-tier)
+
+_pooled_slot-test-quick: (_tier-test-quick pooled-slot-tier)
 
 _note-test-quick: (_tier-test-quick note-tier)
 
