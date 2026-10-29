@@ -32,7 +32,9 @@
         },
         "{workspaceRoot}/tests/**/project.json",
         "{workspaceRoot}/docs/modularization-target-layout.md",
-        "{workspaceRoot}/docs/modularization-command-replay.md"
+        "{workspaceRoot}/docs/modularization-command-replay.md",
+        "{workspaceRoot}/project.json",
+        "{workspaceRoot}/.github/workflows/ci.yml"
       ]
     },
     "lint": {

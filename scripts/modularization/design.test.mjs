@@ -42,6 +42,10 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
     assert.equal(run("graph.json").status, 0);
     assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).files, 2);
     assert.equal(JSON.parse(readFileSync(join(root, "graph.json"), "utf8")).edges, 1);
+    const badGraphOutput = run(".");
+    assert.equal(badGraphOutput.status, 1);
+    assert.match(badGraphOutput.stderr, /output parent is writable/);
+    assert.equal(run("graph.json").status, 0);
     const surplus = spawnSync(process.execPath, [cli, "layout.json", "graph.json", "extra"], {
       cwd: root,
       encoding: "utf8",
@@ -1087,24 +1091,96 @@ test("command lock projection CLI matches Nx on transitive source, resolved lock
       put(inputs, "after.lock", lock("1.1.0"));
       put(inputs, "before-tool", '[toolchain]\nchannel = "1.90.0"\n');
       put(inputs, "after-tool", '[toolchain]\nchannel = "1.91.0"\n');
-      const project = (afterLock, afterTool) => {
+      put(
+        inputs,
+        "current.toml",
+        '[dependencies]\nreader = { package = "modern-reader", version = "1" }\nfuture-only = "1"\n',
+      );
+      put(
+        inputs,
+        "historical.toml",
+        '[dependencies]\nreader = { package = "reader-lib", version = "1" }\n',
+      );
+      const project = (afterLock, afterTool, historical = false, expectedStatus = 0) => {
+        const configured = JSON.parse(readFileSync(join(inputs, "crates.json")));
+        configured.reader.external = historical ? ["modern-reader", "future-only"] : ["reader-lib"];
+        put(inputs, "crates.json", configured);
         const result = spawnSync(
           process.execPath,
           [
             cli,
-            "--resolve",
+            historical ? "--resolve-history" : "--resolve",
             join(inputs, "crates.json"),
             join(inputs, "before.lock"),
             join(inputs, afterLock),
             join(inputs, "before-tool"),
             join(inputs, afterTool),
             join(inputs, "changes.json"),
+            ...(historical
+              ? ["current.toml", "historical.toml", "historical.toml"].map((file) =>
+                  join(inputs, file),
+                )
+              : []),
           ],
           { encoding: "utf8" },
         );
-        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.status, expectedStatus, result.stderr);
+        if (expectedStatus !== 0) return result.stderr;
         return JSON.parse(readFileSync(join(inputs, "changes.json"), "utf8"));
       };
+      assert.deepEqual(
+        project("after.lock", "before-tool", true),
+        project("after.lock", "before-tool"),
+      );
+      assert.deepEqual(project("before.lock", "before-tool", true), []);
+      const historicalManifest = readFileSync(join(inputs, "historical.toml"), "utf8");
+      for (const invalidManifest of [
+        "[dependencies]\nreader={version=42}",
+        '[dependencies]\nreader={version="1",optional=42}',
+        '[dependencies]\nreader={version="1",default-features=42}',
+        '[dependencies]\nreader={version="1",features=[42]}',
+        "[dependencies]\nreader=[]",
+        "[target]\nlinux=42",
+        "[package]\nbuild=42",
+        "[package]\nedition={workspace=false}",
+        "[workspace]\npackage=42",
+        "[workspace]\nresolver=42",
+        "[workspace.package]\nedition=42",
+        "dependencies=42",
+        "dependencies=[]",
+        "[dependencies]\nreader=42",
+        '[dependencies]\nreader={package=42,version="1"}',
+        "[workspace]\ndependencies=42",
+        "target=42",
+        "[target.'cfg(unix)']\ndependencies=42",
+        "package=42",
+        "workspace=42",
+        "features=42",
+        '[features]\ndefault="feature"',
+        "profile=42",
+        "[profile]\ndev=42",
+        "[package]\nedition=42",
+        "[dependencies]\nreader={workspace=false}",
+        '[dependencies]\nreader={version="1",features=42}',
+      ]) {
+        put(inputs, "historical.toml", invalidManifest);
+        assert.match(project("before.lock", "before-tool", true, 1), /invalid Cargo/);
+      }
+      put(inputs, "historical.toml", historicalManifest);
+      assert.deepEqual(project("before.lock", "before-tool", true), []);
+
+      // A modern package can coexist historically for another crate without becoming this crate's root.
+      const modern = (version) => `\n[[package]]\nname = "modern-reader"\nversion = "${version}"\n`;
+      put(inputs, "before.lock", lock("1.0.0") + modern("1.0.0"));
+      put(inputs, "after.lock", lock("1.0.0") + modern("1.1.0"));
+      put(
+        inputs,
+        "historical.toml",
+        '[dependencies]\nreader = { package = "reader-lib", version = "1" }\nother = { package = "modern-reader", version = "1" }\n',
+      );
+      assert.deepEqual(project("after.lock", "before-tool", true), []);
+      put(inputs, "before.lock", lock("1.0.0"));
+      put(inputs, "after.lock", lock("1.1.0"));
       const cases = [
         ["status/source.rs"],
         ["record/source.rs"],
@@ -1560,7 +1636,11 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
     );
     rmSync(join(root, outputPath));
     mkdirSync(join(root, outputPath));
-    expectFailure(/EISDIR/);
+    expectFailure(/EISDIR|EPERM|EACCES/);
+    assert.match(
+      run().stderr,
+      /output parent is writable; rerun the same decompose.mjs invocation/,
+    );
     rmSync(join(root, outputPath), { recursive: true });
     assert.equal(run().status, 0);
   } finally {
@@ -1568,7 +1648,8 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
   }
 });
 
-// expandCatalog is the public in-process input boundary; these assertions drive that parser directly.
+// Direct API proof isolates parser rejection branches: the repository CLI can refuse first on inventory drift.
+// A subprocess for each object would obscure that boundary; the target replay CLI test proves serialized integration.
 test("catalog expansion refuses malformed records, inherited reason names and duplicate owners", async () => {
   const { expandCatalog, baselineHash } = await import("./catalog.mjs");
   const good = {
@@ -1647,6 +1728,7 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
       "command-attributions.json",
       "source-projection.mjs",
       "manifest-projection.mjs",
+      "config-projection.mjs",
       "cli-commands.json",
       "graph.mjs",
       "layout.json",
@@ -1661,6 +1743,8 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
         cwd: root,
         encoding: "utf8",
       });
+    // project.json targets.test runs this file; targets.check depends on test.
+    // justfile's check runs Nx check targets, so this regeneration comparison gates the catalog.
     const inventoried = run("--inventory");
     assert.equal(inventoried.status, 0, inventoried.stderr);
     assert.deepEqual(
@@ -1704,6 +1788,14 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     assert.equal(run.status, 0, run.stderr);
     const evidence = JSON.parse(readFileSync(output, "utf8"));
     assert.equal(evidence.result.rows.length, 144);
+    assert.ok(
+      evidence.result.rows.every(
+        (row) => !row.reasons.some((reason) => reason.includes("historically unresolvable")),
+      ),
+    );
+    assert.ok(!evidence.result.mapping.selection.shared.includes("justfile"));
+    assert.ok(!evidence.result.mapping.selection.shared.includes(".cargo/config.toml"));
+    assert.ok(!evidence.result.mapping.selection.shared.includes(".config/nextest.toml"));
     assert.equal(evidence.result.originalTests, 1922);
     assert.equal(evidence.result.tests, Object.keys(evidence.catalog.tests).length);
     const expanded = expandCatalog(catalog);
@@ -1726,8 +1818,8 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     const doc = readFileSync("docs/modularization-target-layout.md", "utf8");
     assert.equal(doc.split(TARGET_MARKER).length, 2);
     assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \|/);
-    assert.match(doc, /frees at least one suite on \*\*12 PRs\*\*/);
-    assert.match(doc, /removes \*\*104 suite runs\*\*/);
+    assert.match(doc, /frees at least one suite on \*\*37 PRs\*\*/);
+    assert.match(doc, /removes \*\*\d+ suite runs\*\*/);
     assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
     const agentsRow = doc.split("\n").find((line) => line.startsWith("| agents | cmd-agents |"));
     assert(agentsRow);
@@ -1737,6 +1829,10 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     );
     assert.match(doc, /Exception suite \| Complete runner crate closure/);
     assert.match(doc, /Source-backed argv and boundary audit/);
+    assert.match(
+      doc,
+      /src\/ledger.rs::a_lock_without_a_start_token_reads_and_is_written_back_without_one \| run-locks \|/,
+    );
     symlinkSync(resolve("src"), join(root, "src"), "dir");
     mkdirSync(join(root, "tests"), { recursive: true });
     symlinkSync(resolve("tests/e2e"), join(root, "tests/e2e"), "dir");
@@ -1788,6 +1884,50 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     put(root, "target.json", evidence);
     assert.match(render().stderr, /invalid target platform data/);
     evidence.result.platforms.linux.secondsSkip = seconds;
+    const migration = structuredClone(evidence.result.migration);
+    for (const mutate of [
+      (value) => {
+        value.migration = null;
+      },
+      (value) => {
+        value.migration.pop();
+      },
+      (value) => {
+        value.migration[0].crate = "unknown-crate";
+      },
+      (value) => {
+        value.migration[0].suiteSkip = "not-a-number";
+      },
+      (value) => {
+        value.migration[0].suiteSkip = null;
+      },
+      (value) => {
+        value.migration[0].suiteSkip = 2;
+      },
+      (value) => {
+        value.migration[0].suiteSkip = -1;
+      },
+      (value) => {
+        value.migration[0].extra = true;
+      },
+      (value) => {
+        value.migration[1].crate = value.migration[0].crate;
+      },
+      (value) => {
+        value.migration.reverse();
+      },
+      (value) => {
+        value.migration.at(-1).suiteSkip += 0.001;
+      },
+    ]) {
+      evidence.result.migration = structuredClone(migration);
+      mutate(evidence.result);
+      put(root, "target.json", evidence);
+      const refused = render();
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /invalid target migration/);
+    }
+    evidence.result.migration = migration;
     for (const key of ["originalTests", "tests"]) {
       evidence.result[key]--;
       put(root, "target.json", evidence);
@@ -1818,20 +1958,15 @@ test("resolution CLI refuses malformed maps, lock identities and compiler pins, 
     put(root, "after.lock", lock);
     put(root, "before-tool", pin);
     put(root, "after-tool", pin);
-    const run = () =>
+    const run = (output = "out.json") =>
       spawnSync(
         process.execPath,
         [
           cli,
           "--resolve",
-          ...[
-            "crates.json",
-            "before.lock",
-            "after.lock",
-            "before-tool",
-            "after-tool",
-            "out.json",
-          ].map((file) => join(root, file)),
+          ...["crates.json", "before.lock", "after.lock", "before-tool", "after-tool", output].map(
+            (file) => join(root, file),
+          ),
         ],
         { encoding: "utf8" },
       );
@@ -1839,9 +1974,18 @@ test("resolution CLI refuses malformed maps, lock identities and compiler pins, 
       const result = run();
       assert.equal(result.status, 1, result.stdout);
       assert.match(result.stderr, pattern);
+      assert.match(result.stderr, /next: correct the named resolution.*same --resolve invocation/);
     };
     assert.equal(run().status, 0);
     assert.deepEqual(JSON.parse(readFileSync(join(root, "out.json"), "utf8")), []);
+    const badOutput = run(".");
+    assert.equal(badOutput.status, 1);
+    assert.match(badOutput.stderr, /EISDIR|EPERM|EACCES/);
+    assert.match(
+      badOutput.stderr,
+      /output parent is writable; rerun the same --resolve invocation/,
+    );
+    assert.equal(run().status, 0);
     for (const bad of [null, true, 42, []]) {
       put(root, "crates.json", JSON.stringify(bad));
       failure(/resolution configuration must be an object/);
@@ -1886,7 +2030,8 @@ test("resolution CLI refuses malformed maps, lock identities and compiler pins, 
   }
 });
 
-// The report's source-intent reader is a public in-process file boundary, exercised against real test source.
+// The CLI enumerates known test IDs itself, so it cannot receive an arbitrary intentFor ID.
+// Direct API refusal checks cover that caller boundary; target-report CLI tests prove rendered source intent.
 test("test intent comes from the existing journey and refuses path-like ids", async () => {
   const { intentFor } = await import("./target-report.mjs");
   assert.match(
@@ -2019,6 +2164,8 @@ test("narrow docs/scripts inputs free only unreachable suites, matching real Nx"
       rmSync(root, { recursive: true, force: true });
     }
   }
+  // The report CLI rejects malformed row shapes before invoking this comparison helper.
+  // Direct API refusal proof reaches these guards; the real Nx journey above proves valid selection.
   assert.throws(() => compareGlobInputs(selection, []), /needs validated PR rows/);
   assert.throws(
     () =>
@@ -2246,6 +2393,683 @@ opt-level = 0
     }
     assert.throws(() => manifestChanges(crates, manifest, "[package"));
     assert.deepEqual(manifestChanges(crates, manifest, manifest), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration projection selects real test recipes and semantic Cargo/nextest inputs", async () => {
+  const root = scratch();
+  const cli = resolve("scripts/modularization/config-projection.mjs");
+  put(root, "project.json", readFileSync("project.json", "utf8"));
+  put(root, "tests/e2e/project.json", readFileSync("tests/e2e/project.json", "utf8"));
+  put(root, "justfile", readFileSync("justfile", "utf8"));
+  put(root, ".github/workflows/ci.yml", readFileSync(".github/workflows/ci.yml", "utf8"));
+  const runnerProject = JSON.parse(readFileSync(join(root, "tests/e2e/project.json"), "utf8"));
+  runnerProject.targets.test.dependsOn = [];
+  runnerProject.targets["test-quick"] = { executor: "nx:noop" };
+  put(root, "tests/e2e/project.json", runnerProject);
+  const suites = ["cmd-start", "cmd-status"];
+  const configChanges = (file, before, after, owners) => {
+    put(root, "before", before);
+    put(root, "after", after);
+    put(root, "suites.json", owners);
+    const result = spawnSync(
+      process.execPath,
+      [
+        cli,
+        file,
+        join(root, "before"),
+        join(root, "after"),
+        join(root, "suites.json"),
+        join(root, "output.json"),
+      ],
+      { encoding: "utf8", cwd: root },
+    );
+    if (result.status !== 0) throw new Error(result.stderr);
+    return JSON.parse(readFileSync(join(root, "output.json"), "utf8"));
+  };
+  try {
+    const just =
+      'tool := "1"\nfreeze := "1"\n_e2e-test:\n    cargo nextest run {{tool}}\nscreenshots:\n    freeze {{freeze}}\n';
+    assert.deepEqual(
+      configChanges("justfile", just, just.replace('freeze := "1"', 'freeze := "2"'), suites),
+      [],
+    );
+    assert.throws(
+      () => configChanges("justfile", "unrelated:\n    echo ready\n", just, suites),
+      /missing runner recipe/,
+    );
+    assert.equal(
+      configChanges("justfile", just, just.replace('tool := "1"', 'tool := "2"'), suites).length,
+      2,
+    );
+    for (const file of [".cargo/config.toml", ".config/nextest.toml"])
+      for (const invalid of ["profile=42", "profile=[]", "[profile]\nci=42", "[profile]\nci=[]"])
+        assert.throws(
+          () => configChanges(file, "", invalid, suites),
+          /invalid configuration profile/,
+        );
+    const otherTarget = `${just}\n_contract-test:\n    cargo nextest run contract\n`;
+    const evaluated = just.replace("cargo nextest run {{tool}}", "echo $(just --evaluate tool)");
+    assert.equal(
+      configChanges("justfile", evaluated, evaluated.replace('tool := "1"', 'tool := "2"'), suites)
+        .length,
+      2,
+    );
+    const separateBuild = `${just}\n_tier-build bin:\n    cargo build\n`;
+    assert.deepEqual(
+      configChanges(
+        "justfile",
+        separateBuild,
+        separateBuild.replace("cargo build", "cargo build --locked"),
+        suites,
+      ),
+      [],
+    );
+    const helperTarget = `${just.replace("_e2e-test:", "_e2e-test: helper")}\nhelper:\n    echo prepare\n`;
+    assert.equal(
+      configChanges(
+        "justfile",
+        helperTarget,
+        helperTarget.replace("echo prepare", "echo ready"),
+        suites,
+      ).length,
+      2,
+    );
+    const executedHelper = `${just.replace("cargo nextest run {{tool}}", "just helper\n    cargo nextest run {{tool}}")}\nhelper:\n    echo prepare\n`;
+    assert.equal(
+      configChanges(
+        "justfile",
+        executedHelper,
+        executedHelper.replace("echo prepare", "echo ready"),
+        suites,
+      ).length,
+      2,
+    );
+    const diagnostic = just.replace(
+      "cargo nextest run {{tool}}",
+      'echo "run just screenshots"; cargo nextest run {{tool}}',
+    );
+    assert.deepEqual(
+      configChanges(
+        "justfile",
+        diagnostic,
+        diagnostic.replace('freeze := "1"', 'freeze := "2"'),
+        suites,
+      ),
+      [],
+    );
+    const runTarget = `${just}\nrun:\n    cargo run\n`;
+    assert.deepEqual(
+      configChanges(
+        "justfile",
+        runTarget,
+        runTarget.replace("    cargo run", "    cargo run --locked"),
+        suites,
+      ),
+      [],
+    );
+    assert.deepEqual(
+      configChanges(
+        "justfile",
+        otherTarget,
+        otherTarget.replace("run contract", "run --locked contract"),
+        suites,
+      ),
+      [],
+    );
+    assert.equal(
+      configChanges("justfile", just, just.replace('tool := "1"', 'tool := "2"'), suites).length,
+      2,
+    );
+    assert.equal(
+      configChanges(
+        "justfile",
+        just,
+        just.replace("cargo nextest run", "cargo nextest run --locked"),
+        suites,
+      ).length,
+      2,
+    );
+    assert.deepEqual(
+      configChanges(".cargo/config.toml", '[alias]\nx="check"', '[alias]\nx="build"', suites),
+      [],
+    );
+    assert.equal(
+      configChanges(
+        ".cargo/config.toml",
+        "[build]\nrustflags=[]",
+        '[build]\nrustflags=["-Dwarnings"]',
+        suites,
+      ).length,
+      2,
+    );
+    assert.deepEqual(
+      configChanges(
+        ".config/nextest.toml",
+        '[profile.ci]\nstatus-level="pass"',
+        '# comment\n[profile.ci]\nstatus-level="pass"',
+        suites,
+      ),
+      [],
+    );
+    assert.throws(() => configChanges(".config/nextest.toml", "", "[broken", suites));
+    assert.throws(
+      () => configChanges(".cargo/config.toml", "", "", ["../outside"]),
+      /suites must be nonempty project names/,
+    );
+    assert.throws(() => configChanges("unknown.toml", "", "", suites), /usage: config-projection/);
+    assert.equal(
+      configChanges(
+        "justfile",
+        'export UNUSED := "one"\n_e2e-test:\n    echo ready\n',
+        'export UNUSED := "two"\n_e2e-test:\n    echo ready\n',
+        suites,
+      ).length,
+      2,
+    );
+    assert.throws(
+      () => configChanges("justfile", just, "not valid just syntax ???", suites),
+      /error/,
+    );
+    for (const profile of ["dev", "test", "release"]) {
+      assert.equal(
+        configChanges(
+          ".cargo/config.toml",
+          `[profile.${profile}]\ndebug=0`,
+          `[profile.${profile}]\ndebug=1`,
+          suites,
+        ).length,
+        profile === "release" ? 0 : 2,
+      );
+    }
+    for (const [section, before, after, selected] of [
+      ["profile.default", 'status-level="pass"', 'status-level="slow"', 2],
+      ["profile.unused", 'status-level="pass"', 'status-level="slow"', 0],
+      ["test-groups", "e2e={max-threads=1}", "e2e={max-threads=2}", 2],
+      ["store", 'dir="target/nextest"', 'dir="target/alternate"', 2],
+    ]) {
+      assert.equal(
+        configChanges(
+          ".config/nextest.toml",
+          `[${section}]\n${before}`,
+          `[${section}]\n${after}`,
+          suites,
+        ).length,
+        selected,
+      );
+    }
+    const inherited = '[profile.ci]\ninherits="base"\n[profile.base]\nretries=0';
+    assert.equal(
+      configChanges(
+        ".config/nextest.toml",
+        inherited,
+        inherited.replace("retries=0", "retries=1"),
+        suites,
+      ).length,
+      2,
+    );
+    assert.throws(
+      () =>
+        configChanges(
+          ".config/nextest.toml",
+          inherited,
+          inherited.replace('inherits="base"', 'inherits="missing"'),
+          suites,
+        ),
+      /invalid nextest inherited profile/,
+    );
+    assert.throws(
+      () => configChanges(".config/nextest.toml", inherited, `${inherited}\ninherits="ci"`, suites),
+      /inheritance cycle/,
+    );
+    assert.equal(
+      configChanges(
+        ".config/nextest.toml",
+        inherited,
+        inherited.replace("retries=0", "retries=2"),
+        suites,
+      ).length,
+      2,
+    );
+    const badOutput = spawnSync(
+      process.execPath,
+      [
+        cli,
+        ".cargo/config.toml",
+        join(root, "before"),
+        join(root, "after"),
+        join(root, "suites.json"),
+        root,
+      ],
+      { encoding: "utf8", cwd: root },
+    );
+    assert.equal(badOutput.status, 1);
+    assert.match(badOutput.stderr, /EISDIR|EPERM|EACCES/);
+    assert.match(badOutput.stderr, /output parent is writable; rerun the same config-projection/);
+    assert.equal(
+      configChanges(
+        ".config/nextest.toml",
+        '[profile.ci]\nstatus-level="pass"',
+        '[profile.ci]\nstatus-level="slow"',
+        suites,
+      ).length,
+      2,
+    );
+    const project = JSON.parse(readFileSync(join(root, "tests/e2e/project.json"), "utf8"));
+    const savedTarget = project.targets.test;
+    const savedProject = structuredClone(project);
+    for (const dependency of [
+      null,
+      42,
+      {},
+      [null],
+      [42],
+      ["^test"],
+      [{ target: "test", projcts: ["onepipeline"] }],
+      [{ target: 42 }],
+      [{ target: "test", projects: "dependencies" }],
+      [{ target: "test", projects: [] }],
+      [{ target: "test", projects: null }],
+      [{ target: "test", projects: [42] }],
+      [{ target: "test", projects: ["missing-project"] }],
+    ]) {
+      project.targets.test = { ...savedTarget, dependsOn: dependency };
+      put(root, "tests/e2e/project.json", project);
+      assert.throws(
+        () => configChanges("justfile", just, just, suites),
+        /invalid runner dependency|unsupported runner dependency/,
+      );
+    }
+    project.targets.test = savedTarget;
+    for (const mutate of [
+      (value) => {
+        value.name = 42;
+      },
+      (value) => {
+        value.name = "onepipeline";
+      },
+      (value) => {
+        value.targets = [];
+      },
+      (value) => {
+        value.targets.test = 42;
+      },
+      (value) => {
+        value.targets.test = null;
+      },
+      (value) => {
+        value.targets.test.command = [];
+      },
+      (value) => {
+        value.targets.test.executor = 42;
+      },
+      (value) => {
+        value.targets.test.executor = "custom:executor";
+      },
+      (value) => {
+        value.targets.test.executor = "nx:noop";
+      },
+    ]) {
+      const invalid = structuredClone(savedProject);
+      mutate(invalid);
+      put(root, "tests/e2e/project.json", invalid);
+      assert.throws(
+        () => configChanges("justfile", just, just, suites),
+        /invalid runner project|invalid runner target|invalid runner command|unsupported runner executor/,
+      );
+    }
+    put(root, "tests/e2e/project.json", project);
+    assert.deepEqual(configChanges("justfile", just, just, suites), []);
+
+    delete project.targets.test;
+    put(root, "tests/e2e/project.json", project);
+    assert.throws(() => configChanges("justfile", just, just, suites), /missing runner target/);
+    project.targets.test = { ...savedTarget, command: "node unsupported.mjs" };
+    put(root, "tests/e2e/project.json", project);
+    assert.throws(
+      () => configChanges("justfile", just, just, suites),
+      /unsupported runner command/,
+    );
+    project.targets.test = { ...savedTarget, command: "just _e2e-test && node unsupported.mjs" };
+    put(root, "tests/e2e/project.json", project);
+    assert.throws(
+      () => configChanges("justfile", just, just, suites),
+      /unsupported runner command/,
+    );
+    project.targets.test = { executor: "nx:noop" };
+    put(root, "tests/e2e/project.json", project);
+    assert.deepEqual(configChanges("justfile", just, just, suites), []);
+    project.targets.test = savedTarget;
+    put(root, "tests/e2e/project.json", project);
+    put(root, "justfile", "_e2e-test:\n    cargo nextest run --profile focused\n");
+    assert.equal(
+      configChanges(
+        ".config/nextest.toml",
+        "[profile.focused]\nretries=0",
+        "[profile.focused]\nretries=1",
+        suites,
+      ).length,
+      2,
+    );
+    put(root, ".github/workflows/ci.yml", "env:\n  NEXTEST_PROFILE: alternate\n");
+    assert.equal(
+      configChanges(
+        ".config/nextest.toml",
+        "[profile.alternate]\nretries=0",
+        "[profile.alternate]\nretries=1",
+        suites,
+      ).length,
+      2,
+    );
+    assert.deepEqual(
+      configChanges(
+        ".config/nextest.toml",
+        "[profile.ci]\nretries=0",
+        "[profile.ci]\nretries=1",
+        suites,
+      ),
+      [],
+    );
+    project.targets.test.command = "just renamed-entry";
+    put(root, "tests/e2e/project.json", project);
+    assert.equal(
+      configChanges(
+        "justfile",
+        "renamed-entry:\n    echo before\n",
+        "renamed-entry:\n    echo after\n",
+        suites,
+      ).length,
+      2,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("historical CLI flag hunks select their command rather than the enum facade", async () => {
+  const { projectSourceChange } = await import("./source-projection.mjs");
+  const root = scratch();
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
+  try {
+    git("init", "-q");
+    git("config", "user.name", "Projection test");
+    git("config", "user.email", "projection@example.test");
+    const before =
+      "pub enum Command {\n    Start {\n        verbose: bool,\n    },\n    Status,\n}\n";
+    put(root, "src/cli.rs", before);
+    git("add", ".");
+    git("commit", "-qm", "initial");
+    put(root, "src/cli.rs", before.replace("verbose: bool", "quiet: bool"));
+    git("add", ".");
+    git("commit", "-qm", "flag");
+    const owners = {
+      "src/cli.rs": new Map([
+        ["Command", "onepipeline"],
+        ["__variant_Command_Start", "cmd-start"],
+        ["__variant_Command_Status", "cmd-status"],
+      ]),
+    };
+    const result = projectSourceChange(
+      { commit: git("rev-parse", "HEAD"), files: ["src/cli.rs"] },
+      owners,
+      {},
+      root,
+    );
+    assert.deepEqual(result.files, ["moved/cmd-start/src/cli.rs"]);
+    put(root, "src/cli.rs", before.replace("pub enum", "pub(crate) enum"));
+    git("add", ".");
+    git("commit", "-qm", "facade visibility");
+    const facade = projectSourceChange(
+      { commit: git("rev-parse", "HEAD"), files: ["src/cli.rs"] },
+      owners,
+      {},
+      root,
+    );
+    assert.ok(facade.files.includes("moved/onepipeline/src/cli.rs"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("engine proposal CLI isolates query and effect capabilities, refuses cycles and missing source items, then recovers", () => {
+  const root = scratch();
+  const cli = resolve("scripts/modularization/engine-graph-cli.mjs");
+  const graphCli = resolve("scripts/modularization/target-graph.mjs");
+  try {
+    const basePath = join(root, "base.json");
+    const proposalPath = join(root, "proposal.json");
+    const output = join(root, "mapped.json");
+    execFileSync(process.execPath, [graphCli, basePath]);
+    const proposal = JSON.parse(
+      readFileSync("scripts/modularization/engine-subsystems.json", "utf8"),
+    );
+    const run = () =>
+      spawnSync(process.execPath, [cli, basePath, proposalPath, output], { encoding: "utf8" });
+    put(root, "proposal.json", proposal);
+    let response = run();
+    assert.equal(response.status, 0, response.stderr);
+    const mapped = JSON.parse(readFileSync(output, "utf8"));
+    assert.deepEqual(mapped, JSON.parse(readFileSync(basePath, "utf8")));
+    const graph = compileMapping({
+      crates: Object.fromEntries(
+        Object.entries(mapped.crates).map(([name, crate]) => [
+          name,
+          { paths: crate.files, deps: crate.deps },
+        ]),
+      ),
+      suites: {
+        status: { paths: [], crates: ["cmd-status"] },
+        start: { paths: [], crates: ["cmd-start"] },
+        reply: { paths: [], crates: ["cmd-reply"] },
+        review: { paths: [], crates: ["cmd-review"] },
+        readjust: { paths: [], crates: ["cmd-readjust"] },
+      },
+    });
+    for (const name of ["scheduler", "publication", "plan-edits", "agent-execution"])
+      assert(!graph.suites.status.crates.has(name), name);
+    assert(graph.suites.status.crates.has("checkpoint"));
+    assert.equal(mapped.schema, 3);
+    assert.deepEqual(mapped.engineSubsystems, proposal);
+    assert.deepEqual(mapped.externalRoots["test-scenario-schema"], ["serde", "serde_json"]);
+    assert(graph.suites.start.crates.has("publication"));
+    assert(!graph.suites.reply.crates.has("scheduler"));
+    for (const name of ["edit-reconciler", "publication", "review-replies"])
+      assert(graph.suites.reply.crates.has(name), name);
+    assert(graph.suites.review.crates.has("scheduler"));
+    assert(graph.suites.readjust.crates.has("scheduler"));
+    assert(graph.suites.status.crates.has("processes"));
+    assert.equal(mapped.commands["src/reply.rs"], undefined);
+    assert(mapped.crates["review-replies"].files.includes("src/reply.rs"));
+    assert(
+      graph.suites.reply.crates.has("run-summary"),
+      "journal writers retain real summary maintenance",
+    );
+    const validLayout = JSON.parse(readFileSync(basePath, "utf8"));
+    for (const corrupt of [
+      (layout) => {
+        layout.schema = 99;
+      },
+      (layout) => {
+        layout.crates["run-paths"].files.push("../outside.rs");
+      },
+      (layout) => {
+        layout.metadata = "unreviewed";
+      },
+    ]) {
+      const invalid = structuredClone(validLayout);
+      corrupt(invalid);
+      put(root, "base.json", invalid);
+      response = run();
+      assert.equal(response.status, 1);
+      assert.match(response.stderr, /layout differs from the reviewed source-derived layout/);
+    }
+    put(root, "base.json", validLayout);
+    const invalidOutput = spawnSync(process.execPath, [cli, basePath, proposalPath, root], {
+      encoding: "utf8",
+    });
+    assert.equal(invalidOutput.status, 1);
+    assert.match(invalidOutput.stderr, /EISDIR|EPERM|EACCES/);
+    assert.match(invalidOutput.stderr, /output parent is writable/);
+    const usage = spawnSync(process.execPath, [cli], { encoding: "utf8" });
+    assert.equal(usage.status, 1);
+    assert.match(usage.stderr, /usage: engine-graph/);
+    const validProposal = structuredClone(proposal);
+    const refusals = [
+      [
+        "inline edit application",
+        (p) => {
+          p.subsystems["channel-submission"].deps = p.subsystems["channel-submission"].deps.filter(
+            (name) => name !== "edit-reconciler",
+          );
+        },
+        /inline edit application missing/,
+      ],
+      [
+        "undriven execution continuation",
+        (p) => {
+          p.subsystems["cmd-review"].deps = p.subsystems["cmd-review"].deps.filter(
+            (name) => name !== "scheduler",
+          );
+        },
+        /undriven execution continuation missing/,
+      ],
+      [
+        "real summary maintenance",
+        (p) => {
+          p.subsystems.journal.deps = p.subsystems.journal.deps.filter(
+            (name) => name !== "run-summary",
+          );
+        },
+        /journal writer must retain real summary maintenance/,
+      ],
+      [
+        "canonical channel wire type",
+        (p) => {
+          p.subsystems["planner-channel"].deps = p.subsystems["planner-channel"].deps.filter(
+            (name) => name !== "plan-model",
+          );
+        },
+        /channel Command must retain its canonical plan Node dependency/,
+      ],
+      [
+        "unregistered command",
+        (p) => {
+          p.subsystems["cmd-ghost"] = structuredClone(p.subsystems["cmd-status"]);
+        },
+        /invalid subsystem cmd-ghost/,
+      ],
+      [
+        "null subsystem",
+        (p) => {
+          p.subsystems["run-paths"] = null;
+        },
+        /invalid subsystem run-paths/,
+      ],
+      [
+        "null item",
+        (p) => {
+          p.subsystems["run-paths"].items = [null];
+        },
+        /invalid subsystem items/,
+      ],
+      [
+        "schema",
+        (p) => {
+          p.schema = 99;
+        },
+        /invalid engine subsystem proposal/,
+      ],
+      [
+        "unknown field",
+        (p) => {
+          p.subsystems["run-paths"].unused = true;
+        },
+        /invalid subsystem run-paths/,
+      ],
+      [
+        "dependency",
+        (p) => {
+          p.subsystems["run-paths"].deps = ["missing-crate"];
+        },
+        /invalid subsystem run-paths/,
+      ],
+      [
+        "external root",
+        (p) => {
+          p.subsystems["run-paths"].external = ["../outside"];
+        },
+        /invalid subsystem external roots/,
+      ],
+      [
+        "source path",
+        (p) => {
+          p.subsystems["run-paths"].items[0].file = "../outside.rs";
+        },
+        /invalid subsystem items/,
+      ],
+      [
+        "symbol type",
+        (p) => {
+          p.subsystems["run-paths"].items[0].symbols = [null];
+        },
+        /invalid subsystem items/,
+      ],
+      [
+        "duplicate file",
+        (p) => {
+          p.subsystems["run-labels"].files.push("src/labels.rs");
+        },
+        /duplicate subsystem file/,
+      ],
+      [
+        "unknown file",
+        (p) => {
+          p.subsystems["run-labels"].files = ["src/missing.rs"];
+        },
+        /unknown or multiply owned subsystem file/,
+      ],
+      [
+        "duplicate item",
+        (p) => {
+          p.subsystems["run-paths"].items[0].symbols.push("RunPaths");
+        },
+        /duplicate subsystem item/,
+      ],
+      [
+        "foreign command",
+        (p) => {
+          p.subsystems["cmd-status"].deps.push("cmd-reply");
+        },
+        /subsystem command isolation failed/,
+      ],
+    ];
+    for (const [name, mutate, message] of refusals) {
+      const invalid = structuredClone(validProposal);
+      mutate(invalid);
+      put(root, "proposal.json", invalid);
+      response = run();
+      assert.equal(response.status, 1, name);
+      assert.match(response.stderr, message, name);
+    }
+    proposal.subsystems["journal-reader"].deps.push("checkpoint");
+    put(root, "proposal.json", proposal);
+    response = run();
+    assert.equal(response.status, 1);
+    assert.match(response.stderr, /cycle.*checkpoint|checkpoint.*->/s);
+    proposal.subsystems["journal-reader"].deps.pop();
+    proposal.subsystems["run-paths"].items[0].symbols.push("missing_path_operation");
+    put(root, "proposal.json", proposal);
+    response = run();
+    assert.equal(response.status, 1);
+    assert.match(response.stderr, /missing subsystem item.*missing_path_operation/);
+    proposal.subsystems["run-paths"].items[0].symbols.pop();
+    put(root, "proposal.json", proposal);
+    response = run();
+    assert.equal(response.status, 0, response.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(output, "utf8")).crates, mapped.crates);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

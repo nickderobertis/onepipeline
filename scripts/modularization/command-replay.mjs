@@ -10,6 +10,7 @@ import {
   manifestChanges,
   toolchainFingerprint,
 } from "./manifest-projection.mjs";
+import { historicalConfigChanges } from "./config-projection.mjs";
 import { phaseInputs } from "./phase-inputs.mjs";
 import { cliPaths, declarations, commandPaths } from "./source-projection.mjs";
 import { codeOnly, moduleGraph, validate } from "./graph.mjs";
@@ -170,13 +171,57 @@ export function resolvedChanges(crates, before, after, toolBefore, toolAfter) {
       if (![...a.values(), ...b.values()].some((pkg) => pkg.name === root))
         throw new Error(`unresolved external root ${name}:${root}`);
     const changed = [];
-    const present = (packages) =>
-      crate.external.filter((root) => [...packages.values()].some((pkg) => pkg.name === root));
-    if (resolution(a, present(a)) !== resolution(b, present(b)))
+    const present = (packages, roots) =>
+      roots.filter((root) => [...packages.values()].some((pkg) => pkg.name === root));
+    if (
+      resolution(a, present(a, crate.beforeExternal ?? crate.external)) !==
+      resolution(b, present(b, crate.afterExternal ?? crate.external))
+    )
       changed.push(`resolved/${name}/lock.json`);
     if (toolChanged && crate.toolchain) changed.push(`resolved/${name}/toolchain.json`);
     return changed;
   });
+}
+
+/** Project modern crate roots through a PR's own package aliases and resolved sets. */
+export function historicalCrates(crates, current, oldManifest, newManifest, before, after) {
+  const definitions = dependencyDefinitions(cargoManifest(current));
+  const sides = [
+    [oldManifest, before],
+    [newManifest, after],
+  ].map(([manifest, lock]) => ({
+    definitions: dependencyDefinitions(cargoManifest(manifest)),
+    known: new Set([...lockPackages(lock).values()].map((pkg) => pkg.name)),
+  }));
+  return Object.fromEntries(
+    Object.entries(crates).map(([name, crate]) => {
+      const roots = sides.map((side) =>
+        sorted(
+          crate.external.flatMap((root) => {
+            const aliases = definitions
+              .filter((row) => row.packageName === root)
+              .map((row) => row.alias);
+            if (!aliases.length) return side.known.has(root) ? [root] : [];
+            const byAlias = side.definitions.filter((row) => aliases.includes(row.alias));
+            return (
+              byAlias.length ? byAlias : side.definitions.filter((row) => row.packageName === root)
+            )
+              .map((row) => row.packageName)
+              .filter((pkg) => side.known.has(pkg));
+          }),
+        ),
+      );
+      return [
+        name,
+        {
+          ...crate,
+          external: sorted(roots.flat()),
+          beforeExternal: roots[0],
+          afterExternal: roots[1],
+        },
+      ];
+    }),
+  );
 }
 
 export function commandMapping(layout, catalog) {
@@ -362,8 +407,9 @@ export function commandMapping(layout, catalog) {
       delete suites[name];
       continue;
     }
-    if (catalog.schema === 4 && layout.crates["run-files"])
-      suite.crates.push("run-files", "processes");
+    // Phase-local fixture builders write documents with std/serde; they do not link
+    // production IO/process implementations merely to prepare a directory.
+    // Assertions calling the public library retain the explicit public-api suite.
     suite.crates = sorted(suite.crates);
     suite.modules = sorted(suite.modules);
     suite.paths =
@@ -379,10 +425,19 @@ export function commandMapping(layout, catalog) {
         seen.add(crate);
         return (crates[crate]?.deps ?? []).some((dep) => reaches(dep, target, seen));
       };
-      if (suite.crates.some((crate) => reaches(crate, "agent-execution")))
+      if (
+        suite.crates.some(
+          (crate) => reaches(crate, "agent-execution") || reaches(crate, "agent-session"),
+        )
+      ) {
         suite.paths.push("crates/testfakes/src/bin/fake-oneagentgraph.rs");
-      if (suite.crates.some((crate) => reaches(crate, "publication")))
+        if (crates["test-agent-process"]) suite.crates.push("test-agent-process");
+      }
+      if (suite.crates.some((crate) => reaches(crate, "publication"))) {
         suite.paths.push("crates/testfakes/src/bin/fake-gh.rs");
+        if (crates["test-host-process"]) suite.crates.push("test-host-process");
+      }
+      if (crates["test-scenario-schema"]) suite.crates.push("test-scenario-schema");
       suite.paths.push("crates/testfakes/src/profile.rs", "crates/testfakes/src/profile/**");
     }
     const phaseExternal = new Set(
@@ -403,7 +458,7 @@ export function commandMapping(layout, catalog) {
         ...(catalog.schema === 1
           ? ["onepipeline-testfakes"]
           : [
-              ...(usesProcessDouble ? ["onepipeline-testfakes"] : []),
+              ...(usesProcessDouble && catalog.schema !== 4 ? ["onepipeline-testfakes"] : []),
               ...(name === "test-support" ? ["oneagentgraph", "oneharness-core", "onejudge"] : []),
             ]),
         ...external.filter(
@@ -427,9 +482,7 @@ export function commandMapping(layout, catalog) {
       "nx.json",
       "package.json",
       "package-lock.json",
-      "justfile",
-      ".cargo/config.toml",
-      ".config/nextest.toml",
+      ...(catalog.schema === 1 ? ["justfile", ".cargo/config.toml", ".config/nextest.toml"] : []),
       ...(catalog.schema === 1 ? ["tests/e2e/harness.rs", "crates/testfakes/**"] : []),
     ],
     sources: ["src/**"],
@@ -486,14 +539,29 @@ export function run(layout, catalog, weights, changes, projector) {
       const known = new Set(
         [...lockPackages(before).values(), ...lockPackages(after).values()].map((pkg) => pkg.name),
       );
-      const uncertain = [];
-      const historical = Object.fromEntries(
-        Object.entries(mapping.crates).map(([name, crate]) => {
-          if (crate.external.some((root) => !known.has(root)))
-            uncertain.push(`resolved/${name}/unresolved.json`);
-          return [name, { ...crate, external: crate.external.filter((root) => known.has(root)) }];
-        }),
-      );
+      // Schema 1 reproduces the committed historical baseline; schema 4 is the proposed design.
+      const uncertain =
+        catalog.schema === 1
+          ? Object.entries(mapping.crates)
+              .filter(([, crate]) => crate.external.some((root) => !known.has(root)))
+              .map(([name]) => `resolved/${name}/unresolved.json`)
+          : [];
+      const historical =
+        catalog.schema === 1
+          ? Object.fromEntries(
+              Object.entries(mapping.crates).map(([name, crate]) => [
+                name,
+                { ...crate, external: crate.external.filter((root) => known.has(root)) },
+              ]),
+            )
+          : historicalCrates(
+              mapping.crates,
+              read("Cargo.toml"),
+              get(`${change.commit}^`, "Cargo.toml"),
+              get(change.commit, "Cargo.toml"),
+              before,
+              after,
+            );
       const resolved = [
         ...resolvedChanges(
           historical,
@@ -513,6 +581,28 @@ export function run(layout, catalog, weights, changes, projector) {
         reasons.push(
           `resolved dependencies/toolchain: ${sorted(resolved.map((p) => p.split("/")[1])).join(", ")}`,
         );
+    }
+    if (catalog.schema === 4) {
+      for (const file of ["justfile", ".cargo/config.toml", ".config/nextest.toml"]) {
+        if (!files.includes(file)) continue;
+        const get = (rev) => {
+          try {
+            return git("show", `${rev}:${file}`);
+          } catch (error) {
+            if (/does not exist|exists on disk, but not in/.test(String(error.stderr))) return "";
+            throw error;
+          }
+        };
+        files = files.filter((path) => path !== file);
+        const projected = historicalConfigChanges(
+          file,
+          get(`${change.commit}^`),
+          get(change.commit),
+          Object.keys(mapping.suites),
+        );
+        files.push(...projected);
+        if (projected.length) reasons.push(`test target configuration: ${file}`);
+      }
     }
     if (files.includes("Cargo.toml")) {
       if (catalog.schema === 4)
@@ -643,10 +733,11 @@ export function run(layout, catalog, weights, changes, projector) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv[2] === "--resolve") {
-      if (process.argv.length !== 9)
+    if (["--resolve", "--resolve-history"].includes(process.argv[2])) {
+      const history = process.argv[2] === "--resolve-history";
+      if (process.argv.length !== (history ? 12 : 9))
         throw new Error(
-          "usage: command-replay.mjs --resolve CRATES.json BEFORE.lock AFTER.lock BEFORE-tool AFTER-tool OUTPUT.json",
+          "usage: command-replay.mjs --resolve CRATES.json BEFORE.lock AFTER.lock BEFORE-tool AFTER-tool OUTPUT.json [CURRENT.toml BEFORE.toml AFTER.toml for --resolve-history]",
         );
       const crates = JSON.parse(read(process.argv[3]));
       if (!crates || typeof crates !== "object" || Array.isArray(crates))
@@ -662,7 +753,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           throw new Error(`invalid resolution inputs for ${name}`);
       writeFileSync(
         process.argv[8],
-        JSON.stringify(resolvedChanges(crates, ...process.argv.slice(4, 8).map(read))),
+        JSON.stringify(
+          resolvedChanges(
+            history
+              ? historicalCrates(
+                  crates,
+                  ...process.argv.slice(9, 12).map(read),
+                  read(process.argv[4]),
+                  read(process.argv[5]),
+                )
+              : crates,
+            ...process.argv.slice(4, 8).map(read),
+          ),
+        ),
       );
       process.exit(0);
     }
@@ -714,9 +817,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       );
     }
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: review command-tests.json against the test inventory, lock inputs and the 144-PR history; rerun with OUTPUT.json`,
-    );
+    const mode = ["--resolve", "--resolve-history", "--inventory"].includes(process.argv[2])
+      ? process.argv[2]
+      : "replay";
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|ENOSPC|EROFS)$/.test(error.code)
+        ? `check the named path's type, existence and permissions, available disk space, and that the output parent is writable; rerun the same ${mode} invocation`
+        : mode.startsWith("--resolve")
+          ? `correct the named resolution configuration, lockfile, manifest or toolchain input; rerun the same ${mode} invocation with all input and output paths`
+          : `review the named catalog/inventory input and 144-PR history; rerun the same ${mode} invocation with its output path`;
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

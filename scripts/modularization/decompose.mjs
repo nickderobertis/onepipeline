@@ -158,9 +158,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `decomposition: ${Object.keys(result.dispositions).length} original tests classified`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: reconcile the baseline catalog with the current e2e source, then rerun decompose.mjs`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same decompose.mjs invocation"
+        : "reconcile the baseline catalog with the current e2e source, then rerun decompose.mjs";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

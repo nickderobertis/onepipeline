@@ -7,8 +7,9 @@ import { commandAppendix } from "./command-report.mjs";
 import { compileMapping, affectedSuites } from "../crate-split-replay.mjs";
 import { targetGraph } from "./target-graph.mjs";
 import { commandMapping } from "./command-replay.mjs";
-import { commandPaths } from "./source-projection.mjs";
+import { commandPaths, cliArgumentOwners } from "./source-projection.mjs";
 import { expandCatalog } from "./catalog.mjs";
+import { moduleGraph } from "./graph.mjs";
 import { loadAttributions } from "./attribution.mjs";
 import { functions } from "./rust-syntax.mjs";
 import { compareGlobInputs } from "./glob-impact.mjs";
@@ -79,6 +80,35 @@ export function intentFor(id) {
   return intent || name.replaceAll("_", " ");
 }
 
+function validateMigration(steps, crates) {
+  if (!Array.isArray(steps) || steps.length !== Object.keys(crates).length)
+    throw new Error("invalid target migration: expected one step per crate");
+  const landed = new Set();
+  let previous = 0;
+  for (const step of steps) {
+    if (
+      !step ||
+      typeof step !== "object" ||
+      Array.isArray(step) ||
+      Object.keys(step).some((key) => !["crate", "suiteSkip"].includes(key)) ||
+      typeof step.crate !== "string" ||
+      !Object.hasOwn(crates, step.crate) ||
+      landed.has(step.crate) ||
+      !Number.isFinite(step.suiteSkip) ||
+      step.suiteSkip < previous ||
+      step.suiteSkip > 1
+    )
+      throw new Error("invalid target migration step: crate, order or skipped fraction");
+    if (
+      !Array.isArray(crates[step.crate].deps) ||
+      crates[step.crate].deps.some((name) => !landed.has(name))
+    )
+      throw new Error(`invalid target migration dependency order at ${step.crate}`);
+    landed.add(step.crate);
+    previous = step.suiteSkip;
+  }
+}
+
 /** Render the reviewed graph and every original test from the replay's own inputs. */
 export function targetAppendix({ layout, moves, catalog, result }) {
   if (
@@ -107,6 +137,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       )
   )
     throw new Error("target evidence differs from the current reviewed moves/catalog");
+  validateMigration(result.migration, layout.crates);
   const current = JSON.parse(
     execFileSync(
       process.execPath,
@@ -166,6 +197,8 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       !platform.missingModules.every((name) => typeof name === "string")
     )
       throw new Error("invalid target platform data");
+  if (result.migration.at(-1).suiteSkip !== suiteSkip)
+    throw new Error("invalid target migration terminal skipped fraction");
   const baseline = JSON.parse(reviewed("scripts/modularization/command-tests.json"));
   const baselineMetrics = [
     ...reviewed("docs/modularization-command-replay.md").matchAll(
@@ -178,7 +211,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
   const comparison = [
     "## Baseline beside the target",
     "",
-    "The 6.61% unsplit-test baseline is committed at bffb01b3. Suite denominators differ (31 baseline versus the target count below); both seconds columns allocate the same observed module totals and are estimates, not new timings.",
+    "The 6.61% unsplit-test baseline is committed at bffb01b3. The previous target at ebe2ba6e skipped 8.30% of suite runs (Linux 5.00%, macOS 4.95%, Windows 4.97%, local 5.09% estimated seconds); the regenerated target below replaces it. Suite denominators differ (31 baseline versus the target count below); both seconds columns allocate the same observed module totals and are estimates, not new timings.",
     "",
     "| Platform | Baseline suite runs skipped | Baseline estimated seconds skipped | Target suite runs skipped | Target estimated seconds skipped |",
     "| --- | ---: | ---: | ---: | ---: |",
@@ -188,6 +221,202 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     ),
     "",
   ];
+  const engineCrates = new Set([
+    "journal",
+    "journal-reader",
+    "checkpoint",
+    "cross-run-query",
+    "run-summary",
+    "run-result",
+    "edit-reconciler",
+    "readjust-state",
+    "readjustment",
+    "review-discovery",
+    "review-replies",
+    "event-emission",
+    "channel-admission",
+    "dispatch-cancellation",
+    "publication-query",
+    "agent-session",
+    "run-locks",
+    "run-paths",
+    "planner-channel",
+    "checkpoint",
+    "plan-edits",
+    "scheduler",
+    "run-control",
+    "agent-execution",
+    "task-store",
+    "run-record",
+    "run-projection",
+    "publication",
+  ]);
+  const engineFiles = new Set(
+    Object.entries(layout.crates)
+      .filter(([name]) => engineCrates.has(name))
+      .flatMap(([, crate]) => crate.files),
+  );
+  const engineRows = result.rows
+    .map((row) => ({
+      ...row,
+      engineFiles: row.files.filter(
+        (file) =>
+          engineFiles.has(file) &&
+          (file !== "src/driver.rs" ||
+            row.effectiveFiles.some((path) =>
+              [...engineCrates].some((name) => path === `moved/${name}/${file}`),
+            )),
+      ),
+    }))
+    .filter((row) => row.engineFiles.length);
+  const mixedEngineRows = result.rows.filter(
+    (row) => row.files.includes("src/driver.rs") && row.effectiveFiles.includes("src/driver.rs"),
+  );
+  const engineLines = [
+    "## PRs changing genuinely shared engine source",
+    "",
+    `${engineRows.length}/144 PRs (${((100 * engineRows.length) / 144).toFixed(2)}%) change the shared engine source files listed below. This is a separate file-touch statistic, not the number forced broad by lockfiles, configuration or CLI arguments. Command-only driver hunks are excluded; driver.rs counts only when a classified hunk moves to a shared engine owner. ${mixedEngineRows.length} PRs retain an ambiguous whole-file driver input and are conservatively selected separately. A file-level touch can still cover both shared and command-local code, so this statistic is evidence of shared subsystem work, not a claim that every hunk must fan out to all commands.`,
+    "",
+    "| PR / revision | Shared engine files |",
+    "| --- | --- |",
+    ...engineRows.map(
+      (row) =>
+        `| ${/#(\d+)\)/.exec(row.subject)?.[0]?.replace(")", "") ?? row.commit.slice(0, 8)} / ${row.commit.slice(0, 8)} | ${row.engineFiles.join(", ")} |`,
+    ),
+    "",
+  ];
+  const subsystemLines = [
+    "## Engine subsystem boundaries (included in this replay)",
+    "",
+    "engine-subsystems.json schema 1 replaces aggregate dependencies with the consumer-owned interfaces below. The resulting layout is schema 3; source item moves override earlier extraction ownership. These are proposed real implementations and adapters, not test doubles. The compatibility facade aggregates their original public paths and strict wire types.",
+    "",
+    "| Subsystem / command | Source files and extracted items | Consumer-owned interface / preserved behavior |",
+    "| --- | --- | --- |",
+    ...Object.entries(layout.engineSubsystems.subsystems)
+      .filter(([name]) => !name.startsWith("cmd-"))
+      .map(
+        ([name, entry]) =>
+          `| ${name} | ${cell([...entry.files, ...entry.items.map((item) => `${item.file}::{${item.symbols.join(", ")}}`)].join("; ") || "remaining primary items / adapter")} | ${cell(entry.interface)} |`,
+      ),
+    "",
+    "### Corrected source-cycle classification for review replies",
+    "",
+    "src/reply.rs is host review reply drafting/posting. It is shared review-replies, not the CLI reply command. This table supersedes the original command classification for every incident source-cycle edge; the original edge inventory remains unchanged.",
+    "",
+    "| Original edge | Classification | Fix |",
+    "| --- | --- | --- |",
+    ...moduleGraph()
+      .edges.filter((edge) => edge.from === "reply" || edge.to === "reply")
+      .map(
+        (edge) =>
+          `| ${edge.from} → ${edge.to} | ${edge.to === "engine" ? "new seam" : "genuinely shared concept"} | ${edge.to === "engine" ? "review-replies owns DeclineValidation; edit-reconciler wraps Staged. Shared emission helpers move to event-emission." : edge.to === "review" ? "Move review::key to review-replies; discovery calls the same idempotence key without a reverse dependency." : "Move host reply behavior to review-replies and retain the named subsystem implementation dependencies in the graph below."} |`,
+      ),
+    "",
+    "### Aggregate edges replaced by subsystem interfaces",
+    "",
+    "Every removed aggregate edge is listed here. The depending subsystem owns the port or input DTO described in its row above; the command or scheduler composition root supplies the real implementation. Pure query code never receives a write-capable manager merely to obtain facts. This preserves execution paths while reversing compile dependencies.",
+    "",
+    "| Depending crate | Former dependency | New seam / operation move |",
+    "| --- | --- | --- |",
+    ...layout.targetFixes
+      .filter((fix) => fix.replacement === "consumer-owned subsystem port")
+      .map((fix) => `| ${fix.from} | ${fix.to} | ${cell(fix.reason)} |`),
+    "",
+    "### Remaining crate fan-out and the next boundary",
+    "",
+    "Counts include explicit cross-command, public-API and shipped-dispatch integration suites. These edges have not been erased from the replay. The next split narrows implementation changes; a change to a common wire grammar or atomic primitive still must test all its real consumers. No claim below treats moving a runtime dependency behind a callback as permission to omit the real callback implementation from a driving command's suite.",
+    "",
+    "| Crate reaching more than half the suites | Suites | Further split |",
+    "| --- | ---: | --- |",
+  ];
+  const furtherSplits = {
+    "run-views":
+      "Separate snapshot assembly, activity/history queries, liveness refresh and upstream/publication refresh; each command runner retains only the refreshes it actually invokes. Full snapshot integrations retain all facets.",
+    "edit-reconciler":
+      "Separate envelope validation, staged operation application and orphan queue recovery; inline submitters still compose their actual apply/recovery effects.",
+    "readjust-state":
+      "Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read.",
+    readjustment:
+      "Separate host detection from retarget/restack execution and post-edit refresh; only operations invoking each effect retain it.",
+    "review-replies":
+      "Separate review idempotence keys, decline validation, drafting and host posting; the editor needs validation and actual triggered effects.",
+    "review-discovery":
+      "Separate review discovery/query from scheduled pass effects and reply triggering.",
+    "event-emission":
+      "Separate payload encoding, bounded formatting and channel delivery; each emitter retains its actual writer implementation.",
+    "channel-admission":
+      "Separate ownership handover, queue admission and reply wait policy; preserve takeover recovery ordering.",
+    "run-control":
+      "Separate lifecycle start/adoption from stop/shutdown and continuation; retain real ownership and process operations for each entrypoint.",
+    publication:
+      "Separate landing validation, publish execution, restack and retarget operations; preserve atomic publication boundaries.",
+    "release-watch":
+      "Separate stated-release evidence/acknowledgement from upstream polling and scheduler wakeup.",
+    "task-store":
+      "Separate graph edits, dispatch facts and publication state commits while retaining transactional consistency.",
+    "plan-edits":
+      "Separate operation schema and validation from operation-specific application; retain full envelope validation integrations.",
+    "agent-session":
+      "Separate session identity/lookup from author graph creation and process attachment.",
+    "planner-notes": "Separate note envelope validation, delivery and reply receipt handling.",
+    "test-scenario-schema":
+      "Split scenario/profile configuration by fake protocol and keep only the stable primitive codec shared. Fixture setup links the scenario schema, never the aggregate executable package; a shared serde codec update still tests its real consumers.",
+    "render-cost":
+      "Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it.",
+    processes:
+      "Separate host identity, process liveness, subprocess launch and handle detachment; replace generic sys imports with those capability crates.",
+    "event-vocabulary":
+      "Separate scheduler, channel, publication and agent kind registries; assemble complete validation only in the journal registry integration.",
+    diagnostics:
+      "Move domain-specific refusal constructors/formatters to the owning subsystem; retain only the stable error envelope shared by all commands.",
+    "plan-model":
+      "Separate node/edge schema, executor configuration, publication criteria and plan-loading IO; field-specific readers use the corresponding schema facet. Common strict schema validation remains shared.",
+    "event-payloads":
+      "Separate scheduler, edit, publication and channel payload schemas from the generic bus envelope. Full history validators still compose all registries; a registry grammar change legitimately reaches them.",
+    "run-record":
+      "Separate launch identity, agent configuration and invocation provenance; retain a facade LaunchRecord with identical serialization. Whole-record strict decoding remains a shared grammar input.",
+    "run-projection":
+      "Separate scheduler frontier, branch/publication, channel debt and activity folds; views request their required facets. Full-state checkpoint compatibility retains a full-fold integration.",
+    "planner-channel":
+      "Separate envelope schema/allowlist, transport queue, delivery acknowledgements and document-layout validation. Reply transport does not compile scheduler-op validation.",
+    "run-files":
+      "Separate atomic replacement/durability, append-tail healing, JSON codec and range reads; read-only facets cease importing append/lock implementations. Atomic replacement fixes still run all writers.",
+    "branch-template":
+      "Separate branch-template parsing from expansion; commands validating plans need parsing, launch composition needs expansion.",
+    "yaml-codec":
+      "Keep generic strict codec stable; move plan, channel-layout and executor document adapters into their owning crates. A generic strict-decoder fix remains a real shared input.",
+    "run-paths":
+      "Separate run-id validation/root selection from checkpoint/channel/report/dispatch path builders, colocating each builder with its subsystem. Common root semantics remain shared.",
+    "run-labels":
+      "Separate label record codec/query from update/atomic commit; display commands depend only on the query and schema.",
+    "journal-reader":
+      "Separate envelope decoding/version checks, merge ordering, loss accounting and byte-range iteration. Full-history readers still compose the same strict checks.",
+    "publication-query":
+      "Separate landing evidence reread, branch status and debt classification; status needs landing evidence, debt commands need the corresponding debt facet.",
+    "run-result":
+      "Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement.",
+    checkpoint:
+      "Separate coverage/seal validation, bounded replay and derived-cache publication. Cache-writing readers still test the real cache writer.",
+    "run-summary":
+      "Separate summary record/query from append-driven Maintainer; host/runs listing need query, writers compose maintenance.",
+    "append-stamp":
+      "Separate stamp reading/comparison from publication; a changed shared stamp protocol remains an actual input of every stamp consumer.",
+    "run-report":
+      "Separate terminal result record reading from report atomic publication and report presentation; preserve the existing result wire shape.",
+    "cross-run-query":
+      "Separate reference parsing, upstream status snapshot IO and resolution-cache tracking; only the views consuming upstream state retain those facets.",
+    "member-liveness":
+      "Separate heartbeat wire decoding, freshness classification and heartbeat publication; observer views do not import publisher implementation.",
+    "event-filter":
+      "Separate selector AST, matcher and YAML document adapter; inline selectors need no file parser.",
+  };
+  for (const name of Object.keys(layout.crates)) {
+    const count = Object.values(reach.suites).filter((suite) => suite.crates.has(name)).length;
+    if (count <= result.suites / 2) continue;
+    if (!furtherSplits[name]) throw new Error(`missing further split for broad crate ${name}`);
+    subsystemLines.push(`| ${name} | ${count} | ${furtherSplits[name]} |`);
+  }
+  subsystemLines.push("");
   const glob = compareGlobInputs(result.mapping.selection, result.rows);
   const globLines = [
     "## What narrowing the docs/scripts globs frees",
@@ -235,13 +464,17 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       catalog,
     )
       .replace("<!-- BEGIN COMMAND REPLAY -->\n", "")
+      .replace(
+        "Nx/recipe/config changes remain global.",
+        "Nx/package-manager changes remain global; just recipes and Cargo/nextest sections are projected only to test targets which consume them.",
+      )
       .replaceAll(
         "Compiler change: no; other inputs: only after their stated extraction.",
         "No: uniform compiler changes reach all Rust crates; other listed inputs are already projected.",
       )
       .replaceAll(
         "Only command fragments/borrowed helper attribution can narrow; actual shared behavior remains.",
-        "No further removal in this design: these shared inputs/union retain their consumers; ambiguous source/helper hunks conservatively overselect.",
+        "The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect.",
       )
       .replaceAll(
         "scripts/modularization/command-tests.json",
@@ -260,9 +493,27 @@ export function targetAppendix({ layout, moves, catalog, result }) {
         "Unrelated manifest edits are already projected; actual shared requirements/source changes: no.",
       ),
     ...globLines,
+    ...engineLines,
+    ...subsystemLines,
+    "## CLI argument ownership",
+    "",
+    "Each argument type and enum variant below moves to its named command crate. Cli and registration enums stay in the compatibility routing facade; cli-schema retains only genuinely shared argument value types. The old public paths re-export these identical types. A command flag hunk selects its command, while routing registration changes select the shipped-dispatch integration. The primary whole-file ownership table is overridden by these item moves.",
+    "",
+    "| Argument item / registration variant | Destination |",
+    "| --- | --- |",
+    ...Array.from(
+      cliArgumentOwners(
+        reviewed("src/cli.rs"),
+        commandPaths(JSON.parse(reviewed("scripts/modularization/cli-commands.json"))),
+      ),
+    ).map(
+      ([symbol, owner]) =>
+        `| ${symbol} | ${owner instanceof Set ? `${[...owner].join(", ")} (duplicate argument definition, preserving flags)` : owner} |`,
+    ),
+    "",
     "## Crates, direct edges and primary source ownership",
     "",
-    "Every Rust source file has exactly one primary owner in layout.json. Symbol extractions below override the primary owner for the named items, including their private helpers; source wrappers become re-exports. Dependencies retained from a former whole module are conservative: this graph proves reachability and acyclicity, not a compiled refactor.",
+    "Every Rust source file has exactly one primary owner after layout.json and engine-subsystems.json are applied. Symbol extractions below override the primary owner for the named items, including their private helpers; source wrappers become re-exports. engine-subsystems.json replaces the former whole-module unions with explicit subsystem interfaces; remaining edges are real proposed capabilities. This graph proves modeled reachability and acyclicity, not a compiled refactor.",
     "",
     "| Crate | Primary files | Direct dependencies |",
     "| --- | --- | --- |",
@@ -334,7 +585,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "",
     "## Every original test and retained integration",
     "",
-    "Each row preserves all assertions. Decomposed rows move setup exit/output assertions to the producer's phase and consumer assertions to the consumer's phase over records written by the real production writers. Failure fixtures use the same envelope/schema validators and durable writers. Retained integrations exercise the listed commands in the original sequence, with the live ordering in the reason. full-dispatch retains parser/routing assertions against the shipped binary; public-api retains facade identity/parity assertions. Shared helper imports and fixture paths are explicit runner inputs in the replay JSON.",
+    "Each row preserves all assertions. Decomposed rows move setup exit/output assertions to the producer's phase and consumer assertions to the consumer's phase over recorded fixture preconditions. Phase-local std/serde builders prepare those files; the real consumer validates them. Assertions about producer output, durability or ordering remain in the producer phase or a complete integration. Retained integrations exercise the listed commands in the original sequence, with the live ordering in the reason. full-dispatch retains parser/routing assertions against the shipped binary; public-api retains facade identity/parity assertions. Shared helper imports and fixture paths are explicit runner inputs in the replay JSON.",
     "",
     "| Original test | Disposition | Destination command phases / integration participants | Assertion/integration intent from its source | Why |",
     "| --- | --- | --- | --- | --- |",
@@ -354,6 +605,14 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "| Existing source test | Referenced destination owners |",
     "| --- | --- |",
   );
+  const subsystemSites = Object.entries(layout.engineSubsystems.subsystems).flatMap(
+    ([crate, entry]) => entry.items.map((item) => ({ ...item, crate })),
+  );
+  const subsystemOwner = new Map(
+    subsystemSites.flatMap((site) =>
+      site.symbols.map((symbol) => [`${site.file}::${symbol}`, site.crate]),
+    ),
+  );
   const sites = [
     ...moves.extractions,
     ...moves.edgeMoves,
@@ -361,7 +620,17 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     moves.recordFiles,
     ...(moves.sharedSlices ?? []),
     ...(moves.commandSlices ?? []),
-  ];
+  ]
+    .map((site) => ({
+      ...site,
+      symbols: site.symbols.filter(
+        (symbol) =>
+          !subsystemOwner.has(`${site.file}::${symbol}`) ||
+          subsystemOwner.get(`${site.file}::${symbol}`) ===
+            (site.shared ?? site.replacement ?? site.crate),
+      ),
+    }))
+    .concat(subsystemSites);
   for (const file of [...new Set(sites.map((site) => site.file))])
     for (const test of functions(reviewed(file)).filter((entry) => entry.test)) {
       const owners = [

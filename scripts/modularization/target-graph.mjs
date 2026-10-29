@@ -2,8 +2,9 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { codeOnly, moduleGraph, validate } from "./graph.mjs";
+import { engineGraph } from "./engine-graph.mjs";
 import { compileMapping } from "../crate-split-replay.mjs";
-import { commandPaths, cliPaths } from "./source-projection.mjs";
+import { commandPaths, cliPaths, cliArgumentOwners } from "./source-projection.mjs";
 
 /** Apply symbol extractions to the source-derived graph; retain surplus edges conservatively. */
 export function targetGraph(base, moves, root = ".") {
@@ -308,46 +309,66 @@ export function targetGraph(base, moves, root = ".") {
     if (foreign.length)
       throw new Error(`command isolation failed: ${name} reaches ${foreign.join(", ")}`);
   }
-  return {
-    ...base,
-    crates,
-    commands: Object.fromEntries(
-      Object.entries(base.commands)
-        .filter(([, owner]) => !moves.renames?.[owner] || moves.renames[owner].startsWith("cmd-"))
-        .map(([file, owner]) => [file, moves.renames?.[owner] ?? owner]),
-    ),
-    suites: Object.fromEntries(
-      Object.entries(base.suites).map(([name, suite]) => [
-        name,
-        { ...suite, crates: suite.crates.map((crate) => moves.renames?.[crate] ?? crate) },
-      ]),
-    ),
-    auxiliarySuites: Object.fromEntries(
-      Object.entries(base.auxiliarySuites).map(([name, suite]) => [
-        name,
-        { ...suite, crates: suite.crates.map((crate) => moves.renames?.[crate] ?? crate) },
-      ]),
-    ),
-    historicalPaths: attribution,
-    ...(Object.keys(assets).length ? { assets } : {}),
-    ...(Object.keys(externalRoots).length ? { externalRoots } : {}),
-    symbolSources: Object.fromEntries(
-      Object.keys(crates).map((name) => [
-        name,
-        [
-          ...moves.extractions,
-          ...moves.edgeMoves,
-          ...(moves.recordFiles ? [moves.recordFiles] : []),
-          ...(moves.sharedSlices ?? []),
-          ...(moves.commandSlices ?? []),
-        ]
-          .filter((entry) => (entry.shared ?? entry.replacement ?? entry.crate) === name)
-          .map(({ file, symbols }) => ({ file, symbols })),
-      ]),
-    ),
-    targetFixes: fixes,
-    sourceProof: derived,
-  };
+  return engineGraph(
+    {
+      ...base,
+      crates,
+      commands: Object.fromEntries(
+        Object.entries(base.commands)
+          .filter(([, owner]) => !moves.renames?.[owner] || moves.renames[owner].startsWith("cmd-"))
+          .map(([file, owner]) => [file, moves.renames?.[owner] ?? owner]),
+      ),
+      suites: Object.fromEntries(
+        Object.entries(base.suites).map(([name, suite]) => [
+          name,
+          { ...suite, crates: suite.crates.map((crate) => moves.renames?.[crate] ?? crate) },
+        ]),
+      ),
+      auxiliarySuites: Object.fromEntries(
+        Object.entries(base.auxiliarySuites).map(([name, suite]) => [
+          name,
+          { ...suite, crates: suite.crates.map((crate) => moves.renames?.[crate] ?? crate) },
+        ]),
+      ),
+      historicalPaths: attribution,
+      ...(Object.keys(assets).length ? { assets } : {}),
+      ...(Object.keys(externalRoots).length ? { externalRoots } : {}),
+      symbolSources: Object.fromEntries(
+        Object.keys(crates).map((name) => [
+          name,
+          [
+            ...moves.extractions,
+            ...moves.edgeMoves,
+            ...(moves.recordFiles ? [moves.recordFiles] : []),
+            ...(moves.sharedSlices ?? []),
+            ...(moves.commandSlices ?? []),
+          ]
+            .filter((entry) => (entry.shared ?? entry.replacement ?? entry.crate) === name)
+            .map(({ file, symbols }) => ({ file, symbols }))
+            .concat(
+              [
+                {
+                  file: "src/cli.rs",
+                  symbols: [
+                    ...cliArgumentOwners(readFileSync(`${root}/src/cli.rs`, "utf8"), commands),
+                  ]
+                    .filter(
+                      ([symbol, owner]) =>
+                        (owner instanceof Set ? owner.has(name) : owner === name) &&
+                        !symbol.startsWith("__"),
+                    )
+                    .map(([symbol]) => symbol),
+                },
+              ].filter((entry) => entry.symbols.length),
+            ),
+        ]),
+      ),
+      targetFixes: fixes,
+      sourceProof: derived,
+    },
+    JSON.parse(readFileSync(`${root}/scripts/modularization/engine-subsystems.json`, "utf8")),
+    root,
+  );
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

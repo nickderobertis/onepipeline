@@ -2,12 +2,6 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { codeOnly } from "./graph.mjs";
 
-const git = (...args) =>
-  execFileSync("git", args, {
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
 const kebab = (word) =>
   word.replace(/[a-z0-9][A-Z]/g, (pair) => `${pair[0]}-${pair[1]}`).toLowerCase();
 
@@ -100,11 +94,27 @@ export function cliPaths(cli, configured) {
   return enums;
 }
 
-export function sourceOwners(layout, moves, catalog) {
-  const cli = readFileSync("src/cli.rs", "utf8");
-  const commands = commandPaths(
-    JSON.parse(readFileSync("scripts/modularization/cli-commands.json", "utf8")),
-  );
+/** Each enum variant, including its clap attributes, belongs to its command. */
+export function cliVariants(text) {
+  const result = [];
+  for (const decl of declarations(text).filter((entry) => entry.kind === "enum")) {
+    const lines = text.split("\n");
+    let start = decl.start + 1;
+    for (let line = start; line < decl.end; line++) {
+      const match = /^ {4}([A-Z]\w*)(?:\(|\s*\{|,)/.exec(lines[line - 1]);
+      if (!match) continue;
+      const next = lines
+        .slice(line, decl.end - 1)
+        .findIndex((value) => /^ {4}(?:[A-Z]\w*(?:\(|\s*\{|,)|#|\/\/)/.test(value));
+      const end = next < 0 ? decl.end - 1 : line + next;
+      result.push({ name: `__variant_${decl.name}_${match[1]}`, start, end });
+      start = end + 1;
+    }
+  }
+  return result;
+}
+
+export function cliArgumentOwners(cli, commands) {
   const enums = cliPaths(cli, commands);
   const cliOwners = new Map([
     ["Cli", "onepipeline"],
@@ -120,6 +130,7 @@ export function sourceOwners(layout, moves, catalog) {
     const outer = [...enums.get("Command").matchAll(/^ {4}([A-Z]\w*)(?:\((\w+)\))?[, ]/gm)].find(
       (m) => kebab(m[1]) === parent,
     );
+    cliOwners.set(`__variant_Command_${outer[1]}`, child ? "onepipeline" : owner);
     if (!child) {
       if (outer[2]) use(outer[2], owner);
     } else {
@@ -127,11 +138,31 @@ export function sourceOwners(layout, moves, catalog) {
       const inner = [...enums.get(outer[2]).matchAll(/^ {4}([A-Z]\w*)(?:\((\w+)\)| \{)/gm)].find(
         (m) => kebab(m[1]) === child,
       );
+      if (inner) cliOwners.set(`__variant_${outer[2]}_${inner[1]}`, owner);
       if (inner?.[2]) use(inner[2], owner);
     }
   }
-  for (const [type, users] of typeUsers) if (users.size === 1) cliOwners.set(type, [...users][0]);
-  const result = { "src/cli.rs": cliOwners };
+  const types = declarations(cli).filter((entry) => ["struct", "enum"].includes(entry.kind));
+  for (const [type, users] of typeUsers) {
+    const definition = types.find((entry) => entry.name === type);
+    if (definition)
+      for (const nested of types)
+        if (nested.name !== type && new RegExp(`\\b${nested.name}\\b`).test(definition.code))
+          for (const owner of users) use(nested.name, owner);
+  }
+  for (const [type, users] of typeUsers)
+    cliOwners.set(type, users.size === 1 ? [...users][0] : users);
+  for (const type of types) if (!cliOwners.has(type.name)) cliOwners.set(type.name, "cli-schema");
+  return cliOwners;
+}
+
+export function sourceOwners(layout, moves, catalog) {
+  const cli = readFileSync("src/cli.rs", "utf8");
+  const commands = commandPaths(
+    JSON.parse(readFileSync("scripts/modularization/cli-commands.json", "utf8")),
+  );
+  const enums = cliPaths(cli, commands);
+  const result = { "src/cli.rs": cliArgumentOwners(cli, commands) };
   const helpers = new Map();
   for (const entry of [
     ...moves.extractions,
@@ -175,6 +206,12 @@ export function sourceOwners(layout, moves, catalog) {
       result[file].set(name, users.size === 1 ? [...users][0] : primary);
     }
   }
+  // Explicit subsystem item ownership supersedes old aggregate extractions.
+  for (const [owner, entry] of Object.entries(layout.engineSubsystems?.subsystems ?? {}))
+    for (const item of entry.items) {
+      result[item.file] ??= new Map();
+      for (const symbol of item.symbols) result[item.file].set(symbol, owner);
+    }
   // The dispatch match is a routing facade; implementation functions remain with their concepts.
   result["src/driver.rs"] ??= new Map();
   result["src/driver.rs"].set("dispatch", "onepipeline");
@@ -201,7 +238,14 @@ export function sourceOwners(layout, moves, catalog) {
 }
 
 /** Historical hunks are charged to both old and new declaration owners. Unknown lines retain the whole-file input. */
-export function projectSourceChange(change, owners, layout) {
+export function projectSourceChange(change, owners, layout, root = ".") {
+  const git = (...args) =>
+    execFileSync("git", args, {
+      cwd: root,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   const files = [];
   const projected = [];
   for (const file of change.files) {
@@ -214,6 +258,7 @@ export function projectSourceChange(change, owners, layout) {
       try {
         const text = git("show", `${rev}:${file}`);
         snapshots[index] = declarations(text);
+        if (file === "src/cli.rs") snapshots[index].push(...cliVariants(text));
         if (file === "src/driver.rs") {
           const arms = [...codeOnly(text).matchAll(/^ {8}Verb::([A-Z]\w*)/gm)];
           for (const [position, arm] of arms.entries())
@@ -251,9 +296,11 @@ export function projectSourceChange(change, owners, layout) {
         const first = Number(hunk[index === 0 ? 1 : 3]);
         const count = Number(hunk[index === 0 ? 2 : 4] ?? 1);
         for (let line = first; line < first + count; line++) {
-          const held = snapshots[index].filter(
+          let held = snapshots[index].filter(
             (decl) => decl.start <= line && decl.end >= line && owners[file].has(decl.name),
           );
+          if (file === "src/cli.rs" && held.length)
+            held = [held.sort((a, b) => a.end - a.start - (b.end - b.start))[0]];
           if (!held.length) unknown = true;
           for (const decl of held) {
             const destination = owners[file].get(decl.name);

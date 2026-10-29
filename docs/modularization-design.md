@@ -11,7 +11,6 @@ The executable inputs are `scripts/modularization/layout.json` and the current s
 ```sh
 node scripts/modularization/graph.mjs
 node scripts/modularization/replay.mjs scripts/modularization/layout.json target/modularization.json
-node scripts/modularization/render.mjs
 just nx run onepipeline-modularization:check
 ```
 

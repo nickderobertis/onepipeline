@@ -489,9 +489,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `module graph: ${result.files} files, ${result.crates} crates, ${result.edges} source edges; crate graph acyclic${process.argv[3] ? `; wrote ${process.argv[3]}` : ""}`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: correct the named layout entry and rerun node scripts/modularization/graph.mjs MAPPING.json [REPORT.json]`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same node scripts/modularization/graph.mjs MAPPING.json [REPORT.json] invocation"
+        : "correct the named layout entry and rerun node scripts/modularization/graph.mjs MAPPING.json [REPORT.json]";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }
