@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { spawnable } from "./spawn-support.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -627,6 +628,30 @@ describe("affected selection over real commits", () => {
     "onepipeline-note-journeys",
   ];
 
+  it("selects the pooled-slot journey for its engine and support, independently of docs and other journeys", (t) => {
+    const repo = scratchRepository(t);
+    for (const [file, selected] of [
+      ["src/pool.rs", "true"],
+      ["src/engine.rs", "true"],
+      ["src/lifecycle.rs", "true"],
+      ["src/vcs.rs", "true"],
+      ["tests/e2e/harness.rs", "true"],
+      ["tests/e2e/pool_support.rs", "true"],
+      ["tests/pooled_slot/main.rs", "true"],
+      ["docs/contract.md", "false"],
+      ["examples/executors.yaml", "false"],
+      ["tests/e2e/lifecycle.rs", "false"],
+    ]) {
+      const base = repo.head();
+      repo.change(file);
+      assert.equal(
+        repo.affects(base, ["onepipeline-pooled-slot"])["onepipeline-pooled-slot"],
+        selected,
+        `${file} selects the pooled-slot journey`,
+      );
+    }
+  });
+
   it("selects a test tier by the files its tests read, and the crate with it", (t) => {
     const repo = scratchRepository(t);
     const base = repo.head();
@@ -825,6 +850,7 @@ esac
     "_contract-test",
     "_note-test",
     "_codex-server-test",
+    "_pooled_slot-test",
   ];
 
   it("restores its profiles for the aggregate to merge beside the tier that ran", (t) => {
@@ -855,7 +881,14 @@ esac
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
-    assert.deepEqual(tiersIn(cold.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(cold.merged), [
+      "codex_server",
+      "contract",
+      "e2e",
+      "note",
+      "pooled_slot",
+      "rest",
+    ]);
 
     // Only the note tier's inputs change; the budget record the e2e tier
     // writes is gone, as it is on a fresh runner.
@@ -868,7 +901,14 @@ esac
       `only the changed tier runs: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
-    assert.deepEqual(tiersIn(warm.merged), ["codex_server", "contract", "e2e", "note", "rest"]);
+    assert.deepEqual(tiersIn(warm.merged), [
+      "codex_server",
+      "contract",
+      "e2e",
+      "note",
+      "pooled_slot",
+      "rest",
+    ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
       "the replayed e2e tier did not restore the budget record `budgets` reads",
@@ -1061,13 +1101,15 @@ describe("release-only workload selection", () => {
     const graphPath = join(repo.path, "task-graph.json");
     const graph = (args) => {
       const run = spawnSync(
-        join(repo.path, "node_modules", ".bin", "nx"),
-        [...args, `--graph=${graphPath}`],
-        {
-          cwd: repo.path,
-          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
-          encoding: "utf8",
-        },
+        ...spawnable(
+          join(repo.path, "node_modules", ".bin", "nx"),
+          [...args, `--graph=${graphPath}`],
+          {
+            cwd: repo.path,
+            env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+            encoding: "utf8",
+          },
+        ),
       );
       assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
       const tasks = JSON.parse(readFileSync(graphPath, "utf8")).tasks.tasks;

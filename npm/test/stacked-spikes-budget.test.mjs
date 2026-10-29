@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { spawnable } from "./spawn-support.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const binary = join(root, "node_modules", ".bin", "onebudgetspec");
@@ -39,7 +40,7 @@ function check() {
     "stacked-spikes-stage-time",
     join(workspace, "budgets.yaml"),
   ];
-  const output = spawnSync(binary, args, { encoding: "utf8" });
+  const output = spawnSync(...spawnable(binary, args, { encoding: "utf8" }));
   const results = JSON.parse(output.stdout).results;
   assert.equal(results.length, 1, output.stdout);
   assert.equal(results[0].id, "stacked-spikes-stage-time");

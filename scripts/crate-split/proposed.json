@@ -107,7 +107,8 @@
         "tests/e2e/closures.rs",
         "tests/e2e/public_id.rs",
         "tests/recorded/run-root/run-labels",
-        "tests/recorded/run-root/run-labels/**"
+        "tests/recorded/run-root/run-labels/**",
+        "tests/e2e/pool_support.rs"
       ],
       "crates": [
         "onepipeline"
@@ -151,6 +152,10 @@
         "clippy.toml",
         "rustfmt.toml",
         "tests/e2e/store.rs",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/e2e/review.rs",
+        "tests/e2e/review_reply.rs",
+        "tests/golden/review-results-v2.json",
         "tests/e2e/writeback_budget.rs",
         "tests/e2e/writeback_cost.rs",
         "tests/e2e/writeback_projections.rs",

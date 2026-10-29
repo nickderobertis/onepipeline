@@ -7441,6 +7441,60 @@ fn a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job() {
     );
 }
 
+/// A hold stated while another is holding a push leaves that push to its own
+/// release: the held push still goes through when its rendezvous is written.
+///
+/// What [`hold_later_pushes_at`] is for — a journey switching the hook to a second
+/// rendezvous while the first push is inside the hook — and the script that push
+/// is running is the one the second hold would write. So the assertion that
+/// matters is that it was not written again: on Windows a rewrite under a running
+/// `wait-for` can end the hook as a refusal, and whether it does is a race, so
+/// the push succeeding here proves nothing on its own about the rewrite.
+#[test]
+fn a_second_hold_leaves_the_push_the_first_is_holding_to_its_own_release() {
+    let world = World::new("hook-second-hold");
+    let first = held_publication(&world, &world.root.join("first.go"));
+    let repo = world.repository("local-direct", &first.argv());
+    let base = || git(&world, &repo.origin, &["rev-parse", "main"]);
+    let seed = base();
+    let script = world
+        .root
+        .join(if cfg!(windows) { "hook.bat" } else { "hook.sh" });
+
+    // Released before anything is asserted, so a failing assertion ends this test
+    // rather than leaving the push held until the hook's own ceiling.
+    let (written, rewritten, pushed) = std::thread::scope(|scope| {
+        let pushing =
+            scope.spawn(|| publishing_push(&world, &repo.checkout, "a push held across a switch"));
+        world.until("the push to be held", |_| first.holding());
+        let modified = || {
+            std::fs::metadata(&script)
+                .and_then(|meta| meta.modified())
+                .expect("the hook script the held push runs is there")
+        };
+        let written = modified();
+        let second = held_publication(&world, &world.root.join("second.go"));
+        hold_later_pushes_at(&world, &second);
+        let rewritten = modified();
+        first.release();
+        let pushed = pushing.join().expect("the push ran to its end");
+        (written, rewritten, pushed)
+    });
+
+    assert_eq!(
+        rewritten,
+        written,
+        "stating a second hold wrote {} again while a push was running it",
+        script.display()
+    );
+    assert!(
+        pushed.status.success(),
+        "the push the first hold was holding was refused once it was released: {}",
+        String::from_utf8_lossy(&pushed.stderr)
+    );
+    assert_ne!(base(), seed, "the released push did not land");
+}
+
 /// Commit one change and push it, and hand back whatever git made of that —
 /// which is a refusal as often as not, so unlike [`git`] this does not assert.
 ///
@@ -7518,18 +7572,31 @@ fn interpreted(script: &Path) -> Vec<String> {
 /// ever opens.
 #[cfg(windows)]
 fn write_hook_script(world: &World) -> PathBuf {
-    let path = world.root.join("hook.bat");
-    profile::fs::write(&path, include_str!("hook.bat").replace('\n', "\r\n"))
-        .expect("the hook script is written");
-    path
+    write_hook_script_once(
+        &world.root.join("hook.bat"),
+        &include_str!("hook.bat").replace('\n', "\r\n"),
+    )
 }
 
 /// The hook script for this platform, written into the world's own scratch.
 #[cfg(not(windows))]
 fn write_hook_script(world: &World) -> PathBuf {
-    let path = world.root.join("hook.sh");
-    profile::fs::write(&path, include_str!("hook.sh")).expect("the hook script is written");
-    path
+    write_hook_script_once(&world.root.join("hook.sh"), include_str!("hook.sh"))
+}
+
+/// Write the hook script at `path` unless the world already holds it, word for word.
+///
+/// Every hold a journey states reaches here, and a journey states the second while
+/// the first is running: [`hold_later_pushes_at`] exists for exactly that. Writing
+/// the same bytes again is not harmless then, because `std::fs::write` truncates
+/// before it writes, and `cmd.exe` reopens a batch file at every `goto` — so a
+/// `wait-for` turning through its loop can find the file empty, lose its label, and
+/// end the hook with a failure git reads as the merge path refusing the push.
+fn write_hook_script_once(path: &Path, body: &str) -> PathBuf {
+    if profile::fs::read(path).ok().as_deref() != Some(body.as_bytes()) {
+        profile::fs::write(path, body).expect("the hook script is written");
+    }
+    path.to_path_buf()
 }
 
 /// Whether the host would start this file if a `PATH` lookup landed on it.

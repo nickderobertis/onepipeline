@@ -32,6 +32,7 @@ import assert from "node:assert/strict";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { Registry } from "./registry-support.mjs";
+import { spawnable } from "./spawn-support.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const execFileAsync = promisify(execFile);
@@ -41,12 +42,14 @@ const execFileAsync = promisify(execFile);
 /// event loop the registry runs on, and npm would hang against a socket nothing
 /// was accepting.
 async function run(command, args, options = {}) {
-  const { stdout } = await execFileAsync(command, args, {
-    cwd: REPO_ROOT,
-    encoding: "utf8",
-    maxBuffer: 32 * 1024 * 1024,
-    ...options,
-  });
+  const { stdout } = await execFileAsync(
+    ...spawnable(command, args, {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 32 * 1024 * 1024,
+      ...options,
+    }),
+  );
   return stdout;
 }
 
@@ -54,12 +57,14 @@ async function run(command, args, options = {}) {
 /// is what a *successful* run said on stderr — which `run` above discards.
 async function attempt(command, args, options = {}) {
   try {
-    const { stdout, stderr } = await execFileAsync(command, args, {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-      ...options,
-    });
+    const { stdout, stderr } = await execFileAsync(
+      ...spawnable(command, args, {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        maxBuffer: 32 * 1024 * 1024,
+        ...options,
+      }),
+    );
     return { code: 0, stdout, stderr };
   } catch (error) {
     return {

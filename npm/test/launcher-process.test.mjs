@@ -16,12 +16,21 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { chmodSync, closeSync, mkdirSync, openSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  mkdirSync,
+  openSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { STAGED_TARGET_DIR, hostTarget, installInto, pack, run } from "./install-support.mjs";
+import { preloading, spawnable } from "./spawn-support.mjs";
 
 const WINDOWS = process.platform === "win32";
 const EXE = WINDOWS ? "onepipeline.exe" : "onepipeline";
@@ -231,6 +240,8 @@ public static class ConsoleEvent {
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool FreeConsole();
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCtrlHandler(Handler handler, bool add);
+  [DllImport("kernel32.dll", SetLastError = true, EntryPoint = "SetConsoleCtrlHandler")]
+  static extern bool SetConsoleCtrlIgnored(IntPtr none, bool ignored);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GenerateConsoleCtrlEvent(uint ev, uint group);
   [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
@@ -242,6 +253,10 @@ public static class ConsoleEvent {
     si.dwFlags = 1; // STARTF_USESHOWWINDOW
     si.wShowWindow = 0; // SW_HIDE
     PROCESS_INFORMATION pi;
+    // Whether Ctrl+C is ignored is inherited, and a CI runner starts its steps
+    // ignoring it: the launcher is given the handling a terminal gives instead.
+    if (!SetConsoleCtrlIgnored(IntPtr.Zero, false))
+      throw new Exception("SetConsoleCtrlHandler failed: " + Marshal.GetLastWin32Error());
     // CREATE_NEW_CONSOLE
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, false, 0x10,
         IntPtr.Zero, null, ref si, out pi))
@@ -332,10 +347,12 @@ describe("the process the npm-installed command runs as", () => {
       // The command npm put on PATH, started the way any caller starts it.
       const start = (ready, env) =>
         track(
-          spawn(join(project, "node_modules", ".bin", "onepipeline"), flowRun(ready), {
-            cwd: project,
-            env: engineEnv(work, env),
-          }),
+          spawn(
+            ...spawnable(join(project, "node_modules", ".bin", "onepipeline"), flowRun(ready), {
+              cwd: project,
+              env: engineEnv(work, env),
+            }),
+          ),
           ready,
         );
 
@@ -394,13 +411,11 @@ describe("the process the npm-installed command runs as", () => {
         const withoutExec = join(work, "without-execve.cjs");
         writeFileSync(withoutExec, "delete process.execve;\n");
         const refused = spawnSync(
-          join(project, "node_modules", ".bin", "onepipeline"),
-          ["--version"],
-          {
+          ...spawnable(join(project, "node_modules", ".bin", "onepipeline"), ["--version"], {
             cwd: project,
             encoding: "utf8",
-            env: engineEnv(work, { NODE_OPTIONS: `--require "${withoutExec}"` }),
-          },
+            env: engineEnv(work, { NODE_OPTIONS: preloading(withoutExec) }),
+          }),
         );
         assert.equal(refused.status, 1, refused.stderr);
         assert.equal(refused.stdout, "", "the engine ran");
@@ -428,11 +443,13 @@ describe("the process the npm-installed command runs as", () => {
           EXE,
         );
         const refuse = () =>
-          spawnSync(join(damaged, "node_modules", ".bin", "onepipeline"), ["--version"], {
-            cwd: damaged,
-            encoding: "utf8",
-            env: engineEnv(work),
-          });
+          spawnSync(
+            ...spawnable(join(damaged, "node_modules", ".bin", "onepipeline"), ["--version"], {
+              cwd: damaged,
+              encoding: "utf8",
+              env: engineEnv(work),
+            }),
+          );
 
         rmSync(engine);
         const missing = refuse();
@@ -581,7 +598,7 @@ describe("the process the npm-installed command runs as", () => {
         const stderrFile = openSync(log, "w");
         const child = start(ready, {
           stdio: ["ignore", "ignore", stderrFile],
-          env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: `--require "${lies}"` },
+          env: { PROGRAM_HOLD: "1", LIE_AFTER: ready, NODE_OPTIONS: preloading(lies) },
         });
         closeSync(stderrFile);
         const code = await exited(child);
@@ -649,12 +666,13 @@ describe("the process the npm-installed command runs as", () => {
         ".bin",
         WINDOWS ? "onepipeline.cmd" : "onepipeline",
       );
-      const refused = spawnSync(bin, ["--version"], {
-        cwd: project,
-        encoding: "utf8",
-        shell: WINDOWS,
-        env: engineEnv(work, { NODE_OPTIONS: `--require "${preload}"` }),
-      });
+      const refused = spawnSync(
+        ...spawnable(bin, ["--version"], {
+          cwd: project,
+          encoding: "utf8",
+          env: engineEnv(work, { NODE_OPTIONS: preloading(preload) }),
+        }),
+      );
       assert.equal(refused.status, 1, refused.stderr);
       assert.equal(refused.stdout, "", "the engine ran without a keeper");
       assert.match(
@@ -690,6 +708,38 @@ describe("the process the npm-installed command runs as", () => {
         assert.match(refused.stderr, /^onepipeline: failed to launch the onepipeline binary: /);
       }
     });
+
+    if (!WINDOWS) {
+      // On Windows Node throws, rather than emitting "error", for a binary that
+      // is not a program (`spawn UNKNOWN`). Here it throws for a symlink that
+      // resolves to itself, so the keeper meets the same thrown start.
+      it("says it could not start the engine, and exits 1, when starting the binary throws", () => {
+        const looping = join(work, "looping");
+        installInto(looping, packages);
+        keeperFixture(looping);
+        const engine = join(
+          looping,
+          "node_modules",
+          "onepipeline-cli-win32-x64",
+          "bin",
+          "onepipeline.exe",
+        );
+        rmSync(engine);
+        symlinkSync(engine, engine);
+        const launcher = join(looping, "node_modules", "onepipeline-cli", "bin", "onepipeline.js");
+        const refused = spawnSync(process.execPath, [...asWindows, launcher, "--version"], {
+          cwd: looping,
+          encoding: "utf8",
+          env: engineEnv(work),
+        });
+        assert.equal(refused.status, 1, refused.stderr);
+        assert.equal(refused.stdout, "");
+        assert.match(
+          refused.stderr,
+          /^onepipeline: failed to launch the onepipeline binary: spawn ELOOP\n$/,
+        );
+      });
+    }
 
     if (WINDOWS) {
       // A console's Ctrl+C and Ctrl+Break, delivered the way a terminal delivers

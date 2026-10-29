@@ -1274,7 +1274,7 @@ windows-sys = "0.61"
 
 [package]
 name = "onepipeline"
-version = "0.95.4"
+version = "0.95.5"
 edition = "2021"
 rust-version.workspace = true
 description = "Execute a task DAG over oneagentgraph and onevcs, merging their event streams into one."
@@ -1507,6 +1507,11 @@ jsonschema = { version = "0.56", default-features = false }
 [[test]]
 name = "e2e"
 path = "tests/e2e/main.rs"
+
+# The pooled-slot journey has its own Nx input edge and coverage tier.
+[[test]]
+name = "pooled_slot"
+path = "tests/pooled_slot/main.rs"
 
 # The conversational tier, in its own binary for the reason `smoke` is in one:
 # so a runner can name it. Each of these journeys starts a real two-party
