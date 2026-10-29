@@ -566,7 +566,13 @@ enum GraphBackend {
 struct LibraryGraphRun {
     events: Option<mpsc::Receiver<Result<Envelope>>>,
     settled: mpsc::Receiver<Result<Settled>>,
-    cancel: mpsc::Sender<()>,
+    /// How the relay is asked to end the graph: [`CancelMode::Kill`] by a
+    /// [cancel](GraphRun::cancel), [`CancelMode::Stop`] by a
+    /// [stop](GraphRun::stop), which ends nothing before the members have seen it.
+    ///
+    /// [`CancelMode::Kill`]: oneagentgraph::run::CancelMode::Kill
+    /// [`CancelMode::Stop`]: oneagentgraph::run::CancelMode::Stop
+    cancel: mpsc::Sender<oneagentgraph::run::CancelMode>,
     /// The graph run's own id, as the sibling minted it.
     run_id: GraphRunId,
     /// The graph run's directory, which every member process it starts is
@@ -1798,6 +1804,7 @@ impl GraphRun {
         // [`hold_until_ending_recorded`].
         let recorded_under = request.state_dir.clone();
         let recorded_as = run_id.clone();
+        let relay_root = root.clone();
         let (events_tx, events_rx) = mpsc::channel();
         let (settled_tx, settled_rx) = mpsc::channel();
         let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -1808,14 +1815,22 @@ impl GraphRun {
             .spawn(move || {
                 let mut graph_settled = None;
                 loop {
-                    if cancel_rx.try_recv().is_ok() {
+                    if let Ok(mode) = cancel_rx.try_recv() {
                         // Test failpoint only, and nothing at all where its
                         // variable is unset: a journey holds the relay here to
                         // delay its cancel past a caller's patience.
                         if let Err(error) = crate::ordering::meet(RELAYED_CANCEL_GATE_ENV) {
                             eprintln!("onepipeline: {error}");
                         }
-                        let _ = running.cancel();
+                        let _ = match mode {
+                            oneagentgraph::run::CancelMode::Stop => oneagentgraph::run::cancel(
+                                &relay_root,
+                                &recorded_as,
+                                &oneagentgraph::run::CancelScope::run(),
+                                oneagentgraph::run::CancelMode::Stop,
+                            ),
+                            _ => running.cancel(),
+                        };
                     }
                     match running.recv_timeout(Duration::from_millis(10)) {
                         Ok(Some(envelope)) => {
@@ -1983,7 +1998,7 @@ impl GraphRun {
     pub fn cancel(&self) {
         match &self.backend {
             GraphBackend::Library(run) => {
-                let _ = run.cancel.send(());
+                let _ = run.cancel.send(oneagentgraph::run::CancelMode::Kill);
             }
             GraphBackend::Process(run) => {
                 // A cancel is best-effort by contract — the caller has changed
@@ -2007,6 +2022,16 @@ impl GraphRun {
     /// the graph's directory, whose contract is that nothing stamped for it is
     /// still running when it returns.
     ///
+    /// The stop is asked **before** anything is ended, and the [cancel](Self::cancel)
+    /// is held back to a graph that outlives `patience` or that no stop could be
+    /// written for. A library graph's cancel reaps the graph's processes at once,
+    /// ahead of the member that owns them seeing the stop — so a two-party member
+    /// whose harness it ended read its own shutdown as a lost turn and put that to
+    /// its judge side, which a host bus raises as `monitor-failed`. Asked to stop,
+    /// the member marks itself stopping before it tears its harness down, and
+    /// onejudge answers that rather than asking the judge
+    /// (`dispatch::an_observer_stopped_at_settlement_mid_turn_raises_no_monitor_failure`).
+    ///
     /// Every process that reap ends is one the sibling stamped with this graph's
     /// directory as it started it, signalled only after its pid and kernel start
     /// token are re-checked: nothing is matched by name, and a run beside this
@@ -2014,21 +2039,34 @@ impl GraphRun {
     /// each process rather than off the directory, so a graph whose directory is
     /// gone still has its processes ended.
     pub fn stop(&mut self, patience: Duration) -> bool {
-        self.cancel();
+        if let GraphBackend::Library(run) = &self.backend {
+            let _ = run.cancel.send(oneagentgraph::run::CancelMode::Stop);
+        }
         let root = self.root();
-        if let (Some(root), Some(id)) = (&root, self.run_id()) {
-            if let Err(error) = oneagentgraph::run::cancel(
+        let asked = match (&root, self.run_id()) {
+            (Some(root), Some(id)) => match oneagentgraph::run::cancel(
                 root,
                 id,
                 &oneagentgraph::run::CancelScope::run(),
                 oneagentgraph::run::CancelMode::Stop,
             ) {
-                eprintln!("onepipeline: cancel observer {id}: {error}; ending its processes");
-            }
+                Ok(_) => true,
+                Err(error) => {
+                    eprintln!("onepipeline: cancel observer {id}: {error}; ending its processes");
+                    false
+                }
+            },
+            _ => false,
+        };
+        if !asked {
+            self.cancel();
         }
         let deadline = Instant::now() + patience;
         while !self.has_exited() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
+        }
+        if !self.has_exited() {
+            self.cancel();
         }
         if let Some(root) = &root {
             oneagentgraph::scratch::reap(root);

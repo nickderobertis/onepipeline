@@ -6988,6 +6988,201 @@ fn stopping_a_run_ends_its_observers_command_judge() {
     );
 }
 
+/// A world whose observer graph's monitor is a two-party member judged by a
+/// command that answers as a host's message bus does, and the plan of the
+/// one-node run it observes.
+///
+/// The judge is the host's rule from ai-orchestrator's `config/onemessagebus.yaml`
+/// acted out over the real CLI: a supervisor request whose `turn.outcome` is
+/// `lost` raises a non-blocking `monitor-failed` surface on the run's channel
+/// through `onepipeline surface` and fails the member, and any other request is
+/// answered with a continue. Every request it is handed is appended, whole, to
+/// the returned file before it is acted on, so a judge torn down mid-answer has
+/// still said what it was asked.
+#[cfg(unix)]
+fn judged_like_a_host_bus(name: &str, run: &str) -> (World, String, std::path::PathBuf) {
+    let world = World::new(name);
+    world.write_graphs();
+    std::fs::write(
+        world.graphs().join("onejudge.base.yaml"),
+        "system_prompt: Watch the run.\nuser:\n  persona: Supervise the watcher.\n  \
+         done_when: the run has settled\n  max_turns: 12\n",
+    )
+    .expect("the onejudge base config is written");
+    let requests = world.root.join("judge-requests.jsonl");
+    let script = world.root.join("judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "while IFS= read -r request; do\n  \
+             printf '%s\\n' \"$request\" >>'{requests}'\n  \
+             case \"$request\" in\n    \
+             *'\"outcome\":\"lost\"'*)\n      \
+             printf 'monitor turn failed: its turn was lost\\n' \
+             | '{cli}' surface '{run}' --kind monitor-failed >/dev/null 2>&1\n      \
+             exit 1 ;;\n  \
+             esac\n  \
+             printf '%s\\n' '{{\"completion\":false,\"message\":\"Keep watching.\"}}'\n\
+             done\n",
+            requests = requests.display(),
+            cli = crate::harness::binary().display(),
+        ),
+    )
+    .expect("the command judge is written");
+    std::fs::write(
+        world.graphs().join("dag-scope.yaml"),
+        format!(
+            "version: 1\nname: bus-judged-observer\nenv:\n  ONEPIPELINE_RUN_ID: ${{ONEPIPELINE_RUN_ID}}\n  \
+             ONEPIPELINE_RUNS_DIR: ${{ONEPIPELINE_RUNS_DIR}}\nmembers:\n  monitor:\n    task: {}\n    \
+             kind: onejudge\n    base_config: ./onejudge.base.yaml\n    agent:\n      \
+             oneharness_config: ./oneharness.toml\n    judge:\n      command: [sh, '{}']\n    \
+             mode: bypass\n",
+            serde_json::to_string(crate::harness::MONITOR_TASK).expect("the monitor task is quoted"),
+            script.display()
+        ),
+    )
+    .expect("the observer declares a command judge");
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    (world, path, requests)
+}
+
+/// Every supervisor request the host-bus judge was handed whose turn was lost.
+#[cfg(unix)]
+fn lost_turns_put_to_the_judge(requests: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(requests)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line)
+                .unwrap_or_else(|error| panic!("the judge was handed {line:?}: {error}"))
+        })
+        .filter(|request| request["turn"]["outcome"] == "lost")
+        .collect()
+}
+
+/// Every `monitor-failed` surface queued on the run's channel.
+#[cfg(unix)]
+fn monitor_failures(world: &World, run: &str) -> Vec<Value> {
+    world
+        .queued_surfaces(run)
+        .into_iter()
+        .filter(|surface| surface["kind"] == "monitor-failed")
+        .collect()
+}
+
+/// An observer graph stopped at its run's settlement while its monitor's turn is
+/// in flight puts no lost turn to the monitor's judge side, so a host bus judging
+/// that monitor raises no `monitor-failed` surface for the run's own ending.
+///
+/// The turn the stop tears down fails of the stop, and two things keep that from
+/// reading as lost. The driver asks the graph to stop before it ends anything,
+/// so the member marks itself stopping before its harness is torn down; and
+/// onejudge answers that stop before it would ask a command judge to recover a
+/// lost turn (onejudge #203). Without either, the judge is asked about the
+/// cancelled turn and ai-orchestrator's bus raises `monitor-failed` for the run's
+/// own settlement.
+#[cfg(unix)]
+#[test]
+fn an_observer_stopped_at_settlement_mid_turn_raises_no_monitor_failure() {
+    let run = "settledmidturn";
+    let (world, path, requests) = judged_like_a_host_bus("observer-settled-mid-turn", run);
+    world.script("observer.wait", "");
+    world.script("turn.hold", "hold");
+    world.script("build.work", "the worker wrote this\n");
+    let driver = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the driver starts");
+    // The monitor's turn has begun — its first act, reading the run's ledger, is
+    // recorded — and is held on `observer.wait` while the worker runs to
+    // completion and the run settles under it.
+    world.until("the monitor's turn to be in flight", |world| {
+        !world.observer_saw().is_empty()
+    });
+    world.release("turn.go");
+    world.release("turn.settle");
+    let ended = driver
+        .wait_with_output()
+        .expect("the driver exits at settlement");
+    world.release("observer.go");
+    assert!(
+        ended.status.success(),
+        "the attached driver failed: {}",
+        String::from_utf8_lossy(&ended.stderr)
+    );
+    assert_eq!(
+        world.run_json(run, "result.json")["state"],
+        "complete",
+        "the run did not settle: {}",
+        world.dump()
+    );
+
+    let lost = lost_turns_put_to_the_judge(&requests);
+    assert!(
+        lost.is_empty(),
+        "the turn the observer's own stop cancelled was put to its judge as lost: {lost:#?}"
+    );
+    let failures = monitor_failures(&world, run);
+    assert!(
+        failures.is_empty(),
+        "the run's own settlement raised a monitor failure: {failures:#?}"
+    );
+}
+
+/// The other half, so the journey above is not vacuous: a monitor turn that is
+/// lost while its observer is still watching *is* put to the same judge, and the
+/// host bus raises `monitor-failed` for it on the run's channel.
+#[cfg(unix)]
+#[test]
+fn a_monitor_turn_lost_while_its_observer_watches_raises_a_monitor_failure() {
+    let run = "lostwhilewatched";
+    let (world, path, requests) = judged_like_a_host_bus("observer-lost-turn", run);
+    // Every turn fails; the worker's is held in flight so the run is still live,
+    // and its observer still watching, when the monitor's turn is lost.
+    world.script("harness.fail", "");
+    world.script("turn.hold", "hold");
+    let driver = world
+        .agentgraph_cmd(&[
+            "start",
+            &path,
+            "--attach",
+            "--dag-graph",
+            &world.dag_graph(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the driver starts");
+    world.until("a monitor failure on the run's channel", |world| {
+        !monitor_failures(world, run).is_empty()
+    });
+    world.release("turn.go");
+    world.release("turn.settle");
+    driver
+        .wait_with_output()
+        .expect("the driver exits at settlement");
+
+    let lost = lost_turns_put_to_the_judge(&requests);
+    assert!(
+        !lost.is_empty(),
+        "a monitor failure was raised with no lost turn put to the judge"
+    );
+    assert!(
+        lost.iter().all(|request| request["turn"]["cause"]
+            .as_str()
+            .is_some_and(|cause| !cause.is_empty())),
+        "a lost turn reached the judge without its cause: {lost:#?}"
+    );
+}
+
 /// Where, inside a `stop`, the driver's observer watch sees the observer the
 /// stop cancelled settle and asks whether to start another.
 #[cfg(unix)]
