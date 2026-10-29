@@ -1,13 +1,43 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { commandAppendix } from "./command-report.mjs";
-import { compileMapping } from "../crate-split-replay.mjs";
+import { compileMapping, affectedSuites } from "../crate-split-replay.mjs";
+import { targetGraph } from "./target-graph.mjs";
+import { commandMapping } from "./command-replay.mjs";
 import { commandPaths } from "./source-projection.mjs";
 import { expandCatalog } from "./catalog.mjs";
 import { functions } from "./rust-syntax.mjs";
 
 export const TARGET_MARKER = "<!-- BEGIN TARGET LAYOUT -->";
+const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
+const reviewed = (path) => readFileSync(`${projectRoot}${path}`, "utf8");
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  return value && typeof value === "object"
+    ? Object.fromEntries(
+        Object.keys(value)
+          .sort()
+          .map((key) => [key, stable(value[key])]),
+      )
+    : value;
+}
+const digest = (value) =>
+  createHash("sha256")
+    .update(JSON.stringify(stable(value)))
+    .digest("hex");
+
+/** Called in the producer workspace, independently of a renderer's output directory. */
+export function currentDigests() {
+  const moves = JSON.parse(reviewed("scripts/modularization/target-moves.json"));
+  const layout = targetGraph(JSON.parse(reviewed("scripts/modularization/layout.json")), moves);
+  const catalog = expandCatalog(
+    JSON.parse(reviewed("scripts/modularization/command-tests-target.json")),
+  );
+  return { layout: digest(layout), mapping: digest(commandMapping(layout, catalog)) };
+}
 const cell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 const sourceTests = new Map();
 export function intentFor(id) {
@@ -15,7 +45,7 @@ export function intentFor(id) {
     throw new Error("invalid test intent id");
   const [module, name] = id.split("::");
   if (!sourceTests.has(module)) {
-    const text = readFileSync(`tests/e2e/${module}.rs`, "utf8");
+    const text = reviewed(`tests/e2e/${module}.rs`);
     sourceTests.set(
       module,
       new Map(
@@ -68,19 +98,73 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     throw new Error("target test/phase count mismatch");
   if (
     JSON.stringify(moves) !==
-      JSON.stringify(
-        JSON.parse(readFileSync("scripts/modularization/target-moves.json", "utf8")),
-      ) ||
+      JSON.stringify(JSON.parse(reviewed("scripts/modularization/target-moves.json"))) ||
     JSON.stringify(catalog) !==
       JSON.stringify(
-        expandCatalog(
-          JSON.parse(readFileSync("scripts/modularization/command-tests-target.json", "utf8")),
-        ),
+        expandCatalog(JSON.parse(reviewed("scripts/modularization/command-tests-target.json"))),
       )
   )
     throw new Error("target evidence differs from the current reviewed moves/catalog");
+  const current = JSON.parse(
+    execFileSync(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        'process.argv[1]="target-evidence-validation"; const {currentDigests}=await import("./scripts/modularization/target-report.mjs"); process.stdout.write(JSON.stringify(currentDigests()));',
+      ],
+      {
+        cwd: projectRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 1024 * 1024,
+      },
+    ),
+  );
+  if (digest(layout) !== current.layout || digest(result.mapping) !== current.mapping)
+    throw new Error("target layout/selection differs from the current source-derived proposal");
   const reach = compileMapping(result.mapping.selection);
-  const baseline = JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8"));
+  if (result.suites !== Object.keys(result.mapping.suites).length)
+    throw new Error("invalid target suite count");
+  for (const row of result.rows) {
+    if (
+      typeof row.commit !== "string" ||
+      !/^[a-f0-9]{40}$/.test(row.commit) ||
+      typeof row.subject !== "string" ||
+      [row.files, row.effectiveFiles, row.affected, row.reasons].some(
+        (entries) =>
+          !Array.isArray(entries) || !entries.every((entry) => typeof entry === "string"),
+      )
+    )
+      throw new Error("invalid target replay row");
+    if (
+      JSON.stringify(affectedSuites(reach, row.effectiveFiles).affected) !==
+      JSON.stringify(row.affected)
+    )
+      throw new Error("target row selection differs from its graph inputs");
+  }
+  const suiteSkip =
+    result.rows.reduce((sum, row) => sum + result.suites - row.affected.length, 0) /
+    (144 * result.suites);
+  if (
+    !result.platforms ||
+    JSON.stringify(Object.keys(result.platforms).sort()) !==
+      JSON.stringify(["linux", "local", "macos", "windows"])
+  )
+    throw new Error("invalid target platforms");
+  for (const platform of Object.values(result.platforms))
+    if (
+      platform.suiteSkip !== suiteSkip ||
+      !Number.isFinite(platform.secondsSkip) ||
+      platform.secondsSkip < 0 ||
+      platform.secondsSkip > 1 ||
+      !Number.isFinite(platform.secondsPerRun) ||
+      platform.secondsPerRun <= 0 ||
+      !Array.isArray(platform.missingModules) ||
+      !platform.missingModules.every((name) => typeof name === "string")
+    )
+      throw new Error("invalid target platform data");
+  const baseline = JSON.parse(reviewed("scripts/modularization/command-tests.json"));
   const partition = {};
   for (const [id, disposition] of Object.entries(catalog.dispositions))
     if (baseline.tests[id].suite === "cross-command")
@@ -175,9 +259,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "| CLI route | Command crate | Isolated phase IDs | Runner closure |",
     "| --- | --- | --- | --- |",
   );
-  const commands = commandPaths(
-    JSON.parse(readFileSync("scripts/modularization/cli-commands.json", "utf8")),
-  );
+  const commands = commandPaths(JSON.parse(reviewed("scripts/modularization/cli-commands.json")));
   for (const [path, crate] of Object.entries(commands)) {
     const tests = Object.entries(catalog.tests)
       .filter(([, t]) => t.suite === crate)
@@ -219,7 +301,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     ...(moves.commandSlices ?? []),
   ];
   for (const file of [...new Set(sites.map((site) => site.file))])
-    for (const test of functions(readFileSync(file, "utf8")).filter((entry) => entry.test)) {
+    for (const test of functions(reviewed(file)).filter((entry) => entry.test)) {
       const owners = [
         ...new Set(
           sites

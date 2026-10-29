@@ -1678,6 +1678,25 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     put(root, "target.json", evidence);
     assert.match(render().stderr, /differs from the current reviewed moves/);
     evidence.moves.extractions[0].file = oldFile;
+    evidence.layout.crates["cmd-start"].files.push("src/lib.rs");
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /layout\/selection differs/);
+    evidence.layout.crates["cmd-start"].files.pop();
+    const deps = evidence.result.mapping.selection.crates["cmd-status"].deps;
+    evidence.result.mapping.selection.crates["cmd-status"].deps = [];
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /layout\/selection differs/);
+    evidence.result.mapping.selection.crates["cmd-status"].deps = deps;
+    const affected = evidence.result.rows[0].affected;
+    evidence.result.rows[0].affected = [];
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /row selection differs/);
+    evidence.result.rows[0].affected = affected;
+    const seconds = evidence.result.platforms.linux.secondsSkip;
+    evidence.result.platforms.linux.secondsSkip = 2;
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /invalid target platform data/);
+    evidence.result.platforms.linux.secondsSkip = seconds;
     for (const key of ["originalTests", "tests"]) {
       evidence.result[key]--;
       put(root, "target.json", evidence);
