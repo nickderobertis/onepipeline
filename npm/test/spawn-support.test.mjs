@@ -191,7 +191,12 @@ it("npm's Windows bin shims forward only engine stdout and its status through th
   // A real executable engine: Node emits JSON and exits with the requested code.
   copyFileSync(process.execPath, join(platform, "bin", "onepipeline.exe"));
   const preload = join(project, "windows.cjs");
-  writeFileSync(preload, 'Object.defineProperty(process, "platform", {value: "win32"});\n');
+  // Pose as the win32-x64 host that package serves, whatever this host's arch.
+  writeFileSync(
+    preload,
+    'Object.defineProperty(process, "platform", {value: "win32"});\n' +
+      'Object.defineProperty(process, "arch", {value: "x64"});\n',
+  );
   const sent = ["two words", 'say "hi"', "a&b|c", "", "trailing\\"];
   for (const status of [0, 3]) {
     const args = [
