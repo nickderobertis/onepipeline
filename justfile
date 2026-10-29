@@ -426,8 +426,16 @@ test-quick:
 # `ONEPIPELINE_TEST_PARTITION` (`count:K/N`, which `scripts/test-partition.sh`
 # checks) runs the K-th of N shards of every tier, so N jobs share one leg and
 # each test runs in exactly one of them; unset, every test runs.
+# A nonempty whole tier can have an empty shard. Check the unpartitioned listing
+# before allowing that share to be empty; an empty filter still fails.
 _tier-test-quick filter:
-    @partition=$(bash scripts/test-partition.sh) && bash scripts/nextest-run.sh cargo nextest run --locked ${partition:+--partition "$partition"} -E "$1"
+    @partition=$(bash scripts/test-partition.sh) && \
+      no_tests=fail && \
+      if [ -n "$partition" ]; then \
+        selected=$(cargo nextest list --locked -E "$1" --message-format oneline) || exit $?; \
+        if [ -n "$selected" ]; then no_tests=pass; fi; \
+      fi && \
+      bash scripts/nextest-run.sh cargo nextest run --locked --no-tests "$no_tests" ${partition:+--partition "$partition"} -E "$1"
 
 _crate-test-quick: (_tier-test-quick rest-tier)
 

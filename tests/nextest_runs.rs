@@ -880,6 +880,7 @@ fn rerun_fixture(case: &str) -> Fixture {
 fn recipe_line(recipe: &str, containing: &str) -> String {
     let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
     justfile
+        .replace("\\\n", " ")
         .split(&format!("\n{recipe}:\n"))
         .nth(1)
         .unwrap_or_else(|| panic!("the justfile has a `{recipe}` recipe"))
@@ -1725,6 +1726,79 @@ fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_
             "{refused:?} ran tests before it was refused:\n{said}"
         );
     }
+}
+
+/// A one-test tier has an empty second shard. That share is valid, but an
+/// empty filter is a missing journey even when a partition was supplied.
+#[test]
+fn a_single_test_tier_accepts_its_empty_shard_but_refuses_an_empty_filter() {
+    let fixture = Fixture::new(
+        "empty-tier",
+        "[package]\nname = \"empty-tier\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
+        &[
+            ("tests/pooled_slot.rs", "#[test] fn journey() {}\n"),
+            (
+                "scripts/test-partition.sh",
+                include_str!("../scripts/test-partition.sh"),
+            ),
+            (
+                "scripts/nextest-run.sh",
+                include_str!("../scripts/nextest-run.sh"),
+            ),
+        ],
+    );
+    let locked = fixture
+        .command("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture lock");
+    assert!(locked.status.success(), "the fixture lock is written");
+    let run = |partition: Option<&str>, empty: bool| {
+        let mut command = fixture.command("just");
+        command
+            .arg("--justfile")
+            .arg(repo_root().join("justfile"))
+            .arg("--working-directory")
+            .arg(&fixture.0);
+        if empty {
+            command.args([
+                "--set",
+                "pooled-slot-tier",
+                "binary(pooled_slot) and test(absent)",
+            ]);
+        }
+        if let Some(partition) = partition {
+            command.env("ONEPIPELINE_TEST_PARTITION", partition);
+        }
+        command
+            .arg("_pooled_slot-test-quick")
+            .output()
+            .expect("just runs the real pooled-slot tier recipe")
+    };
+    let empty_shard = run(Some("count:2/2"), false);
+    assert!(
+        empty_shard.status.success(),
+        "an empty shard passes: {}",
+        String::from_utf8_lossy(&empty_shard.stderr)
+    );
+    assert!(String::from_utf8_lossy(&empty_shard.stderr).contains("0 tests run"));
+    for partition in [None, Some("count:2/2")] {
+        let missing = run(partition, true);
+        assert_eq!(
+            missing.status.code(),
+            Some(4),
+            "an empty filter fails: {}",
+            String::from_utf8_lossy(&missing.stderr)
+        );
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("no tests to run"));
+    }
+    let whole = run(None, false);
+    assert!(
+        whole.status.success(),
+        "the unsplit tier passes: {}",
+        String::from_utf8_lossy(&whole.stderr)
+    );
+    assert!(String::from_utf8_lossy(&whole.stderr).contains("1 passed"));
 }
 
 /// A `ci.yml` splitting its Windows leg three ways, as the repository's own does

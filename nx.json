@@ -189,7 +189,8 @@
       "{workspaceRoot}/justfile",
       "{workspaceRoot}/clippy.toml",
       "{workspaceRoot}/rustfmt.toml",
-      "{workspaceRoot}/tests/e2e/pool_support.rs"
+      "{workspaceRoot}/tests/e2e/pool_support.rs",
+      "{workspaceRoot}/tests/e2e/pool_hand_back.rs"
     ]
   },
   "targetDefaults": {
