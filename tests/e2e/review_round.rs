@@ -709,8 +709,8 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
 
 /// Store progress does not promise that a caller has observed the command's stderr.
 /// A file spool stages a delayed pipe reader without pipe capacity or EOF dependencies.
-/// To check the regression, restore the original immediate output assertion after
-/// `later.arrived()` in place of the output wait below, keeping this delayed capture.
+/// At the second store hold, publication is still withheld; the journey must wait
+/// for captured progress after release before advancing its diagnostic clock.
 #[test]
 fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
     progressing_round(true);
