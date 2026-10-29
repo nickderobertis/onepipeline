@@ -187,11 +187,12 @@
         }
       ],
       "deps": [
+        "run-state",
         "event-payloads",
         "plan-model",
         "readjust-state"
       ],
-      "interface": "Pure deterministic event fold. Own a FoldOperations interface for validated edit operations; move the pure operation fold here, never link the edit transaction runner."
+      "interface": "The deterministic event fold only (fold, fold_one, fold_record and the per-event folds, fold_operations, evidences_progress) over run-state's RunState. Own a FoldOperations interface for validated edit operations; move the pure operation fold here, never link the edit transaction runner. Consumers that read state without folding events depend on run-state instead."
     },
     "checkpoint": {
       "files": [
@@ -234,7 +235,7 @@
         "run-paths",
         "run-record",
         "journal-reader",
-        "run-projection"
+        "run-state"
       ],
       "interface": "Reference parse and read-only upstream status resolution. Query owns UpstreamSnapshot source; release watcher uses it, but views do not import release polling or plan edits."
     },
@@ -278,7 +279,10 @@
       "deps": [
         "plan-model",
         "yaml-codec",
-        "diagnostics"
+        "diagnostics",
+        "plan-compat",
+        "plan-preservation",
+        "plan-criteria"
       ],
       "interface": "Graph/criterion/destination validation owns DestinationFacts input. OS identity and dispatch policy are inputs, not dependencies on runtime control implementation."
     },
@@ -290,7 +294,8 @@
         "plan-validation",
         "planner-channel",
         "publication-boundary",
-        "diagnostics"
+        "diagnostics",
+        "plan-compat"
       ],
       "interface": "Pure staged edit validation and edit transaction logic own EditStore and CommitReceipt ports. Task-store implements persistence; scheduler supplies current state. Pure replay of committed operations lives in run-projection."
     },
@@ -305,7 +310,8 @@
         "run-paths",
         "run-files",
         "journal",
-        "diagnostics"
+        "diagnostics",
+        "plan-compat"
       ],
       "interface": "Taskgraph store transactions implement plan-edits EditStore; no publication runner, release poller or complete runtime state. Own StoreEvents/ReleaseFacts inputs for the facts these operations consume."
     },
@@ -356,9 +362,11 @@
         "dispatch-controls",
         "diagnostics",
         "processes",
-        "run-result"
+        "run-result",
+        "publication-host",
+        "branch-stack"
       ],
-      "interface": "Publication effects: vcs, lifecycle, stack, closures and withdrawal. Own PublicationHost and PublicationEvents ports; real onevcs/GitHub implementation and refusal paths remain in this crate. Scheduler calls it; query consumers do not. Move publication/rework decision types from engine.rs into publication, using publication-owned snapshots rather than borrowing scheduler internals."
+      "interface": "Publication effects: vcs, lifecycle, stack, closures and withdrawal. Own PublicationHost and PublicationEvents ports; real onevcs/GitHub implementation and refusal paths remain in this crate. Scheduler calls it; query consumers do not. Move publication/rework decision types from engine.rs into publication, using publication-owned snapshots rather than borrowing scheduler internals. The host operations are publication-host and stack planning is branch-stack; publication keeps lifecycle, closures, discharge, findings, supersession and withdrawal."
     },
     "agent-session": {
       "files": [
@@ -429,7 +437,7 @@
         "diagnostics",
         "processes"
       ],
-      "interface": "Read/render RunView and all view facets. RunView::open/refresh still perform derived checkpoint writes, heartbeat application, landing rereads and upstream refresh. Views own query DTOs for pool/dispatch/edits; the write-capable managers are not concrete dependencies."
+      "interface": "Read/render RunView and all view facets. RunView::open/refresh still perform derived checkpoint writes, heartbeat application, landing rereads and upstream refresh. Views own query DTOs for pool/dispatch/edits; the write-capable managers are not concrete dependencies. The goals renderers move to cmd-goals and the next-envelope shaping to cmd-next; the views core never calls them."
     },
     "loop-statistics": {
       "files": [],
@@ -475,7 +483,8 @@
       "deps": [
         "branch-template",
         "yaml-codec",
-        "diagnostics"
+        "diagnostics",
+        "plan-criteria"
       ],
       "interface": "Strict plan wire model and branch template values. Host/process validation is delegated to explicit plan-validation context."
     },
@@ -553,7 +562,7 @@
         "run-files",
         "journal",
         "diagnostics",
-        "edit-reconciler",
+        "envelope-submission",
         "channel-admission",
         "run-views",
         "release-watch",
@@ -571,7 +580,7 @@
         "agent-session",
         "planner-channel",
         "journal",
-        "run-projection",
+        "run-state",
         "processes",
         "diagnostics",
         "run-views",
@@ -830,7 +839,14 @@
     },
     "cmd-next": {
       "files": [],
-      "items": [],
+      "items": [
+        {
+          "file": "src/views.rs",
+          "symbols": [
+            "shaped"
+          ]
+        }
+      ],
       "deps": [
         "planner-channel",
         "flow-session",
@@ -991,7 +1007,16 @@
     },
     "cmd-goals": {
       "files": [],
-      "items": [],
+      "items": [
+        {
+          "file": "src/views.rs",
+          "symbols": [
+            "goals",
+            "goals_grouped",
+            "goals_of"
+          ]
+        }
+      ],
       "deps": [
         "run-views",
         "diagnostics"
@@ -1069,18 +1094,10 @@
             "TakeBack",
             "ValidatedRetitle",
             "staged_retitle",
-            "commits_of"
-          ]
-        },
-        {
-          "file": "src/driver.rs",
-          "symbols": [
-            "Submitted",
-            "submit_envelope",
-            "take_the_run_over_and_answer",
-            "let_go_or_leave_the_claim",
-            "let_go_of_reply",
-            "validate_here"
+            "commits_of",
+            "Effect",
+            "ValidatedNote",
+            "retitle_change"
           ]
         },
         {
@@ -1105,20 +1122,23 @@
         "task-store",
         "planner-channel",
         "journal",
-        "run-projection",
+        "run-state",
         "diagnostics",
-        "run-views",
-        "run-control",
         "publication",
-        "release-watch",
         "readjustment",
         "review-replies",
         "planner-notes",
-        "channel-admission",
         "event-emission",
-        "dispatch-controls"
+        "dispatch-controls",
+        "checkpoint",
+        "review-discovery",
+        "run-files",
+        "run-paths",
+        "run-record",
+        "processes",
+        "event-payloads"
       ],
-      "interface": "Real inline validation, staged apply, delivery, journal ordering and orphan queue recovery. Own ReconcileContext for in-flight dispatch cancellation/delivery; scheduler supplies live dispatch state, undriven callers supply the actual no-driver state only after ownership lock. Concrete task-store/publication/readjustment/review-replies/note implementations remain dependencies. Preserve AppliedHere/AppliedByRun/Answered/Queued and refusal outcomes; review-replies returns its owned validation result rather than importing Staged."
+      "interface": "Reconciling validated edit envelopes against the run: staged retitles, recovery of claimed and queued envelopes, recorded refusals and operation facts. Submission from a command process is envelope-submission; this crate links neither run views nor run control. The envelope effect record, validated manager note and retitle compilation it builds move here from engine.rs; the scheduler's seat bookkeeping (engine::Seat) and manager-note delivery (engine::deliver_manager_note) stay with the scheduler and are reached through ports it wires."
     },
     "dispatch-cancellation": {
       "files": [],
@@ -1151,7 +1171,8 @@
         "plan-model",
         "plan-validation",
         "yaml-codec",
-        "diagnostics"
+        "diagnostics",
+        "plan-criteria"
       ],
       "interface": "Template registry and parsing use validation DTOs; task-store mutation never follows a template lookup. Preserve every template assertion and asset path."
     },
@@ -1191,8 +1212,9 @@
       "items": [],
       "deps": [
         "readjust-state",
-        "run-projection",
-        "publication",
+        "run-state",
+        "publication-host",
+        "branch-stack",
         "task-store",
         "journal",
         "planner-channel",
@@ -1210,10 +1232,10 @@
       "deps": [
         "readjustment",
         "review-replies",
-        "publication",
+        "publication-host",
         "task-store",
         "journal",
-        "run-projection",
+        "run-state",
         "event-emission",
         "diagnostics"
       ],
@@ -1237,7 +1259,7 @@
         "publication",
         "readjust-state",
         "journal",
-        "run-projection",
+        "run-state",
         "event-emission",
         "agent-session",
         "diagnostics",
@@ -1299,6 +1321,199 @@
         "processes"
       ],
       "interface": "Actual ownership-lock handover, queue claim/admission and reply wait policy. No edit application; admitted envelopes pass to edit-reconciler when the submitting process owns the undriven run."
+    },
+    "run-state": {
+      "files": [],
+      "items": [
+        {
+          "file": "src/projection.rs",
+          "symbols": [
+            "StopState",
+            "RunState",
+            "Recorded",
+            "ReworkRecord",
+            "RestackRecord",
+            "PendingDecision",
+            "NodeActivity",
+            "Doing",
+            "ActivityReference",
+            "Progress",
+            "Refusal",
+            "ServiceRecord",
+            "MemberLabel",
+            "DriverClaim",
+            "ClaimAsWritten",
+            "change_requests_only",
+            "Closure",
+            "SessionOpened",
+            "DERIVATIONS_HELD",
+            "Statuses",
+            "SettledFacts",
+            "Derivation",
+            "derivations",
+            "derived_already",
+            "remember_derived",
+            "RELEASE_AWAITED",
+            "millis_of",
+            "days_in_month",
+            "days_from_civil"
+          ]
+        }
+      ],
+      "deps": [
+        "event-payloads",
+        "plan-model",
+        "plan-validation",
+        "readjust-state"
+      ],
+      "interface": "The folded run state and its status derivation, separate from the fold that builds it: RunState and its record types, the derived-status cache (with its static DERIVED store), and timestamp parsing (millis_of). Record value types RunState holds but other modules define today (vcs::DispatchSession, vcs::BranchName, agentgraph::TurnAddress, views::AwaitedRelease, hooks::FiredOver, channel::ReworkComment, edits::Park, edits::StatedLanding) move here, and their old paths re-export them; their behaviour stays with its owners. The generic payload-map builder it calls (journal::payload) moves to event-payloads, since the journal writer sits above this crate. Fields the fold writes become visible to run-projection. Readers of state link this crate, not the event fold."
+    },
+    "publication-host": {
+      "files": [
+        "src/vcs.rs"
+      ],
+      "items": [],
+      "deps": [
+        "plan-model",
+        "plan-validation",
+        "run-state",
+        "event-payloads",
+        "journal",
+        "render-cost",
+        "event-filter",
+        "processes",
+        "diagnostics"
+      ],
+      "interface": "The onevcs host operations publication runs on (sessions, change requests, pushes, merges, landing reads), with the real onevcs/GitHub implementation and its refusal paths. Cancellation arrives as a passed-in token port (today executor::CancellationToken), and the merge back-off and infrastructure-failure constants it names today in engine.rs move here; views::one_line formatting moves to diagnostics. Callers that only read or push through the host do not link publication's lifecycle, closures or withdrawal effects."
+    },
+    "branch-stack": {
+      "files": [
+        "src/stack.rs"
+      ],
+      "items": [],
+      "deps": [
+        "plan-model",
+        "plan-validation",
+        "run-state",
+        "event-payloads"
+      ],
+      "interface": "The stacked-branch model and restack planning: parents, onto targets and settled stacks. Pure over plan and run state; publication and readjustment execute the restacks it plans."
+    },
+    "plan-criteria": {
+      "files": [],
+      "items": [
+        {
+          "file": "src/plan.rs",
+          "symbols": [
+            "check_criteria",
+            "CriteriaRule",
+            "CRITERIA_HEADING",
+            "MANAGER_NOTES_HEADING",
+            "amendment_clauses",
+            "is_section_heading",
+            "heading_text",
+            "list_item",
+            "criterion_listed"
+          ]
+        }
+      ],
+      "deps": [],
+      "interface": "The task-document grammar: criteria and manager-notes headings, amendment clauses and criteria checks. Plain text in, verdicts out; plan-model renders tasks through it."
+    },
+    "plan-compat": {
+      "files": [],
+      "items": [
+        {
+          "file": "src/plan.rs",
+          "symbols": [
+            "node_field_is_newer",
+            "body_is_newer",
+            "draft_is_newer",
+            "retired_field_refusal",
+            "PLAN_SCHEMA_VERSIONS_READ",
+            "RETIRED_FIELDS"
+          ]
+        }
+      ],
+      "deps": [
+        "plan-model"
+      ],
+      "interface": "Plan schema version gating: which fields, bodies and drafts are newer than a reader, and the refusal naming a retired field. Readers and writers that gate on versions link it; consumers of the plan types alone do not."
+    },
+    "plan-preservation": {
+      "files": [],
+      "items": [
+        {
+          "file": "src/plan.rs",
+          "symbols": [
+            "PRESERVE_BESIDE_DRAFT",
+            "preserve_needs_a_branch",
+            "depends_on_preserved",
+            "preserved_fan_in",
+            "preserved_base_conflict"
+          ]
+        }
+      ],
+      "deps": [],
+      "interface": "Preserved-branch plan rules (preserve beside a draft, fan-in, base conflicts), applied by plan validation only."
+    },
+    "planner-notes": {
+      "files": [],
+      "items": [],
+      "deps": [
+        "diagnostics",
+        "event-payloads",
+        "journal",
+        "plan-edits",
+        "plan-criteria",
+        "planner-channel",
+        "processes",
+        "run-control",
+        "run-state",
+        "run-record",
+        "run-views"
+      ],
+      "interface": "Planner notes name only the manager-notes heading from the plan grammar and only timestamps from run state, so they depend on plan-criteria and run-state rather than plan-model and the event fold."
+    },
+    "envelope-submission": {
+      "files": [],
+      "items": [
+        {
+          "file": "src/driver.rs",
+          "symbols": [
+            "Submitted",
+            "submit_envelope",
+            "take_the_run_over_and_answer",
+            "let_go_or_leave_the_claim",
+            "let_go_of_reply",
+            "validate_here"
+          ]
+        }
+      ],
+      "deps": [
+        "edit-reconciler",
+        "plan-edits",
+        "task-store",
+        "planner-channel",
+        "journal",
+        "run-projection",
+        "diagnostics",
+        "run-views",
+        "run-control",
+        "publication",
+        "release-watch",
+        "readjustment",
+        "review-replies",
+        "planner-notes",
+        "channel-admission",
+        "event-emission",
+        "dispatch-controls",
+        "publication-boundary",
+        "run-locks",
+        "run-record",
+        "checkpoint"
+      ],
+      "interface": "Submitting a reply envelope from a command process: take the run over if undriven, validate here, answer and let go of the claim. Driven submissions queue for the driver; undriven ones apply inline through edit-reconciler, so cmd-reply and cmd-attest keep the real application path. Owns the run-control, run-views and release-watch links that reconciliation does not need. Manager-note validation shared with the scheduler (engine::{validate_manager_note, Offered, last_turn_address}) and the scratch writer-ending hook (scratch::at_writer_ending) stay with their owners and are reached through ports the reply and attest composition roots wire, so a submission links neither the scheduler nor another command."
     }
   }
 }

@@ -3529,8 +3529,9 @@ test("engine proposal CLI isolates query and effect capabilities, refuses cycles
       [
         "inline edit application",
         (p) => {
+          // Reply and attest reach inline application through envelope-submission, which owns submit_envelope.
           p.subsystems["channel-submission"].deps = p.subsystems["channel-submission"].deps.filter(
-            (name) => name !== "edit-reconciler",
+            (name) => name !== "envelope-submission",
           );
         },
         /inline edit application missing/,

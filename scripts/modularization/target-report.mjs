@@ -533,6 +533,16 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "agent-session":
       "Separate session identity/lookup from author graph creation and process attachment.",
     "planner-notes": "Separate note envelope validation, delivery and reply receipt handling.",
+    "run-state":
+      "Separate node status and frontier records from activity, refusal and driver-claim records; status readers and activity views then link only their facet. The derived-status cache stays with the status facet.",
+    "plan-validation":
+      "Separate the graph value types run state records (NodeStatus, NodeRef, Landing, Settled) from graph and destination validation; run-state would then link the value types only, and validation reach the suites that validate.",
+    "plan-criteria":
+      "Already the task-document grammar alone; plan-model renders tasks through it, so a grammar change legitimately reaches every plan reader. Splitting it further returns nothing until rendering moves out of plan-model.",
+    "plan-compat":
+      "Reaches the plan-validation suites because validation gates on schema versions; separating the read-side version gate from the write-side retired-field refusal would leave writers alone linking the refusal.",
+    "plan-preservation":
+      "Reaches exactly plan-validation's suites, its only consumer; it narrows further only when plan-validation's own reach does (see that row).",
     "render-cost":
       "Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it.",
     processes:
