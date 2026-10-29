@@ -48,19 +48,27 @@ class Schema:
     union stands for."""
 
     def __init__(self, text):
-        text = re.sub(r'"[^"\n]*"', "", re.sub(r"#[^\n]*", "", text))
-        self.fields, self.inputs, self.members = {}, {}, {}
-        named = r"\s*:\s*\[*\s*(\w+)"
+        text = re.sub(r'"[^"\n]*"', "", re.sub(r"#[^\n]*", "", text)).replace(",", " ")
+        self.fields, self.inputs, self.members, self.enums = {}, {}, {}, {}
+        typed = r"\s*:\s*([\[\]\w!\s]*?[\w\]]!?)(\s*=\s*[^\s,)]+)?(?=\s+\w+\s*[:(]|\s*$)"
+
+        def declared(listed):
+            return {name: (written.replace(" ", "").replace("\n", ""), bool(default))
+                    for name, written, default in re.findall(r"(\w+)" + typed, listed.strip())}
+
         for kind, name, implements, body in re.findall(
-                r"\b(type|interface|input)\s+(\w+)(?:\s+implements\s+([\w\s&]+?))?\s*\{([^}]*)\}",
-                text):
+                r"\b(type|interface|input|enum)\s+(\w+)(?:\s+implements\s+([\w\s&]+?))?\s*"
+                r"\{([^}]*)\}", text):
+            if kind == "enum":
+                self.enums[name] = set(re.findall(r"\w+", body))
+                continue
             if kind == "input":
-                self.inputs[name] = dict(re.findall(r"(\w+)" + named, body))
+                self.inputs[name] = declared(body)
                 continue
             self.fields[name] = {
-                field: (returned, dict(re.findall(r"(\w+)" + named, arguments)))
+                field: (re.sub(r"[\[\]!\s]", "", returned), declared(arguments))
                 for field, arguments, returned in re.findall(
-                    r"(\w+)\s*(?:\(([^)]*)\))?" + named, body)}
+                    r"(\w+)\s*(?:\(([^)]*)\))?\s*:\s*([\[\]\w!]+)", body)}
             for interface in re.findall(r"\w+", implements or ""):
                 self.members.setdefault(interface, set()).add(name)
         for name, members in re.findall(r"\bunion\s+(\w+)\s*=\s*([\w\s|]+?)(?=\n\s*\n|"
@@ -79,28 +87,52 @@ class Schema:
         if defined is None or field not in defined:
             raise Unsupported("GitHub's schema defines no %s.%s" % (typename, field))
         returned, arguments = defined[field]
-        for name, value in supplied.items():
-            if name not in arguments:
-                raise Unsupported("GitHub's schema defines no argument %s.%s(%s)"
-                                  % (typename, field, name))
-            self.check_input(arguments[name], value, "%s.%s(%s)" % (typename, field, name))
+        self.check_fields(arguments, supplied, "%s.%s" % (typename, field))
         return returned
 
-    def check_input(self, typename, value, where):
-        """Refuse a value of input type `typename` naming a field the input type lacks."""
-        if typename not in self.inputs or value is None:
+    def check_fields(self, declared, supplied, where):
+        """Refuse arguments, or an input object's fields, that name one `declared` lacks, omit
+        one it requires, or carry a value its type does not admit."""
+        for name in supplied:
+            if name not in declared:
+                raise Unsupported("GitHub's schema defines no %s.%s" % (where, name))
+        for name, (written, defaulted) in declared.items():
+            if name in supplied:
+                self.check_value(written, supplied[name], "%s.%s" % (where, name))
+            elif written.endswith("!") and not defaulted:
+                raise Unsupported("%s.%s is required" % (where, name))
+
+    SCALARS = {"String": str, "ID": str, "URI": str, "DateTime": str, "Int": int,
+               "Boolean": bool}
+
+    def check_value(self, written, value, where):
+        """Refuse `value` unless the type `written` — nullability and list wrappers included —
+        admits it: a scalar of its kind, a member of its enum, or an input object."""
+        if written.endswith("!"):
+            if value is None:
+                raise Unsupported("%s may not be null" % where)
+            written = written[:-1]
+        if value is None:
             return
-        if isinstance(value, list):
+        if written.startswith("["):
+            if not isinstance(value, list):
+                raise Unsupported("%s must be a list" % where)
             for item in value:
-                self.check_input(typename, item, where)
+                self.check_value(written[1:-1], item, where)
             return
-        if not isinstance(value, dict):
-            raise Unsupported("%s must be a %s object" % (where, typename))
-        for name, held in value.items():
-            if name not in self.inputs[typename]:
-                raise Unsupported("GitHub's schema defines no %s.%s, which %s carries"
-                                  % (typename, name, where))
-            self.check_input(self.inputs[typename][name], held, "%s.%s" % (where, name))
+        if written in self.inputs:
+            if not isinstance(value, dict):
+                raise Unsupported("%s must be a %s object" % (where, written))
+            self.check_fields(self.inputs[written], value, written)
+        elif written in self.enums:
+            if value not in self.enums[written]:
+                raise Unsupported("%s is no %s member: %r" % (where, written, value))
+        elif written in self.SCALARS:
+            kind = self.SCALARS[written]
+            if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+                raise Unsupported("%s must be a %s: %r" % (where, written, value))
+        else:
+            raise Unsupported("the loopback cannot check %s's type %s" % (where, written))
 
 
 
@@ -886,12 +918,14 @@ class Handler(BaseHTTPRequestHandler):
                 if held is None:
                     self.reply({"message": "Not Found"}, 404)
                     return
-                # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] GitHub publishes no
-                # REST schema the linked store pins, as it pins `schema.graphql`; this answer carries
-                # only the two fields of "Get a repository" (docs.github.com/en/rest/repos/repos)
-                # the store reads, which its own `visibility` module validates on every answer.
+                # llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] GitHub publishes
+                # no REST schema the linked store pins, as it pins `schema.graphql`; this answer
+                # carries only the two fields of "Get a repository"
+                # (docs.github.com/en/rest/repos/repos) the store reads, which its own
+                # `visibility` module validates on every answer.
                 self.reply({"private": held["visibility"] == "private",
                             "visibility": held["visibility"]})
+                # llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
                 return
         self.reply({"message": "Not Found"}, 404)
 
