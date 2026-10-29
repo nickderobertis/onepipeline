@@ -6996,7 +6996,9 @@ fn stopping_a_run_ends_its_observers_command_judge() {
 /// acted out over the real CLI: a supervisor request whose `turn.outcome` is
 /// `lost` raises a non-blocking `monitor-failed` surface on the run's channel
 /// through `onepipeline surface` and fails the member, and any other request is
-/// answered with a continue. Every request it is handed is appended, whole, to
+/// answered with a continue. A line that is not a supervisor request naming its
+/// turn's outcome, matched on onejudge's own encoding of one, is refused, and the
+/// log is read back through [`SupervisorRequest`]. Every request it is handed is appended, whole, to
 /// the returned file before it is acted on, so a judge torn down mid-answer has
 /// still said what it was asked.
 #[cfg(unix)]
@@ -7017,12 +7019,18 @@ fn judged_like_a_host_bus(name: &str, run: &str) -> (World, String, std::path::P
             "while IFS= read -r request; do\n  \
              printf '%s\\n' \"$request\" >>'{requests}'\n  \
              case \"$request\" in\n    \
-             *'\"outcome\":\"lost\"'*)\n      \
+             '{{\"op\":\"supervisor\",'*) ;;\n    \
+             *) printf 'not a supervisor request: %s\\n' \"$request\" >&2; exit 2 ;;\n  \
+             esac\n  \
+             case \"$request\" in\n    \
+             *'\"turn\":{{\"outcome\":\"lost\",'*)\n      \
              printf 'monitor turn failed: its turn was lost\\n' \
              | '{cli}' surface '{run}' --kind monitor-failed >/dev/null 2>&1\n      \
-             exit 1 ;;\n  \
-             esac\n  \
-             printf '%s\\n' '{{\"completion\":false,\"message\":\"Keep watching.\"}}'\n\
+             exit 1 ;;\n    \
+             *'\"turn\":{{\"outcome\":\"taken\"}}'*)\n      \
+             printf '%s\\n' '{{\"completion\":false,\"message\":\"Keep watching.\"}}' ;;\n    \
+             *) printf 'a supervisor request with no turn outcome: %s\\n' \"$request\" >&2; exit 2 ;;\n  \
+             esac\n\
              done\n",
             requests = requests.display(),
             cli = crate::harness::binary().display(),
@@ -7046,21 +7054,46 @@ fn judged_like_a_host_bus(name: &str, run: &str) -> (World, String, std::path::P
     (world, path, requests)
 }
 
-/// Every supervisor request the host-bus judge was handed whose turn was lost.
+/// The part of onejudge's `supervisor` request a host bus decides on, read off
+/// the judge's log: a line missing either, or naming an outcome onejudge does not
+/// send, fails the journey rather than dropping out of it.
 #[cfg(unix)]
-fn lost_turns_put_to_the_judge(requests: &std::path::Path) -> Vec<Value> {
+#[derive(Debug, serde::Deserialize)]
+struct SupervisorRequest {
+    op: String,
+    turn: TurnReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "outcome", rename_all = "lowercase", deny_unknown_fields)]
+enum TurnReport {
+    Taken,
+    Lost {
+        cause: String,
+        harness: Option<String>,
+    },
+}
+
+/// The cause and harness of each lost turn the host-bus judge was handed, in
+/// order.
+#[cfg(unix)]
+fn lost_turns_put_to_the_judge(requests: &std::path::Path) -> Vec<(String, Option<String>)> {
     std::fs::read_to_string(requests)
         .unwrap_or_default()
         .lines()
-        .map(|line| {
-            serde_json::from_str::<Value>(line)
-                .unwrap_or_else(|error| panic!("the judge was handed {line:?}: {error}"))
+        .filter_map(|line| {
+            let request: SupervisorRequest = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("the judge was handed {line:?}: {error}"));
+            assert_eq!(request.op, "supervisor", "the judge was handed {line:?}");
+            match request.turn {
+                TurnReport::Lost { cause, harness } => Some((cause, harness)),
+                TurnReport::Taken => None,
+            }
         })
-        .filter(|request| request["turn"]["outcome"] == "lost")
         .collect()
 }
 
-/// Every `monitor-failed` surface queued on the run's channel.
 #[cfg(unix)]
 fn monitor_failures(world: &World, run: &str) -> Vec<Value> {
     world
@@ -7176,9 +7209,7 @@ fn a_monitor_turn_lost_while_its_observer_watches_raises_a_monitor_failure() {
         "a monitor failure was raised with no lost turn put to the judge"
     );
     assert!(
-        lost.iter().all(|request| request["turn"]["cause"]
-            .as_str()
-            .is_some_and(|cause| !cause.is_empty())),
+        lost.iter().all(|(cause, _)| !cause.is_empty()),
         "a lost turn reached the judge without its cause: {lost:#?}"
     );
 }
