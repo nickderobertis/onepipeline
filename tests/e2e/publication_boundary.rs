@@ -4125,7 +4125,6 @@ fn scrubbed_world(name: &str) -> (World, Repository) {
     (world, library)
 }
 
-/// Stage everything in `repository`'s checkout and commit it as `message`.
 fn commit_all(world: &World, repository: &Repository, message: &str) {
     crate::harness::git(world, &repository.checkout, &["add", "-A"]);
     crate::harness::git(world, &repository.checkout, &["commit", "-qm", message]);
@@ -4141,7 +4140,6 @@ fn scrub_the_base(world: &World, library: &Repository) {
     crate::harness::git(world, &library.checkout, &["push", "-q", "origin", "main"]);
 }
 
-/// What the origin's `main` holds at `path`, if anything.
 fn on_origin_base(library: &Repository, path: &str) -> Option<String> {
     let shown = std::process::Command::new("git")
         .args(["show", &format!("main:{path}")])
@@ -4154,7 +4152,6 @@ fn on_origin_base(library: &Repository, path: &str) -> Option<String> {
         .then(|| String::from_utf8_lossy(&shown.stdout).into_owned())
 }
 
-/// The commit the origin's `main` names.
 fn origin_base(world: &World, library: &Repository) -> String {
     crate::harness::git(world, &library.origin, &["rev-parse", "main"])
         .trim()
