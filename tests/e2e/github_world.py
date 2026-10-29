@@ -216,7 +216,10 @@ class Parser:
                 name = self.take()
                 self.take("on")
                 condition = self.take()
-                self.directives()
+                if self.directives():
+                    raise Unsupported("the loopback reads no directive on a fragment definition")
+                if name in fragments:
+                    raise Unsupported("the document defines fragment %s twice" % name)
                 fragments[name] = (condition, self.selections())
             elif self.peek("{"):
                 operations.append(("query", None, {}, self.selections()))
@@ -341,9 +344,13 @@ class Parser:
 
 
 def evaluate(value, variables):
+    """`value` with each variable it references replaced by its binding, refusing a reference to
+    a variable the operation does not declare, which `variables` binds every one of."""
     kind, held = value
     if kind == "var":
-        return variables.get(held)
+        if held not in variables:
+            raise Unsupported("the document references undeclared variable $%s" % held)
+        return variables[held]
     if kind == "list":
         return [evaluate(item, variables) for item in held]
     if kind == "object":
@@ -377,6 +384,65 @@ def merge(into, value):
 class Execution:
     def __init__(self, schema, fragments, variables):
         self.schema, self.fragments, self.variables = schema, fragments, variables
+
+    def possible(self, typename):
+        """The concrete types a composite type stands for."""
+        return self.schema.members.get(typename, {typename})
+
+    def validate(self, typename, selections, spreading=()):
+        """Refuse the document unless every selection in it is valid where it stands, whether or
+        not executing it would reach that selection: each field defined on its parent type with
+        the arguments it admits, a selection under every composite field and none under a leaf,
+        `__typename` bare, every directive one GitHub reads, and every fragment defined, used and
+        conditioned on a composite type its parent could be."""
+        for selection in selections:
+            if selection[0] == "field":
+                _, _, name, arguments, directives, nested = selection
+                included(directives, self.variables)
+                if name == "__typename":
+                    if arguments or nested is not None:
+                        raise Unsupported("%s.__typename takes no arguments and no selection"
+                                          % typename)
+                    continue
+                supplied = {key: evaluate(value, self.variables)
+                            for key, value in arguments.items()}
+                named = re.sub(r"[\[\]!]", "", self.schema.returned(typename, name, supplied))
+                composite = named in self.schema.fields or named in self.schema.members
+                if composite and nested is None:
+                    raise Unsupported("%s.%s needs a selection" % (typename, name))
+                if not composite and nested is not None:
+                    raise Unsupported("%s.%s is a leaf and takes no selection" % (typename, name))
+                if composite:
+                    self.validate(named, nested, spreading)
+                continue
+            within = spreading
+            if selection[0] == "inline":
+                _, condition, directives, nested = selection
+            else:
+                _, fragment, directives = selection
+                if fragment not in self.fragments:
+                    raise Unsupported("the document defines no fragment %s" % fragment)
+                if fragment in spreading:
+                    raise Unsupported("fragment %s spreads itself" % fragment)
+                self.used.add(fragment)
+                within = spreading + (fragment,)
+                condition, nested = self.fragments[fragment]
+            included(directives, self.variables)
+            if condition is not None:
+                if condition not in self.schema.fields and condition not in self.schema.members:
+                    raise Unsupported("GitHub's schema defines no composite type %s" % condition)
+                if not self.possible(condition) & self.possible(typename):
+                    raise Unsupported("a %s can never be a %s" % (typename, condition))
+            self.validate(condition or typename, nested, within)
+
+    def run(self, root, selections):
+        """The answer to `selections` over `root`, once the whole document is valid."""
+        self.used = set()
+        self.validate(root.typename, selections)
+        unused = set(self.fragments) - self.used
+        if unused:
+            raise Unsupported("the document defines unused fragment %s" % ", ".join(sorted(unused)))
+        return self.select(root, selections)
 
     def select(self, target, selections):
         answer = {}
@@ -947,15 +1013,17 @@ def answer_graphql(path, request):
     for supplied in variables:
         if supplied not in declared:
             raise Unsupported("the document declares no variable $%s" % supplied)
+    bound = {}
     for held, (written, default) in declared.items():
         if held not in variables and default is not None:
-            variables[held] = evaluate(default, {})
+            bound[held] = evaluate(default, {})
         elif held not in variables and written.endswith("!"):
             raise Unsupported("variable $%s is required" % held)
-        if held in variables:
-            schema.check_value(written, variables[held], "$" + held)
+        else:
+            bound[held] = variables.get(held)
+        schema.check_value(written, bound[held], "$" + held)
     root = Mutation(world) if kind == "mutation" else Query(world)
-    return {"data": Execution(schema, fragments, variables).select(root, selections)}
+    return {"data": Execution(schema, fragments, bound).run(root, selections)}
 
 
 class Handler(BaseHTTPRequestHandler):
