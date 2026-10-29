@@ -3069,6 +3069,70 @@ test("configuration projection refuses an unresolved nextest profile reference",
   }
 });
 
+test("nextest's own parser accepts every script field and section the projection does, and only those", async () => {
+  const { scriptEntryFields, nextestSections } = await import("./config-projection.mjs");
+  const root = scratch();
+  try {
+    put(
+      root,
+      "Cargo.toml",
+      '[package]\nname = "probe"\nversion = "0.0.0"\nedition = "2021"\n[workspace]\n',
+    );
+    put(root, "src/lib.rs", "pub fn probe() {}\n");
+    const values = {
+      filter: '"all()"',
+      platform: '"cfg(all())"',
+      setup: '"db"',
+      "list-wrapper": '"trace"',
+      "run-wrapper": '"trace"',
+    };
+    const sections = {
+      "test-groups": "[test-groups]\nserial = { max-threads = 1 }\n",
+      store: '[store]\ndir = "target/nextest"\n',
+      experimental: 'experimental = ["setup-scripts", "wrapper-scripts"]\n',
+      "nextest-version": 'nextest-version = "0.9.0"\n',
+    };
+    // Every accepted field and section must have a probe value, so the list cannot grow unchecked.
+    assert.deepEqual(Object.keys(values).sort(), [...scriptEntryFields].sort());
+    assert.deepEqual(Object.keys(sections).sort(), Object.keys(nextestSections).sort());
+    const topLevel = Object.entries(sections).filter(
+      ([name]) => !name.includes("groups") && name !== "store",
+    );
+    const tables = Object.entries(sections).filter(
+      ([name]) => name.includes("groups") || name === "store",
+    );
+    put(
+      root,
+      ".config/nextest.toml",
+      [
+        ...topLevel.map(([, text]) => text),
+        '[scripts.setup.db]\ncommand = "true"\n[scripts.wrapper.trace]\ncommand = "true"\n',
+        ...tables.map(([, text]) => text),
+        "[[profile.default.scripts]]\n",
+        ...scriptEntryFields
+          .filter((field) => field !== "list-wrapper" && field !== "run-wrapper")
+          .map((field) => `${field} = ${values[field]}\n`),
+        'setpu = "db"\n',
+        "[[profile.default.scripts]]\n",
+        `filter = ${values.filter}\nlist-wrapper = ${values["list-wrapper"]}\nrun-wrapper = ${values["run-wrapper"]}\n`,
+      ].join(""),
+    );
+    const result = spawnSync("cargo", ["nextest", "show-config", "test-groups"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, CARGO_TARGET_DIR: join(root, "target") },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const unknown = [...result.stderr.matchAll(/ignoring unknown configuration key: (\S+)/g)].map(
+      (m) => m[1],
+    );
+    // nextest flags exactly the misspelled field: every field and section the projection accepts is one it reads.
+    assert.deepEqual(unknown, ["profile.default.scripts.0.setpu"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("configuration projection refuses an unresolved configuration section", () => {
   const { root, selected, refused } = projectionWorkspace();
   try {

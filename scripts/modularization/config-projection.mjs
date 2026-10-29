@@ -309,7 +309,7 @@ const cargoSections = {
   "credential-alias": false,
   "future-incompat-report": false,
 };
-const nextestSections = {
+export const nextestSections = {
   "test-groups": true,
   store: true,
   experimental: true,
@@ -317,7 +317,8 @@ const nextestSections = {
 };
 
 // nextest's profile script entry: which tests (filter, platform) run which setup scripts or wrapper scripts.
-const scriptEntryFields = ["filter", "platform", "setup", "list-wrapper", "run-wrapper"];
+// Both lists are held to nextest's own parser by a drift test that runs the installed cargo-nextest.
+export const scriptEntryFields = ["filter", "platform", "setup", "list-wrapper", "run-wrapper"];
 const scriptKinds = { setup: "setup", "list-wrapper": "wrapper", "run-wrapper": "wrapper" };
 
 function nextestScripts(configs, profiles) {
