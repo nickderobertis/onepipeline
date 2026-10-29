@@ -3974,8 +3974,9 @@ fn a_create_the_destination_stored_and_answered_malformed_names_the_destination_
 
 /// A failure the store does not refuse keeps today's schedule exactly: a rate limit, and a
 /// source that could not be reached — each a failure the store classes `transient`, arrived
-/// as its own typed error at the source's own boundary. The first retry stays prompt, the
-/// interval grows, and the one line and one surface say it is being retried.
+/// as its own typed error at the source's own boundary. Completed projection records show
+/// that each retry waits out its scheduled interval, and the one line and one surface say
+/// it is being retried.
 #[test]
 fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
     for (scenario, error, words, kind) in [
@@ -3999,18 +4000,36 @@ fn a_failure_the_store_does_not_refuse_is_retried_on_the_schedule() {
         );
 
         let outage = starts_refusing_with(&world, &run, &format!("retry this {scenario}"), &error);
-        let waited = retry_intervals(&world, &run, &outage, 3, Duration::from_secs(60));
+        // Observe completed attempts, not the instants this test happens to poll them.
+        // A loaded runner can finish several retries between polls, and store work adds
+        // unrelated time to the gaps between their completions.
+        let failed = |world: &World| {
+            crate::linear_writeback::projection_records(world, &run)
+                .into_iter()
+                .filter(|record| record["outcome"] == "failed")
+                .collect::<Vec<_>>()
+        };
+        world.until_within(
+            Duration::from_secs(60),
+            "three completed store retries",
+            |world| failed(world).len() >= 4,
+        );
         outage.replied();
 
-        assert!(
-            waited[0] < Duration::from_secs(1),
-            "{scenario}: the first retry came {:?} after the failure",
-            waited[0]
-        );
-        for pair in waited.windows(2) {
+        let records = failed(&world);
+        for (pair, scheduled_ms) in records.windows(2).take(3).zip([250, 1_000, 4_000]) {
+            let started =
+                |record: &Value| millis(record["at"].as_str().expect("attempt timestamp"));
+            let ended =
+                started(&pair[0]) + pair[0]["duration_ms"].as_u64().expect("attempt duration");
+            let waited_ms = started(&pair[1])
+                .checked_sub(ended)
+                .expect("the retry starts after the failed attempt ends");
+            // Both fields have millisecond precision. There is no upper wall-clock bound:
+            // a ready worker can be descheduled, but it must never ask before it is due.
             assert!(
-                pair[1] >= pair[0] * 2,
-                "{scenario}: the schedule did not grow: {waited:?}"
+                waited_ms + 1 >= scheduled_ms,
+                "{scenario}: retry waited {waited_ms}ms, less than its {scheduled_ms}ms schedule: {records:?}"
             );
         }
         let line = the_line_reported(&world, &run);
