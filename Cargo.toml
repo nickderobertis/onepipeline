@@ -1508,6 +1508,11 @@ jsonschema = { version = "0.56", default-features = false }
 name = "e2e"
 path = "tests/e2e/main.rs"
 
+# The pooled-slot journey has its own Nx input edge and coverage tier.
+[[test]]
+name = "pooled_slot"
+path = "tests/pooled_slot/main.rs"
+
 # The conversational tier, in its own binary for the reason `smoke` is in one:
 # so a runner can name it. Each of these journeys starts a real two-party
 # conversation and holds one side's turn open, which makes them the most
