@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.5](https://github.com/nickderobertis/onepipeline/compare/v0.95.4...v0.95.5) - 2026-10-29
+
+### Added
+
+- *(deps)* link the plan store that routes by organization and classification together ([#1262](https://github.com/nickderobertis/onepipeline/pull/1262))
+
+### Fixed
+
+- *(test)* make the pooled-slot hand-back journey reliable on a loaded runner ([#1279](https://github.com/nickderobertis/onepipeline/pull/1279))
+- *(tests)* make the activity-rule liveness test wait for the spawned tree to exit ([#1268](https://github.com/nickderobertis/onepipeline/pull/1268))
+- *(tests)* make the live-judge note journey wait for the worker's presentation record ([#1273](https://github.com/nickderobertis/onepipeline/pull/1273))
+- *(npm)* run the npm launcher journeys on Windows ([#1259](https://github.com/nickderobertis/onepipeline/pull/1259))
+- *(deps)* link the plan store that keeps a private Linear home's public projections ([#1256](https://github.com/nickderobertis/onepipeline/pull/1256))
+
 ## [0.95.4](https://github.com/nickderobertis/onepipeline/compare/v0.95.3...v0.95.4) - 2026-10-28
 
 ### Fixed
