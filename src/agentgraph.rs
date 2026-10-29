@@ -2027,7 +2027,7 @@ impl GraphRun {
     /// written for. A library graph's cancel reaps the graph's processes at once,
     /// ahead of the member that owns them seeing the stop — so a two-party member
     /// whose harness it ended read its own shutdown as a lost turn and put that to
-    /// its judge side, which a host bus raises as `monitor-failed`. Asked to stop,
+    /// its judge side, which a host bus raises as that member failing. Asked to stop,
     /// the member marks itself stopping before it tears its harness down, and
     /// onejudge answers that rather than asking the judge
     /// (`dispatch::an_observer_stopped_at_settlement_mid_turn_raises_no_monitor_failure`).
