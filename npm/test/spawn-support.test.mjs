@@ -370,7 +370,6 @@ describe("on this host, a command started through it", () => {
     );
     assert.equal(ran.error, undefined);
     assert.equal(ran.status, 4, ran.stderr);
-    // The preload ran first, then the program read back exactly what was sent.
     assert.equal(ran.stdout, `preloaded${JSON.stringify(SENT)}`);
   });
 });
