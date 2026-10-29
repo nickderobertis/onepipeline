@@ -1630,6 +1630,16 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
       },
     });
     expectFailure(/unmapped baseline command crate/);
+    // A baseline entry must name the suite it belonged to.
+    for (const suite of [undefined, 42, "Not A Suite"]) {
+      const entry = { ...baseline.tests["example::dynamic_family"], suite };
+      if (suite === undefined) delete entry.suite;
+      put(root, baselinePath, {
+        ...baseline,
+        tests: { ...baseline.tests, "example::dynamic_family": entry },
+      });
+      expectFailure(/invalid baseline test example::dynamic_family/);
+    }
     put(root, baselinePath, baseline);
     for (const bad of [
       { ...config, schema: 2 },
@@ -3127,6 +3137,20 @@ test("configuration projection refuses an unresolved configuration section", () 
       `[scripts.setup.db]\ncommand="${command}"\n[profile.ci]\n${used ? '[[profile.default.scripts]]\nfilter="all()"\nsetup="db"\n' : ""}`;
     assert.equal(selected(".config/nextest.toml", scripts("a", false), scripts("b", false)), 0);
     assert.equal(selected(".config/nextest.toml", scripts("a", true), scripts("b", true)), 2);
+    // A wrapper script is resolved through run-wrapper or list-wrapper, like a setup script.
+    const wrapped = (command) =>
+      `[scripts.wrapper.trace]\ncommand="${command}"\n[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nrun-wrapper="trace"\n`;
+    assert.equal(selected(".config/nextest.toml", wrapped("a"), wrapped("b")), 2);
+    // A misspelled field or a non-table entry refuses instead of silently naming no script.
+    const misspelled = '[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetpu="db"\n';
+    refused(
+      ".config/nextest.toml",
+      misspelled,
+      misspelled,
+      /unresolved nextest script field setpu \(read from .config\/nextest.toml profile.default.scripts\[0\]\)/,
+    );
+    const untabled = '[profile.ci]\n[profile.default]\nscripts=["db"]\n';
+    refused(".config/nextest.toml", untabled, untabled, /invalid nextest script entry/);
     const missing = '[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetup="absent"\n';
     refused(
       ".config/nextest.toml",

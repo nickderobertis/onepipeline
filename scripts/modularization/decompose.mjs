@@ -24,6 +24,8 @@ export function decompose(baseline) {
       !/^[a-z][a-z0-9_]*::[A-Za-z_]\w*$/.test(id) ||
       !entry ||
       Object.keys(entry).some((key) => !["suite", "commands", "reason"].includes(key)) ||
+      typeof entry.suite !== "string" ||
+      !/^[a-z][a-z0-9-]*$/.test(entry.suite) ||
       !Array.isArray(entry.commands) ||
       !entry.commands.every(
         (name) => typeof name === "string" && /^cmd-[a-z][a-z0-9-]*$/.test(name),

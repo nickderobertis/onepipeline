@@ -316,19 +316,32 @@ const nextestSections = {
   "nextest-version": true,
 };
 
+// nextest's profile script entry: which tests (filter, platform) run which setup scripts or wrapper scripts.
+const scriptEntryFields = ["filter", "platform", "setup", "list-wrapper", "run-wrapper"];
+const scriptKinds = { setup: "setup", "list-wrapper": "wrapper", "run-wrapper": "wrapper" };
+
 function nextestScripts(configs, profiles) {
   const used = new Map();
   for (const config of configs)
-    for (const key of profiles)
-      for (const [index, entry] of (config[key]?.scripts ?? []).entries())
-        for (const name of [entry?.setup ?? [], entry?.wrapper ?? []].flat())
-          used.set(name, `.config/nextest.toml ${key}.scripts[${index}]`);
-  for (const [name, from] of used)
+    for (const key of profiles) {
+      const entries = config[key]?.scripts ?? [];
+      if (!Array.isArray(entries))
+        throw new Error(`invalid nextest ${key}.scripts: expected an array of script entries`);
+      for (const [index, entry] of entries.entries()) {
+        const from = `.config/nextest.toml ${key}.scripts[${index}]`;
+        if (!record(entry)) throw new Error(`invalid nextest script entry (read from ${from})`);
+        for (const field of Object.keys(entry))
+          if (!scriptEntryFields.includes(field))
+            throw unresolved("nextest script field", field, from);
+        for (const [field, kind] of Object.entries(scriptKinds))
+          for (const name of [entry[field] ?? []].flat())
+            used.set(`${kind}:${name}`, { kind, name, from });
+      }
+    }
+  for (const { kind, name, from } of used.values())
     if (
       typeof name !== "string" ||
-      !configs.some((config) =>
-        ["setup", "wrapper"].some((kind) => Object.hasOwn(config.scripts?.[kind] ?? {}, name)),
-      )
+      !configs.some((config) => Object.hasOwn(config.scripts?.[kind] ?? {}, name))
     )
       throw unresolved("nextest script", JSON.stringify(name), from);
   return used;
@@ -379,11 +392,9 @@ export function configChanges(file, before, after, suites, recipeEntries) {
     }
     if (key.startsWith("profile.")) return profiles.has(key);
     if (key === "scripts")
-      return ["setup", "wrapper"].some((kind) =>
-        [...scripts.keys()].some(
-          (name) =>
-            JSON.stringify(a.scripts?.[kind]?.[name]) !== JSON.stringify(b.scripts?.[kind]?.[name]),
-        ),
+      return [...scripts.values()].some(
+        ({ kind, name }) =>
+          JSON.stringify(a.scripts?.[kind]?.[name]) !== JSON.stringify(b.scripts?.[kind]?.[name]),
       );
     return nextestSections[key];
   });
