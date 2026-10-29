@@ -11,6 +11,7 @@ import {
   toolchainFingerprint,
 } from "./manifest-projection.mjs";
 import { historicalConfigChanges } from "./config-projection.mjs";
+import { testFakeManifestChanges, testFakes } from "./test-fakes.mjs";
 import { phaseInputs } from "./phase-inputs.mjs";
 import { cliPaths, declarations, commandPaths } from "./source-projection.mjs";
 import { codeOnly, moduleGraph, validate } from "./graph.mjs";
@@ -363,6 +364,28 @@ export function commandMapping(layout, catalog) {
       toolchain: true,
     };
   }
+  const fakes = catalog.schema === 4 ? testFakes() : null;
+  const wiredDoubles = new Set(
+    (fakes?.wired ?? []).flatMap((site) =>
+      site.doubles.map((double) => `${site.helper}=${double}`),
+    ),
+  );
+  if (catalog.schema === 4)
+    for (const [name, fake] of Object.entries(fakes.crates)) {
+      if (Object.hasOwn(crates, name))
+        throw new Error(`test-fake crate ${name} collides with a crate`);
+      for (const capability of fake.selection.capabilities ?? [])
+        if (!Object.hasOwn(layout.crates, capability))
+          throw new Error(
+            `unresolved test-fake capability ${capability} (read from test-fakes.json ${name})`,
+          );
+      crates[name] = {
+        paths: fake.paths,
+        deps: fake.deps,
+        external: fake.external,
+        toolchain: true,
+      };
+    }
   const suites = Object.fromEntries(
     Object.keys(layout.crates)
       .filter((name) => name.startsWith("cmd-"))
@@ -425,30 +448,38 @@ export function commandMapping(layout, catalog) {
         seen.add(crate);
         return (crates[crate]?.deps ?? []).some((dep) => reaches(dep, target, seen));
       };
-      if (
-        suite.crates.some(
-          (crate) => reaches(crate, "agent-execution") || reaches(crate, "agent-session"),
+      // Each suite links only the test-fake crates its tests actually use: the fakes its traced phases start by
+      // name, the ones a world wires in whose capability its production closure reaches, and those every harness
+      // user links.
+      const used = new Set();
+      for (const [fake, entry] of Object.entries(fakes.crates)) {
+        const { selection } = entry;
+        if (selection.everySuite) used.add(fake);
+        if (
+          selection.capabilities?.some((cap) => suite.crates.some((crate) => reaches(crate, cap)))
         )
-      ) {
-        suite.paths.push("crates/testfakes/src/bin/fake-oneagentgraph.rs");
-        if (crates["test-agent-process"]) suite.crates.push("test-agent-process");
+          used.add(fake);
+        if (
+          selection.helpers?.some((helper) =>
+            suite.tests.some((id) => phases[id].helpers.includes(helper)),
+          )
+        )
+          used.add(fake);
+        if (
+          entry.modules.some((module) =>
+            suite.tests.some((id) => phases[id].fakeModules.includes(module)),
+          )
+        )
+          used.add(fake);
       }
-      if (suite.crates.some((crate) => reaches(crate, "publication"))) {
-        suite.paths.push("crates/testfakes/src/bin/fake-gh.rs");
-        if (crates["test-host-process"]) suite.crates.push("test-host-process");
-      }
-      if (crates["test-scenario-schema"]) suite.crates.push("test-scenario-schema");
-      suite.paths.push("crates/testfakes/src/profile.rs", "crates/testfakes/src/profile/**");
+      for (const id of suite.tests)
+        for (const started of phases[id].doubles)
+          if (!wiredDoubles.has(started)) used.add(fakes.doubleOwner.get(started.split("=")[1]));
+      suite.crates.push(...used);
     }
     const phaseExternal = new Set(
       catalog.schema === 4 ? suite.tests.flatMap((id) => phases[id].external) : [],
     );
-    const usesProcessDouble =
-      catalog.schema === 4 &&
-      (phaseExternal.has("onepipeline_testfakes") ||
-        suite.paths.some((path) => path.startsWith("crates/testfakes/src/bin/")));
-    if (usesProcessDouble)
-      suite.paths.push("crates/testfakes/Cargo.toml", "crates/testfakes/src/lib.rs");
     crates[`runner-${name}`] = {
       paths: [`resolved/runner-${name}/**`],
       deps: suite.crates,
@@ -457,10 +488,7 @@ export function commandMapping(layout, catalog) {
         "serde_json",
         ...(catalog.schema === 1
           ? ["onepipeline-testfakes"]
-          : [
-              ...(usesProcessDouble && catalog.schema !== 4 ? ["onepipeline-testfakes"] : []),
-              ...(name === "test-support" ? ["oneagentgraph", "oneharness-core", "onejudge"] : []),
-            ]),
+          : [...(name === "test-support" ? ["oneagentgraph", "oneharness-core", "onejudge"] : [])]),
         ...external.filter(
           (dep) =>
             (catalog.schema === 1 || dep !== "onepipeline-testfakes") &&
@@ -518,6 +546,7 @@ export function commandMapping(layout, catalog) {
 export function run(layout, catalog, weights, changes, projector) {
   const mapping = commandMapping(layout, catalog);
   const compiled = compileMapping(mapping.selection);
+  const testFakeSplit = catalog.schema === 4 ? testFakes() : null;
   const moduleCounts = {};
   const originals = new Set(
     Object.entries(catalog.tests).map(([name, entry]) => entry.original ?? name),
@@ -603,6 +632,24 @@ export function run(layout, catalog, weights, changes, projector) {
         files.push(...projected);
         if (projected.length) reasons.push(`test target configuration: ${file}`);
       }
+      const fakeManifest = testFakeSplit.manifestPath;
+      if (files.includes(fakeManifest)) {
+        const get = (rev) => {
+          try {
+            return git("show", `${rev}:${fakeManifest}`);
+          } catch (error) {
+            if (/does not exist|exists on disk, but not in/.test(String(error.stderr))) return "";
+            throw error;
+          }
+        };
+        const projected = testFakeManifestChanges(
+          testFakeSplit,
+          get(`${change.commit}^`),
+          get(change.commit),
+        );
+        files = [...files.filter((path) => path !== fakeManifest), ...projected];
+        if (projected.length) reasons.push(`test-fake manifest: ${projected.length} crates`);
+      }
     }
     if (files.includes("Cargo.toml")) {
       if (catalog.schema === 4)
@@ -679,9 +726,14 @@ export function run(layout, catalog, weights, changes, projector) {
   );
   const migration = [];
   const extracted = new Set();
-  while (extracted.size < Object.keys(layout.crates).length) {
-    const next = Object.keys(layout.crates).find(
-      (name) => !extracted.has(name) && layout.crates[name].deps.every((dep) => extracted.has(dep)),
+  // Test-fake crates are extracted in the same dependency order as production crates.
+  const migrating = Object.fromEntries([
+    ...Object.entries(layout.crates).map(([name, crate]) => [name, crate.deps]),
+    ...Object.entries(testFakeSplit?.crates ?? {}).map(([name, crate]) => [name, crate.deps]),
+  ]);
+  while (extracted.size < Object.keys(migrating).length) {
+    const next = Object.keys(migrating).find(
+      (name) => !extracted.has(name) && migrating[name].every((dep) => extracted.has(dep)),
     );
     if (!next) throw new Error("migration dependency cycle");
     extracted.add(next);

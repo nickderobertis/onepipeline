@@ -1793,6 +1793,20 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
         (row) => !row.reasons.some((reason) => reason.includes("historically unresolvable")),
       ),
     );
+    // Each runner links only the test fakes its tests start or its closure executes.
+    const runnerDeps = (suite) => evidence.result.mapping.selection.crates[`runner-${suite}`].deps;
+    assert.deepEqual(
+      runnerDeps("cmd-telemetry").filter((crate) => /fake|^test-|held-git|source$/.test(crate)),
+      ["test-fake-codec", "test-profile", "test-containment"],
+    );
+    assert.ok(runnerDeps("test-support").includes("held-git"));
+    assert.ok(runnerDeps("cmd-start").includes("label-strict-source"));
+    assert.ok(!runnerDeps("cmd-status").includes("fake-oneagentgraph"));
+    assert.ok(
+      evidence.result.rows.every(
+        (row) => !row.effectiveFiles.includes("crates/testfakes/Cargo.toml"),
+      ),
+    );
     assert.ok(!evidence.result.mapping.selection.shared.includes("justfile"));
     assert.ok(!evidence.result.mapping.selection.shared.includes(".cargo/config.toml"));
     assert.ok(!evidence.result.mapping.selection.shared.includes(".config/nextest.toml"));
@@ -3123,6 +3137,174 @@ test("historical driver hunks outside owned items resolve to what they belong to
   }
 });
 
+/** A scratch git package shaped like crates/testfakes, with a reviewed split each test then breaks. */
+function fakePackage() {
+  const root = scratch();
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
+  git("init", "-q");
+  git("config", "user.name", "Projection test");
+  git("config", "user.email", "projection@example.test");
+  const files = {
+    "crates/testfakes/Cargo.toml":
+      '[package]\nname = "fakes"\nversion = "0.0.0"\n\n[dependencies]\nserde_json = "1"\nsha2 = "0.10"\n\n[[bin]]\nname = "fake-a"\npath = "src/bin/fake-a.rs"\n',
+    "crates/testfakes/src/lib.rs":
+      "pub mod yaml;\n\n/// Records a call.\npub fn record() { stamp(); }\n\nfn stamp() {}\n\npub fn member() { record(); }\n",
+    "crates/testfakes/src/yaml.rs": "pub fn from_str() {}\n",
+    "crates/testfakes/src/bin/fake-a.rs":
+      "use fakes as fake;\nfn main() { fake::record(); serde_json::json!(1); }\n",
+    "crates/testfakes/src/bin/fake-b.rs":
+      "use fakes as fake;\nfn main() { fake::member(); sha2::digest(); }\n",
+    "tests/e2e/journey.rs": 'fn journey() { double("fake-a"); double("fake-b"); }\n',
+  };
+  for (const [path, text] of Object.entries(files)) put(root, path, text);
+  const crate = (fileList, items, modules, selection) => ({
+    files: fileList,
+    items,
+    modules,
+    selection,
+    interface: "scratch",
+  });
+  const spec = {
+    schema: 1,
+    package: "crates/testfakes",
+    library: "crates/testfakes/src/lib.rs",
+    crates: {
+      "test-fake-codec": crate(["crates/testfakes/src/yaml.rs"], ["record"], ["yaml"], {
+        everySuite: "the harness links it",
+      }),
+      "test-fake-member": crate([], ["member"], [], { via: "agent fakes link it" }),
+      "fake-a": crate(["crates/testfakes/src/bin/fake-a.rs"], [], [], { doubles: ["fake-a"] }),
+      "fake-b": crate(["crates/testfakes/src/bin/fake-b.rs"], [], [], { doubles: ["fake-b"] }),
+    },
+    wired: [],
+    historical: [],
+  };
+  const write = (value) =>
+    put(root, "scripts/modularization/test-fakes.json", JSON.stringify(value));
+  write(spec);
+  git("add", ".");
+  git("commit", "-qm", "initial");
+  return { root, git, spec, write };
+}
+
+test("the test-fake split owns every fake and derives each crate's real dependencies", async () => {
+  const { testFakes, testFakeManifestChanges } = await import("./test-fakes.mjs");
+  const { root, git, spec, write } = fakePackage();
+  try {
+    const fakes = testFakes(root);
+    assert.deepEqual(fakes.crates["fake-a"].deps, ["test-fake-codec"]);
+    assert.deepEqual(fakes.crates["fake-a"].external, ["serde_json"]);
+    assert.deepEqual(fakes.crates["fake-b"].deps, ["test-fake-member"]);
+    assert.deepEqual(fakes.crates["fake-b"].external, ["sha2"]);
+    // The private helper moves with the item calling it, and so does its dependency edge.
+    assert.deepEqual(fakes.crates["test-fake-member"].deps, ["test-fake-codec"]);
+    // A dependency change charges only the crates linking it; a [[bin]] change its crate; package fields all.
+    const manifest = readFileSync(join(root, "crates/testfakes/Cargo.toml"), "utf8");
+    assert.deepEqual(
+      testFakeManifestChanges(fakes, manifest, manifest.replace('sha2 = "0.10"', 'sha2 = "0.11"')),
+      ["moved/fake-b/crates/testfakes/Cargo.toml"],
+    );
+    assert.deepEqual(
+      testFakeManifestChanges(
+        fakes,
+        manifest,
+        manifest.replace('path = "src/bin/fake-a.rs"', 'path = "src/bin/a.rs"'),
+      ),
+      ["moved/fake-a/crates/testfakes/Cargo.toml"],
+    );
+    assert.equal(
+      testFakeManifestChanges(
+        fakes,
+        manifest,
+        manifest.replace('version = "0.0.0"', 'version = "0.0.1"'),
+      ).length,
+      4,
+    );
+    const refuses = (mutate, message, extra) => {
+      const broken = structuredClone(spec);
+      mutate(broken);
+      write(broken);
+      extra?.();
+      assert.throws(() => testFakes(root), message);
+      write(spec);
+    };
+    refuses((value) => {
+      value.crates["fake-b"].files = [];
+      value.crates["fake-b"].selection = { via: "nothing" };
+    }, /unowned test-fake file crates\/testfakes\/src\/bin\/fake-b.rs/);
+    refuses((value) => {
+      value.crates["fake-b"].selection = { via: "nothing" };
+    }, /unowned test-fake binary fake-b/);
+    refuses((value) => {
+      value.crates["test-fake-member"].items = [];
+    }, /unowned test-fake library item member/);
+    refuses((value) => {
+      value.crates["test-fake-codec"].modules = [];
+    }, /unowned test-fake library module yaml/);
+    refuses((value) => {
+      value.crates["fake-a"].selection = { doubles: ["fake-b"] };
+    }, /test-fake binary fake-b is owned twice|not in that crate/);
+    // Fakes a test starts and dependencies the manifest declares must have an owner too.
+    put(root, "tests/e2e/journey.rs", 'fn journey() { double("fake-z"); }\n');
+    git("add", ".");
+    assert.throws(
+      () => testFakes(root),
+      /unresolved test fake fake-z \(read from tests\/e2e\/journey.rs\)/,
+    );
+    git("checkout", "HEAD", "--", ".");
+    put(
+      root,
+      "crates/testfakes/Cargo.toml",
+      manifest.replace('sha2 = "0.10"', 'sha2 = "0.10"\ntokio = "1"'),
+    );
+    assert.throws(() => testFakes(root), /unattributed test-fake dependency tokio/);
+    put(root, "crates/testfakes/Cargo.toml", manifest);
+    assert.ok(testFakes(root));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("historical test-fake library hunks move to the crate owning their item", async () => {
+  const { testFakes, testFakeOwners } = await import("./test-fakes.mjs");
+  const { projectSourceChange } = await import("./source-projection.mjs");
+  const { root, git } = fakePackage();
+  const library = "crates/testfakes/src/lib.rs";
+  try {
+    const owners = testFakeOwners(testFakes(root));
+    const change = (from, to) => {
+      const text = readFileSync(join(root, library), "utf8");
+      assert.ok(text.includes(from), from);
+      put(root, library, text.replace(from, to));
+      git("commit", "-qam", `change ${from}`);
+      return projectSourceChange(
+        { commit: git("rev-parse", "HEAD"), files: [library] },
+        owners,
+        {},
+        root,
+      ).files;
+    };
+    assert.deepEqual(
+      change("pub fn member() { record(); }", "pub fn member() { record(); record(); }"),
+      [`moved/test-fake-member/${library}`],
+    );
+    // A private helper and a doc comment belong to the codec item they serve.
+    assert.deepEqual(change("fn stamp() {}", "fn stamp() { let _ = 1; }"), [
+      `moved/test-fake-codec/${library}`,
+    ]);
+    assert.deepEqual(change("/// Records a call.", "/// Records one call."), [
+      `moved/test-fake-codec/${library}`,
+    ]);
+    // A module declaration belongs to the crate owning that module.
+    assert.deepEqual(change("pub mod yaml;", "pub(crate) mod yaml;"), [
+      `moved/test-fake-codec/${library}`,
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("historical CLI flag hunks select their command rather than the enum facade", async () => {
   const { projectSourceChange } = await import("./source-projection.mjs");
   const root = scratch();
@@ -3208,7 +3390,9 @@ test("engine proposal CLI isolates query and effect capabilities, refuses cycles
     assert(graph.suites.status.crates.has("checkpoint"));
     assert.equal(mapped.schema, 3);
     assert.deepEqual(mapped.engineSubsystems, proposal);
-    assert.deepEqual(mapped.externalRoots["test-scenario-schema"], ["serde", "serde_json"]);
+    // Test fakes are split by scripts/modularization/test-fakes.json, not grouped as engine subsystems.
+    for (const name of ["test-scenario-schema", "test-agent-process", "test-host-process"])
+      assert(!Object.hasOwn(mapped.engineSubsystems.subsystems, name), name);
     assert(graph.suites.start.crates.has("publication"));
     assert(!graph.suites.reply.crates.has("scheduler"));
     for (const name of ["edit-reconciler", "publication", "review-replies"])

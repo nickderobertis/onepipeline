@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { codeOnly } from "./graph.mjs";
+import { testFakeOwners, testFakes } from "./test-fakes.mjs";
 
 const kebab = (word) =>
   word.replace(/[a-z0-9][A-Z]/g, (pair) => `${pair[0]}-${pair[1]}`).toLowerCase();
@@ -212,6 +213,10 @@ export function sourceOwners(layout, moves, catalog) {
       result[item.file] ??= new Map();
       for (const symbol of item.symbols) result[item.file].set(symbol, owner);
     }
+  // The shared test-fake library splits by item into the crates of the reviewed test-fake split.
+  if (catalog.schema === 4) {
+    Object.assign(result, testFakeOwners(testFakes()));
+  }
   // The dispatch match is a routing facade; implementation functions remain with their concepts.
   result["src/driver.rs"] ??= new Map();
   result["src/driver.rs"].set("dispatch", "onepipeline");
@@ -380,6 +385,11 @@ export function driverLineOwners(text, decls, fileOwners) {
     }
     const raw = lines[line - 1] ?? "";
     if (!raw.trim()) return new Set();
+    const module = /^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/.exec(raw);
+    if (module)
+      return fileOwners.has(`mod:${module[1]}`)
+        ? ownerSet(fileOwners.get(`mod:${module[1]}`))
+        : null;
     if (!/^\s*(?:\/\/|#\[|\/\*|\*)/.test(raw)) return null;
     const next = ranges
       .filter((candidate) => candidate.start > line)
@@ -392,6 +402,9 @@ export function driverLineOwners(text, decls, fileOwners) {
     return resolved.get(next) ?? null;
   };
 }
+
+// Files whose hunks outside owned items resolve to what they belong to (see driverLineOwners).
+const lineResolved = new Set(["src/driver.rs", "crates/testfakes/src/lib.rs"]);
 
 /** Historical hunks are charged to both old and new declaration owners. Unknown lines retain the whole-file input. */
 export function projectSourceChange(change, owners, layout, root = ".") {
@@ -459,7 +472,7 @@ export function projectSourceChange(change, owners, layout, root = ".") {
           );
           if (file === "src/cli.rs" && held.length)
             held = [held.sort((a, b) => a.end - a.start - (b.end - b.start))[0]];
-          if (!held.length && file === "src/driver.rs") {
+          if (!held.length && lineResolved.has(file)) {
             snapshots[index].resolve ??= driverLineOwners(
               texts[index],
               snapshots[index],
@@ -482,7 +495,7 @@ export function projectSourceChange(change, owners, layout, root = ".") {
     }
     if (unknown) {
       files.push(file);
-      if (file.startsWith("tests/e2e/"))
+      if (file.startsWith("tests/e2e/") || file.startsWith("crates/testfakes/"))
         for (const value of owners[file].values())
           for (const owner of value instanceof Set ? value : [value]) destinations.add(owner);
       // A changed import, impl or unclassified helper may affect every extracted facet from this file.

@@ -1155,51 +1155,6 @@
       ],
       "interface": "Template registry and parsing use validation DTOs; task-store mutation never follows a template lookup. Preserve every template assertion and asset path."
     },
-    "test-scenario-schema": {
-      "files": [],
-      "items": [],
-      "deps": [],
-      "external": [
-        "serde",
-        "serde_json"
-      ],
-      "interface": "Test-only scenario/profile wire types move out of the aggregate testfakes package. Reading fixture configuration must not pull in every fake executable and every sibling engine. Identical source-generated wire schemas retain assertions."
-    },
-    "test-agent-process": {
-      "files": [],
-      "items": [],
-      "deps": [
-        "test-scenario-schema"
-      ],
-      "external": [
-        "oneagentgraph",
-        "onemessagebus",
-        "onevcs",
-        "onejudge",
-        "oneharness-core",
-        "oneharness",
-        "serde",
-        "serde_json",
-        "serde-saphyr",
-        "libc",
-        "windows-sys"
-      ],
-      "interface": "Real compiled fake-oneagentgraph subprocess, including its typed sibling protocol dependencies. Link/build it only for suites whose production capabilities actually launch or drive agent sessions."
-    },
-    "test-host-process": {
-      "files": [],
-      "items": [],
-      "deps": [
-        "test-scenario-schema"
-      ],
-      "external": [
-        "onevcs-testing",
-        "onevcs",
-        "serde",
-        "serde_json"
-      ],
-      "interface": "Real fake-gh subprocess and its sibling remote double, selected for publication operations; all git operations remain real."
-    },
     "cmd-integrate": {
       "files": [],
       "items": [],

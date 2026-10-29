@@ -307,6 +307,11 @@ function snippet(module, body, scope, methodOf) {
     publicApi,
     dynamicCli,
     pipeline: /\bbinary\s*\(/.test(erased) || /\benv!\(\s*"CARGO_BIN_EXE_onepipeline"/.test(body),
+    // Fakes this snippet starts by name, and test-fake library modules it links directly.
+    doubles: [...new Set([...body.matchAll(/\bdouble\(\s*"([^"]+)"\s*\)/g)].map((m) => m[1]))],
+    fakeModules: [
+      ...new Set([...erased.matchAll(/\bonepipeline_testfakes::(\w+)/g)].map((m) => m[1])),
+    ],
     external: [
       ...new Set(
         [...erased.matchAll(/\b([a-z][a-z0-9_]*)::/g)]
@@ -341,6 +346,8 @@ export function phaseInputs(piece, disposition, commands) {
   let dynamicCli = false;
   let pipeline = false;
   const unresolved = new Set();
+  const doubles = new Set();
+  const fakeModules = new Set();
   for (const held of pending) {
     const review = reviewedAttributions[held.key.split("@")[0]];
     const diagnostic =
@@ -348,7 +355,7 @@ export function phaseInputs(piece, disposition, commands) {
       review?.boundary === "external" ||
       ["support", "library"].includes(review?.kind) ||
       /::dump(?:@|$)/.test(held.key);
-    const visitKey = `${held.key}:${diagnostic}:${held.resolvedArgv ?? false}`;
+    const visitKey = `${held.key}:${diagnostic}:${held.resolvedArgv ?? false}:${held.dumping ?? false}`;
     if (reached.has(visitKey)) continue;
     reached.add(visitKey);
     const analysis = snippet(held.module, held.body, held.scope, held.methodOf);
@@ -383,9 +390,15 @@ export function phaseInputs(piece, disposition, commands) {
       }
     }
     for (const path of analysis.paths) paths.add(path);
+    // Support and library tests still run the fakes they start; only a failure dump starts none.
+    const dumping = held.dumping || /::dump(?:@|$)/.test(held.key);
+    if (!dumping) {
+      for (const name of analysis.doubles) doubles.add(`${held.key.split("@")[0]}=${name}`);
+      for (const module of analysis.fakeModules) fakeModules.add(module);
+    }
     for (const next of analysis.pending)
-      if (!reached.has(`${next.key}:${diagnostic}:${next.resolvedArgv ?? false}`)) {
-        pending.push({ ...next, diagnostic });
+      if (!reached.has(`${next.key}:${diagnostic}:${next.resolvedArgv ?? false}:${dumping}`)) {
+        pending.push({ ...next, diagnostic, dumping });
         consumers.add(next.key);
       }
   }
@@ -398,6 +411,8 @@ export function phaseInputs(piece, disposition, commands) {
     pipeline,
     unresolved: [...unresolved].sort(),
     helpers: [...new Set([...consumers].map((key) => key.split("@")[0]))].sort(),
+    doubles: [...doubles].sort(),
+    fakeModules: [...fakeModules].sort(),
   };
   phases.set(cacheKey, result);
   return result;

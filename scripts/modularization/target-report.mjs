@@ -13,6 +13,7 @@ import { moduleGraph } from "./graph.mjs";
 import { loadAttributions } from "./attribution.mjs";
 import { functions } from "./rust-syntax.mjs";
 import { compareGlobInputs } from "./glob-impact.mjs";
+import { testFakes } from "./test-fakes.mjs";
 
 export const TARGET_MARKER = "<!-- BEGIN TARGET LAYOUT -->";
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -40,20 +41,22 @@ const pr = (row) =>
  * touches (overlapping); "sole cause" counts only suites no other touched crate, own path or shared input selected,
  * which is what splitting that crate alone could ever return.
  */
-export function forcedTimeLines(result, reach, layout, mixedEngineRows) {
+export function forcedTimeLines(result, reach, mixedEngineRows) {
   const seconds = result.platforms.linux.suiteSeconds;
   const total = Object.values(seconds).reduce((a, b) => a + b, 0);
   const ran = result.rows.reduce(
     (sum, row) => sum + row.affected.reduce((s, name) => s + seconds[name], 0),
     0,
   );
-  const crates = Object.keys(layout.crates).map((name) => ({
-    name,
-    reached: Object.keys(reach.suites).filter((suite) => reach.suites[suite].crates.has(name)),
-    touches: 0,
-    forced: 0,
-    sole: 0,
-  }));
+  const crates = Object.keys(reach.crates)
+    .filter((name) => !name.startsWith("runner-") && name !== "residual")
+    .map((name) => ({
+      name,
+      reached: Object.keys(reach.suites).filter((suite) => reach.suites[suite].crates.has(name)),
+      touches: 0,
+      forced: 0,
+      sole: 0,
+    }));
   const byName = new Map(crates.map((crate) => [crate.name, crate]));
   const causes = { shared: 0, ownOnly: 0, ownAndCrate: 0, crateOnly: 0 };
   for (const row of result.rows) {
@@ -135,6 +138,57 @@ export function forcedTimeLines(result, reach, layout, mixedEngineRows) {
     "| PR / revision still whole-file |",
     "| --- |",
     ...mixedEngineRows.map((row) => `| ${pr(row)} |`),
+  ];
+}
+
+/** The reviewed test-fake split: one crate per fake process or protocol, and the suites that link each. */
+export function testFakeLines(result, reach) {
+  const fakes = testFakes(projectRoot.replace(/\/$/, ""));
+  const suites = Object.keys(reach.suites);
+  const rows = Object.entries(fakes.crates).map(([name, crate]) => {
+    const users = suites.filter((suite) => reach.suites[suite].crates.has(name));
+    const moved = [
+      ...crate.files,
+      ...(crate.items.length ? [`lib.rs::{${crate.items.join(", ")}}`] : []),
+      ...crate.modules.map((module) => `lib.rs mod ${module}`),
+    ];
+    const reason = crate.selection.everySuite
+      ? `every suite: ${crate.selection.everySuite}`
+      : [
+          ...(crate.selection.doubles ?? []).map((double) => `tests starting ${double}`),
+          ...(crate.selection.capabilities ?? []).map((cap) => `closures reaching ${cap}`),
+          ...(crate.selection.helpers ?? []).map((helper) => `tests calling ${helper}`),
+          ...(crate.selection.via ? [crate.selection.via] : []),
+        ].join("; ");
+    return `| ${name} | ${cell(moved.join("; "))} | ${crate.deps.join(", ") || "none"} | ${crate.external.join(", ") || "std only"} | ${cell(reason)} | ${users.length} | ${users.length && users.length <= 12 ? users.join(", ") : users.length ? "see count" : "none"} |`;
+  });
+  const touched = result.rows.filter((row) =>
+    row.files.some((file) => file.startsWith(`${fakes.package}/`)),
+  );
+  const selected = (row) =>
+    row.affected.filter((suite) =>
+      [...reach.suites[suite].crates].some((crate) => Object.hasOwn(fakes.crates, crate)),
+    ).length;
+  return [
+    "## Test-fake crates",
+    "",
+    `The planner's ruling splits crates/testfakes into one crate per fake process or fake protocol; only test-fake-codec, the stable primitive codec (script directory, recorded invocations, argv flags, rendezvous, YAML helper), is shared by the fakes. scripts/modularization/test-fakes.json is the reviewed ownership: every tracked file, every public library item and module, every binary (declared or auto-discovered) and every manifest dependency must be owned, and every double("…") a test names must be a declared binary, or the replay refuses. Dependencies between these crates and their external roots are derived from the code each owns. A suite links a fake when one of its traced test phases starts that fake by name, when a world wires the fake in and the suite's production closure reaches the capability that executes it (wired sites below), or when its tests call the helper that configures it; test-profile, test-containment and the codec are linked by the harness itself and so reach every suite. Each crate keeps the real compiled subprocess and its typed sibling protocols; no fake becomes a mock. double() in the harness builds the package of the fake it is asked for, rather than the whole aggregate.`,
+    "",
+    `Historical changes are re-attributed: a library hunk goes to the crate owning its item (private helpers and comments resolve as driver hunks do, and an unresolved line charges every crate with library items), a binary or module file to its crate, a manifest dependency change to the crates linking that dependency, a [[bin]] change to its crate, and any other manifest change to all of them. ${touched.length} of the 144 PRs change ${fakes.package}; on those, ${(touched.reduce((sum, row) => sum + selected(row), 0) / Math.max(touched.length, 1)).toFixed(1)} of ${suites.length} suites are selected on average.`,
+    "",
+    "| Crate | Moves into it | Depends on | External roots | Selected by | Suites | Suites depending |",
+    "| --- | --- | --- | --- | --- | ---: | --- |",
+    ...rows,
+    "",
+    "| Wired site | Fakes | Why selection uses capabilities instead |",
+    "| --- | --- | --- |",
+    ...fakes.wired.map(
+      (site) => `| ${site.helper} | ${site.doubles.join(", ")} | ${cell(site.reason)} |`,
+    ),
+    ...fakes.historical.map(
+      (entry) => `| historical ${entry.file} | ${entry.crate} | ${cell(entry.reason)} |`,
+    ),
+    "",
   ];
 }
 
@@ -243,7 +297,10 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       )
   )
     throw new Error("target evidence differs from the current reviewed moves/catalog");
-  validateMigration(result.migration, layout.crates);
+  validateMigration(result.migration, {
+    ...layout.crates,
+    ...testFakes(projectRoot.replace(/\/$/, "")).crates,
+  });
   const current = JSON.parse(
     execFileSync(
       process.execPath,
@@ -472,8 +529,6 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "agent-session":
       "Separate session identity/lookup from author graph creation and process attachment.",
     "planner-notes": "Separate note envelope validation, delivery and reply receipt handling.",
-    "test-scenario-schema":
-      "Split scenario/profile configuration by fake protocol and keep only the stable primitive codec shared. Fixture setup links the scenario schema, never the aggregate executable package; a shared serde codec update still tests its real consumers.",
     "render-cost":
       "Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it.",
     processes:
@@ -529,7 +584,12 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     if (!furtherSplits[name]) throw new Error(`missing further split for broad crate ${name}`);
     subsystemLines.push(`| ${name} | ${count} | ${furtherSplits[name]} |`);
   }
-  subsystemLines.push("", ...forcedTimeLines(result, reach, layout, mixedEngineRows), "");
+  subsystemLines.push(
+    "",
+    ...forcedTimeLines(result, reach, mixedEngineRows),
+    "",
+    ...testFakeLines(result, reach),
+  );
   const glob = compareGlobInputs(result.mapping.selection, result.rows);
   const globLines = [
     "## What narrowing the docs/scripts globs frees",

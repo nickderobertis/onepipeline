@@ -1,0 +1,234 @@
+{
+  "schema": 1,
+  "package": "crates/testfakes",
+  "library": "crates/testfakes/src/lib.rs",
+  "crates": {
+    "test-fake-codec": {
+      "files": ["crates/testfakes/src/yaml.rs"],
+      "items": [
+        "SCRIPT_DIR_ENV",
+        "executable",
+        "script_dir",
+        "fail",
+        "USAGE",
+        "refuse",
+        "required",
+        "record",
+        "count",
+        "append",
+        "flag",
+        "flags",
+        "label",
+        "segment",
+        "node_script",
+        "rendezvous_script",
+        "meet",
+        "wait_for",
+        "wait_for_any",
+        "wait_for_any_ticking",
+        "barrier",
+        "now",
+        "moved_by"
+      ],
+      "modules": ["yaml"],
+      "selection": {
+        "everySuite": "The e2e harness writes scripted executables (executable), names run segments (segment) and parses fixture documents (yaml) through it, so every suite links it."
+      },
+      "interface": "The one shared primitive codec: the script directory, recorded invocations and counters, argv flag/label reading, per-node scripts, rendezvous files and sockets, timestamps, and the strict YAML document helper. No fake behaviour, process or sibling engine."
+    },
+    "test-profile": {
+      "files": ["crates/testfakes/src/profile.rs", "crates/testfakes/src/profile/**"],
+      "items": [],
+      "modules": ["profile"],
+      "selection": {
+        "everySuite": "Every e2e test runs its processes and filesystem calls through the harness's profile::process and profile::fs wrappers."
+      },
+      "interface": "Test-side process/filesystem profiling wrappers and their record format. Not linked by any fake."
+    },
+    "test-containment": {
+      "files": ["crates/testfakes/src/containment.rs"],
+      "items": [],
+      "modules": ["containment"],
+      "selection": {
+        "everySuite": "The harness places every test's process tree in the containment job/process group."
+      },
+      "interface": "Ending a test's whole process tree (job object on Windows, process group on Unix). Not linked by any fake."
+    },
+    "test-fake-member": {
+      "files": [],
+      "items": [
+        "RUN_ID_ENV",
+        "CLI_BIN_ENV",
+        "MEMBER_ENV",
+        "EVALUATOR_OPENING",
+        "ACTIVITY_MARK",
+        "report_env",
+        "ignore_the_polite_ask",
+        "ask_manager",
+        "stop_own_run",
+        "observe",
+        "supervise",
+        "scheduled_member",
+        "declared_members",
+        "replied_answer"
+      ],
+      "modules": [],
+      "selection": { "via": "Linked only by the agent-side process fakes that act out a scripted graph member." },
+      "interface": "The scripted graph-member protocol: observing and supervising a run, asking the manager, stopping its own run, reading a replied answer, and the members a graph declares through oneagentgraph's own configuration parser."
+    },
+    "test-fake-task-source": {
+      "files": ["crates/testfakes/src/hosted.rs"],
+      "items": [],
+      "modules": ["hosted"],
+      "selection": { "via": "Linked only by the two onetaskgraph source programs." },
+      "interface": "The onetaskgraph stdio plugin host over the real local-md plugin, shared by the scripted and label-strict sources."
+    },
+    "fake-oneagentgraph": {
+      "files": ["crates/testfakes/src/bin/fake-oneagentgraph.rs"],
+      "items": [],
+      "modules": [],
+      "selection": {
+        "doubles": ["fake-oneagentgraph"],
+        "capabilities": ["agent-execution", "agent-session"]
+      },
+      "interface": "The oneagentgraph subprocess double: graph sessions, member scripts and its typed sibling protocols."
+    },
+    "fake-gh": {
+      "files": ["crates/testfakes/src/bin/fake-gh.rs"],
+      "items": [],
+      "modules": [],
+      "selection": {
+        "doubles": ["fake-gh"],
+        "capabilities": ["publication", "branch-publication", "review-discovery", "review-replies", "publication-query"]
+      },
+      "interface": "GitHub at onevcs's ONEVCS_GH seam, over onevcs-testing's remote double; every git operation stays real."
+    },
+    "fake-claude": {
+      "files": ["crates/testfakes/src/bin/fake-claude.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["fake-claude"] },
+      "interface": "The paid claude-code turn at oneharness's per-harness binary seam, for journeys driving the real oneagentgraph."
+    },
+    "fake-codex": {
+      "files": ["crates/testfakes/src/bin/fake-codex.rs", "crates/testfakes/src/codex_app_server.rs"],
+      "items": ["CODEX_SERVER_OVERLOADED"],
+      "modules": ["codex_app_server"],
+      "selection": { "doubles": ["fake-codex"] },
+      "interface": "Codex's JSON-lines turn and its app-server protocol, which the codex_server tier also links directly."
+    },
+    "fake-oneharness": {
+      "files": ["crates/testfakes/src/bin/fake-oneharness.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["fake-oneharness"] },
+      "interface": "The oneharness executable a two-party member's provider block names, and in-flight redirection."
+    },
+    "oneharness-cli": {
+      "files": ["crates/testfakes/src/bin/oneharness-cli.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["oneharness-cli"] },
+      "interface": "The released oneharness CLI's shell, built from this lock. Not a double."
+    },
+    "fake-dispatch-env-hook": {
+      "files": ["crates/testfakes/src/bin/fake-dispatch-env-hook.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["fake-dispatch-env-hook"] },
+      "interface": "The dispatch environment hook program."
+    },
+    "scripted-source": {
+      "files": ["crates/testfakes/src/bin/scripted-source.rs"],
+      "items": [],
+      "modules": [],
+      "selection": {
+        "doubles": ["scripted-source"],
+        "helpers": ["harness::through_scripted_source"]
+      },
+      "interface": "A real onetaskgraph source that answers scripted source errors or holds a call open."
+    },
+    "label-strict-source": {
+      "files": ["crates/testfakes/src/bin/label-strict-source.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["label-strict-source"] },
+      "interface": "A real onetaskgraph source enforcing github-projects label strictness."
+    },
+    "host-channel-server": {
+      "files": ["crates/testfakes/src/bin/host-channel-server.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["host-channel-server"] },
+      "interface": "A host's own channel server over the bus library."
+    },
+    "node-validator": {
+      "files": ["crates/testfakes/src/bin/node-validator.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["node-validator"] },
+      "interface": "A real --node-validator hook program."
+    },
+    "envelope-reviewer": {
+      "files": ["crates/testfakes/src/bin/envelope-reviewer.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["envelope-reviewer"] },
+      "interface": "A real --envelope-reviewer hook program."
+    },
+    "bus-validator": {
+      "files": ["crates/testfakes/src/bin/bus-validator.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["bus-validator"] },
+      "interface": "A real bus command validator."
+    },
+    "reviewer-bar": {
+      "files": ["crates/testfakes/src/bin/reviewer-bar.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["reviewer-bar"] },
+      "interface": "The command a reviewer's bar is fingerprinted with."
+    },
+    "held-git": {
+      "files": ["crates/testfakes/src/bin/held-git.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["held-git"] },
+      "interface": "A git wrapper that holds chosen invocations open."
+    },
+    "session-holder": {
+      "files": ["crates/testfakes/src/bin/session-holder.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["session-holder"] },
+      "interface": "An unattributed live onevcs session held by a running process."
+    },
+    "review-read": {
+      "files": ["crates/testfakes/src/bin/review-read.rs"],
+      "items": [],
+      "modules": [],
+      "selection": { "doubles": ["review-read"] },
+      "interface": "Review feedback read through the linked onevcs."
+    }
+  },
+  "wired": [
+    {
+      "helper": "harness::cmd_on",
+      "doubles": ["fake-oneagentgraph", "fake-gh"],
+      "reason": "Every onepipeline command a world builds carries ONEPIPELINE_ONEAGENTGRAPH_BIN and ONEVCS_GH; the fake runs only when the command's production closure reaches the capability that executes it, so those suites select it through its capabilities."
+    },
+    {
+      "helper": "harness::plans_source",
+      "doubles": ["scripted-source"],
+      "reason": "The scripted source is configured only for a world built through_scripted_source, which selects it through that helper."
+    }
+  ],
+  "historical": [
+    {
+      "file": "crates/testfakes/src/bin/fake-onetaskgraph.rs",
+      "crate": "test-fake-task-source",
+      "reason": "Deleted in #542 when scripted-source and the hosted plugin replaced it as the store fake; its consumers are now the task-source protocol's consumers."
+    }
+  ]
+}
