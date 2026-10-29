@@ -27,16 +27,16 @@ fn a_zombie_reaped_before_ps_reads_the_table_has_ended() {
     let reaped = scratch.join("reaped");
     let host_ps = which("ps");
     let delayed = scratch.join("ps");
+    // The paths reach the script through the environment the probe's `ps`
+    // inherits, so no path is ever parsed as shell source.
     std::fs::write(
         &delayed,
-        format!(
-            "#!/bin/sh\n: > '{asked}'\nwhile [ ! -e '{reaped}' ]; do sleep 0.01; done\nexec '{host_ps}' \"$@\"\n",
-            asked = asked.display(),
-            reaped = reaped.display(),
-            host_ps = host_ps.display(),
-        ),
+        "#!/bin/sh\n: > \"$PROCESS_ENDED_ASKED\"\nwhile [ ! -e \"$PROCESS_ENDED_REAPED\" ]; do sleep 0.01; done\nexec \"$PROCESS_ENDED_HOST_PS\" \"$@\"\n",
     )
     .expect("the delayed ps");
+    std::env::set_var("PROCESS_ENDED_ASKED", &asked);
+    std::env::set_var("PROCESS_ENDED_REAPED", &reaped);
+    std::env::set_var("PROCESS_ENDED_HOST_PS", &host_ps);
     std::fs::set_permissions(&delayed, std::fs::Permissions::from_mode(0o755))
         .expect("the delayed ps is executable");
     let path = std::env::var_os("PATH").unwrap_or_default();
