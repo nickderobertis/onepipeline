@@ -141,7 +141,6 @@ fn metadata_of(body: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Every issue the model holds, by node id.
 fn issues(state: &Value) -> &Map<String, Value> {
     state["issues"].as_object().expect("the model's issues")
 }

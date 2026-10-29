@@ -43,19 +43,24 @@ class Unsupported(Exception):
 
 
 class Schema:
-    """The object and interface types of an SDL document, each with its fields' named types,
-    and which concrete types each interface and union stands for."""
+    """The object and interface types of an SDL document, each field with its named type and its
+    arguments' named types; its input types' fields; and which concrete types each interface and
+    union stands for."""
 
     def __init__(self, text):
         text = re.sub(r'"[^"\n]*"', "", re.sub(r"#[^\n]*", "", text))
-        self.fields, self.members = {}, {}
+        self.fields, self.inputs, self.members = {}, {}, {}
+        named = r"\s*:\s*\[*\s*(\w+)"
         for kind, name, implements, body in re.findall(
-                r"\b(type|interface)\s+(\w+)(?:\s+implements\s+([\w\s&]+?))?\s*\{([^}]*)\}",
+                r"\b(type|interface|input)\s+(\w+)(?:\s+implements\s+([\w\s&]+?))?\s*\{([^}]*)\}",
                 text):
+            if kind == "input":
+                self.inputs[name] = dict(re.findall(r"(\w+)" + named, body))
+                continue
             self.fields[name] = {
-                field: returned
-                for field, returned in re.findall(
-                    r"(\w+)\s*(?:\([^)]*\))?\s*:\s*\[*\s*(\w+)", body)}
+                field: (returned, dict(re.findall(r"(\w+)" + named, arguments)))
+                for field, arguments, returned in re.findall(
+                    r"(\w+)\s*(?:\(([^)]*)\))?" + named, body)}
             for interface in re.findall(r"\w+", implements or ""):
                 self.members.setdefault(interface, set()).add(name)
         for name, members in re.findall(r"\bunion\s+(\w+)\s*=\s*([\w\s|]+?)(?=\n\s*\n|"
@@ -67,13 +72,35 @@ class Schema:
         return (condition is None or condition == typename
                 or typename in self.members.get(condition, ()))
 
-    def returned(self, typename, field):
+    def returned(self, typename, field, supplied):
         """The named type `typename.field` answers, refused when the schema defines no such
-        field."""
+        field, or no argument `supplied` names, or no field of an input object it carries."""
         defined = self.fields.get(typename)
         if defined is None or field not in defined:
             raise Unsupported("GitHub's schema defines no %s.%s" % (typename, field))
-        return defined[field]
+        returned, arguments = defined[field]
+        for name, value in supplied.items():
+            if name not in arguments:
+                raise Unsupported("GitHub's schema defines no argument %s.%s(%s)"
+                                  % (typename, field, name))
+            self.check_input(arguments[name], value, "%s.%s(%s)" % (typename, field, name))
+        return returned
+
+    def check_input(self, typename, value, where):
+        """Refuse a value of input type `typename` naming a field the input type lacks."""
+        if typename not in self.inputs or value is None:
+            return
+        if isinstance(value, list):
+            for item in value:
+                self.check_input(typename, item, where)
+            return
+        if not isinstance(value, dict):
+            raise Unsupported("%s must be a %s object" % (where, typename))
+        for name, held in value.items():
+            if name not in self.inputs[typename]:
+                raise Unsupported("GitHub's schema defines no %s.%s, which %s carries"
+                                  % (typename, name, where))
+            self.check_input(self.inputs[typename][name], held, "%s.%s" % (where, name))
 
 
 
@@ -130,6 +157,8 @@ class Parser:
                 operations.append(("query", self.selections()))
             else:
                 kind = self.take()
+                if kind not in ("query", "mutation"):
+                    raise Unsupported("the loopback answers queries and mutations, not %r" % kind)
                 if not self.peek("(") and not self.peek("{") and not self.peek("@"):
                     self.take()
                 if self.peek("("):
@@ -281,9 +310,9 @@ class Execution:
                 if name == "__typename":
                     merge(answer, {alias: target.typename})
                     continue
-                returned = self.schema.returned(target.typename, name)
                 supplied = {key: evaluate(value, self.variables)
                             for key, value in arguments.items()}
+                returned = self.schema.returned(target.typename, name, supplied)
                 merge(answer, {alias: self.shape(target.field(name, supplied), returned,
                                                  nested)})
             elif selection[0] == "inline":
@@ -369,6 +398,7 @@ def seeded(seed):
                 or set(issue) != {"id", "repository", "title", "body", "board", "status", "parent"}
                 or not all(isinstance(issue[key], str) for key in ("id", "title", "body"))
                 or issue["id"] in ids or issue["repository"] not in seed["repositories"]
+                or not isinstance(issue["board"], int) or isinstance(issue["board"], bool)
                 or str(issue["board"]) not in seed["boards"]
                 or issue["status"] not in STATUS_OPTIONS
                 or (issue["parent"] is not None and issue["parent"] not in ids)):
@@ -761,7 +791,8 @@ class Mutation(Node):
                 held[key] = supplied[key]
         movement = supplied.get("stateInput") or {}
         if "state" in supplied:
-            movement = {"value": supplied["state"], "stateReason": supplied.get("stateReason")}
+            movement = {"value": supplied["state"],
+                        "stateReason": "COMPLETED" if supplied["state"] == "CLOSED" else None}
         if movement:
             held["state"] = movement["value"]
             held["stateReason"] = movement.get("stateReason")
