@@ -2,13 +2,16 @@
 
 #[path = "../e2e/harness.rs"]
 mod harness;
+#[path = "../e2e/pool_hand_back.rs"]
+mod pool_hand_back;
 #[path = "../e2e/pool_support.rs"]
-mod support;
+mod pool_support;
 
 use harness::{lifecycle, plan_of, World};
+use pool_hand_back::*;
+use pool_support::*;
 use serde_json::json;
 use std::path::PathBuf;
-use support::*;
 
 /// A pooled identity that admits one session holds the second node that would
 /// open one, and lets it go when the first's session closes.

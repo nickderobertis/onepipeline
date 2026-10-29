@@ -426,17 +426,16 @@ fn a_driver_killed_by_a_signal_leaves_no_record_and_its_adopter_writes_its_own()
 fn a_driver_that_panics_after_adoption_leaves_no_record() {
     let world = World::new("exit-panic");
     let run = "panicked";
-    world.script("build.wait", "hold");
-    world.script("ship.wait", "hold");
+    let build = world.rendezvous("build");
+    let ship = world.rendezvous("ship");
     let killed = start_detached(
         &world,
         run,
         vec![agent("build", &[]), agent("ship", &[])],
         &[],
     );
-    world.until("both held nodes to be dispatched", |world| {
-        world.events_of(run, "node-dispatched").len() >= 2
-    });
+    let _original_build = build.arrived();
+    let _original_ship = ship.arrived();
     end_process(killed);
 
     let mut adopt = world.cmd(&["adopt", run]);
@@ -446,21 +445,35 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
         .stderr(std::process::Stdio::piped());
     let mut adopting = adopt.spawn().expect("the adoption starts");
     let pid = adopting.id();
-    world.until(
-        "the adopter to journal its adoption and re-dispatch both nodes",
-        |world| {
-            world
-                .events_of(run, "driver-adopted")
-                .iter()
-                .any(|adopted| adopted["payload"]["pid"] == json!(pid))
-                && world.events_of(run, "node-dispatched").len() >= 4
-        },
+    // These connections prove both replacement workers reached their holds. A
+    // loaded runner can take longer than one polling step to adopt and launch
+    // them; nextest's test timeout remains the backstop for a missing dispatch.
+    let adopted_build = build.arrived();
+    let adopted_ship = ship.arrived();
+    assert!(
+        world
+            .events_of(run, "driver-adopted")
+            .iter()
+            .any(|adopted| { adopted["payload"]["pid"] == json!(pid) }),
+        "the adopter dispatched without journalling its adoption: {}",
+        world.dump()
     );
+    for node in ["build", "ship"] {
+        assert_eq!(
+            world
+                .events_of(run, "node-dispatched")
+                .iter()
+                .filter(|event| event["labels"]["node"] == node)
+                .count(),
+            2,
+            "{node} must have an original and an adopted dispatch"
+        );
+    }
     // The terminal goes away: every later line the attached stream writes fails.
     drop(adopting.stderr.take());
     // One node settles, which the attached stream writes about; the other is
     // still held, so the driver has work in flight when it panics.
-    world.release("build.go");
+    adopted_build.release();
 
     let deadline = Instant::now() + Duration::from_secs(120);
     let ended = loop {
@@ -480,7 +493,7 @@ fn a_driver_that_panics_after_adoption_leaves_no_record() {
         "the panicking driver {pid} wrote a driver-exited: {exits:?}"
     );
     assert!(exits.is_empty(), "{exits:?}");
-    world.release("ship.go");
+    adopted_ship.release();
 }
 
 /// A node validator that passes the edit it is offered at submission, and holds

@@ -1,0 +1,4350 @@
+{
+  "priority_labels": {
+    "high": "High",
+    "low": "Low",
+    "medium": "Medium",
+    "urgent": "Critical"
+  },
+  "HumanItemSample": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemSample",
+    "description": "An explicit sample bundle, validated before any query or action.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "Bundle version.",
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 1,
+        "maximum": 1
+      },
+      "items": {
+        "description": "Sample items with complete affected-node lists.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HumanItemDetail"
+        }
+      },
+      "approval_keys": {
+        "description": "Sample approval authority's current key for each board copy.",
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "approvals": {
+        "description": "Approvals accepted by the sample authority before item completion.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HumanItemSampleApproval"
+        }
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "schema_version",
+      "items",
+      "approval_keys"
+    ],
+    "$defs": {
+      "HumanItemDetail": {
+        "description": "An item and its complete affected-node list.",
+        "type": "object",
+        "properties": {
+          "item": {
+            "description": "Item.",
+            "$ref": "#/$defs/HumanItem"
+          },
+          "blocked": {
+            "description": "Blocked.",
+            "$ref": "#/$defs/HumanItemBlocked"
+          },
+          "nodes": {
+            "description": "Nodes.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemNode"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "blocked",
+          "nodes"
+        ]
+      },
+      "HumanItem": {
+        "description": "A stable host-unique human item at schema version one.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "Schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "State.",
+            "$ref": "#/$defs/HumanItemState"
+          },
+          "resolution": {
+            "description": "Resolution.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracker": {
+            "description": "Tracker.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemTracker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "Created at.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval",
+          "state",
+          "resolution",
+          "tracker",
+          "created_at",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "resolution": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "task"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "answered",
+                    "dismissed"
+                  ]
+                },
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    "reason": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "reason": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      },
+      "HumanItemBlocked": {
+        "description": "Affected node counts grouped by plan.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "Total.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "plans": {
+            "description": "Plans.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemBlockedPlan"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "plans"
+        ]
+      },
+      "HumanItemBlockedPlan": {
+        "description": "A plan affected by an item; preview contains its first three nodes.",
+        "type": "object",
+        "properties": {
+          "plan": {
+            "description": "Plan.",
+            "type": "string"
+          },
+          "count": {
+            "description": "Count.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "preview": {
+            "description": "Preview.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemNode"
+            },
+            "maxItems": 3
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan",
+          "count",
+          "preview"
+        ]
+      },
+      "HumanItemNode": {
+        "description": "An affected step.",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "Run.",
+            "type": "string"
+          },
+          "node": {
+            "description": "Node.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run",
+          "node",
+          "title"
+        ]
+      },
+      "HumanItemSampleApproval": {
+        "description": "An approval written by the fixture authority, never a live design approval.",
+        "type": "object",
+        "properties": {
+          "approval": {
+            "description": "Stored document reference.",
+            "$ref": "#/$defs/HumanItemApproval"
+          },
+          "actor": {
+            "description": "Resolving actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "User represented by the actor, if any.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "approval",
+          "actor",
+          "on_behalf_of"
+        ]
+      }
+    }
+  },
+  "HumanItemRefusal": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemRefusal",
+    "description": "A typed refusal from a query or action adapter.",
+    "oneOf": [
+      {
+        "description": "Runtime integration is not installed.",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "unavailable"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "description": "The requested transition conflicts with stored state.",
+        "type": "object",
+        "properties": {
+          "reason": {
+            "description": "Actionable refusal text.",
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "const": "conflict"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "reason"
+        ]
+      }
+    ]
+  },
+  "HumanItem": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItem",
+    "description": "A stable host-unique human item at schema version one.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "Schema version.",
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 1,
+        "maximum": 1
+      },
+      "id": {
+        "description": "Id.",
+        "type": "string"
+      },
+      "dedup_key": {
+        "description": "Dedup key.",
+        "type": "string"
+      },
+      "kind": {
+        "description": "Kind.",
+        "$ref": "#/$defs/HumanItemKind"
+      },
+      "title": {
+        "description": "Title.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "body": {
+        "description": "Body.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "priority": {
+        "description": "Priority.",
+        "type": "string",
+        "enum": [
+          "urgent",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "owner": {
+        "description": "Owner.",
+        "$ref": "#/$defs/HumanItemOwner"
+      },
+      "block": {
+        "description": "Block.",
+        "$ref": "#/$defs/HumanItemBlock"
+      },
+      "approval": {
+        "description": "Approval.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemApproval"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "state": {
+        "description": "State.",
+        "$ref": "#/$defs/HumanItemState"
+      },
+      "resolution": {
+        "description": "Resolution.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemResolution"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "tracker": {
+        "description": "Tracker.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemTracker"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "created_at": {
+        "description": "Created at.",
+        "type": "string"
+      },
+      "updated_at": {
+        "description": "Updated at.",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "schema_version",
+      "id",
+      "dedup_key",
+      "kind",
+      "title",
+      "body",
+      "priority",
+      "owner",
+      "block",
+      "approval",
+      "state",
+      "resolution",
+      "tracker",
+      "created_at",
+      "updated_at"
+    ],
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "state": {
+              "const": "open"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "resolution": {
+              "type": "null"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "resolution": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "kind": {
+              "const": "task"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "state": {
+              "enum": [
+                "open",
+                "completed",
+                "dismissed"
+              ]
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "state": {
+              "enum": [
+                "open",
+                "answered",
+                "dismissed"
+              ]
+            },
+            "approval": {
+              "type": "null"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "state": {
+              "const": "answered"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "resolution": {
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                },
+                "reason": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "text"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "state": {
+              "enum": [
+                "completed",
+                "dismissed"
+              ]
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "resolution": {
+              "properties": {
+                "text": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "state": {
+              "const": "completed"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "resolution": {
+              "properties": {
+                "reason": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "$defs": {
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      }
+    }
+  },
+  "HumanItemInput": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemInput",
+    "description": "Immutable fields supplied when raising a human item.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "The immutable input schema version.",
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 1,
+        "maximum": 1
+      },
+      "dedup_key": {
+        "description": "Dedup key.",
+        "type": "string"
+      },
+      "kind": {
+        "description": "Kind.",
+        "$ref": "#/$defs/HumanItemKind"
+      },
+      "title": {
+        "description": "Title.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "body": {
+        "description": "Body.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "priority": {
+        "description": "Priority.",
+        "type": "string",
+        "enum": [
+          "urgent",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "owner": {
+        "description": "Owner.",
+        "$ref": "#/$defs/HumanItemOwner"
+      },
+      "block": {
+        "description": "Block.",
+        "$ref": "#/$defs/HumanItemBlock"
+      },
+      "approval": {
+        "description": "Approval.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemApproval"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "schema_version",
+      "dedup_key",
+      "kind",
+      "title",
+      "body",
+      "priority",
+      "owner",
+      "block",
+      "approval"
+    ],
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "kind": {
+              "const": "question"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "approval": {
+              "type": "null"
+            }
+          }
+        }
+      }
+    ],
+    "$defs": {
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      }
+    }
+  },
+  "HumanItemAction": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemAction",
+    "description": "The authoritative human-item action vocabulary. Tasks use Complete, including design reviews.",
+    "oneOf": [
+      {
+        "description": "Raise an item with a required deduplication key.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "The immutable input schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "raise"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "schema_version",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "question"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "description": "Answer an open item.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "answer"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "id",
+          "text",
+          "actor",
+          "on_behalf_of"
+        ]
+      },
+      {
+        "description": "Complete an open item.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "complete"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "id",
+          "actor",
+          "on_behalf_of"
+        ]
+      },
+      {
+        "description": "Dismiss an open item.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "const": "dismiss"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "id",
+          "actor",
+          "on_behalf_of"
+        ]
+      }
+    ],
+    "$defs": {
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      }
+    }
+  },
+  "HumanItemFilter": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemFilter",
+    "description": "Query selectors; omitted state selects open items.",
+    "type": "object",
+    "properties": {
+      "kind": {
+        "description": "Kind.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "blocking": {
+        "description": "Blocking.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      },
+      "priority": {
+        "description": "Priority.",
+        "type": [
+          "string",
+          "null"
+        ],
+        "enum": [
+          null,
+          "urgent",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "state": {
+        "description": "State.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemState"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "session": {
+        "description": "Session.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "run": {
+        "description": "Run.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "plan": {
+        "description": "Plan.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "host": {
+        "description": "Host.",
+        "type": [
+          "boolean",
+          "null"
+        ]
+      }
+    },
+    "additionalProperties": false,
+    "$defs": {
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      }
+    }
+  },
+  "HumanItemView": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemView",
+    "description": "An item and its derived impact.",
+    "type": "object",
+    "properties": {
+      "item": {
+        "description": "Item.",
+        "$ref": "#/$defs/HumanItem"
+      },
+      "blocked": {
+        "description": "Blocked.",
+        "$ref": "#/$defs/HumanItemBlocked"
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "item",
+      "blocked"
+    ],
+    "$defs": {
+      "HumanItem": {
+        "description": "A stable host-unique human item at schema version one.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "Schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "State.",
+            "$ref": "#/$defs/HumanItemState"
+          },
+          "resolution": {
+            "description": "Resolution.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracker": {
+            "description": "Tracker.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemTracker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "Created at.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval",
+          "state",
+          "resolution",
+          "tracker",
+          "created_at",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "resolution": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "task"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "answered",
+                    "dismissed"
+                  ]
+                },
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    "reason": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "reason": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      },
+      "HumanItemBlocked": {
+        "description": "Affected node counts grouped by plan.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "Total.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "plans": {
+            "description": "Plans.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemBlockedPlan"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "plans"
+        ]
+      },
+      "HumanItemBlockedPlan": {
+        "description": "A plan affected by an item; preview contains its first three nodes.",
+        "type": "object",
+        "properties": {
+          "plan": {
+            "description": "Plan.",
+            "type": "string"
+          },
+          "count": {
+            "description": "Count.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "preview": {
+            "description": "Preview.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemNode"
+            },
+            "maxItems": 3
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan",
+          "count",
+          "preview"
+        ]
+      },
+      "HumanItemNode": {
+        "description": "An affected step.",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "Run.",
+            "type": "string"
+          },
+          "node": {
+            "description": "Node.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run",
+          "node",
+          "title"
+        ]
+      }
+    }
+  },
+  "HumanItemDetail": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemDetail",
+    "description": "An item and its complete affected-node list.",
+    "type": "object",
+    "properties": {
+      "item": {
+        "description": "Item.",
+        "$ref": "#/$defs/HumanItem"
+      },
+      "blocked": {
+        "description": "Blocked.",
+        "$ref": "#/$defs/HumanItemBlocked"
+      },
+      "nodes": {
+        "description": "Nodes.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/HumanItemNode"
+        }
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "item",
+      "blocked",
+      "nodes"
+    ],
+    "$defs": {
+      "HumanItem": {
+        "description": "A stable host-unique human item at schema version one.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "Schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "State.",
+            "$ref": "#/$defs/HumanItemState"
+          },
+          "resolution": {
+            "description": "Resolution.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracker": {
+            "description": "Tracker.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemTracker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "Created at.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval",
+          "state",
+          "resolution",
+          "tracker",
+          "created_at",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "resolution": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "task"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "answered",
+                    "dismissed"
+                  ]
+                },
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    "reason": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "reason": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      },
+      "HumanItemBlocked": {
+        "description": "Affected node counts grouped by plan.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "Total.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "plans": {
+            "description": "Plans.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemBlockedPlan"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "plans"
+        ]
+      },
+      "HumanItemBlockedPlan": {
+        "description": "A plan affected by an item; preview contains its first three nodes.",
+        "type": "object",
+        "properties": {
+          "plan": {
+            "description": "Plan.",
+            "type": "string"
+          },
+          "count": {
+            "description": "Count.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "preview": {
+            "description": "Preview.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemNode"
+            },
+            "maxItems": 3
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan",
+          "count",
+          "preview"
+        ]
+      },
+      "HumanItemNode": {
+        "description": "An affected step.",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "Run.",
+            "type": "string"
+          },
+          "node": {
+            "description": "Node.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run",
+          "node",
+          "title"
+        ]
+      }
+    }
+  },
+  "HumanItemReceipt": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemReceipt",
+    "description": "A successful mutation and its event identifier.",
+    "type": "object",
+    "properties": {
+      "item": {
+        "description": "Item.",
+        "$ref": "#/$defs/HumanItemView"
+      },
+      "event_id": {
+        "description": "Event id.",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "item",
+      "event_id"
+    ],
+    "$defs": {
+      "HumanItemView": {
+        "description": "An item and its derived impact.",
+        "type": "object",
+        "properties": {
+          "item": {
+            "description": "Item.",
+            "$ref": "#/$defs/HumanItem"
+          },
+          "blocked": {
+            "description": "Blocked.",
+            "$ref": "#/$defs/HumanItemBlocked"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "blocked"
+        ]
+      },
+      "HumanItem": {
+        "description": "A stable host-unique human item at schema version one.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "Schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "State.",
+            "$ref": "#/$defs/HumanItemState"
+          },
+          "resolution": {
+            "description": "Resolution.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracker": {
+            "description": "Tracker.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemTracker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "Created at.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval",
+          "state",
+          "resolution",
+          "tracker",
+          "created_at",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "resolution": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "task"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "answered",
+                    "dismissed"
+                  ]
+                },
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    "reason": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "reason": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      },
+      "HumanItemBlocked": {
+        "description": "Affected node counts grouped by plan.",
+        "type": "object",
+        "properties": {
+          "total": {
+            "description": "Total.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "plans": {
+            "description": "Plans.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemBlockedPlan"
+            }
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "total",
+          "plans"
+        ]
+      },
+      "HumanItemBlockedPlan": {
+        "description": "A plan affected by an item; preview contains its first three nodes.",
+        "type": "object",
+        "properties": {
+          "plan": {
+            "description": "Plan.",
+            "type": "string"
+          },
+          "count": {
+            "description": "Count.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "preview": {
+            "description": "Preview.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/HumanItemNode"
+            },
+            "maxItems": 3
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan",
+          "count",
+          "preview"
+        ]
+      },
+      "HumanItemNode": {
+        "description": "An affected step.",
+        "type": "object",
+        "properties": {
+          "run": {
+            "description": "Run.",
+            "type": "string"
+          },
+          "node": {
+            "description": "Node.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "run",
+          "node",
+          "title"
+        ]
+      }
+    }
+  },
+  "HumanItemMetadata": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemMetadata",
+    "description": "Optional onepipeline.human_item node metadata.",
+    "type": "object",
+    "properties": {
+      "kind": {
+        "description": "Kind.",
+        "$ref": "#/$defs/HumanItemKind"
+      },
+      "priority": {
+        "description": "Priority.",
+        "type": "string",
+        "enum": [
+          "urgent",
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "title": {
+        "description": "Title.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      },
+      "body": {
+        "description": "Body.",
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "kind",
+      "priority",
+      "title",
+      "body"
+    ],
+    "$defs": {
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      }
+    }
+  },
+  "HumanItemEventPayload": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "HumanItemEventPayload",
+    "description": "Version-one payload transported by a generic bus envelope.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "Schema version.",
+        "type": "integer",
+        "format": "uint32",
+        "minimum": 1,
+        "maximum": 1
+      },
+      "item_id": {
+        "description": "Item id.",
+        "type": "string"
+      },
+      "owner": {
+        "description": "Owner.",
+        "$ref": "#/$defs/HumanItemOwner"
+      },
+      "action": {
+        "description": "Action.",
+        "$ref": "#/$defs/HumanItemEventAction"
+      },
+      "item": {
+        "description": "Item.",
+        "$ref": "#/$defs/HumanItem"
+      },
+      "resolution": {
+        "description": "Resolution.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemResolution"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "schema_version",
+      "item_id",
+      "owner",
+      "action",
+      "item",
+      "resolution"
+    ],
+    "allOf": [
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-raised"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "resolution": {
+              "type": "null"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-answered"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "resolution": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-completed"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "resolution": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-dismissed"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "const": "dismissed"
+                }
+              }
+            },
+            "resolution": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      {
+        "if": {
+          "properties": {
+            "action": {
+              "const": "human-item-auto-resolved"
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "item": {
+              "properties": {
+                "state": {
+                  "const": "dismissed"
+                }
+              }
+            },
+            "resolution": {
+              "type": "object"
+            }
+          }
+        }
+      }
+    ],
+    "$defs": {
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemEventAction": {
+        "description": "The closed action ids transported in human-item event payloads.",
+        "oneOf": [
+          {
+            "description": "human-item-raised",
+            "type": "string",
+            "const": "human-item-raised"
+          },
+          {
+            "description": "human-item-answered",
+            "type": "string",
+            "const": "human-item-answered"
+          },
+          {
+            "description": "human-item-completed",
+            "type": "string",
+            "const": "human-item-completed"
+          },
+          {
+            "description": "human-item-dismissed",
+            "type": "string",
+            "const": "human-item-dismissed"
+          },
+          {
+            "description": "human-item-auto-resolved",
+            "type": "string",
+            "const": "human-item-auto-resolved"
+          }
+        ]
+      },
+      "HumanItem": {
+        "description": "A stable host-unique human item at schema version one.",
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "description": "Schema version.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 1
+          },
+          "id": {
+            "description": "Id.",
+            "type": "string"
+          },
+          "dedup_key": {
+            "description": "Dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Kind.",
+            "$ref": "#/$defs/HumanItemKind"
+          },
+          "title": {
+            "description": "Title.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "body": {
+            "description": "Body.",
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          },
+          "priority": {
+            "description": "Priority.",
+            "type": "string",
+            "enum": [
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "owner": {
+            "description": "Owner.",
+            "$ref": "#/$defs/HumanItemOwner"
+          },
+          "block": {
+            "description": "Block.",
+            "$ref": "#/$defs/HumanItemBlock"
+          },
+          "approval": {
+            "description": "Approval.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "description": "State.",
+            "$ref": "#/$defs/HumanItemState"
+          },
+          "resolution": {
+            "description": "Resolution.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tracker": {
+            "description": "Tracker.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/HumanItemTracker"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "description": "Created at.",
+            "type": "string"
+          },
+          "updated_at": {
+            "description": "Updated at.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "id",
+          "dedup_key",
+          "kind",
+          "title",
+          "body",
+          "priority",
+          "owner",
+          "block",
+          "approval",
+          "state",
+          "resolution",
+          "tracker",
+          "created_at",
+          "updated_at"
+        ],
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "open"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "resolution": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "kind": {
+                  "const": "task"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "open",
+                    "answered",
+                    "dismissed"
+                  ]
+                },
+                "approval": {
+                  "type": "null"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "answered"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "string",
+                      "minLength": 1,
+                      "pattern": "\\S"
+                    },
+                    "reason": {
+                      "type": "null"
+                    }
+                  },
+                  "required": [
+                    "text"
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "enum": [
+                    "completed",
+                    "dismissed"
+                  ]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "text": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "resolution": {
+                  "properties": {
+                    "reason": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "HumanItemKind": {
+        "description": "The human item kind.",
+        "oneOf": [
+          {
+            "description": "Task.",
+            "type": "string",
+            "const": "task"
+          },
+          {
+            "description": "Question.",
+            "type": "string",
+            "const": "question"
+          }
+        ]
+      },
+      "HumanItemBlock": {
+        "description": "The scope held by an open item; never a presentation filter.",
+        "oneOf": [
+          {
+            "description": "Holds nothing.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "nothing"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "description": "Holds work in a run.",
+            "type": "object",
+            "properties": {
+              "run": {
+                "description": "Run identifier.",
+                "type": "string"
+              },
+              "node": {
+                "description": "Node identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "work"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "run",
+              "node"
+            ]
+          },
+          {
+            "description": "Holds a whole plan.",
+            "type": "object",
+            "properties": {
+              "plan": {
+                "description": "Plan identifier.",
+                "type": "string"
+              },
+              "scope": {
+                "type": "string",
+                "const": "plan"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "scope",
+              "plan"
+            ]
+          },
+          {
+            "description": "Holds all work on the host.",
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "const": "host"
+              }
+            },
+            "required": [
+              "scope"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "HumanItemState": {
+        "description": "The human item state.",
+        "oneOf": [
+          {
+            "description": "Open.",
+            "type": "string",
+            "const": "open"
+          },
+          {
+            "description": "Answered.",
+            "type": "string",
+            "const": "answered"
+          },
+          {
+            "description": "Completed.",
+            "type": "string",
+            "const": "completed"
+          },
+          {
+            "description": "Dismissed.",
+            "type": "string",
+            "const": "dismissed"
+          }
+        ]
+      },
+      "HumanItemResolution": {
+        "description": "Who resolved an item and what they said.",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "description": "Actor.",
+            "type": "string"
+          },
+          "on_behalf_of": {
+            "description": "On behalf of.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "description": "Text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Reason.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "actor",
+          "on_behalf_of",
+          "text",
+          "reason"
+        ]
+      },
+      "HumanItemTracker": {
+        "description": "An associated tracker task.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "Task.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Url.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "task",
+          "url"
+        ]
+      }
+    }
+  }
+}

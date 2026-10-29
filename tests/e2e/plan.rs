@@ -374,6 +374,13 @@ fn a_ready_human_action_waits_and_blocks_what_it_unblocks() {
             .expect(id)
             .clone()
     };
+    assert!(
+        !world
+            .state_home()
+            .join(onepipeline::human_items::JOURNAL_PATH)
+            .exists(),
+        "legacy human scheduling must not create human-item records"
+    );
     assert_eq!(node("approve")["status"], "waiting");
     assert_eq!(node("approve")["unblocks"], json!(["ship"]));
     assert_eq!(node("ship")["status"], "blocked");
@@ -1187,4 +1194,60 @@ fn a_node_the_planner_cancels_settles_parked_and_the_run_still_settles() {
         .find(|node| node["id"] == "slow")
         .expect("the cancelled node is still named");
     assert_eq!(slow["status"], "parked", "{result}");
+}
+
+#[test]
+fn human_item_metadata_is_loaded_and_refused_through_the_plan_cli() {
+    let world = World::new("human-item-plan-cli");
+    let metadata = json!({"kind":"question","priority":"high","title":"Which rollout should we use?","body":"Choose gradual or immediate rollout."});
+    let mut described = human("decision", &[]);
+    described["human_item"] = metadata.clone();
+    let project = world.plan("described", &plan_of("described", vec![described.clone()]));
+    world.run(&["plan", "check", &project]).exited(0);
+    let run = settle(&world, "described-run", vec![described]);
+    assert_eq!(
+        world.run_json(&run, "plan.json")["tasks"][0]["human_item"],
+        metadata
+    );
+    assert!(!world
+        .state_home()
+        .join(onepipeline::human_items::JOURNAL_PATH)
+        .exists());
+
+    let legacy = settle(&world, "legacy-human", vec![human("legacy", &[])]);
+    assert!(world.run_json(&legacy, "plan.json")["tasks"][0]
+        .get("human_item")
+        .is_none());
+    let mut cases = Vec::new();
+    for field in ["kind", "priority", "title", "body"] {
+        let mut invalid = metadata.clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        cases.push((format!("missing-{field}"), invalid));
+    }
+    for (field, value) in [
+        ("kind", json!("approval")),
+        ("priority", json!("none")),
+        ("priority", json!("Critical")),
+        ("title", json!(" ")),
+        ("body", json!("")),
+        ("extra", json!(true)),
+    ] {
+        let mut invalid = metadata.clone();
+        invalid[field] = value;
+        cases.push((format!("invalid-{field}-{}", cases.len()), invalid));
+    }
+    for (name, invalid) in cases {
+        let mut node = human("decision", &[]);
+        node["human_item"] = invalid;
+        let project = world.plan(&name, &plan_of(&name, vec![node]));
+        world
+            .run(&["plan", "check", &project])
+            .exited(1)
+            .out_has("human_item");
+        world
+            .run(&["start", &project])
+            .exited(REFUSED)
+            .err_has("human_item");
+        assert!(!world.run_file(&name, "plan.json").exists());
+    }
 }
