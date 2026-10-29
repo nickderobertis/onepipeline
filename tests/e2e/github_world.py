@@ -66,7 +66,7 @@ class Schema:
                 self.inputs[name] = declared(body)
                 continue
             self.fields[name] = {
-                field: (re.sub(r"[\[\]!\s]", "", returned), declared(arguments))
+                field: (returned, declared(arguments))
                 for field, arguments, returned in re.findall(
                     r"(\w+)\s*(?:\(([^)]*)\))?\s*:\s*([\[\]\w!]+)", body)}
             for interface in re.findall(r"\w+", implements or ""):
@@ -81,7 +81,7 @@ class Schema:
                 or typename in self.members.get(condition, ()))
 
     def returned(self, typename, field, supplied):
-        """The named type `typename.field` answers, refused when the schema defines no such
+        """The type `typename.field` answers, as written, refused when the schema defines no such
         field, or no argument `supplied` names, or no field of an input object it carries."""
         defined = self.fields.get(typename)
         if defined is None or field not in defined:
@@ -101,6 +101,39 @@ class Schema:
                 self.check_value(written, supplied[name], "%s.%s" % (where, name))
             elif written.endswith("!") and not defaulted:
                 raise Unsupported("%s.%s is required" % (where, name))
+
+    def check_answer(self, written, value, where):
+        """Refuse an answer the type `written` does not admit: null where it is non-null, a
+        single value where it is a list, a scalar of another kind, a value outside its enum, or
+        an object whose type is not the one declared or a member of it."""
+        if written.endswith("!"):
+            if value is None:
+                raise Unsupported("the loopback answered null for non-null %s" % where)
+            written = written[:-1]
+        if value is None:
+            return
+        if written.startswith("["):
+            if not isinstance(value, list):
+                raise Unsupported("the loopback answered a single value for list %s" % where)
+            for item in value:
+                self.check_answer(written[1:-1], item, where)
+            return
+        if isinstance(value, Node):
+            if not self.matches(written, value.typename):
+                raise Unsupported("the loopback answered a %s for %s, declared %s"
+                                  % (value.typename, where, written))
+        elif written in self.enums:
+            if value not in self.enums[written]:
+                raise Unsupported("the loopback answered %r, no %s member, for %s"
+                                  % (value, written, where))
+        elif written in self.SCALARS:
+            kind = self.SCALARS[written]
+            if not isinstance(value, kind) or (kind is int and isinstance(value, bool)):
+                raise Unsupported("the loopback answered %r, no %s, for %s"
+                                  % (value, written, where))
+        else:
+            raise Unsupported("the loopback answered %s, whose type %s it cannot check"
+                              % (where, written))
 
     SCALARS = {"String": str, "ID": str, "URI": str, "DateTime": str, "Int": int,
                "Boolean": bool}
@@ -186,42 +219,50 @@ class Parser:
                 self.directives()
                 fragments[name] = (condition, self.selections())
             elif self.peek("{"):
-                operations.append(("query", self.selections()))
+                operations.append(("query", None, {}, self.selections()))
             else:
                 kind = self.take()
                 if kind not in ("query", "mutation"):
                     raise Unsupported("the loopback answers queries and mutations, not %r" % kind)
+                name = None
                 if not self.peek("(") and not self.peek("{") and not self.peek("@"):
-                    self.take()
-                if self.peek("("):
-                    self.variable_definitions()
-                self.directives()
-                operations.append((kind, self.selections()))
+                    name = self.take()
+                declared = self.variable_definitions() if self.peek("(") else {}
+                if self.directives():
+                    raise Unsupported("the loopback reads no directive on an operation")
+                operations.append((kind, name, declared, self.selections()))
         if len(operations) != 1:
             raise Unsupported("a document must hold exactly one operation")
         return operations[0], fragments
 
     def variable_definitions(self):
+        """Each variable the operation declares, with its type as written and its default."""
+        declared = {}
         self.take("(")
         while not self.peek(")"):
             self.take("$")
-            self.take()
+            name = self.take()
             self.take(":")
-            self.type()
+            written = self.type()
+            default = None
             if self.peek("="):
                 self.take()
-                self.value()
+                default = self.value()
+            declared[name] = (written, default)
         self.take(")")
+        return declared
 
     def type(self):
         if self.peek("["):
             self.take()
-            self.type()
+            written = "[" + self.type() + "]"
             self.take("]")
         else:
-            self.take()
+            written = self.take()
         if self.peek("!"):
             self.take()
+            written += "!"
+        return written
 
     def directives(self):
         found = []
@@ -312,7 +353,12 @@ def evaluate(value, variables):
 
 def included(directives, variables):
     for name, arguments in directives:
-        condition = evaluate(arguments.get("if", ("const", True)), variables)
+        if name not in ("include", "skip") or set(arguments) != {"if"}:
+            raise Unsupported("the loopback reads only @include(if:) and @skip(if:), not @%s"
+                              % name)
+        condition = evaluate(arguments["if"], variables)
+        if not isinstance(condition, bool):
+            raise Unsupported("@%s(if:) must be a Boolean: %r" % (name, condition))
         if name == "include" and not condition:
             return False
         if name == "skip" and condition:
@@ -345,8 +391,10 @@ class Execution:
                 supplied = {key: evaluate(value, self.variables)
                             for key, value in arguments.items()}
                 returned = self.schema.returned(target.typename, name, supplied)
-                merge(answer, {alias: self.shape(target.field(name, supplied), returned,
-                                                 nested)})
+                value = target.field(name, supplied)
+                self.name_objects(value, re.sub(r"[\[\]!]", "", returned))
+                self.schema.check_answer(returned, value, "%s.%s" % (target.typename, name))
+                merge(answer, {alias: self.shape(value, nested)})
             elif selection[0] == "inline":
                 _, condition, directives, nested = selection
                 if (included(directives, self.variables)
@@ -360,12 +408,17 @@ class Execution:
                     merge(answer, self.select(target, nested))
         return answer
 
-    def shape(self, value, returned, nested):
+    @staticmethod
+    def name_objects(value, named):
+        """Give each object answered without a type of its own the type the field declares."""
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, Node) and item.typename is None:
+                item.typename = named
+
+    def shape(self, value, nested):
         if isinstance(value, list):
-            return [self.shape(item, returned, nested) for item in value]
+            return [self.shape(item, nested) for item in value]
         if isinstance(value, Node):
-            if value.typename is None:
-                value.typename = returned
             if nested is None:
                 raise Unsupported("%s needs a selection" % value.typename)
             return self.select(value, nested)
@@ -887,7 +940,20 @@ def answer_graphql(path, request):
         raise Unsupported("GraphQL requires an object of a query string and its variables")
     query, variables = request["query"], request.get("variables", {})
     requests.append({"path": path, "query": query, "variables": variables})
-    (kind, selections), fragments = Parser(query).document()
+    (kind, name, declared, selections), fragments = Parser(query).document()
+    if request.get("operationName") is not None and request["operationName"] != name:
+        raise Unsupported("operationName %r names no operation of the document"
+                          % request["operationName"])
+    for supplied in variables:
+        if supplied not in declared:
+            raise Unsupported("the document declares no variable $%s" % supplied)
+    for held, (written, default) in declared.items():
+        if held not in variables and default is not None:
+            variables[held] = evaluate(default, {})
+        elif held not in variables and written.endswith("!"):
+            raise Unsupported("variable $%s is required" % held)
+        if held in variables:
+            schema.check_value(written, variables[held], "$" + held)
     root = Mutation(world) if kind == "mutation" else Query(world)
     return {"data": Execution(schema, fragments, variables).select(root, selections)}
 
@@ -934,7 +1000,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"message": "Not Found"}, 404)
             return
         try:
-            length = int(self.headers.get("Content-Length", "0"))
+            length = int(self.headers.get("Content-Length", ""))
+            if not 0 < length <= 262144:
+                raise ValueError("Content-Length must be between 1 and 262144")
             request = json.loads(self.rfile.read(length))
             with lock:
                 answer = answer_graphql(self.path, request)
