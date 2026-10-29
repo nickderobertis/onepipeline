@@ -4,7 +4,7 @@
 //! write-back's cost by.
 //!
 //! It holds one team (`TEAM`) with its workflow states, the workspace's project statuses, one
-//! project and its issues, with a generic per-kind vocabulary: an issue's states and
+//! project, its issues and the dependencies between them, with a generic per-kind vocabulary: an issue's states and
 //! a project's statuses are two different sets of names, which is what the per-kind
 //! `status_mapping` exists for. What it answers is decided by the operation each request names —
 //! the plugin's own documents, recognised by their root field — and every request it cannot
@@ -79,6 +79,10 @@ pub enum Operation {
     DocumentCreate,
     /// `documentUpdate`: one document's title or content written.
     DocumentUpdate,
+    /// `issueRelationCreate`: one dependency between two issues filed.
+    IssueRelationCreate,
+    /// `issueRelationDelete`: one dependency between two issues taken back.
+    IssueRelationDelete,
     /// Anything else, which this endpoint refuses by name.
     Unknown,
 }
@@ -104,6 +108,10 @@ impl Operation {
             Self::DocumentCreate
         } else if query.starts_with("mutation") && query.contains("documentUpdate(") {
             Self::DocumentUpdate
+        } else if query.starts_with("mutation") && query.contains("issueRelationCreate(") {
+            Self::IssueRelationCreate
+        } else if query.starts_with("mutation") && query.contains("issueRelationDelete(") {
+            Self::IssueRelationDelete
         } else if query.starts_with("mutation") {
             Self::Unknown
         } else if query.contains("projects(") {
@@ -132,6 +140,23 @@ impl Operation {
         matches!(
             self,
             Self::Resolution | Self::IssueResolved | Self::CounterpartLookups
+        )
+    }
+
+    /// Whether this is a write: every mutation this endpoint answers, and any it refuses by name
+    /// is [`Operation::Unknown`], which a journey counting writes counts too.
+    pub fn writes(self) -> bool {
+        matches!(
+            self,
+            Self::IssueUpdate
+                | Self::ProjectUpdate
+                | Self::IssueCreate
+                | Self::ProjectCreate
+                | Self::DocumentCreate
+                | Self::DocumentUpdate
+                | Self::IssueRelationCreate
+                | Self::IssueRelationDelete
+                | Self::Unknown
         )
     }
 }
@@ -171,6 +196,17 @@ struct Issue {
     priority: u64,
 }
 
+/// One dependency between two issues: `issue` is the one a write named as its own, and
+/// `related` the one it named across the relation, which the plugin reads as `issue` depending
+/// on `related`.
+#[derive(Clone, Debug)]
+struct Relation {
+    id: String,
+    issue: String,
+    related: String,
+    kind: String,
+}
+
 #[derive(Clone, Debug)]
 struct Document {
     id: String,
@@ -190,6 +226,10 @@ struct World {
     project_held: bool,
     issues: Vec<Issue>,
     documents: Vec<Document>,
+    relations: Vec<Relation>,
+    /// How many relations were ever filed, so a relation filed after one was taken back never
+    /// reuses its id.
+    relations_filed: usize,
     log: Vec<Request>,
     faults: BTreeMap<Operation, VecDeque<Fault>>,
     held: bool,
@@ -290,6 +330,16 @@ impl Linear {
                     held.description.clone(),
                 )
             })
+            .collect()
+    }
+
+    /// Every dependency this endpoint holds between two issues, as `(issue, related, type)`:
+    /// `issue` depends on `related`.
+    pub fn relations(&self) -> Vec<(String, String, String)> {
+        self.lock()
+            .relations
+            .iter()
+            .map(|held| (held.issue.clone(), held.related.clone(), held.kind.clone()))
             .collect()
     }
 
@@ -460,6 +510,7 @@ impl Linear {
                     | Operation::ProjectUpdate
                     | Operation::Document
                     | Operation::DocumentUpdate
+                    | Operation::IssueRelationDelete
             ) && !variables["id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
@@ -521,14 +572,17 @@ impl Linear {
             | Operation::IssueUpdate
             | Operation::ProjectUpdate
             | Operation::Document
-            | Operation::DocumentUpdate => variables["id"].as_str().expect("validated request ID"),
+            | Operation::DocumentUpdate
+            | Operation::IssueRelationDelete => {
+                variables["id"].as_str().expect("validated request ID")
+            }
             _ => "",
         };
         let data = match operation {
             Operation::Resolution => world.resolution(),
             Operation::IssueResolved => {
                 let mut data = world.resolution();
-                data["issue"] = world.issue(id);
+                data["issue"] = world.related(world.issue(id), query);
                 data
             }
             Operation::CounterpartLookups => {
@@ -536,7 +590,7 @@ impl Linear {
                 // row against the origin it looks up, as it does a listing's.
                 let mut data = world.resolution();
                 data["originIssues"] = json!({
-                    "nodes": world.issues.iter().map(|held| world.render(held)).collect::<Vec<_>>(),
+                    "nodes": world.issues.iter().map(|held| world.related(world.render(held), query)).collect::<Vec<_>>(),
                     "pageInfo": {"hasNextPage": false, "endCursor": null},
                 });
                 data["originProjects"] = json!({
@@ -545,7 +599,7 @@ impl Linear {
                 });
                 data
             }
-            Operation::Issue => json!({"issue": world.issue(id)}),
+            Operation::Issue => json!({"issue": world.related(world.issue(id), query)}),
             Operation::IssueRelations => {
                 let description = world
                     .issues
@@ -554,12 +608,12 @@ impl Linear {
                     .map(|held| held.description.clone());
                 json!({"issue": description.map(|description| json!({
                     "description": description,
-                    "relations": empty_page(),
-                    "inverseRelations": empty_page(),
+                    "relations": world.relations_of(id),
+                    "inverseRelations": world.inverse_relations_of(id),
                 }))})
             }
             Operation::Issues => json!({"issues": {
-                "nodes": world.issues.iter().map(|held| world.render(held)).collect::<Vec<_>>(),
+                "nodes": world.issues.iter().map(|held| world.related(world.render(held), query)).collect::<Vec<_>>(),
                 "pageInfo": {"hasNextPage": false, "endCursor": null},
             }}),
             Operation::Projects => json!({"projects": {
@@ -580,13 +634,9 @@ impl Linear {
                     return refusal("an issueUpdate carries a non-empty `input` object");
                 };
                 match world.update(id, input) {
-                    Ok(mut issue) => {
-                        // A rewrite reads the issue's relations back in its own answer; this
-                        // endpoint relates nothing.
-                        if query.contains("relations(") {
-                            issue["relations"] = empty_page();
-                        }
-                        json!({"issueUpdate": {"success": true, "issue": issue}})
+                    // A rewrite reads the issue's relations back in its own answer.
+                    Ok(issue) => {
+                        json!({"issueUpdate": {"success": true, "issue": world.related(issue, query)}})
                     }
                     Err(why) => return refusal(&why),
                 }
@@ -709,6 +759,27 @@ impl Linear {
                     Err(why) => return refusal(&why),
                 }
             }
+            // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the relation wire shapes are Linear's GraphQL schema, which no artifact this crate depends on carries; what holds them to it is that the real onetaskgraph-linear plugin parses every answer here and refuses a malformed one (failing the journey), every request this endpoint does not recognise is refused by name, and drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
+            Operation::IssueRelationCreate => {
+                let Some(input) = variables["input"].as_object() else {
+                    return refusal("an issueRelationCreate carries an `input` object");
+                };
+                match world.relate(input) {
+                    Ok(relation) => json!({"issueRelationCreate": {
+                        "success": true, "issueRelation": {"id": relation},
+                    }}),
+                    Err(why) => return refusal(&why),
+                }
+            }
+            Operation::IssueRelationDelete => {
+                let before = world.relations.len();
+                world.relations.retain(|held| held.id != id);
+                if world.relations.len() == before {
+                    return refusal("Entity not found: IssueRelation");
+                }
+                json!({"issueRelationDelete": {"success": true}})
+            }
+            // llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
         json!({"data": data})
@@ -940,14 +1011,91 @@ impl World {
             issue.priority = priority.as_u64().expect("validated priority");
         }
         let issue = issue.clone();
-        let mut answer = self.render(&issue);
-        answer["relations"] = empty_page();
-        Ok(answer)
+        Ok(self.render(&issue))
+    }
+
+    // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the relation wire shapes are Linear's GraphQL schema, which no artifact this crate depends on carries; what holds them to it is that the real onetaskgraph-linear plugin parses every answer here and refuses a malformed one (failing the journey), every request this endpoint does not recognise is refused by name, and drift against hosted Linear is what onetaskgraph-linear's credentialled live lane measures.
+    /// File one dependency between two issues this endpoint holds, and answer its id.
+    fn relate(&mut self, input: &Map<String, Value>) -> Result<String, String> {
+        let text = |field: &str| input.get(field).and_then(Value::as_str);
+        let (Some(issue), Some(related), Some(kind)) =
+            (text("issueId"), text("relatedIssueId"), text("type"))
+        else {
+            return Err(
+                "an issueRelationCreate carries an `issueId`, a `relatedIssueId` and a `type`"
+                    .to_owned(),
+            );
+        };
+        if input.len() != 3 {
+            return Err(format!(
+                "the loopback relates by three fields, not {input:?}"
+            ));
+        }
+        if !matches!(kind, "blocks" | "related") {
+            return Err(format!("invalid relation type: {kind}"));
+        }
+        for end in [issue, related] {
+            if !self.issues.iter().any(|held| held.id == end) {
+                return Err(format!("Entity not found: Issue {end}"));
+            }
+        }
+        self.relations_filed += 1;
+        let id = format!("relation-{}", self.relations_filed);
+        self.relations.push(Relation {
+            id: id.clone(),
+            issue: issue.to_owned(),
+            related: related.to_owned(),
+            kind: kind.to_owned(),
+        });
+        Ok(id)
+    }
+
+    /// The relations an issue's own writes filed, as its `relations` connection pages them.
+    fn relations_of(&self, issue: &str) -> Value {
+        page(
+            self.relations
+                .iter()
+                .filter(|held| held.issue == issue)
+                .map(|held| json!({"id": held.id, "type": held.kind, "relatedIssue": {"id": held.related}}))
+                .collect(),
+        )
+    }
+
+    /// The relations naming an issue across them, as its `inverseRelations` connection pages
+    /// them.
+    fn inverse_relations_of(&self, issue: &str) -> Value {
+        page(
+            self.relations
+                .iter()
+                .filter(|held| held.related == issue)
+                .map(|held| json!({"id": held.id, "type": held.kind, "issue": {"id": held.issue}}))
+                .collect(),
+        )
+    }
+
+    /// A rendered issue with each relation connection `query` selects, as Linear answers only
+    /// what a document asks for.
+    fn related(&self, mut issue: Value, query: &str) -> Value {
+        let Some(id) = issue.get("id").and_then(Value::as_str).map(str::to_owned) else {
+            return issue;
+        };
+        if query.contains("relations(") {
+            issue["relations"] = self.relations_of(&id);
+        }
+        if query.contains("inverseRelations(") {
+            issue["inverseRelations"] = self.inverse_relations_of(&id);
+        }
+        issue
     }
 }
 
+fn page(nodes: Vec<Value>) -> Value {
+    json!({"nodes": nodes, "pageInfo": {"hasNextPage": false, "endCursor": null}})
+}
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
 fn empty_page() -> Value {
-    json!({"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}})
+    page(Vec::new())
 }
 
 fn refusal(message: &str) -> Value {
