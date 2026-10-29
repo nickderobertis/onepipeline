@@ -237,6 +237,162 @@ export function sourceOwners(layout, moves, catalog) {
   return result;
 }
 
+const ownerSet = (value) => new Set(value instanceof Set ? value : [value]);
+
+/**
+ * A driver line outside every owned declaration resolves to the owners of what it actually belongs to, in that
+ * snapshot: an unowned private helper to the owners of the declarations calling it (a public one may have callers
+ * elsewhere, so it stays unresolved); a unit test to the owners of the production items it references; a method or nested item to its
+ * enclosing item; an `impl` block to its type; a comment or attribute to the item it precedes; a `use` statement
+ * to the declarations naming what it imports. A blank line changes nothing. Anything else returns null, which
+ * keeps the whole-file input.
+ */
+export function driverLineOwners(text, decls, fileOwners) {
+  const code = codeOnly(text);
+  const lines = text.split("\n");
+  const codeLines = code.split("\n");
+  const lineOf = (offset) => code.slice(0, offset).split("\n").length;
+  const ranges = decls.map((decl) => ({
+    ...decl,
+    code: decl.code ?? codeLines.slice(decl.start - 1, decl.end).join("\n"),
+  }));
+  for (const match of code.matchAll(
+    /^[ \t]*impl\b(?:<[^>{]*>)?\s+(?:[\w:<>, ]+\s+for\s+)?(\w+)[^{;]*\{/gm,
+  )) {
+    let end = match.index + match[0].length;
+    for (let depth = 1; end < code.length && depth; end++)
+      depth += code[end] === "{" ? 1 : code[end] === "}" ? -1 : 0;
+    ranges.push({
+      name: `impl:${match[1]}`,
+      type: match[1],
+      start: lineOf(match.index),
+      end: lineOf(end),
+      code: code.slice(match.index, end),
+    });
+  }
+  for (const match of code.matchAll(/^[ \t]*#\[cfg\(test\)\]\s*mod\s+(\w+)\s*\{/gm)) {
+    let end = match.index + match[0].length;
+    for (let depth = 1; end < code.length && depth; end++)
+      depth += code[end] === "{" ? 1 : code[end] === "}" ? -1 : 0;
+    ranges.push({
+      name: `mod:${match[1]}`,
+      test: true,
+      start: lineOf(match.index),
+      end: lineOf(end),
+    });
+  }
+  const span = (range) => range.end - range.start;
+  const container = (range) =>
+    ranges
+      .filter(
+        (other) =>
+          other !== range &&
+          other.start <= range.start &&
+          other.end >= range.end &&
+          span(other) > span(range),
+      )
+      .sort((a, b) => span(a) - span(b))[0];
+  const innermost = (line, except) =>
+    ranges
+      .filter((range) => range !== except && range.start <= line && range.end >= line)
+      .sort((a, b) => span(a) - span(b))[0];
+  const inTests = (range) =>
+    ranges.some(
+      (other) =>
+        other.test && other.start <= range.start && other.end >= range.end && other !== range,
+    );
+  // Owners of the in-file declarations calling this one, or null while any caller is unresolved.
+  const callers = (range) => {
+    const users = [];
+    for (const [index, line] of codeLines.entries())
+      if (new RegExp(`\\b${range.name}\\b`).test(line)) {
+        const user = innermost(index + 1, null);
+        if (!user || user === range || (user.start >= range.start && user.end <= range.end))
+          continue;
+        // A unit test exercising a production helper does not own it; its production callers do.
+        if ((user.test || inTests(user)) && !inTests(range)) continue;
+        // A type's own impl blocks take their owners from it, not the reverse.
+        if (user.type === range.name || container(user)?.type === range.name) continue;
+        if (!resolved.has(user)) return null;
+        users.push(resolved.get(user));
+      }
+    return users.length ? new Set(users.flatMap((set) => [...set])) : null;
+  };
+  // A unit test moves with the owners of the production items it references (the documented unit-test rule).
+  const referenced = (range) => {
+    const owners = new Set();
+    for (const other of ranges) {
+      if (other.test || other.type || inTests(other) || !/^\w+$/.test(other.name)) continue;
+      if (!new RegExp(`\\b${other.name}\\b`).test(range.code)) continue;
+      if (container(other) && !container(other).type) continue;
+      if (!resolved.has(other)) return null;
+      for (const owner of resolved.get(other)) owners.add(owner);
+    }
+    return owners.size ? owners : null;
+  };
+  const resolved = new Map();
+  for (const range of ranges)
+    if (fileOwners.has(range.name)) resolved.set(range, ownerSet(fileOwners.get(range.name)));
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const range of ranges) {
+      if (resolved.has(range) || range.test) continue;
+      const outer = container(range);
+      let owners = null;
+      if (outer?.test) owners = referenced(range) ?? (range.private ? callers(range) : null);
+      else if (outer) owners = resolved.get(outer) ?? null;
+      else if (range.type) {
+        const type = ranges.find(
+          (other) => other.name === range.type && !other.type && !container(other),
+        );
+        owners = type ? (resolved.get(type) ?? null) : null;
+      } else if (range.private) owners = callers(range);
+      if (owners) {
+        resolved.set(range, owners);
+        changed = true;
+      }
+    }
+  }
+  const uses = [...code.matchAll(/^[ \t]*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]*);/gm)].map(
+    (match) => ({
+      start: lineOf(match.index),
+      end: lineOf(match.index + match[0].length - 1),
+      names: [...match[1].matchAll(/\b([A-Za-z_]\w*)\b(?!\s*::)/g)]
+        .map((name) => name[1])
+        .filter((name) => !["self", "super", "crate", "as"].includes(name)),
+    }),
+  );
+  return (line) => {
+    const range = innermost(line, null);
+    if (range) return resolved.get(range) ?? null;
+    const statement = uses.find((use) => use.start <= line && use.end >= line);
+    if (statement) {
+      const owners = new Set();
+      for (const name of statement.names)
+        for (const [index, codeLine] of codeLines.entries()) {
+          if (index + 1 >= statement.start && index + 1 <= statement.end) continue;
+          if (!new RegExp(`\\b${name}\\b`).test(codeLine)) continue;
+          const user = innermost(index + 1, null);
+          if (!user || !resolved.has(user)) return null;
+          for (const owner of resolved.get(user)) owners.add(owner);
+        }
+      return owners.size ? owners : null;
+    }
+    const raw = lines[line - 1] ?? "";
+    if (!raw.trim()) return new Set();
+    if (!/^\s*(?:\/\/|#\[|\/\*|\*)/.test(raw)) return null;
+    const next = ranges
+      .filter((candidate) => candidate.start > line)
+      .sort((a, b) => a.start - b.start)[0];
+    if (!next) return null;
+    for (let between = line + 1; between < next.start; between++) {
+      const text = lines[between - 1] ?? "";
+      if (text.trim() && !/^\s*(?:\/\/|#\[|\/\*|\*|[\w(),\s="]*\]\s*$)/.test(text)) return null;
+    }
+    return resolved.get(next) ?? null;
+  };
+}
+
 /** Historical hunks are charged to both old and new declaration owners. Unknown lines retain the whole-file input. */
 export function projectSourceChange(change, owners, layout, root = ".") {
   const git = (...args) =>
@@ -254,9 +410,11 @@ export function projectSourceChange(change, owners, layout, root = ".") {
       continue;
     }
     const snapshots = [null, null];
+    const texts = ["", ""];
     for (const [index, rev] of [`${change.commit}^`, change.commit].entries()) {
       try {
         const text = git("show", `${rev}:${file}`);
+        texts[index] = text;
         snapshots[index] = declarations(text);
         if (file === "src/cli.rs") snapshots[index].push(...cliVariants(text));
         if (file === "src/driver.rs") {
@@ -301,6 +459,18 @@ export function projectSourceChange(change, owners, layout, root = ".") {
           );
           if (file === "src/cli.rs" && held.length)
             held = [held.sort((a, b) => a.end - a.start - (b.end - b.start))[0]];
+          if (!held.length && file === "src/driver.rs") {
+            snapshots[index].resolve ??= driverLineOwners(
+              texts[index],
+              snapshots[index],
+              owners[file],
+            );
+            const resolved = snapshots[index].resolve(line);
+            if (resolved) {
+              for (const owner of resolved) destinations.add(owner);
+              continue;
+            }
+          }
           if (!held.length) unknown = true;
           for (const decl of held) {
             const destination = owners[file].get(decl.name);

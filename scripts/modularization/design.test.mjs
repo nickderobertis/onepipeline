@@ -2966,6 +2966,7 @@ test("configuration projection refuses an unresolved nextest profile reference",
       /unresolved cargo profile selection --cargo-profile/,
     );
     put(root, "justfile", "_e2e-test:\n    cargo nextest run\n");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: a literal GitHub Actions expression the projection must refuse
     put(root, ".github/workflows/ci.yml", "env:\n  NEXTEST_PROFILE: ${{ matrix.profile }}\n");
     refused(
       ".config/nextest.toml",
@@ -3027,6 +3028,96 @@ test("configuration projection refuses an unresolved configuration section", () 
       /unresolved nextest script "absent" \(read from .config\/nextest.toml profile.default.scripts\[0\]\)/,
     );
     refused("unknown.toml", "", "", /usage: config-projection/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("historical driver hunks outside owned items resolve to what they belong to", async () => {
+  const { projectSourceChange } = await import("./source-projection.mjs");
+  const root = scratch();
+  const git = (...args) =>
+    execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
+  const driver = [
+    "use crate::thing::Helper;",
+    "",
+    "pub fn dispatch(verb: Verb) {",
+    "    match verb {",
+    "        Verb::Start => start(),",
+    "        Verb::Status => status(),",
+    "    }",
+    "}",
+    "",
+    "/// Starts.",
+    "#[inline]",
+    "fn start() { prepare(); Helper::go(); }",
+    "",
+    "fn status() { Frame::read(); }",
+    "",
+    "fn prepare() { let ready = 1; }",
+    "",
+    "struct Frame;",
+    "impl Frame {",
+    "    fn read() { let frame = 1; }",
+    "}",
+    "",
+    "pub(crate) fn shared() { let shared = 1; }",
+    "",
+    "#[cfg(test)]",
+    "mod tests {",
+    "    fn fixture() { let fixture = 1; }",
+    "    #[test]",
+    "    fn starts() { fixture(); super::prepare(); start(); }",
+    "}",
+    "",
+  ].join("\n");
+  const owners = {
+    "src/driver.rs": new Map([
+      ["dispatch", "onepipeline"],
+      ["__arm_Start", "cmd-start"],
+      ["__arm_Status", "cmd-status"],
+    ]),
+  };
+  try {
+    git("init", "-q");
+    git("config", "user.name", "Projection test");
+    git("config", "user.email", "projection@example.test");
+    put(root, "src/driver.rs", driver);
+    git("add", ".");
+    git("commit", "-qm", "initial");
+    const change = (from, to) => {
+      const text = readFileSync(join(root, "src/driver.rs"), "utf8");
+      assert.ok(text.includes(from), from);
+      put(root, "src/driver.rs", text.replace(from, to));
+      git("commit", "-qam", `change ${from}`);
+      return projectSourceChange(
+        { commit: git("rev-parse", "HEAD"), files: ["src/driver.rs"] },
+        owners,
+        {},
+        root,
+      ).files;
+    };
+    // A private helper belongs to its production callers; the unit test calling it does not own it.
+    assert.deepEqual(change("let ready = 1;", "let ready = 2;"), ["moved/cmd-start/src/driver.rs"]);
+    // Documentation and attributes belong to the item they precede.
+    assert.deepEqual(change("/// Starts.", "/// Starts a run."), ["moved/cmd-start/src/driver.rs"]);
+    assert.deepEqual(change("#[inline]", "#[inline(always)]"), ["moved/cmd-start/src/driver.rs"]);
+    // An impl block's method belongs to its type, and the type to the code naming it.
+    assert.deepEqual(change("let frame = 1;", "let frame = 2;"), [
+      "moved/cmd-status/src/driver.rs",
+    ]);
+    // An import belongs to the declarations naming what it imports.
+    assert.deepEqual(change("use crate::thing::Helper;", "use crate::thing::{Helper};"), [
+      "moved/cmd-start/src/driver.rs",
+    ]);
+    // A unit test and its test-only fixture move with the production items they reference.
+    assert.deepEqual(change("let fixture = 1;", "let fixture = 2;"), [
+      "moved/cmd-start/src/driver.rs",
+    ]);
+    // A blank line changes no item.
+    assert.deepEqual(change("struct Frame;\n", "struct Frame;\n\n"), []);
+    // A crate-visible item may have callers in other modules, so it keeps the whole-file input.
+    assert.deepEqual(change("let shared = 1;", "let shared = 2;"), ["src/driver.rs"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

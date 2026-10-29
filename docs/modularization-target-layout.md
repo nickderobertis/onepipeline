@@ -49,6 +49,10 @@ The previous target at `ebe2ba6e` selected at least 40 of 43 suites on 127/144 P
 
 The base merge at `120837a2` adds three e2e functions and moves `lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back` unchanged in purpose to the auxiliary `pooled_slot` suite. That suite retains the real binary and its complete dependency closure; it has no spike profile weight. The catalog now covers the 1,922 functions remaining in the e2e binary, with the moved journey retained in the auxiliary mapping. Source hashes were reviewed against that merge; command attribution is unchanged.
 
+## Test-strategy option (described, not implemented)
+
+The forced-time tables below show the ceiling of the crate-boundary approach. Only 12.46% of the suite-seconds the history ran were selected by crates alone; 68.49% were selected by a suite's own test, harness or contract-document inputs as well, and cmd-start alone is 46.09% of a full Linux run. A separate option would change the test strategy itself rather than the boundaries. Split the cmd-start and cross-command suites by the fixtures and harness facets each test actually reads, project `tests/e2e/harness.rs` per helper the same way driver.rs is now projected, and narrow the docs/contract*.md inputs to the sections each test parses. This changes which tests run on a pull request. It touches no assertion, and it is not a sharding, sampling or coverage change, but it is an enforcement decision for the planner who owns the gate. Nothing in this dispatch implements it, and no figure above or below assumes it.
+
 ## Local verification scope
 
 Planner reply 214 confirms that this design-only dispatch owes the research project's checks and judged diff lint locally. The existing [research project](../scripts/modularization/project.json) has `test.command = node --test scripts/modularization/design.test.mjs`, and `check.dependsOn` includes `test`; the root `just check` runs Nx check targets. The inventory-regeneration equality assertion in that file is therefore a quality-gated catalogue freshness check, not an ungated helper. Current Nx docs/scripts globs additionally select `onepipeline`, `pool-maintenance`, `onepipeline-contract`, `onepipeline-e2e` and `onepipeline-npm`; their gating journeys remain with the change request's required checks. `onepipeline-visual-docs` is also selected but remains advisory under the repository's existing policy. No live input, test command, coverage threshold or enforcement rule changes here.
@@ -104,10 +108,10 @@ The 6.61% unsplit-test baseline is committed at bffb01b3. The previous target at
 
 | Platform | Baseline suite runs skipped | Baseline estimated seconds skipped | Target suite runs skipped | Target estimated seconds skipped |
 | --- | ---: | ---: | ---: | ---: |
-| local | 6.61% | 2.53% | 13.70% | 6.54% |
-| linux | 6.61% | 2.55% | 13.70% | 6.47% |
-| macos | 6.61% | 2.57% | 13.70% | 6.28% |
-| windows | 6.61% | 2.69% | 13.70% | 6.16% |
+| local | 6.61% | 2.53% | 13.73% | 6.54% |
+| linux | 6.61% | 2.55% | 13.73% | 6.48% |
+| macos | 6.61% | 2.57% | 13.73% | 6.29% |
+| windows | 6.61% | 2.69% | 13.73% | 6.17% |
 
 
 ## Command replay output
@@ -116,10 +120,10 @@ The 6.61% unsplit-test baseline is committed at bffb01b3. The previous target at
 
 | Platform | Suite runs skipped | Estimated observed test-seconds skipped | Observed module-seconds/full run |
 | --- | ---: | ---: | ---: |
-| local | 13.70% | 6.54% | 36620 |
-| linux | 13.70% | 6.47% | 10409 |
-| macos | 13.70% | 6.28% | 13333 |
-| windows | 13.70% | 6.16% | 37567 |
+| local | 13.73% | 6.54% | 36620 |
+| linux | 13.73% | 6.48% | 10409 |
+| macos | 13.73% | 6.29% | 13333 |
+| windows | 13.73% | 6.17% | 37567 |
 
 Estimated compile stress scenario (not a benchmark or a confidence interval):
 
@@ -129,7 +133,7 @@ Estimated compile stress scenario (not a benchmark or a confidence interval):
 | macOS | 233 cached wall s | 704.0 wall s | +471.0 wall s |
 | Windows, each leg | 106–164 cached wall s | 320.3–495.5 wall s | +214.3–331.5 wall s |
 
-Linux incremental all-source CPU stress estimate: 193 → 565.8 s. Local test-phase scenario: 10,293.5 × 6.54% = 672.8 wall seconds avoided on average if concurrency and scheduling stayed proportional; this excludes compilation and every other gate phase. There is no measured local gate speedup.
+Linux incremental all-source CPU stress estimate: 193 → 565.8 s. Local test-phase scenario: 10,293.5 × 6.54% = 673.3 wall seconds avoided on average if concurrency and scheduling stayed proportional; this excludes compilation and every other gate phase. There is no measured local gate speedup.
 
 ## Every command's test boundary
 
@@ -257,7 +261,7 @@ The named inputs below are the actual changed inputs whose union forces selectio
 | #634 / 47f26ded | 43/43 | shared source/input: moved/run-projection/src/engine.rs; shared source/input: moved/run-result/src/engine.rs | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
 | #651 / 03d93fe4 | 41/43 | Cargo.lock / compiler projection consumers: event-payloads, home, plan-edits, plan-model, plan-template, plan-validation, processes, publication, publication-boundary, runner-cmd-adopt, runner-cmd-boundary-guidance, runner-cmd-boundary-validate-envelope, runner-cmd-next, runner-cmd-plan-check, runner-cmd-readjust, runner-cmd-reply, runner-cmd-results, runner-cmd-review, runner-cmd-runs, runner-cmd-shutdown, runner-cmd-start, runner-cmd-status, runner-cmd-stop, runner-cmd-surface, runner-cmd-template-check, runner-cmd-template-list, runner-cmd-template-resolve, runner-cmd-unpublished, runner-cross-command, runner-public-api, task-store | Unrelated manifest edits are already projected; actual shared requirements/source changes: no. |
 | #653 / f3bd3791 | 42/43 | Cargo.lock / compiler projection consumers: agent-execution, agent-session, branch-publication, checkpoint, cmd-flow, cmd-publish-branch, cmd-results, cmd-runs, cmd-status, cmd-telemetry, cmd-transcript, cmd-unpublished, edit-reconciler, event-payloads, event-vocabulary, free-space, plan-edits, plan-model, plan-validation, planner-channel, pool-maintenance, public-identity, publication, publication-boundary, publication-debt, readjust-state, readjustment, release-watch, review-discovery, review-replies, run-control, run-projection, run-result, run-views, runner-cmd-adopt, runner-cmd-attest, runner-cmd-boundary-guidance, runner-cmd-boundary-validate-envelope, runner-cmd-channel-queue, runner-cmd-goals, runner-cmd-integrate, runner-cmd-next, runner-cmd-observer-view, runner-cmd-plan-check, runner-cmd-publish-branch, runner-cmd-readjust, runner-cmd-reply, runner-cmd-repo-recover, runner-cmd-results, runner-cmd-review, runner-cmd-runs, runner-cmd-shutdown, runner-cmd-start, runner-cmd-status, runner-cmd-stop, runner-cmd-stop-guard, runner-cmd-supersessions, runner-cmd-surface, runner-cmd-telemetry, runner-cmd-template-check, runner-cmd-template-list, runner-cmd-template-resolve, runner-cmd-transcript, runner-cmd-unpublished, runner-cmd-unwatched, runner-cmd-watch, runner-cross-command, runner-public-api, runner-test-support, scheduler, task-store, test-agent-process, test-host-process; shared source/input: moved/run-projection/src/engine.rs; shared source/input: moved/run-result/src/engine.rs; shared source/input: src/plan.rs; shared source/input: src/projection.rs; shared source/input: src/views.rs; shared source/input: moved/publication-query/src/views.rs | Unrelated manifest edits are already projected; actual shared requirements/source changes: no. |
-| #667 / 9102e12e | 24/43 | union: docs/contract-divergences.md; union: src/driver.rs; union: tests/contract.rs; union: tests/e2e/ask.rs; union: tests/e2e/wake_budget.rs | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
+| #667 / 9102e12e | 22/43 | union: docs/contract-divergences.md; union: src/driver.rs; union: tests/contract.rs; union: tests/e2e/ask.rs; union: tests/e2e/wake_budget.rs | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
 | #673 / 3047c012 | 34/43 | shared source/input: moved/run-projection/src/engine.rs; shared source/input: moved/run-result/src/engine.rs | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
 | #685 / aeb6acb5 | 38/43 | shared source/input: src/channel.rs; shared source/input: moved/run-projection/src/engine.rs; shared source/input: moved/run-result/src/engine.rs; shared source/input: src/projection.rs | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
 | #670 / c186d703 | 43/43 | test target configuration: .config/nextest.toml | The subsystem table names further capability splits for broad crates. Common protocol/compiler changes retain actual consumers; ambiguous historical hunks conservatively overselect. |
@@ -408,27 +412,27 @@ Every extraction preserves the facade's public paths and type identities through
 | review-discovery | 13.32% |
 | channel-admission | 13.32% |
 | run-control | 13.32% |
-| cmd-scratch-discard | 13.44% |
-| cmd-stop | 13.47% |
-| cmd-shutdown | 13.57% |
-| planner-notes | 13.57% |
-| edit-reconciler | 13.57% |
-| scheduler | 13.57% |
-| cmd-start | 13.57% |
-| cmd-adopt | 13.57% |
-| cmd-drive-run | 13.57% |
-| cmd-drive | 13.60% |
-| channel-submission | 13.60% |
-| cmd-reply | 13.60% |
-| cmd-review | 13.63% |
-| cmd-readjust | 13.66% |
-| cmd-attest | 13.70% |
-| onepipeline | 13.70% |
-| cli-dispatcher | 13.70% |
+| cmd-scratch-discard | 13.45% |
+| cmd-stop | 13.49% |
+| cmd-shutdown | 13.60% |
+| planner-notes | 13.60% |
+| edit-reconciler | 13.60% |
+| scheduler | 13.60% |
+| cmd-start | 13.60% |
+| cmd-adopt | 13.60% |
+| cmd-drive-run | 13.60% |
+| cmd-drive | 13.63% |
+| channel-submission | 13.63% |
+| cmd-reply | 13.63% |
+| cmd-review | 13.66% |
+| cmd-readjust | 13.70% |
+| cmd-attest | 13.73% |
+| onepipeline | 13.73% |
+| cli-dispatcher | 13.73% |
 
 ## What narrowing the docs/scripts globs frees
 
-Holding this proposed 43-suite graph fixed, 83 of the 144 PRs edit docs/ or scripts/. Retaining blanket docs/** and scripts/** inputs selects every suite for those edits. Replacing those blanket inputs with each suite's actual fixture/script inputs frees at least one suite on **37 PRs**; **1** of those can skip all suites. It removes **280 suite runs** across the cohort. Suite-run skipping is 9.17% with blanket inputs and 13.70% with the proposed inputs. This isolates the glob effect on the same graph; it is not a claim that today's single binary already has the proposed isolation. Required real fixture inputs remain.
+Holding this proposed 43-suite graph fixed, 83 of the 144 PRs edit docs/ or scripts/. Retaining blanket docs/** and scripts/** inputs selects every suite for those edits. Replacing those blanket inputs with each suite's actual fixture/script inputs frees at least one suite on **37 PRs**; **1** of those can skip all suites. It removes **282 suite runs** across the cohort. Suite-run skipping is 9.17% with blanket inputs and 13.73% with the proposed inputs. This isolates the glob effect on the same graph; it is not a claim that today's single binary already has the proposed isolation. Required real fixture inputs remain.
 
 | PR / revision freed by narrower inputs | Changed docs/scripts inputs | Blanket selected | Proposed selected |
 | --- | --- | ---: | ---: |
@@ -454,7 +458,7 @@ Holding this proposed 43-suite graph fixed, 83 of the 144 PRs edit docs/ or scri
 | #614 / 8c82674c | docs/contract.md | 43 | 41 |
 | #612 / 7cf175e6 | docs/contract-divergences.md, docs/contract.md | 43 | 42 |
 | #653 / f3bd3791 | docs/contract-divergences.md, docs/contract.md | 43 | 42 |
-| #667 / 9102e12e | docs/contract-divergences.md | 43 | 24 |
+| #667 / 9102e12e | docs/contract-divergences.md | 43 | 22 |
 | #685 / aeb6acb5 | docs/contract-divergences.md, docs/contract.md | 43 | 38 |
 | #691 / 1474a2f8 | docs/contract-divergences.md, docs/contract.md | 43 | 38 |
 | #699 / 36740cc8 | docs/contract-divergences.md, docs/contract.md | 43 | 38 |
@@ -472,7 +476,7 @@ Holding this proposed 43-suite graph fixed, 83 of the 144 PRs edit docs/ or scri
 
 ## PRs changing genuinely shared engine source
 
-97/144 PRs (67.36%) change the shared engine source files listed below. This is a separate file-touch statistic, not the number forced broad by lockfiles, configuration or CLI arguments. Command-only driver hunks are excluded; driver.rs counts only when a classified hunk moves to a shared engine owner. 27 PRs retain an ambiguous whole-file driver input and are conservatively selected separately. A file-level touch can still cover both shared and command-local code, so this statistic is evidence of shared subsystem work, not a claim that every hunk must fan out to all commands.
+96/144 PRs (66.67%) change the shared engine source files listed below. This is a separate file-touch statistic, not the number forced broad by lockfiles, configuration or CLI arguments. Command-only driver hunks are excluded; driver.rs counts only when a classified hunk moves to a shared engine owner. 17 PRs retain an ambiguous whole-file driver input and are conservatively selected separately. A file-level touch can still cover both shared and command-local code, so this statistic is evidence of shared subsystem work, not a claim that every hunk must fan out to all commands.
 
 | PR / revision | Shared engine files |
 | --- | --- |
@@ -571,7 +575,6 @@ Holding this proposed 43-suite graph fixed, 83 of the 144 PRs edit docs/ or scri
 | #865 / 4c236086 | src/channel.rs, src/channel/layout.rs, src/channel/layout/document.rs, src/discharge.rs, src/driver.rs, src/edits.rs, src/engine.rs, src/executor.rs, src/hooks.rs, src/lifecycle.rs, src/projection.rs, src/stack.rs, src/taskgraph.rs, src/vcs.rs, src/writeback.rs |
 | #891 / 080bf199 | src/channel.rs, src/channel/layout.rs, src/channel/layout/document.rs, src/checkpoint.rs, src/continuation.rs, src/edits.rs, src/engine.rs, src/journal.rs, src/projection.rs, src/review.rs, src/vcs.rs, src/writeback.rs |
 | #892 / c8ff4a50 | src/dispatchenv.rs, src/engine.rs, src/writeback.rs |
-| #914 / 5091d998 | src/driver.rs |
 | #916 / dfde02c3 | src/channel.rs, src/channel/layout.rs, src/channel/layout/document.rs, src/checkpoint.rs, src/driver.rs, src/edits.rs, src/engine.rs, src/lifecycle.rs, src/projection.rs, src/readjust.rs, src/review.rs, src/stack.rs, src/trigger.rs, src/vcs.rs, src/writeback.rs |
 
 ## Engine subsystem boundaries (included in this replay)
@@ -983,6 +986,104 @@ Counts include explicit cross-command, public-API and shipped-dispatch integrati
 | run-result | 32 | Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement. |
 | test-scenario-schema | 43 | Split scenario/profile configuration by fake protocol and keep only the stable primitive codec shared. Fixture setup links the scenario schema, never the aggregate executable package; a shared serde codec update still tests its real consumers. |
 | readjust-state | 34 | Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read. |
+
+### Test time each crate forces
+
+Linux module-seconds per suite run are allocated as in the replay table above (10409 s per full run; the 144 PRs ran 1401778 suite-seconds against 1498896 for running everything). **Forced** charges each PR's whole reach to every crate it touches, so PRs touching several crates count once per crate. **Sole cause** counts only suites that no other touched crate, suite-owned path or shared input also selected: it is the most splitting that crate alone could return.
+
+Each suite-second run has exactly one of these causes: a shared input (lockfile, toolchain, configuration or the docs/scripts globs) 8.91%; only the suite's own paths 10.14%; its own paths and a crate together 68.49%; only crates 12.46%. No crate split can return more than the last share, and splitting the five highest-forcing crates perfectly would return at most 1557 s, 0.11% of what ran: the PRs touching them also change the same suites' own test, harness or contract-document inputs. Those crates are therefore not split further here; the levers are the own-path inputs and the heaviest suites below.
+
+| Rank | Crate | Suites reached | Linux s per change | PRs touching | Forced Linux s (144 PRs) | Sole-cause Linux s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | run-projection | 34 | 10106 | 76 | 768083 | 446 |
+| 2 | publication | 13 | 8113 | 88 | 713921 | 506 |
+| 3 | run-views | 27 | 9763 | 69 | 673628 | 0 |
+| 4 | plan-model | 41 | 10250 | 63 | 645749 | 231 |
+| 5 | edit-reconciler | 10 | 7939 | 80 | 635154 | 374 |
+| 6 | run-result | 32 | 10011 | 63 | 630671 | 0 |
+| 7 | event-payloads | 35 | 10122 | 62 | 627548 | 1717 |
+| 8 | run-control | 13 | 8177 | 71 | 580571 | 0 |
+| 9 | plan-validation | 17 | 8284 | 69 | 571629 | 67 |
+| 10 | plan-edits | 14 | 8217 | 68 | 558769 | 611 |
+| 11 | channel-admission | 13 | 8177 | 67 | 547863 | 0 |
+| 12 | task-store | 14 | 8217 | 66 | 542335 | 8217 |
+| 13 | checkpoint | 32 | 10011 | 53 | 530564 | 0 |
+| 14 | scheduler | 8 | 7353 | 70 | 514718 | 0 |
+| 15 | planner-channel | 28 | 8945 | 53 | 474075 | 503 |
+
+### Why fewer seconds are skipped than suite runs
+
+Suite-run skipping is the unweighted mean of per-suite skip rates; seconds skipped weights each suite by its share of a full run (6.48% on Linux). The two differ because skip rate and weight are inversely related. 6 of 43 suites (cmd-start, cross-command, cmd-reply, cmd-results, cmd-status, cmd-adopt) hold 80.11% of the seconds and are skipped on 5.56% of PRs on average; the other 37 hold the rest and are skipped on 15.05%. cmd-start alone holds 46.09% and is skipped on 4.86% of PRs. Moving seconds-skipped toward suite-runs-skipped therefore needs the heaviest suites split by the inputs their tests actually read, rather than more isolation of already-cheap command suites.
+
+| Suite | Share of Linux seconds | PRs skipping it |
+| --- | ---: | ---: |
+| cmd-start | 46.09% | 4.86% |
+| cross-command | 17.80% | 4.17% |
+| cmd-reply | 5.24% | 5.56% |
+| cmd-results | 3.77% | 8.33% |
+| cmd-status | 3.66% | 5.56% |
+| cmd-adopt | 3.56% | 4.86% |
+| cmd-host | 2.09% | 14.58% |
+| cmd-readjust | 1.78% | 9.72% |
+| cmd-stop | 1.52% | 7.64% |
+| test-support | 1.49% | 21.53% |
+| cmd-publish-branch | 1.29% | 8.33% |
+| cmd-plan-check | 1.00% | 11.11% |
+| cmd-runs | 0.83% | 9.72% |
+| cmd-review | 0.76% | 9.72% |
+| cmd-unwatched | 0.76% | 11.11% |
+| cmd-next | 0.75% | 9.72% |
+| cmd-watch | 0.74% | 9.72% |
+| cmd-observer-view | 0.62% | 10.42% |
+| cmd-shutdown | 0.57% | 13.19% |
+| cmd-unpublished | 0.51% | 12.50% |
+| cmd-stop-guard | 0.51% | 11.11% |
+| cmd-surface | 0.50% | 14.58% |
+| public-api | 0.47% | 6.94% |
+| cmd-telemetry | 0.41% | 15.97% |
+| cmd-template-resolve | 0.40% | 30.56% |
+| cmd-boundary-guidance | 0.40% | 20.14% |
+| cmd-attest | 0.39% | 8.33% |
+| cmd-repo-recover | 0.27% | 8.33% |
+| cmd-flow | 0.21% | 14.58% |
+| cmd-transcript | 0.20% | 13.19% |
+| cmd-scratch-discard | 0.19% | 13.89% |
+| cmd-template-check | 0.19% | 30.56% |
+| cmd-goals | 0.18% | 13.19% |
+| cmd-ask | 0.15% | 14.58% |
+| cmd-drive | 0.13% | 9.03% |
+| cmd-boundary-validate-envelope | 0.12% | 20.14% |
+| cmd-integrate | 0.10% | 9.72% |
+| cmd-supersessions | 0.07% | 15.28% |
+| full-dispatch | 0.06% | 8.33% |
+| cmd-agents | 0.06% | 29.17% |
+| cmd-channel-queue | 0.06% | 11.81% |
+| cmd-template-list | 0.06% | 30.56% |
+| cmd-label | 0.03% | 47.92% |
+
+### Driver hunks outside owned items
+
+A src/driver.rs hunk outside every owned declaration resolves in its own snapshot: a private helper to its production callers, a method or nested item to its container, an impl block to its type, a doc comment or attribute to the item it precedes, a use statement to the declarations naming what it imports, and a unit test (with its test-only fixtures) to the production items it references; a blank line changes nothing. 27 PRs touching driver.rs now project every driver hunk to owners. 17 still retain the whole-file input, each for one of two reasons the lexer cannot settle: the hunk is in a crate-visible item whose other callers are in other modules (src/driver.rs::settled, for instance), or a private item's name is also a local binding or field in an unresolved caller, so its true callers need Rust scope resolution. Both stay conservatively whole-file.
+
+| PR / revision still whole-file |
+| --- |
+| #293 / 65797ad7 |
+| #318 / 693a9110 |
+| #346 / 11a53b1d |
+| #402 / 52e1427b |
+| #405 / 759ed787 |
+| #414 / 0d7b7f2a |
+| #435 / 993123fa |
+| #448 / b117e452 |
+| #511 / e63701e7 |
+| #495 / 8239288e |
+| #532 / fb52f930 |
+| #541 / 8238cea0 |
+| #554 / 0b2a00af |
+| #691 / 1474a2f8 |
+| #701 / d83bf636 |
+| #849 / fa52f9f4 |
+| #861 / 61194ef6 |
 
 ## CLI argument ownership
 

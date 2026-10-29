@@ -671,6 +671,7 @@ export function run(layout, catalog, weights, changes, projector) {
             (rows.length * Object.keys(mapping.suites).length),
           secondsSkip: skipped / (perRun * rows.length),
           secondsPerRun: perRun,
+          suiteSeconds: suiteWeights,
           missingModules: Object.keys(moduleCounts).filter((module) => !seconds.has(module)),
         },
       ];

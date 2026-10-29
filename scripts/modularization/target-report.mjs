@@ -4,7 +4,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { commandAppendix } from "./command-report.mjs";
-import { compileMapping, affectedSuites } from "../crate-split-replay.mjs";
+import { compileMapping, affectedSuites, touchedCrates } from "../crate-split-replay.mjs";
 import { targetGraph } from "./target-graph.mjs";
 import { commandMapping } from "./command-replay.mjs";
 import { commandPaths, cliArgumentOwners } from "./source-projection.mjs";
@@ -31,6 +31,112 @@ const digest = (value) =>
   createHash("sha256")
     .update(JSON.stringify(stable(value)))
     .digest("hex");
+
+const pr = (row) =>
+  `${/#(\d+)\)/.exec(row.subject)?.[0]?.replace(")", "") ?? row.commit.slice(0, 8)} / ${row.commit.slice(0, 8)}`;
+
+/**
+ * Linux test-seconds each crate forces across the 144 PRs. "Forced" charges a PR's whole reach to every crate it
+ * touches (overlapping); "sole cause" counts only suites no other touched crate, own path or shared input selected,
+ * which is what splitting that crate alone could ever return.
+ */
+export function forcedTimeLines(result, reach, layout, mixedEngineRows) {
+  const seconds = result.platforms.linux.suiteSeconds;
+  const total = Object.values(seconds).reduce((a, b) => a + b, 0);
+  const ran = result.rows.reduce(
+    (sum, row) => sum + row.affected.reduce((s, name) => s + seconds[name], 0),
+    0,
+  );
+  const crates = Object.keys(layout.crates).map((name) => ({
+    name,
+    reached: Object.keys(reach.suites).filter((suite) => reach.suites[suite].crates.has(name)),
+    touches: 0,
+    forced: 0,
+    sole: 0,
+  }));
+  const byName = new Map(crates.map((crate) => [crate.name, crate]));
+  const causes = { shared: 0, ownOnly: 0, ownAndCrate: 0, crateOnly: 0 };
+  for (const row of result.rows) {
+    const { touched } = touchedCrates(reach, row.effectiveFiles);
+    const shared = row.effectiveFiles.some(reach.shared);
+    for (const name of touched) {
+      const crate = byName.get(name);
+      if (!crate) continue;
+      crate.touches++;
+      crate.forced += crate.reached.reduce((sum, suite) => sum + seconds[suite], 0);
+    }
+    for (const suite of row.affected) {
+      if (shared) {
+        causes.shared += seconds[suite];
+        continue;
+      }
+      const own = row.effectiveFiles.some(reach.suites[suite].own);
+      const by = [...touched].filter((name) => reach.suites[suite].crates.has(name));
+      causes[own ? (by.length ? "ownAndCrate" : "ownOnly") : "crateOnly"] += seconds[suite];
+      if (!own && by.length === 1 && byName.has(by[0])) byName.get(by[0]).sole += seconds[suite];
+    }
+  }
+  const ranked = crates.filter((crate) => crate.touches).sort((a, b) => b.forced - a.forced);
+  const suites = Object.keys(seconds)
+    .map((name) => ({
+      name,
+      share: seconds[name] / total,
+      skip: result.rows.filter((row) => !row.affected.includes(name)).length / result.rows.length,
+    }))
+    .sort((a, b) => b.share - a.share);
+  const heavy = [];
+  for (const suite of suites) {
+    heavy.push(suite);
+    if (heavy.reduce((sum, entry) => sum + entry.share, 0) >= 0.8) break;
+  }
+  const mean = (list, key) => list.reduce((sum, entry) => sum + entry[key], 0) / list.length;
+  const rest = suites.slice(heavy.length);
+  const weighted = suites.reduce((sum, suite) => sum + suite.share * suite.skip, 0);
+  const pct = (value) => `${(value * 100).toFixed(2)}%`;
+  const resolvedDriver = result.rows.filter(
+    (row) =>
+      row.files.includes("src/driver.rs") &&
+      !row.effectiveFiles.includes("src/driver.rs") &&
+      row.sourceProjection?.some((entry) => entry.file === "src/driver.rs"),
+  );
+  return [
+    "### Test time each crate forces",
+    "",
+    `Linux module-seconds per suite run are allocated as in the replay table above (${total.toFixed(0)} s per full run; the 144 PRs ran ${ran.toFixed(0)} suite-seconds against ${(total * 144).toFixed(0)} for running everything). **Forced** charges each PR's whole reach to every crate it touches, so PRs touching several crates count once per crate. **Sole cause** counts only suites that no other touched crate, suite-owned path or shared input also selected: it is the most splitting that crate alone could return.`,
+    "",
+    `Each suite-second run has exactly one of these causes: a shared input (lockfile, toolchain, configuration or the docs/scripts globs) ${pct(causes.shared / ran)}; only the suite's own paths ${pct(causes.ownOnly / ran)}; its own paths and a crate together ${pct(causes.ownAndCrate / ran)}; only crates ${pct(causes.crateOnly / ran)}. No crate split can return more than the last share, and splitting the five highest-forcing crates perfectly would return at most ${ranked
+      .slice(0, 5)
+      .reduce((sum, crate) => sum + crate.sole, 0)
+      .toFixed(
+        0,
+      )} s, ${pct(ranked.slice(0, 5).reduce((sum, crate) => sum + crate.sole, 0) / ran)} of what ran: the PRs touching them also change the same suites' own test, harness or contract-document inputs. Those crates are therefore not split further here; the levers are the own-path inputs and the heaviest suites below.`,
+    "",
+    "| Rank | Crate | Suites reached | Linux s per change | PRs touching | Forced Linux s (144 PRs) | Sole-cause Linux s |",
+    "| ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+    ...ranked
+      .slice(0, 15)
+      .map(
+        (crate, index) =>
+          `| ${index + 1} | ${crate.name} | ${crate.reached.length} | ${crate.reached.reduce((sum, suite) => sum + seconds[suite], 0).toFixed(0)} | ${crate.touches} | ${crate.forced.toFixed(0)} | ${crate.sole.toFixed(0)} |`,
+      ),
+    "",
+    "### Why fewer seconds are skipped than suite runs",
+    "",
+    `Suite-run skipping is the unweighted mean of per-suite skip rates; seconds skipped weights each suite by its share of a full run (${pct(weighted)} on Linux). The two differ because skip rate and weight are inversely related. ${heavy.length} of ${suites.length} suites (${heavy.map((suite) => suite.name).join(", ")}) hold ${pct(heavy.reduce((sum, entry) => sum + entry.share, 0))} of the seconds and are skipped on ${pct(mean(heavy, "skip"))} of PRs on average; the other ${rest.length} hold the rest and are skipped on ${pct(mean(rest, "skip"))}. ${suites[0].name} alone holds ${pct(suites[0].share)} and is skipped on ${pct(suites[0].skip)} of PRs. Moving seconds-skipped toward suite-runs-skipped therefore needs the heaviest suites split by the inputs their tests actually read, rather than more isolation of already-cheap command suites.`,
+    "",
+    "| Suite | Share of Linux seconds | PRs skipping it |",
+    "| --- | ---: | ---: |",
+    ...suites.map((suite) => `| ${suite.name} | ${pct(suite.share)} | ${pct(suite.skip)} |`),
+    "",
+    "### Driver hunks outside owned items",
+    "",
+    `A src/driver.rs hunk outside every owned declaration resolves in its own snapshot: a private helper to its production callers, a method or nested item to its container, an impl block to its type, a doc comment or attribute to the item it precedes, a use statement to the declarations naming what it imports, and a unit test (with its test-only fixtures) to the production items it references; a blank line changes nothing. ${resolvedDriver.length} PRs touching driver.rs now project every driver hunk to owners. ${mixedEngineRows.length} still retain the whole-file input, each for one of two reasons the lexer cannot settle: the hunk is in a crate-visible item whose other callers are in other modules (src/driver.rs::settled, for instance), or a private item's name is also a local binding or field in an unresolved caller, so its true callers need Rust scope resolution. Both stay conservatively whole-file.`,
+    "",
+    "| PR / revision still whole-file |",
+    "| --- |",
+    ...mixedEngineRows.map((row) => `| ${pr(row)} |`),
+  ];
+}
 
 /** Called in the producer workspace, independently of a renderer's output directory. */
 export function currentDigests() {
@@ -193,6 +299,13 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       platform.secondsSkip > 1 ||
       !Number.isFinite(platform.secondsPerRun) ||
       platform.secondsPerRun <= 0 ||
+      !platform.suiteSeconds ||
+      JSON.stringify(Object.keys(platform.suiteSeconds).sort()) !==
+        JSON.stringify(Object.keys(result.mapping.suites).sort()) ||
+      Math.abs(
+        Object.values(platform.suiteSeconds).reduce((a, b) => a + b, 0) - platform.secondsPerRun,
+      ) >
+        1e-6 * platform.secondsPerRun ||
       !Array.isArray(platform.missingModules) ||
       !platform.missingModules.every((name) => typeof name === "string")
     )
@@ -416,7 +529,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     if (!furtherSplits[name]) throw new Error(`missing further split for broad crate ${name}`);
     subsystemLines.push(`| ${name} | ${count} | ${furtherSplits[name]} |`);
   }
-  subsystemLines.push("");
+  subsystemLines.push("", ...forcedTimeLines(result, reach, layout, mixedEngineRows), "");
   const glob = compareGlobInputs(result.mapping.selection, result.rows);
   const globLines = [
     "## What narrowing the docs/scripts globs frees",
