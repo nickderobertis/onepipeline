@@ -2438,7 +2438,7 @@ test("configuration projection selects real test recipes and semantic Cargo/next
     );
     assert.throws(
       () => configChanges("justfile", "unrelated:\n    echo ready\n", just, suites),
-      /missing runner recipe/,
+      /unresolved just recipe _e2e-test \(read from tests\/e2e\/project.json targets.test.command\)/,
     );
     assert.equal(
       configChanges("justfile", just, just.replace('tool := "1"', 'tool := "2"'), suites).length,
@@ -2593,8 +2593,8 @@ test("configuration projection selects real test recipes and semantic Cargo/next
       assert.equal(
         configChanges(
           ".config/nextest.toml",
-          `[${section}]\n${before}`,
-          `[${section}]\n${after}`,
+          `[profile.ci]\n[${section}]\n${before}`,
+          `[profile.ci]\n[${section}]\n${after}`,
           suites,
         ).length,
         selected,
@@ -2725,19 +2725,16 @@ test("configuration projection selects real test recipes and semantic Cargo/next
 
     delete project.targets.test;
     put(root, "tests/e2e/project.json", project);
-    assert.throws(() => configChanges("justfile", just, just, suites), /missing runner target/);
+    assert.throws(
+      () => configChanges("justfile", just, just, suites),
+      /unresolved Nx target onepipeline-e2e:test \(read from tests\/e2e\/project.json runner roots\)/,
+    );
     project.targets.test = { ...savedTarget, command: "node unsupported.mjs" };
     put(root, "tests/e2e/project.json", project);
-    assert.throws(
-      () => configChanges("justfile", just, just, suites),
-      /unsupported runner command/,
-    );
+    assert.throws(() => configChanges("justfile", just, just, suites), /unresolved runner command/);
     project.targets.test = { ...savedTarget, command: "just _e2e-test && node unsupported.mjs" };
     put(root, "tests/e2e/project.json", project);
-    assert.throws(
-      () => configChanges("justfile", just, just, suites),
-      /unsupported runner command/,
-    );
+    assert.throws(() => configChanges("justfile", just, just, suites), /unresolved runner command/);
     project.targets.test = { executor: "nx:noop" };
     put(root, "tests/e2e/project.json", project);
     assert.deepEqual(configChanges("justfile", just, just, suites), []);
@@ -2747,8 +2744,8 @@ test("configuration projection selects real test recipes and semantic Cargo/next
     assert.equal(
       configChanges(
         ".config/nextest.toml",
-        "[profile.focused]\nretries=0",
-        "[profile.focused]\nretries=1",
+        "[profile.ci]\n[profile.focused]\nretries=0",
+        "[profile.ci]\n[profile.focused]\nretries=1",
         suites,
       ).length,
       2,
@@ -2757,8 +2754,8 @@ test("configuration projection selects real test recipes and semantic Cargo/next
     assert.equal(
       configChanges(
         ".config/nextest.toml",
-        "[profile.alternate]\nretries=0",
-        "[profile.alternate]\nretries=1",
+        "[profile.focused]\n[profile.alternate]\nretries=0",
+        "[profile.focused]\n[profile.alternate]\nretries=1",
         suites,
       ).length,
       2,
@@ -2766,8 +2763,8 @@ test("configuration projection selects real test recipes and semantic Cargo/next
     assert.deepEqual(
       configChanges(
         ".config/nextest.toml",
-        "[profile.ci]\nretries=0",
-        "[profile.ci]\nretries=1",
+        "[profile.focused]\n[profile.alternate]\n[profile.ci]\nretries=0",
+        "[profile.focused]\n[profile.alternate]\n[profile.ci]\nretries=1",
         suites,
       ),
       [],
@@ -2783,6 +2780,253 @@ test("configuration projection selects real test recipes and semantic Cargo/next
       ).length,
       2,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** A scratch runner workspace whose every reference resolves; each test breaks exactly one. */
+function projectionWorkspace() {
+  const root = scratch();
+  const runner = JSON.parse(readFileSync("tests/e2e/project.json", "utf8"));
+  runner.targets.test = { command: "just _e2e-test", inputs: ["e2eSource"] };
+  runner.targets["test-quick"] = { executor: "nx:noop" };
+  const files = {
+    "project.json": readFileSync("project.json", "utf8"),
+    "tests/e2e/project.json": runner,
+    justfile: 'tool := "1"\n_e2e-test:\n    cargo nextest run {{tool}}\n',
+    ".github/workflows/ci.yml": "env:\n  NEXTEST_PROFILE: ci\n",
+  };
+  for (const [path, value] of Object.entries(files)) put(root, path, value);
+  const project = (file, before, after) => {
+    put(root, "before", before);
+    put(root, "after", after);
+    put(root, "suites.json", ["cmd-start", "cmd-status"]);
+    return spawnSync(
+      process.execPath,
+      [
+        resolve("scripts/modularization/config-projection.mjs"),
+        file,
+        join(root, "before"),
+        join(root, "after"),
+        join(root, "suites.json"),
+        join(root, "output.json"),
+      ],
+      { encoding: "utf8", cwd: root },
+    );
+  };
+  const selected = (file, before, after) => {
+    const result = project(file, before, after);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(readFileSync(join(root, "output.json"), "utf8")).length;
+  };
+  const refused = (file, before, after, message) => {
+    const result = project(file, before, after);
+    assert.equal(result.status, 1, `expected a refusal, got ${result.stdout}`);
+    assert.match(result.stderr, message);
+    assert.match(result.stderr, /next: correct the named configuration/);
+  };
+  return { root, runner, selected, refused };
+}
+
+test("configuration projection refuses an unresolved just recipe reference", () => {
+  const { root, selected, refused } = projectionWorkspace();
+  try {
+    const dependency = "_e2e-test: helper\n    cargo nextest run\nhelper:\n    echo ready\n";
+    assert.equal(selected("justfile", dependency, dependency.replace("ready", "set")), 2);
+    put(root, "justfile", dependency);
+    // just itself refuses an undefined dependency, so the unresolved one is in a body invocation.
+    for (const [body, message] of [
+      [
+        "just missing-helper",
+        /unresolved just recipe missing-helper \(read from justfile recipe:_e2e-test\)/,
+      ],
+      [
+        "echo $(just --evaluate missing)",
+        /unresolved just variable missing \(read from justfile recipe:_e2e-test\)/,
+      ],
+      [
+        'just {{"helper"}}',
+        /unresolved just invocation "just \{\{…\}\}" \(read from justfile recipe:_e2e-test body\)/,
+      ],
+      ["just --justfile other helper", /unresolved just invocation "just --justfile other helper"/],
+      [
+        "{{just_executable()}} helper",
+        /unresolved just invocation just_executable\(\) \(read from justfile recipe:_e2e-test\)/,
+      ],
+    ]) {
+      const broken = dependency.replace("cargo nextest run", body);
+      refused("justfile", broken, broken, message);
+    }
+    const dotenv = `set dotenv-load\n${dependency}`;
+    refused(
+      "justfile",
+      dotenv,
+      dotenv,
+      /unresolved just setting dotenv_load \(read from justfile settings/,
+    );
+    // A diagnostic naming a recipe is not an invocation, and an entry recipe the runner names must exist.
+    const diagnostic = dependency.replace("cargo nextest run", "echo \"run 'just nowhere' first\"");
+    assert.equal(selected("justfile", diagnostic, diagnostic), 0);
+    refused(
+      "justfile",
+      "other:\n    echo\n",
+      "other:\n    echo\n",
+      /unresolved just recipe _e2e-test \(read from tests\/e2e\/project.json targets.test.command\)/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration projection refuses an unresolved Nx target reference", () => {
+  const { root, runner, selected, refused } = projectionWorkspace();
+  const just = 'tool := "1"\n_e2e-test:\n    cargo nextest run {{tool}}\n';
+  try {
+    assert.equal(selected("justfile", just, just.replace('"1"', '"2"')), 2);
+    runner.targets.test.dependsOn = [{ projects: ["onepipeline"], target: "no-such-archive" }];
+    put(root, "tests/e2e/project.json", runner);
+    refused(
+      "justfile",
+      just,
+      just,
+      /unresolved Nx target onepipeline:no-such-archive \(read from tests\/e2e\/project.json targets.test.dependsOn\)/,
+    );
+    runner.targets.test.dependsOn = ["no-such-sibling"];
+    put(root, "tests/e2e/project.json", runner);
+    refused("justfile", just, just, /unresolved Nx target onepipeline-e2e:no-such-sibling/);
+    // Options change what a target executes (cwd, env, args) and are not modelled, so they refuse.
+    delete runner.targets.test.dependsOn;
+    runner.targets.test.options = { cwd: "tests/e2e" };
+    put(root, "tests/e2e/project.json", runner);
+    refused(
+      "justfile",
+      just,
+      just,
+      /unresolved Nx target field options \(read from tests\/e2e\/project.json targets.test\)/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration projection refuses an unresolved runner command", () => {
+  const { root, runner, selected, refused } = projectionWorkspace();
+  const just =
+    'tool := "1"\n_e2e-test:\n    cargo nextest run {{tool}}\n_tier-test tier:\n    cargo nextest run\n';
+  try {
+    assert.equal(selected("justfile", just, just.replace('"1"', '"2"')), 2);
+    for (const command of [
+      "node run-tests.mjs",
+      "just _tier-test e2e",
+      "just _e2e-test && cargo test",
+    ]) {
+      runner.targets.test.command = command;
+      put(root, "tests/e2e/project.json", runner);
+      refused(
+        "justfile",
+        just,
+        just,
+        new RegExp(
+          `unresolved runner command ${JSON.stringify(command).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(read from tests/e2e/project.json targets.test.command\\)`,
+        ),
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration projection refuses an unresolved nextest profile reference", () => {
+  const { root, selected, refused } = projectionWorkspace();
+  const config = "[profile.ci]\nretries=0\n[profile.focused]\nretries=0\n";
+  const changed = config.replace("[profile.focused]\nretries=0", "[profile.focused]\nretries=1");
+  try {
+    assert.equal(selected(".config/nextest.toml", config, changed), 0);
+    put(root, "justfile", "_e2e-test:\n    cargo nextest run --profile focused\n");
+    assert.equal(selected(".config/nextest.toml", config, changed), 2);
+    refused(
+      ".config/nextest.toml",
+      "[profile.ci]\n",
+      "[profile.ci]\n",
+      /unresolved nextest profile focused \(read from justfile recipe:_e2e-test body\)/,
+    );
+    put(root, "justfile", 'p := "focused"\n_e2e-test:\n    cargo nextest run --profile {{p}}\n');
+    refused(
+      ".config/nextest.toml",
+      config,
+      changed,
+      /unresolved nextest profile "\{\{…\}\}" \(read from justfile recipe:_e2e-test body\)/,
+    );
+    put(root, "justfile", "_e2e-test:\n    cargo nextest run --cargo-profile ci-build\n");
+    refused(
+      ".config/nextest.toml",
+      config,
+      changed,
+      /unresolved cargo profile selection --cargo-profile/,
+    );
+    put(root, "justfile", "_e2e-test:\n    cargo nextest run\n");
+    put(root, ".github/workflows/ci.yml", "env:\n  NEXTEST_PROFILE: ${{ matrix.profile }}\n");
+    refused(
+      ".config/nextest.toml",
+      config,
+      changed,
+      /unresolved nextest profile "\$\{\{ matrix.profile \}\}" \(read from .github\/workflows\/ci.yml:2\)/,
+    );
+    put(root, ".github/workflows/ci.yml", "env:\n  NEXTEST_PROFILE: missing\n");
+    refused(
+      ".config/nextest.toml",
+      config,
+      changed,
+      /unresolved nextest profile missing \(read from .github\/workflows\/ci.yml:2\)/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration projection refuses an unresolved configuration section", () => {
+  const { root, selected, refused } = projectionWorkspace();
+  try {
+    assert.equal(
+      selected(".cargo/config.toml", "[term]\nverbose=false", "[term]\nverbose=true"),
+      0,
+    );
+    assert.equal(selected(".cargo/config.toml", "[env]\nA='1'", "[env]\nA='2'"), 2);
+    refused(
+      ".cargo/config.toml",
+      "",
+      "[made-up]\nx=1",
+      /unresolved configuration section made-up \(read from .cargo\/config.toml\)/,
+    );
+    const nextest = (body) => `[profile.ci]\n${body}`;
+    assert.equal(
+      selected(
+        ".config/nextest.toml",
+        nextest('nextest-version="0.9.1"'),
+        nextest('nextest-version="0.9.2"'),
+      ),
+      2,
+    );
+    refused(
+      ".config/nextest.toml",
+      nextest(""),
+      nextest("[made-up]\nx=1"),
+      /unresolved configuration section made-up \(read from .config\/nextest.toml\)/,
+    );
+    // A setup script changes the runners only when a selected profile runs it, and that script must exist.
+    const scripts = (command, used) =>
+      `[scripts.setup.db]\ncommand="${command}"\n[profile.ci]\n${used ? '[[profile.default.scripts]]\nfilter="all()"\nsetup="db"\n' : ""}`;
+    assert.equal(selected(".config/nextest.toml", scripts("a", false), scripts("b", false)), 0);
+    assert.equal(selected(".config/nextest.toml", scripts("a", true), scripts("b", true)), 2);
+    const missing = '[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetup="absent"\n';
+    refused(
+      ".config/nextest.toml",
+      missing,
+      missing,
+      /unresolved nextest script "absent" \(read from .config\/nextest.toml profile.default.scripts\[0\]\)/,
+    );
+    refused("unknown.toml", "", "", /usage: config-projection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

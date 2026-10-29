@@ -45,11 +45,26 @@ export function configSections(file, text) {
   return justCache.get(text);
 }
 
+/** Every reference the projection reads resolves to a known input, or the projection stops here naming it. */
+export function unresolved(kind, reference, where) {
+  return new Error(`unresolved ${kind} ${reference} (read from ${where})`);
+}
+
+const runnerProjects = ["project.json", "tests/e2e/project.json"];
+// Fields that never change what a target executes; anything else (options, a custom executor's settings) is unresolved.
+const runnerTargetFields = [
+  "command",
+  "executor",
+  "dependsOn",
+  "inputs",
+  "outputs",
+  "parallelism",
+  "cache",
+];
+
 /** The existing e2e project's actual test commands and archive-build dependencies are authoritative. */
 export function runnerEntries() {
-  const projects = ["project.json", "tests/e2e/project.json"].map((file) =>
-    JSON.parse(readFileSync(file, "utf8")),
-  );
+  const projects = runnerProjects.map((file) => JSON.parse(readFileSync(file, "utf8")));
   if (
     projects.some(
       (project) =>
@@ -62,16 +77,23 @@ export function runnerEntries() {
   )
     throw new Error("invalid runner project metadata or duplicate project name");
   const byName = Object.fromEntries(projects.map((project) => [project.name, project]));
+  const fileOf = Object.fromEntries(
+    projects.map((project, index) => [project.name, runnerProjects[index]]),
+  );
   const reached = new Set();
-  const recipes = new Set();
-  const visit = (name, target) => {
+  const recipes = new Map();
+  const visit = (name, target, from) => {
     const key = `${name}:${target}`;
     if (reached.has(key)) return;
     reached.add(key);
     if (!Object.hasOwn(byName, name) || !Object.hasOwn(byName[name].targets, target))
-      throw new Error(`missing runner target ${key}`);
+      throw unresolved("Nx target", key, from);
+    const where = `${fileOf[name]} targets.${target}`;
     const definition = byName[name].targets[target];
     if (!record(definition)) throw new Error(`invalid runner target ${key}`);
+    for (const field of Object.keys(definition))
+      if (!field.startsWith("//") && !runnerTargetFields.includes(field))
+        throw unresolved("Nx target field", field, where);
     if (
       (definition.command !== undefined && typeof definition.command !== "string") ||
       (definition.executor !== undefined && typeof definition.executor !== "string")
@@ -84,16 +106,19 @@ export function runnerEntries() {
     if (definition.dependsOn !== undefined && !Array.isArray(definition.dependsOn))
       throw new Error(`invalid runner dependency list ${key}`);
     const recipe = /^just\s+([\w-]+)\s*$/.exec(definition.command ?? "");
-    if (recipe) recipes.add(recipe[1]);
-    else if (definition.executor !== "nx:noop")
-      throw new Error(
-        `unsupported runner command ${key}: ${definition.command ?? definition.executor}`,
+    if (recipe) {
+      if (!recipes.has(recipe[1])) recipes.set(recipe[1], `${where}.command`);
+    } else if (definition.executor !== "nx:noop")
+      throw unresolved(
+        "runner command",
+        JSON.stringify(definition.command ?? definition.executor ?? null),
+        `${where}.command`,
       );
     for (const dependency of definition.dependsOn ?? []) {
       if (typeof dependency === "string") {
         if (!/^[A-Za-z0-9_-]+$/.test(dependency))
           throw new Error(`unsupported runner dependency ${key}: ${dependency}`);
-        visit(name, dependency);
+        visit(name, dependency, `${where}.dependsOn`);
       } else {
         if (
           !record(dependency) ||
@@ -109,81 +134,207 @@ export function runnerEntries() {
           selected.some((project) => typeof project !== "string" || !Object.hasOwn(byName, project))
         )
           throw new Error(`unsupported runner dependency projects ${key}`);
-        for (const project of selected) visit(project, dependency.target);
+        for (const project of selected) visit(project, dependency.target, `${where}.dependsOn`);
       }
     }
   };
-  for (const target of ["test", "test-quick"]) visit(projects[1].name, target);
-  return [...recipes];
+  for (const target of ["test", "test-quick"])
+    visit(projects[1].name, target, `${runnerProjects[1]} runner roots`);
+  return [...recipes].map(([name, from]) => ({ name, from }));
 }
+
+/** Rendered body lines, with interpolations kept visibly unresolved rather than dropped. */
+const bodyLines = (section) =>
+  (section.body ?? []).map((line) =>
+    line.map((fragment) => (typeof fragment === "string" ? fragment : "{{…}}")).join(""),
+  );
+
+const unsupportedSettings = {
+  dotenv_load: (value) => value === true,
+  dotenv_filename: (value) => value !== null,
+  dotenv_path: (value) => value !== null,
+  dotenv_command: (value) => Array.isArray(value) && value.length > 0,
+  fallback: (value) => value === true,
+};
 
 export function testRecipes(text, entries = runnerEntries()) {
   const sections = configSections("justfile", text);
-  for (const name of entries)
-    if (!Object.hasOwn(sections, `recipe:${name}`))
-      throw new Error(`missing runner recipe ${name}`);
-  const reached = new Set(
-    [
-      "globals",
-      ...entries.map((name) => `recipe:${name}`),
-      ...Object.keys(sections).filter((key) => sections[key].export),
-    ].filter((key) => Object.hasOwn(sections, key)),
-  );
-  const variables = (value) => {
-    if (!value || typeof value !== "object") return [];
-    if (Array.isArray(value) && value[0] === "variable") return [value[1]];
-    return Object.values(value).flatMap(variables);
+  for (const { name, from } of entries)
+    if (!Object.hasOwn(sections, `recipe:${name}`)) throw unresolved("just recipe", name, from);
+  const { settings = {}, modules = {} } = sections.globals;
+  for (const [setting, active] of Object.entries(unsupportedSettings))
+    if (active(settings[setting]))
+      throw unresolved(
+        "just setting",
+        setting,
+        "justfile settings (reads an input outside this file)",
+      );
+  if (Object.keys(modules).length)
+    throw unresolved("just module", Object.keys(modules).join(", "), "justfile modules");
+  const reached = new Set([
+    "globals",
+    ...entries.map(({ name }) => `recipe:${name}`),
+    ...Object.keys(sections).filter(
+      (key) => key.startsWith("variable:") && (settings.export || sections[key].export),
+    ),
+  ]);
+  const expressions = (value, found = []) => {
+    if (!value || typeof value !== "object") return found;
+    if (
+      Array.isArray(value) &&
+      value.length >= 2 &&
+      value[0] === "call" &&
+      value[1] === "just_executable"
+    )
+      found.push(["invocation", "just_executable()"]);
+    if (
+      Array.isArray(value) &&
+      value.length === 2 &&
+      value[0] === "variable" &&
+      typeof value[1] === "string"
+    )
+      found.push(["variable", value[1]]);
+    else for (const item of Object.values(value)) expressions(item, found);
+    return found;
   };
   for (const key of reached) {
+    if (key === "globals") continue;
     const section = sections[key];
-    const references = [
-      ...variables(section).map((name) => `variable:${name}`),
-      ...(section.dependencies ?? []).map((dependency) => `recipe:${dependency.recipe}`),
-    ];
-    for (const line of section.body ?? [])
-      for (const fragment of line.filter((value) => typeof value === "string"))
-        for (const match of fragment.matchAll(
-          /(?:^|[;\n]|&&|\|\||\$\()\s*@?just\s+(?:(--evaluate)\s+)?([\w-]+)/g,
-        ))
-          references.push(`${match[1] ? "variable" : "recipe"}:${match[2]}`);
-    for (const reference of references)
-      if (Object.hasOwn(sections, reference)) reached.add(reference);
+    const parameters = new Set((section.parameters ?? []).map((parameter) => parameter.name));
+    const references = [];
+    for (const [kind, name] of expressions(section)) {
+      if (kind === "invocation") throw unresolved("just invocation", name, `justfile ${key}`);
+      if (!parameters.has(name)) references.push(["just variable", `variable:${name}`]);
+    }
+    for (const dependency of section.dependencies ?? [])
+      references.push(["just recipe", `recipe:${dependency.recipe}`]);
+    for (const line of bodyLines(section))
+      for (const match of line.matchAll(/(?:^|[;\n]|&&|\|\||\$\()\s*@?just(?=\s|$)([^;&|)\n]*)/g)) {
+        const invocation = /^\s+(?:(--evaluate)\s+)?([A-Za-z_][\w-]*)(?:\s|$)/.exec(match[1]);
+        if (!invocation || /\{\{…\}\}/.test(invocation[0]))
+          throw unresolved(
+            "just invocation",
+            JSON.stringify(`just${match[1]}`.trim()),
+            `justfile ${key} body`,
+          );
+        references.push(
+          invocation[1]
+            ? ["just variable", `variable:${invocation[2]}`]
+            : ["just recipe", `recipe:${invocation[2]}`],
+        );
+      }
+    for (const [kind, reference] of references) {
+      if (!Object.hasOwn(sections, reference))
+        throw unresolved(kind, reference.slice(reference.indexOf(":") + 1), `justfile ${key}`);
+      reached.add(reference);
+    }
   }
   return reached;
 }
 
+/** Profiles the runners select: literal `--profile`/`NEXTEST_PROFILE` values, then their `inherits` chains. */
 export function nextestProfiles(configs = []) {
-  const sections = configSections("justfile", readFileSync("justfile", "utf8"));
-  const bodies = [...testRecipes(readFileSync("justfile", "utf8"))]
-    .map((key) => JSON.stringify(sections[key]))
-    .join("\n");
-  const profiles = new Set(["profile.default"]);
-  for (const match of bodies.matchAll(/--profile(?:=|\s+)([a-z][\w-]*)/g))
-    profiles.add(`profile.${match[1]}`);
+  const text = readFileSync("justfile", "utf8");
+  const sections = configSections("justfile", text);
+  const referenced = new Map([["default", "nextest's built-in default profile"]]);
+  const literal = (value, where) => {
+    if (!/^[a-z][\w-]*$/.test(value))
+      throw unresolved("nextest profile", JSON.stringify(value), where);
+    if (!referenced.has(value)) referenced.set(value, where);
+  };
+  for (const key of testRecipes(text)) {
+    for (const line of bodyLines(sections[key])) {
+      for (const match of line.matchAll(/--cargo-profile\b|--release\b/g))
+        throw unresolved("cargo profile selection", match[0], `justfile ${key} body`);
+      for (const match of line.matchAll(/(?:--profile|\bNEXTEST_PROFILE)(?:=|\s+)(\S*)/g))
+        literal(match[1].replace(/^["']|["']$/g, ""), `justfile ${key} body`);
+    }
+  }
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
-  for (const match of workflow.matchAll(/^\s*NEXTEST_PROFILE:\s*([a-z][\w-]*)\s*$/gm))
-    profiles.add(`profile.${match[1]}`);
-  for (const config of configs) {
-    const visit = (key, chain = []) => {
-      if (chain.includes(key))
-        throw new Error(`nextest profile inheritance cycle: ${[...chain, key].join(" -> ")}`);
+  for (const [index, line] of workflow.split("\n").entries()) {
+    const match = /^\s*NEXTEST_PROFILE:\s*(.*?)\s*$/.exec(line);
+    if (match)
+      literal(match[1].replace(/^["']|["']$/g, ""), `.github/workflows/ci.yml:${index + 1}`);
+  }
+  const profiles = new Set();
+  const visit = (key, from, chain = []) => {
+    if (chain.includes(key))
+      throw new Error(`nextest profile inheritance cycle: ${[...chain, key].join(" -> ")}`);
+    profiles.add(key);
+    if (
+      key !== "profile.default" &&
+      configs.length &&
+      !configs.some((config) => Object.hasOwn(config, key))
+    )
+      throw unresolved("nextest profile", key.slice("profile.".length), from);
+    for (const config of configs) {
       const parent = config[key]?.inherits;
-      if (parent === undefined) return;
+      if (parent === undefined) continue;
       if (
         typeof parent !== "string" ||
         !/^[a-z][\w-]*$/.test(parent) ||
-        (parent !== "default" && !Object.hasOwn(config, `profile.${parent}`))
+        (parent !== "default" &&
+          !configs.some((other) => Object.hasOwn(other, `profile.${parent}`)))
       )
         throw new Error(`invalid nextest inherited profile ${key}`);
-      profiles.add(`profile.${parent}`);
-      visit(`profile.${parent}`, [...chain, key]);
-    };
-    for (const key of [...profiles]) visit(key);
-  }
+      visit(`profile.${parent}`, `.config/nextest.toml ${key}.inherits`, [...chain, key]);
+    }
+  };
+  for (const [name, from] of referenced) visit(`profile.${name}`, from);
   return profiles;
 }
 
+// Every top-level section each file may carry, and whether a change to it reaches the runners.
+// A section absent here is unresolved: the projection refuses it rather than guessing either way.
+const cargoSections = {
+  build: true,
+  target: true,
+  env: true,
+  source: true,
+  registries: true,
+  registry: true,
+  net: true,
+  http: true,
+  patch: true,
+  resolver: true,
+  unstable: true,
+  // Developer shortcuts and presentation: no runner invokes an alias, and none changes what is compiled or tested.
+  alias: false,
+  term: false,
+  doc: false,
+  "cargo-new": false,
+  install: false,
+  "credential-alias": false,
+  "future-incompat-report": false,
+};
+const nextestSections = {
+  "test-groups": true,
+  store: true,
+  experimental: true,
+  "nextest-version": true,
+};
+
+function nextestScripts(configs, profiles) {
+  const used = new Map();
+  for (const config of configs)
+    for (const key of profiles)
+      for (const [index, entry] of (config[key]?.scripts ?? []).entries())
+        for (const name of [entry?.setup ?? [], entry?.wrapper ?? []].flat())
+          used.set(name, `.config/nextest.toml ${key}.scripts[${index}]`);
+  for (const [name, from] of used)
+    if (
+      typeof name !== "string" ||
+      !configs.some((config) =>
+        ["setup", "wrapper"].some((kind) => Object.hasOwn(config.scripts?.[kind] ?? {}, name)),
+      )
+    )
+      throw unresolved("nextest script", JSON.stringify(name), from);
+  return used;
+}
+
 export function configChanges(file, before, after, suites, recipeEntries) {
+  if (!["justfile", ".cargo/config.toml", ".config/nextest.toml"].includes(file))
+    throw unresolved("configuration file", file, "the projected path");
   const a = configSections(file, before);
   const b = configSections(file, after);
   const changed = Object.keys({ ...a, ...b }).filter(
@@ -197,15 +348,27 @@ export function configChanges(file, before, after, suites, recipeEntries) {
         ])
       : null;
   const profiles = file === ".config/nextest.toml" ? nextestProfiles([a, b]) : null;
+  const scripts = profiles ? nextestScripts([a, b], profiles) : null;
   const consumed = changed.filter((key) => {
     if (recipes) return recipes.has(key);
-    // Cargo aliases are developer shortcuts, not cargo nextest/build inputs.
-    if (file === ".cargo/config.toml")
-      return (
-        key !== "alias" &&
-        (!key.startsWith("profile.") || ["profile.dev", "profile.test"].includes(key))
+    if (file === ".cargo/config.toml") {
+      // Runners build with the dev/test profiles; selecting any other is refused in nextestProfiles.
+      if (key.startsWith("profile.")) return ["profile.dev", "profile.test"].includes(key);
+      if (!Object.hasOwn(cargoSections, key))
+        throw unresolved("configuration section", key, ".cargo/config.toml");
+      return cargoSections[key];
+    }
+    if (key.startsWith("profile.")) return profiles.has(key);
+    if (key === "scripts")
+      return ["setup", "wrapper"].some((kind) =>
+        [...scripts.keys()].some(
+          (name) =>
+            JSON.stringify(a.scripts?.[kind]?.[name]) !== JSON.stringify(b.scripts?.[kind]?.[name]),
+        ),
       );
-    return profiles.has(key) || ["test-groups", "store"].includes(key);
+    if (!Object.hasOwn(nextestSections, key))
+      throw unresolved("configuration section", key, ".config/nextest.toml");
+    return nextestSections[key];
   });
   return consumed.length ? suites.map((suite) => `migrated-tests/${suite}/config/${file}`) : [];
 }
@@ -215,7 +378,7 @@ export function historicalConfigChanges(file, before, after, suites) {
   if (file !== "justfile") return configChanges(file, before, after, suites);
   const roots = runnerEntries();
   const existing = (text) =>
-    roots.filter((name) => Object.hasOwn(configSections(file, text), `recipe:${name}`));
+    roots.filter(({ name }) => Object.hasOwn(configSections(file, text), `recipe:${name}`));
   return configChanges(file, before, after, suites, {
     before: existing(before),
     after: existing(after),
