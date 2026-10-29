@@ -312,6 +312,7 @@ fn scheduling_fixture(case: &str, config: &str) -> Fixture {
             ("tests/e2e.rs", SCHEDULING_E2E),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             (
                 "tests/oneagentgraph_liveness.rs",
                 SCHEDULING_OUTSIDE_THE_GROUP,
@@ -342,7 +343,7 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
     );
     assert!(
-        log.contains("11 tests run: 11 passed"),
+        log.contains("12 tests run: 12 passed"),
         "every test of the fixture ran and passed:\n{log}"
     );
 }
@@ -446,6 +447,7 @@ fn leaking_fixture(case: &str) -> Fixture {
             ("tests/e2e.rs", LEAKING_E2E),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -620,6 +622,7 @@ fn long_journey_fixture(name: &str, config: &str) -> Fixture {
             ("tests/e2e.rs", &journeys),
             ("tests/note.rs", &journeys),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -2270,6 +2273,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
             ),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     );
@@ -2295,7 +2299,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
         .filter_map(|line| line.split_once(' '))
         .map(|(binary, test)| format!("{binary}\t{test}"))
         .collect();
-    assert_eq!(tests.len(), 6, "{}", stdout(&listed));
+    assert_eq!(tests.len(), 7, "{}", stdout(&listed));
 
     let mut log = String::new();
     for (_, project, _) in INVENTORY_PROJECTS {
