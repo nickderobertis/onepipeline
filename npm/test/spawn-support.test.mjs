@@ -121,7 +121,8 @@ describe("outside Windows, a command is", () => {
   });
 });
 
-// Keep the fixture's echo mode observable on hosts without cmd.exe.
+// The batch file the Windows journeys install `echo-args` as. For the
+// node_modules\.bin layout it stands in for the `.cmd` shim npm writes there.
 function windowsEchoEntry(layout, script) {
   const invoke = `"${process.execPath}" "${script}" %*`;
   const line =
@@ -131,10 +132,56 @@ function windowsEchoEntry(layout, script) {
   return `${line}\r\n`;
 }
 
-it("the Windows journey fixture suppresses command echo before its compound invocation", () => {
-  const batch = windowsEchoEntry(join("node_modules", ".bin"), "echo-args.cjs");
-  assert.match(batch, /^@ECHO off\r\n/i);
-  assert.match(batch, /endLocal & goto .* & ".*" "echo-args.cjs" %\*\r\n$/);
+/// `cmd-shim`, the writer of Windows bin shims bundled with the npm on PATH.
+function npmCmdShim() {
+  const npmEnvironment = run("npm", ["run", "env", "--silent"]);
+  const npmCli = npmEnvironment.match(/^npm_execpath=(.+)\r?$/m)?.[1].trim();
+  assert.ok(npmCli, "npm run env must identify the npm CLI doing the install");
+  return createRequire(npmCli)("cmd-shim");
+}
+
+/// The lines cmd.exe echoes to stdout before running them: every line not
+/// prefixed by `@` while echo is on, which it is until an `ECHO off`. A label
+/// (`:name`) is never echoed.
+function echoedLines(batch) {
+  let echo = true;
+  const echoed = [];
+  for (const raw of batch.split("\r\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith(":")) continue;
+    if (echo && !line.startsWith("@")) echoed.push(line);
+    const command = line.replace(/^@/, "").trim();
+    if (/^echo\s+off$/i.test(command)) echo = false;
+    else if (/^echo\s+on$/i.test(command)) echo = true;
+  }
+  return echoed;
+}
+
+it("the Windows journey's node_modules\\.bin stand-in runs as the shim npm writes there does", async () => {
+  const script = join(work, "shim-target", "echo-args.cjs");
+  mkdirSync(join(work, "shim-target"), { recursive: true });
+  // A package's bin names node in its shebang, which is what the shim runs.
+  writeFileSync(script, "#!/usr/bin/env node\n");
+  const entry = join(work, "shim-target", "node_modules", ".bin", "echo-args");
+  mkdirSync(join(entry, ".."), { recursive: true });
+  await npmCmdShim()(script, entry);
+  const npm = readFileSync(`${entry}.cmd`, "utf8");
+  const standIn = windowsEchoEntry(join("node_modules", ".bin"), script);
+
+  // Nothing of the batch file itself reaches stdout: only the program's output.
+  assert.deepEqual(echoedLines(npm), []);
+  assert.deepEqual(echoedLines(standIn), echoedLines(npm));
+
+  // Both end on the same compound line, handing the program `%*` untouched; as
+  // the batch file's last command, its exit status is the batch file's.
+  const last = (batch) => batch.trimEnd().split("\r\n").at(-1);
+  const relative = last(npm).match(/"%_prog%"\s+"%dp0%\\([^"]+)"/)?.[1];
+  assert.ok(relative, last(npm));
+  assert.equal(join(entry, "..", ...relative.split("\\")), script);
+  assert.equal(
+    last(standIn).replace(`"${process.execPath}" "${script}"`, "<node> <script>"),
+    last(npm).replace(/"%_prog%"\s+"%dp0%\\[^"]+"/, "<node> <script>"),
+  );
 });
 
 it("npm's Windows bin shims forward only engine stdout and its status through the launcher", async () => {
@@ -146,12 +193,7 @@ it("npm's Windows bin shims forward only engine stdout and its status through th
   const entry = join(project, "node_modules", ".bin", "onepipeline");
   // Use the very writer bundled with the npm doing the install, including on
   // Linux where npm normally makes a symlink instead of Windows' three files.
-  const npmEnvironment = run("npm", ["run", "env", "--silent"]);
-  const npmCli = npmEnvironment.match(/^npm_execpath=(.+)\r?$/m)?.[1].trim();
-  assert.ok(npmCli, "npm run env must identify the npm CLI doing the install");
-  const npmRequire = createRequire(npmCli);
-  const cmdShim = npmRequire("cmd-shim");
-  await cmdShim(launcher, entry);
+  await npmCmdShim()(launcher, entry);
   const cmd = readFileSync(`${entry}.cmd`, "utf8");
   const sh = readFileSync(entry, "utf8");
   const ps = readFileSync(`${entry}.ps1`, "utf8");
