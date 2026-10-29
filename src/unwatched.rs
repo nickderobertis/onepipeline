@@ -746,6 +746,7 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
         }
     };
     let mut owned = Discovered::default();
+    let mut candidates = Vec::new();
     for entry in entries {
         // llmlint: ignore-block[changed_behavior_has_e2e] an entry the filesystem lists and
         // then refuses to describe is a host condition no portable journey can set —
@@ -786,16 +787,67 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
         // The launch record and nothing else. Read leniently, exactly as every
         // other reader of it: a record this build cannot parse names no session,
         // and a run belonging to nobody is passed over.
-        let Some(launch) = ledger::read_json_opt::<LaunchRecord>(&paths.launch()) else {
-            continue;
-        };
-        if launch.owned_by(session) {
-            owned
-                .runs
-                .push((paths, crate::flow::FlowId::parse(&launch.flow)));
-        }
+        candidates.push((candidates.len(), paths));
     }
+    let readers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(4);
+    // Discovery reads every launch, even when the session owns only a handful.
+    // Bound the I/O concurrency to the same small number of cores as a hosted
+    // runner, while keeping small roots on the calling thread.
+    let mut runs = if candidates.len() < 32 || readers == 1 {
+        owned_launches(&candidates, session)
+    } else {
+        std::thread::scope(|scope| {
+            let mut pending = Vec::new();
+            let mut found = Vec::new();
+            for chunk in candidates.chunks(candidates.len().div_ceil(readers)) {
+                match std::thread::Builder::new()
+                    .name("unwatched-discovery".to_owned())
+                    .spawn_scoped(scope, || owned_launches(chunk, session))
+                {
+                    Ok(reader) => pending.push(reader),
+                    // A host that cannot start another thread still gets the
+                    // same complete discovery through the sequential reader.
+                    Err(_) => found.extend(owned_launches(chunk, session)),
+                }
+            }
+            for reader in pending {
+                match reader.join() {
+                    Ok(runs) => found.extend(runs),
+                    // Preserve a reader's programming failure as the sequential
+                    // call would; filesystem and decoding failures are Options.
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            }
+            found
+        })
+    };
+    // Joining chunks and a sequential fallback can complete out of order. Keep
+    // discovery's original directory order for every downstream decision.
+    runs.sort_unstable_by_key(|(index, _)| *index);
+    owned.runs = runs.into_iter().map(|(_, run)| run).collect();
     Ok(owned)
+}
+
+/// Read each complete launch record before deciding ownership. Both discovery
+/// paths use this reader, including all of the launch schema's validation.
+fn owned_launches(
+    candidates: &[(usize, RunPaths)],
+    session: &str,
+) -> Vec<(usize, (RunPaths, Option<crate::flow::FlowId>))> {
+    candidates
+        .iter()
+        .filter_map(|(index, paths)| {
+            let launch = ledger::read_json_opt::<LaunchRecord>(&paths.launch())?;
+            launch.owned_by(session).then(|| {
+                (
+                    *index,
+                    (paths.clone(), crate::flow::FlowId::parse(&launch.flow)),
+                )
+            })
+        })
+        .collect()
 }
 
 /// What discovery found: the runs the session owns, and what it could not resolve.

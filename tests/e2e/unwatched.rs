@@ -1548,6 +1548,54 @@ fn assembled_run(template: &RunPaths, root: &std::path::Path, id: &str, session:
 
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+#[test]
+fn a_large_root_validates_owned_foreign_and_malformed_launches_before_reporting() {
+    let world = World::new("unwatched-discovery");
+    world.script("build.wait", "hold");
+    let template = paths_of(&world, &held(&world, "discovery-template"));
+    let mut launches = Vec::new();
+    for index in 0..40 {
+        let owner = if index < 3 {
+            world.session.as_str()
+        } else {
+            "another-planner"
+        };
+        launches.push(assembled_run(
+            &template,
+            &world.runs,
+            &format!("discovery-{index:02}"),
+            owner,
+        ));
+    }
+    world.run(&["stop", &template.run, "--force"]).exited(0);
+    world.release("build.go");
+    let original = std::fs::read(launches[1].launch()).expect("the real launch record");
+    let mut malformed: Value = serde_json::from_slice(&original).expect("the real schema");
+    malformed["pid"] = json!("not a process id");
+    std::fs::write(launches[1].launch(), malformed.to_string()).expect("the incomplete launch");
+    let (code, rows) = asked(&world, &["unwatched"]);
+    assert_eq!(code, RUNS_UNWATCHED, "{rows}");
+    assert_eq!(rows.lines().count(), 2, "{rows}");
+    assert!(
+        rows.contains("discovery-00") && rows.contains("discovery-02"),
+        "{rows}"
+    );
+    assert!(
+        !rows.contains("discovery-01") && !rows.contains("discovery-03"),
+        "{rows}"
+    );
+    std::fs::write(launches[1].launch(), original).expect("the recovered launch");
+    let (code, recovered) = asked(&world, &["unwatched"]);
+    assert_eq!(code, RUNS_UNWATCHED, "{recovered}");
+    assert_eq!(recovered.lines().count(), 3, "{recovered}");
+    for index in 0..3 {
+        assert!(
+            recovered.contains(&format!("discovery-{index:02}")),
+            "{recovered}"
+        );
+    }
+}
+
 /// Windows may refuse an atomic replacement or an open while another handle
 /// is closing. Wait for that filesystem state, under the harness's existing
 /// deadline; unrelated errors still fail at their first attempt.
