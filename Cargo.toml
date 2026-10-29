@@ -1262,9 +1262,9 @@ onevcs-testing = "0.19.22"
 # approval, and each write spends Linear's quota and notifies the item's followers.
 # `tests/e2e/linear_launch.rs`'s `an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write`
 # drives it and fails on 0.12.11.
-onetaskgraph-core = "=0.12.11"
-onetaskgraph-plugin-api = "=0.12.11"
-onetaskgraph-local-md = "=0.12.11"
+onetaskgraph-core = "=0.12.12"
+onetaskgraph-plugin-api = "=0.12.12"
+onetaskgraph-local-md = "=0.12.12"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
