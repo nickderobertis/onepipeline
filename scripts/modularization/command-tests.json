@@ -165,6 +165,11 @@
       "commands": [],
       "reason": "Retain the existing integration between the public facade and runtime fixtures; no fixture assertion is replaced."
     },
+    "harness::a_second_hold_leaves_the_push_the_first_is_holding_to_its_own_release": {
+      "suite": "cross-command",
+      "commands": [],
+      "reason": "Retain the existing integration between the public facade and runtime fixtures; no fixture assertion is replaced."
+    },
     "harness::a_runs_settling_patience_is_one_step_per_node_on_its_longest_chain": {
       "suite": "cross-command",
       "commands": [],
@@ -5166,6 +5171,13 @@
       ],
       "reason": "Exercises cmd-start through the production entry point; retain assertions and failure paths."
     },
+    "dispatch::an_unsignalled_observer_started_before_its_launch_record_still_has_its_judge_ended": {
+      "suite": "cmd-start",
+      "commands": [
+        "cmd-start"
+      ],
+      "reason": "Exercises cmd-start through the production entry point; retain assertions and failure paths."
+    },
     "dispatch::stopping_with_a_missing_observer_record_does_not_recreate_it": {
       "suite": "cross-command",
       "commands": [
@@ -8429,15 +8441,6 @@
         "cmd-start"
       ],
       "reason": "Exercises cmd-start through the production entry point; retain assertions and failure paths."
-    },
-    "lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back": {
-      "suite": "cross-command",
-      "commands": [
-        "cmd-next",
-        "cmd-start",
-        "cmd-status"
-      ],
-      "reason": "Retain the existing integration between cmd-next, cmd-start, cmd-status; no fixture assertion is replaced."
     },
     "lifecycle::a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_and_for_its_workspace_again_after": {
       "suite": "cross-command",
@@ -13245,6 +13248,13 @@
       "reason": "Exercises cmd-start through the production entry point; retain assertions and failure paths."
     },
     "review_round::a_round_command_that_keeps_writing_outlives_a_step_of_wall_time": {
+      "suite": "cmd-start",
+      "commands": [
+        "cmd-start"
+      ],
+      "reason": "Exercises cmd-start through the production entry point; retain assertions and failure paths."
+    },
+    "review_round::a_round_command_waits_for_output_when_the_pipe_reader_is_delayed": {
       "suite": "cmd-start",
       "commands": [
         "cmd-start"

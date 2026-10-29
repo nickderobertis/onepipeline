@@ -1628,6 +1628,7 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
       "manifest-projection.mjs",
       "cli-commands.json",
       "graph.mjs",
+      "layout.json",
     ])
       put(
         root,
@@ -1639,7 +1640,8 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
         cwd: root,
         encoding: "utf8",
       });
-    assert.equal(run("--inventory").status, 0);
+    const inventoried = run("--inventory");
+    assert.equal(inventoried.status, 0, inventoried.stderr);
     assert.deepEqual(
       JSON.parse(readFileSync(join(root, "scripts/modularization/command-tests.json"), "utf8")),
       JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8")),
@@ -1681,7 +1683,7 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     assert.equal(run.status, 0, run.stderr);
     const evidence = JSON.parse(readFileSync(output, "utf8"));
     assert.equal(evidence.result.rows.length, 144);
-    assert.equal(evidence.result.originalTests, 1920);
+    assert.equal(evidence.result.originalTests, 1922);
     assert.equal(evidence.result.tests, Object.keys(evidence.catalog.tests).length);
     const expanded = expandCatalog(catalog);
     for (const id of Object.keys(baseline.tests)) {

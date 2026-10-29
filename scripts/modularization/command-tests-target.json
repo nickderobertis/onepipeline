@@ -1,6 +1,6 @@
 {
   "schema": 4,
-  "baselineSha256": "c8637b605250ecfd49dc72e965bc2dd0527c93b816961deda9ad153ed462282d",
+  "baselineSha256": "371591131d001cf2f4b566041f495cdf7ef2fe93e0859a29fbf717f6d2dd2aec",
   "dispositions": {
     "harness::the_harness_double_draws_its_stream_as_the_released_cli_does": {
       "kind": "support",
@@ -177,6 +177,11 @@
       "reason": "support-boundary"
     },
     "harness::a_held_push_nothing_releases_expires_rather_than_waiting_out_the_job": {
+      "kind": "support",
+      "originalCommands": [],
+      "reason": "support-boundary"
+    },
+    "harness::a_second_hold_leaves_the_push_the_first_is_holding_to_its_own_release": {
       "kind": "support",
       "originalCommands": [],
       "reason": "support-boundary"
@@ -3974,6 +3979,13 @@
       ],
       "reason": "isolated-command"
     },
+    "dispatch::an_unsignalled_observer_started_before_its_launch_record_still_has_its_judge_ended": {
+      "kind": "isolated",
+      "originalCommands": [
+        "cmd-start"
+      ],
+      "reason": "isolated-command"
+    },
     "dispatch::stopping_with_a_missing_observer_record_does_not_recreate_it": {
       "kind": "decompose",
       "originalCommands": [
@@ -7043,15 +7055,6 @@
         "cmd-start"
       ],
       "reason": "isolated-command"
-    },
-    "lifecycle::a_pooled_identity_holds_the_second_node_until_the_first_hands_its_slot_back": {
-      "kind": "decompose",
-      "originalCommands": [
-        "cmd-next",
-        "cmd-start",
-        "cmd-status"
-      ],
-      "reason": "command-phases"
     },
     "lifecycle::a_workspace_held_node_reads_as_held_for_concurrency_while_the_host_is_full_and_for_its_workspace_again_after": {
       "kind": "integration",
@@ -11268,6 +11271,13 @@
       "reason": "isolated-command"
     },
     "review_round::a_round_command_that_keeps_writing_outlives_a_step_of_wall_time": {
+      "kind": "isolated",
+      "originalCommands": [
+        "cmd-start"
+      ],
+      "reason": "isolated-command"
+    },
+    "review_round::a_round_command_waits_for_output_when_the_pipe_reader_is_delayed": {
       "kind": "isolated",
       "originalCommands": [
         "cmd-start"

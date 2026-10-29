@@ -12012,6 +12012,36 @@
         "onepipeline"
       ],
       "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
+    },
+    "pooled_slot": {
+      "crates": [
+        "onepipeline"
+      ],
+      "reason": "Retain the real pooled-slot hand-back subprocess journey and all assertions against the full binary; this auxiliary suite has no spike timing weight.",
+      "paths": [
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "clippy.toml",
+        "crates/**/*",
+        "graphs/**/*",
+        "justfile",
+        "nx.json",
+        "oneharness.toml",
+        "package-lock.json",
+        "package.json",
+        "personas/**/*",
+        "rust-toolchain.toml",
+        "rustfmt.toml",
+        "schemas/**/*",
+        "src/**/*",
+        "tests/e2e/harness.rs",
+        "tests/e2e/hook.*",
+        "tests/e2e/pool_support.rs",
+        "tests/e2e/probe.*",
+        "tests/pooled_slot/**/*"
+      ]
     }
   },
   "commands": {

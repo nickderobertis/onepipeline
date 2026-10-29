@@ -313,7 +313,7 @@
       "commands": [],
       "reason": "a judged codex dispatch retires its shared server and sweeper drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion.",
       "kind": "library",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::a_killed_observer_is_replaced_and_the_run_goes_on_being_watched": {
       "sha256": "f2f43744b486035193a446b212881f3727d6db769c48b779c1ccb1937cf09701",
@@ -323,7 +323,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a killed observer is replaced and the run goes on being watched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_driven": {
       "sha256": "021a7970c2cb762362f771723c59b889c6959a547d79165b56c360919ac4f393",
@@ -333,7 +333,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a run whose observer finished before its drivers first append is listed driven are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::a_run_whose_observer_graph_finished_is_reported_unwatched": {
       "sha256": "ea48d30989b77ac90fd46100ec75af94a80fae1b7ce0de8dc28fb6ed23772305",
@@ -343,7 +343,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a run whose observer graph finished is reported unwatched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each": {
       "sha256": "2b3e5d0823ff88576a842b2b02bf4deebd8cfb89b49d6cc835bd0c7247031115",
@@ -353,7 +353,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a run whose observer graph is watching and then is killed reads as each are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::an_observer_records_its_ending_before_anything_reads_that_it_has_gone": {
       "sha256": "3778516fd2c3db245a9863f8915f6ef7ec489b544557571c99425266ed9708d3",
@@ -363,7 +363,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for an observer records its ending before anything reads that it has gone are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy": {
       "sha256": "74655867ab3e377bd2b00452a69f4ee845ff8750921838c912785bbb7673f095",
@@ -375,7 +375,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for an observers monitor runs under its own config beside a launch config it cannot satisfy are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::run_labels_foreign_exit_requires_released_ownership": {
       "sha256": "6ad1ab249a592824c12d1525be8ef91ba0c750ac9024dcdb1182fa88435825d1",
@@ -384,35 +384,35 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for run labels foreign exit requires released ownership are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not": {
       "sha256": "1d9ba62e6c74a06fdce97cb2b4e0bbf1f908b391f99d6fc042f104a19426469d",
       "commands": [],
       "reason": "the codex double answers each exec line oneharness builds and refuses each it does not asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads": {
       "sha256": "bd2ea84e7fd100ee573fde0e5999cdc240084ec6248a7aeae02cf8a2645e89a6",
       "commands": [],
       "reason": "the codex doubles overload answer is the one the linked classifier reads asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take": {
       "sha256": "537e70a92003005572ee62a1f8c7699d063052559b5ebdb88900815a9bc204a2",
       "commands": [],
       "reason": "the model turn double refuses an argument the real claude does not take asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "dispatch::the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto": {
       "sha256": "7263e9cd74df55025f8939e4c81bcab22ceb1f449dd3683d51956d043e65c8aa",
       "commands": [],
       "reason": "the siblings own refusals still exit with the codes this crate maps onto asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+      "moduleSha256": "d6a837bd4b553c1d5e33a5f1c32dc1a2a49d56810f6d80025759f2169c7e2134"
     },
     "driver_exit::readings": {
       "sha256": "b0462cbb1a3c74c7117563ee2dd5ee70ae19838a3392bc2257cdb8bf3c4adcd2",
@@ -570,11 +570,11 @@
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_parked_run_is_read_as_driven": {
       "sha256": "ede6961adc8286256d5eb44fb72ed6f55588c9373d45213e744352802f23316e",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae",
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59",
       "commands": [
         "cmd-adopt",
         "cmd-runs",
@@ -587,98 +587,98 @@
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started": {
       "sha256": "cd073c9af689deb4b48d8b11add97b151370009455f366a89204407dddecda5e",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify": {
       "sha256": "7fe7246fbf4124ab1f28c5474bbb4a6848ad12f0386b7d42dbc1ffa999ef697e",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for": {
       "sha256": "7358b4f131691cffb0a27086dfb300678bbb35cc9f844812116188a2e807cbc9",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_given_a_patience_it_cannot_keep_fails_saying_so": {
       "sha256": "62b165e358fdaee422463531786ab8f30dcf640a87526de31121c7309d51a422",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out": {
       "sha256": "cfd67388aef19abcea0a3cc7d78bd5787a4228f4b3d0ff472d2e04d33803597a",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_refuses_a_process_list_it_cannot_read": {
       "sha256": "f8b915fd40260e65be3efb7a9f7707d002775a95296ad57813c09237d6073294",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_that_cannot_list_processes_fails_saying_why": {
       "sha256": "85ee497e9ec6be9c65d092949d1b226bb1db716e4e600328483a316e17f0e8e6",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_that_runs_out_of_patience_names_what_it_left_running": {
       "sha256": "582e6be43a6fa61f4b395f2255c87725e2eb760e8c2262a72d4892ba8b2b0362",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone": {
       "sha256": "7e044a808d212e755b399847e7c613f420257f0f769d9d79b999923bd60d1744",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::the_harness_double_draws_its_stream_as_the_released_cli_does": {
       "sha256": "325e114ccd68ca981aaae92d2767ee3d4f4e07a896ac5ac831d32f2d0c8b9d30",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::the_harness_double_layers_a_repeated_config_in_order": {
       "sha256": "4240d554e9887937148d1f0ba11e1290f12f61b7424c9a34ebe31c262263f423",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::the_harness_double_refuses_a_malformed_turn_gates_line": {
       "sha256": "3f81a9c3fc3283eeb032e1471d2a13b4ebb99d49fdc2c8625f305cac8a00711d",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "harness::the_harness_double_selects_the_chain_an_extends_parent_declares": {
       "sha256": "3fc72fe22e4798b9ce9104ddd6c28ebc7f4a4b95a0062a46675ebfb639e665ca",
       "commands": [],
       "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
       "kind": "support",
-      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+      "moduleSha256": "9585de4ffd1570d4369e3f03b2d2e1e4f54efa3bdd838c5af7d3920108bc2e59"
     },
     "host_view::a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused": {
       "sha256": "5da665a26988be1a41051c1a376e7abbd38ccbb077fee6816d936b7e703dc46d",
@@ -779,7 +779,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a dispatch that died rather than failing its task settles naming what killed it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "4b180f5302b11d98c319bdfec783bbe875a6a923973be926a8a6fb118fcfb5a2"
+      "moduleSha256": "e1e04585464d1005c13d163e3da7d7ea7ad304d8b82b3983e7691d39458f7c02"
     },
     "lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published": {
       "sha256": "e9130ca137bc3be61dd8bbb26f5b8f95452fb53e3ce951dee395bb6fbf5791bc",
@@ -789,7 +789,7 @@
         "cmd-status"
       ],
       "reason": "The source's explicit argv alternatives for a dispatch whose member died is settled from the classification its producer published are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
-      "moduleSha256": "4b180f5302b11d98c319bdfec783bbe875a6a923973be926a8a6fb118fcfb5a2"
+      "moduleSha256": "e1e04585464d1005c13d163e3da7d7ea7ad304d8b82b3983e7691d39458f7c02"
     },
     "linear_writeback::a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections": {
       "sha256": "f363567824a9412eecda6a47b2e2d2f8044ee5994d0f552ba9e5de32befbcb1e",
@@ -1480,63 +1480,63 @@
       "commands": [],
       "reason": "a second onevcs read of an identity runs beside one held inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::a_session_close_waits_for_an_onevcs_read_working_inside_its_clone": {
       "sha256": "d64ecc4635c9ba4a0d358728f7d989441eed127693298a581db1c7df740d40df",
       "commands": [],
       "reason": "a session close waits for an onevcs read working inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_answers_with_the_real_gits_failing_exit_code": {
       "sha256": "0778f35e314d0c0d2be78e89b041e59a28c7ef19fcb83a4815167bf11fb194dd",
       "commands": [],
       "reason": "held git answers with the real gits failing exit code asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_fails_when_the_real_git_is_killed_by_a_signal": {
       "sha256": "beccb23516a2c22c8576cf934b7adbe0ac90860c43935673f1117ab1e279774a",
       "commands": [],
       "reason": "held git fails when the real git is killed by a signal asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_gives_up_a_hold_whose_control_directory_is_removed": {
       "sha256": "a7a96764534d699818917e6554f6544f3b9346bc2be26a847933e6df11f87e95",
       "commands": [],
       "reason": "held git gives up a hold whose control directory is removed asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_holds_a_git_that_names_the_clones_git_directory_from_outside": {
       "sha256": "8782c575f215525d72c7cdcfdf6d1d67d426f278724be2ca9da5f3bee7477305",
       "commands": [],
       "reason": "held git holds a git that names the clones git directory from outside asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_holds_only_the_first_start_inside_its_clone": {
       "sha256": "7c2bf03dd068fc5e45f42e142ffcbc296bbff29e454695ec8b0cac8e2d246793",
       "commands": [],
       "reason": "held git holds only the first start inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::held_git_refuses_a_hold_whose_clone_does_not_resolve": {
       "sha256": "34a20c2e61b4363d2f61d55cba258890f2a3d946b3441d546e77b7e39e1fdd0a",
       "commands": [],
       "reason": "held git refuses a hold whose clone does not resolve asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review_round::the_counted_git_counts_each_start_and_is_the_real_git_for_it": {
       "sha256": "638396fe3a6c5f76f9ab9a7aae99d8c8f97fca0f474b14aa900db79d635c29a1",
       "commands": [],
       "reason": "the counted git counts each start and is the real git for it asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
       "kind": "support",
-      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+      "moduleSha256": "555287c73013e30bee5c1be746ddcbb9d1fbc8b6a5f4f6fe446b3197c1b1b016"
     },
     "review::refuses_unknown_or_foreign_runs_and_keeps_a_failed_repository_read_atomic": {
       "sha256": "5d89258d5e4b4a4971261bd1cd87ac0ae4fdb8a0b4d6c3362d92eeb3945bcf7e",
