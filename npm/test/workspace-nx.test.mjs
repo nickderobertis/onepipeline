@@ -880,7 +880,14 @@ esac
 
     const cold = aggregate();
     for (const recipe of TIER_RECIPES) assert.ok(cold.ran.includes(recipe), cold.ran.join(" "));
-    assert.deepEqual(tiersIn(cold.merged), ["codex_server", "contract", "e2e", "note", "pooled_slot", "rest"]);
+    assert.deepEqual(tiersIn(cold.merged), [
+      "codex_server",
+      "contract",
+      "e2e",
+      "note",
+      "pooled_slot",
+      "rest",
+    ]);
 
     // Only the note tier's inputs change; the budget record the e2e tier
     // writes is gone, as it is on a fresh runner.
@@ -893,7 +900,14 @@ esac
       `only the changed tier runs: ${warm.ran.join(" ")}`,
     );
     assert.ok(warm.ran.includes("_crate-coverage-clean"), warm.ran.join(" "));
-    assert.deepEqual(tiersIn(warm.merged), ["codex_server", "contract", "e2e", "note", "pooled_slot", "rest"]);
+    assert.deepEqual(tiersIn(warm.merged), [
+      "codex_server",
+      "contract",
+      "e2e",
+      "note",
+      "pooled_slot",
+      "rest",
+    ]);
     assert.ok(
       existsSync(join(repo.path, "target", "budget-records", "stacked-spikes-stage.json")),
       "the replayed e2e tier did not restore the budget record `budgets` reads",
