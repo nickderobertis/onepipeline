@@ -564,6 +564,7 @@ fn round_command_capturing(
     // A withheld pipe reader can fill the Windows pipe before the second store
     // hold releases it; joining its copier can also wait on inherited write handles.
     // A regular-file spool has neither dependency: only publication is delayed.
+    // Copying its current EOF never waits for inherited writers to close.
     let spool = world.root.join("round-command.stderr-spool");
     command.stderr(if stderr_release.is_some() {
         File::create(&spool).expect("the stderr spool opens")
@@ -711,6 +712,8 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
 /// A file spool stages a delayed pipe reader without pipe capacity or EOF dependencies.
 /// At the second store hold, publication is still withheld; the journey must wait
 /// for captured progress after release before advancing its diagnostic clock.
+/// The zero-byte capture at the second hold reproduces the original immediate
+/// assertion failure even when the real child has already written to the spool.
 #[test]
 fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
     progressing_round(true);
