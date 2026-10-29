@@ -732,3 +732,58 @@ fn sample_file_failures_refuse_without_a_success_receipt_or_state_change() {
         "a refused mutation must preserve fixture bytes"
     );
 }
+
+#[test]
+fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
+    let world = World::new();
+    let original = world.state();
+    let mut input = original["items"][1]["item"].clone();
+    for field in [
+        "id",
+        "state",
+        "resolution",
+        "tracker",
+        "created_at",
+        "updated_at",
+    ] {
+        input.as_object_mut().unwrap().remove(field);
+    }
+    input["kind"] = json!("task");
+    input["dedup_key"] = json!("new-work-hold");
+    input["title"] = json!("Unblock the build step");
+    let path = world.0.join("work-input.json");
+    std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let raised = world.json(
+        &["raise", "--input", path.to_str().unwrap()],
+        "HumanItemReceipt",
+    );
+    let id = raised["item"]["item"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(raised["item"]["blocked"], original["items"][1]["blocked"]);
+    for command in ["list", "report"] {
+        let text = world.ok(&[command]);
+        let line = text
+            .lines()
+            .find(|line| line.starts_with(&format!("{id}  ")))
+            .unwrap_or_else(|| panic!("{command} omits {id}: {text}"));
+        assert!(line.ends_with("blocks 5 steps in plan-1"), "{line}");
+    }
+    let shown = world.ok(&["show", &id]);
+    assert!(shown.contains("blocks 5 steps in plan-1"), "{shown}");
+    for step in 0..5 {
+        assert!(
+            shown.contains(&format!("run-1 / step-{step}: Step {step}")),
+            "{shown}"
+        );
+    }
+    let detail = world.json(&["show", &id, "--json"], "HumanItemDetail");
+    assert_eq!(detail["nodes"], original["items"][1]["nodes"]);
+
+    let before = std::fs::read(world.sample()).unwrap();
+    input["dedup_key"] = json!("unknown-work-hold");
+    input["block"] = json!({"scope":"work","run":"run-1","node":"deploy"});
+    std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+    let output = world.run(&["raise", "--input", path.to_str().unwrap()]);
+    assert!(output.stdout.is_empty());
+    refuse(output, "no affected-node context for run-1 / deploy");
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+}

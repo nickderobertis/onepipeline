@@ -715,6 +715,29 @@ impl HumanItemSample {
             {
                 suffix += 1;
             }
+            // A work hold's impact is derived from the fixture: the stored
+            // current impact of another item holding the same run/node. Without
+            // one the sample cannot say what is blocked, so it refuses rather
+            // than raise an open hold that reports no affected steps.
+            let (blocked, nodes) = match &input.block {
+                HumanItemBlock::Work { run, node } => self
+                    .items
+                    .iter()
+                    .find(|d| d.item.block == input.block && !d.nodes.is_empty())
+                    .map(|d| (d.blocked.clone(), d.nodes.clone()))
+                    .ok_or_else(|| {
+                        conflict(format!(
+                            "sample has no affected-node context for {run} / {node}"
+                        ))
+                    })?,
+                _ => (
+                    HumanItemBlocked {
+                        total: 0,
+                        plans: vec![],
+                    },
+                    vec![],
+                ),
+            };
             let item = HumanItem {
                 schema_version: 1,
                 id: format!("sample-{suffix}"),
@@ -734,11 +757,8 @@ impl HumanItemSample {
             };
             self.items.push(HumanItemDetail {
                 item,
-                blocked: HumanItemBlocked {
-                    total: 0,
-                    plans: vec![],
-                },
-                nodes: vec![],
+                blocked,
+                nodes,
             });
             return Ok(receipt(self.items.last().expect("just appended"), "raised"));
         }
