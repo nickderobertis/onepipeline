@@ -55,6 +55,12 @@ export function expandCatalog(catalog) {
       )
     )
       throw new Error(`invalid disposition ${id}`);
+    if (
+      (["support", "library"].includes(entry.kind) && entry.originalCommands.length !== 0) ||
+      (entry.kind === "isolated" && entry.originalCommands.length !== 1) ||
+      (["integration", "decompose"].includes(entry.kind) && entry.originalCommands.length < 2)
+    )
+      throw new Error(`disposition has incompatible commands: ${id}`);
     const owners =
       entry.kind === "support"
         ? ["test-support"]

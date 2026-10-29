@@ -1594,7 +1594,28 @@ test("catalog expansion refuses malformed records, inherited reason names and du
   for (const originalCommands of [["cmd-start", "cmd-start"], []]) {
     const broken = structuredClone(good);
     broken.dispositions["example::works"].originalCommands = originalCommands;
-    assert.throws(() => expandCatalog(broken), /no unique owners/);
+    assert.throws(() => expandCatalog(broken), /no unique owners|incompatible commands/);
+  }
+  for (const [kind, originalCommands] of [
+    ["isolated", ["cmd-start", "cmd-status"]],
+    ["decompose", ["cmd-start"]],
+    ["integration", []],
+    ["support", ["cmd-start"]],
+    ["library", ["cmd-start"]],
+  ]) {
+    const broken = structuredClone(good);
+    Object.assign(broken.dispositions["example::works"], { kind, originalCommands });
+    assert.throws(() => expandCatalog(broken), /incompatible commands/);
+  }
+  for (const [kind, originalCommands] of [
+    ["isolated", ["cmd-start"]],
+    ["integration", ["cmd-start", "cmd-status"]],
+    ["support", []],
+    ["library", []],
+  ]) {
+    const valid = structuredClone(good);
+    Object.assign(valid.dispositions["example::works"], { kind, originalCommands });
+    assert.equal(Object.keys(expandCatalog(valid).tests).length, 1);
   }
   const broken = structuredClone(good);
   broken.dispositions["example::works"].typo = true;
