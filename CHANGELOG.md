@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.7](https://github.com/nickderobertis/onepipeline/compare/v0.95.6...v0.95.7) - 2026-10-29
+
+### Fixed
+
+- *(test)* make the post-adoption driver panic journey reliable on a loaded runner ([#1285](https://github.com/nickderobertis/onepipeline/pull/1285))
+
 ## [0.95.6](https://github.com/nickderobertis/onepipeline/compare/v0.95.5...v0.95.6) - 2026-10-29
 
 ### Fixed
