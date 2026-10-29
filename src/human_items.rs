@@ -550,7 +550,8 @@ pub enum HumanItemsCommand {
         /// Item identifier.
         id: String,
         /// Nonempty answer.
-        #[arg(long)]
+        #[arg(long, value_parser = parse_answer)]
+        // llmlint: ignore[invalid_states_unrepresentable] This argument becomes HumanItemAction::Answer's contract-declared String text; parse_answer refuses blank text at the CLI boundary, so no blank answer reaches the action.
         text: String,
     },
     /// Complete an open task using its stored approval reference, if any.
@@ -1167,6 +1168,13 @@ fn input_constraints() -> serde_json::Value {
 
 fn nullable<T: JsonSchema>(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
     generator.subschema_for::<Option<T>>()
+}
+
+fn parse_answer(value: &str) -> Result<String, String> {
+    if value.trim().is_empty() {
+        return Err("answer text must not be blank".into());
+    }
+    Ok(value.to_owned())
 }
 
 fn parse_blocking(value: &str) -> Result<bool, String> {

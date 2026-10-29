@@ -935,3 +935,131 @@ fn a_stale_design_replacement_never_duplicates_an_id_or_dedup_key() {
     assert_eq!(listed.as_array().unwrap().len(), 4);
     assert!(world.state().get("approvals").is_none());
 }
+
+#[test]
+fn raising_plan_and_nonblocking_items_persists_their_impact_and_presentation() {
+    let world = World::new();
+    let mut input = world.state()["items"][3]["item"].clone();
+    for field in [
+        "id",
+        "state",
+        "resolution",
+        "tracker",
+        "created_at",
+        "updated_at",
+    ] {
+        input.as_object_mut().unwrap().remove(field);
+    }
+    let path = world.0.join("raise-input.json");
+    let mut raise = |dedup_key: &str, title: &str, block: Value| {
+        input["dedup_key"] = json!(dedup_key);
+        input["title"] = json!(title);
+        input["block"] = block;
+        std::fs::write(&path, serde_json::to_vec(&input).unwrap()).unwrap();
+        world.json(
+            &["raise", "--input", path.to_str().unwrap()],
+            "HumanItemReceipt",
+        )
+    };
+    let plan = raise(
+        "new-plan-hold",
+        "Which region should plan-1 ship to?",
+        json!({"scope":"plan","plan":"plan-1"}),
+    );
+    let nothing = raise(
+        "new-aside",
+        "Should the changelog name contributors?",
+        json!({"scope":"nothing"}),
+    );
+    let plan_id = plan["item"]["item"]["id"].as_str().unwrap().to_owned();
+    let nothing_id = nothing["item"]["item"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(plan["item"]["item"]["state"], "open");
+    assert_eq!(nothing["item"]["blocked"], json!({"total":0,"plans":[]}));
+
+    // Persisted: a fresh read of the bundle carries both, and every view of
+    // them validates against the engine schema.
+    let stored = world.state();
+    assert!(serde_json::from_value::<HumanItemSample>(stored.clone()).is_ok());
+    let ids: Vec<_> = stored["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["item"]["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        ids.contains(&plan_id) && ids.contains(&nothing_id),
+        "{ids:?}"
+    );
+    for verb in ["list", "report"] {
+        let text = world.ok(&[verb]);
+        let line = |id: &str| {
+            text.lines()
+                .find(|line| line.starts_with(&format!("{id}  ")))
+                .unwrap_or_else(|| panic!("{verb} omits {id}: {text}"))
+                .to_owned()
+        };
+        assert!(line(&plan_id).ends_with("blocks all of plan-1"), "{text}");
+        assert!(!line(&nothing_id).contains("blocks"), "{text}");
+        assert!(text.contains("Which region should plan-1 ship to?"));
+        assert!(text.contains("Should the changelog name contributors?"));
+        let blocking: Value =
+            serde_json::from_str(&world.ok(&[verb, "--blocking", "yes", "--json"])).unwrap();
+        let nonblocking: Value =
+            serde_json::from_str(&world.ok(&[verb, "--blocking", "no", "--json"])).unwrap();
+        let has = |set: &Value, id: &str| {
+            set.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["item"]["id"] == id)
+        };
+        assert!(has(&blocking, &plan_id) && !has(&blocking, &nothing_id));
+        assert!(has(&nonblocking, &nothing_id) && !has(&nonblocking, &plan_id));
+    }
+    world.json(&["show", &plan_id, "--json"], "HumanItemDetail");
+    let detail = world.json(&["show", &nothing_id, "--json"], "HumanItemDetail");
+    assert_eq!(detail["nodes"], json!([]));
+    assert!(world
+        .ok(&["show", &plan_id])
+        .contains("blocks all of plan-1"));
+}
+
+#[test]
+fn malformed_selectors_and_blank_answers_are_refused_before_the_fixture_is_read() {
+    let world = World::new();
+    let before = std::fs::read(world.sample()).unwrap();
+    for (args, reason) in [
+        (
+            vec!["list", "--blocking", "maybe"],
+            "blocking must be yes or no",
+        ),
+        (
+            vec!["report", "--blocking", "true"],
+            "blocking must be yes or no",
+        ),
+        (
+            vec!["list", "--blocking", "Yes"],
+            "blocking must be yes or no",
+        ),
+        (
+            vec!["answer", "item-4", "--text", ""],
+            "answer text must not be blank",
+        ),
+        (
+            vec!["answer", "item-4", "--text", "  "],
+            "answer text must not be blank",
+        ),
+    ] {
+        // The sample path does not exist: only a refusal made while parsing
+        // the arguments can name the malformed value.
+        let output = Command::new(env!("CARGO_BIN_EXE_onepipeline"))
+            .args(["human-items", "--sample"])
+            .arg(world.0.join("absent.json"))
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        refuse(output, reason);
+    }
+    assert_eq!(std::fs::read(world.sample()).unwrap(), before);
+}
