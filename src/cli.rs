@@ -167,6 +167,8 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
+    /// Query or act on human attention items (sample adapters only).
+    HumanItems(crate::human_items::HumanItemsArgs),
     /// Manage dispatch scratch of ended runs.
     #[command(subcommand)]
     Scratch(ScratchCommand),
