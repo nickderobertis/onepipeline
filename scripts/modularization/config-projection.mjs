@@ -51,7 +51,9 @@ export function unresolved(kind, reference, where) {
 }
 
 const runnerProjects = ["project.json", "tests/e2e/project.json"];
-// Fields that never change what a target executes; anything else (options, a custom executor's settings) is unresolved.
+// The target fields this projection models: command, executor and dependsOn are interpreted below; inputs,
+// outputs, parallelism and cache are Nx scheduling metadata. Any other field (options, a custom executor's
+// settings) is unresolved.
 const runnerTargetFields = [
   "command",
   "executor",
@@ -161,7 +163,7 @@ export function testRecipes(text, entries = runnerEntries()) {
   const sections = configSections("justfile", text);
   for (const { name, from } of entries)
     if (!Object.hasOwn(sections, `recipe:${name}`)) throw unresolved("just recipe", name, from);
-  const { settings = {}, modules = {} } = sections.globals;
+  const { settings = {} } = sections.globals;
   for (const [setting, active] of Object.entries(unsupportedSettings))
     if (active(settings[setting]))
       throw unresolved(
@@ -169,8 +171,8 @@ export function testRecipes(text, entries = runnerEntries()) {
         setting,
         "justfile settings (reads an input outside this file)",
       );
-  if (Object.keys(modules).length)
-    throw unresolved("just module", Object.keys(modules).join(", "), "justfile modules");
+  // A module needs its source file beside the justfile, which a projected snapshot read from stdin never has, so
+  // just itself refuses one while parsing; there is no module section here to resolve.
   const reached = new Set([
     "globals",
     ...entries.map(({ name }) => `recipe:${name}`),

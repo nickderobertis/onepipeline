@@ -2872,13 +2872,25 @@ test("configuration projection refuses an unresolved just recipe reference", () 
       const broken = dependency.replace("cargo nextest run", body);
       refused("justfile", broken, broken, message);
     }
-    const dotenv = `set dotenv-load\n${dependency}`;
-    refused(
-      "justfile",
-      dotenv,
-      dotenv,
-      /unresolved just setting dotenv_load \(read from justfile settings/,
-    );
+    // Each setting that reads an input outside this file refuses, by the setting's name.
+    for (const [setting, name] of [
+      ["set dotenv-load", "dotenv_load"],
+      ['set dotenv-filename := "local.env"', "dotenv_filename"],
+      ['set dotenv-path := "local.env"', "dotenv_path"],
+      ['set dotenv-command := "echo"', "dotenv_command"],
+      ["set fallback", "fallback"],
+    ]) {
+      const configured = `${setting}\n${dependency}`;
+      refused(
+        "justfile",
+        configured,
+        configured,
+        new RegExp(`unresolved just setting ${name} \\(read from justfile settings`),
+      );
+    }
+    // A module's source file is never beside a projected snapshot, so just refuses it while parsing.
+    const module = `mod helper\n${dependency}`;
+    refused("justfile", module, module, /could not find source file for module `helper`/);
     // A diagnostic naming a recipe is not an invocation, and an entry recipe the runner names must exist.
     const diagnostic = dependency.replace("cargo nextest run", "echo \"run 'just nowhere' first\"");
     assert.equal(selected("justfile", diagnostic, diagnostic), 0);
@@ -3589,6 +3601,15 @@ test("engine proposal CLI isolates query and effect capabilities, refuses cycles
     response = run();
     assert.equal(response.status, 0, response.stderr);
     assert.deepEqual(JSON.parse(readFileSync(output, "utf8")).crates, mapped.crates);
+    // Valid declared external roots replace the derived ones for that subsystem in the emitted graph.
+    proposal.subsystems["run-paths"].external = ["serde", "serde_json"];
+    put(root, "proposal.json", proposal);
+    response = run();
+    assert.equal(response.status, 0, response.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(output, "utf8")).externalRoots["run-paths"], [
+      "serde",
+      "serde_json",
+    ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
