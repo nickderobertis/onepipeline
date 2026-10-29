@@ -53,6 +53,8 @@ pub mod error;
 pub mod event;
 pub mod executor;
 pub mod filter;
+/// Human attention contract.
+pub mod human_items;
 pub mod maintenance;
 pub mod note;
 pub mod payload;

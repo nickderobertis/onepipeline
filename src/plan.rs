@@ -1309,6 +1309,9 @@ impl<'de> Deserialize<'de> for Publish {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
+    /// Optional human-item description; absent nodes retain existing scheduling behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_item: Option<crate::human_items::HumanItemMetadata>,
     /// Unique within the plan.
     pub id: String,
     /// Defaults to [`NodeKind::Agent`], and is omitted when it is that, so a
