@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.95.6](https://github.com/nickderobertis/onepipeline/compare/v0.95.5...v0.95.6) - 2026-10-29
+
+### Fixed
+
+- *(tests)* make the busy review-round journey wait for the write it judges ([#1274](https://github.com/nickderobertis/onepipeline/pull/1274))
+- *(test)* make the restack-before-checks journey reliable on a loaded runner ([#1261](https://github.com/nickderobertis/onepipeline/pull/1261))
+- *(dispatch)* end an unsignallable settled observer's judge deterministically ([#1283](https://github.com/nickderobertis/onepipeline/pull/1283))
+
 ## [0.95.5](https://github.com/nickderobertis/onepipeline/compare/v0.95.4...v0.95.5) - 2026-10-29
 
 ### Added
