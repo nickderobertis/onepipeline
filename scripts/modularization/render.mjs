@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { components } from "./graph.mjs";
+import { components, validate } from "./graph.mjs";
 import { evidence } from "./replay.mjs";
 
 export const MARKER = "<!-- BEGIN GENERATED MODULARIZATION -->";
@@ -9,6 +9,7 @@ const pct = (fraction) => `${(100 * fraction).toFixed(2)}%`;
 
 /** Render all duplicated graph, timing and migration claims from their inputs. */
 export function appendix({ layout: l, graph: g, report: r }) {
+  const transformed = validate(l, g).transformedCrates;
   const cyclic = components(g.modules, g.edges).filter((group) => group.length > 1);
   const within = g.edges.filter((edge) =>
     cyclic.some((group) => group.includes(edge.from) && group.includes(edge.to)),
@@ -43,14 +44,14 @@ export function appendix({ layout: l, graph: g, report: r }) {
     "",
     "## Crate graph and exact file ownership",
     "",
-    "The dependency column is the proposed graph; the checker refuses a cycle and names its path. Empty ownership means an adapter extraction described above.",
+    "The computed dependency column comes from source imports after file moves, edge moves and caller-owned interface redirections, plus explicit adapter extraction edges. The conservative replay column may retain extra dependencies. Both graphs must be acyclic. Empty ownership means an adapter extraction described above.",
     "",
-    "| Crate | Owned Rust files | Direct dependencies |",
-    "| --- | --- | --- |",
+    "| Crate | Owned Rust files | Computed dependencies | Conservative replay dependencies |",
+    "| --- | --- | --- | --- |",
   );
   for (const [name, crate] of Object.entries(l.crates))
     lines.push(
-      `| ${name} | ${crate.files.join(", ") || "adapter from driver/verbs"} | ${crate.deps.join(", ") || "none"} |`,
+      `| ${name} | ${crate.files.join(", ") || "adapter from driver/verbs"} | ${transformed[name].deps.join(", ") || "none"} | ${crate.deps.join(", ") || "none"} |`,
     );
   lines.push(
     "",
@@ -64,7 +65,7 @@ export function appendix({ layout: l, graph: g, report: r }) {
   for (const edge of within) {
     const fix = l.edges[`${edge.from}->${edge.to}`];
     lines.push(
-      `| ${edge.from} → ${edge.to} | ${edge.sites.join(", ")} | ${fix.kind} | ${fix.fix} |`,
+      `| ${edge.from} → ${edge.to} | ${edge.sites.join(", ")} | ${fix.kind} | ${fix.fix}${fix.interface ? ` Interface: ${fix.interface.owner}::${fix.interface.trait}; adapter in ${fix.interface.adapter}.` : ""}${fix.movedTo ? ` Moved caller fragment owner: ${fix.movedTo}.` : ""} |`,
     );
   }
   lines.push(

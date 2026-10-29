@@ -31,6 +31,7 @@ export function replayMapping(layout, extracted = new Set(Object.keys(layout.cra
       ...today.shared,
       ...today.sources.filter((path) => path.startsWith("schemas/")),
       "src/AGENTS.md",
+      ...(layout.dispatcher ? layout.crates[layout.dispatcher.crate].files : []),
     ],
     sources: today.sources.filter((path) => !path.startsWith("schemas/")),
     fallback: residual.length ? "residual" : "onepipeline",

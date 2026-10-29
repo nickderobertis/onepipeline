@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "evidenceRevision": "b0ce59cc40484264fe42adf27b89a32bd345be0e",
   "crates": {
     "render-cost": {
@@ -658,7 +658,6 @@
     "onepipeline": {
       "files": [
         "src/lib.rs",
-        "src/main.rs",
         "src/verbs.rs"
       ],
       "deps": [
@@ -1001,6 +1000,17 @@
         "run-projection",
         "run-record"
       ]
+    },
+    "cli-dispatcher": {
+      "files": [
+        "src/main.rs"
+      ],
+      "deps": [
+        "cli-schema",
+        "diagnostics",
+        "onepipeline",
+        "processes"
+      ]
     }
   },
   "edges": {
@@ -1094,7 +1104,12 @@
     },
     "boundary->edits": {
       "kind": "seam",
-      "fix": "publication-boundary owns a edits provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with plan-edits. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a edits provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with plan-edits. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication-boundary",
+        "trait": "EditsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "boundary->error": {
       "kind": "shared",
@@ -1122,11 +1137,21 @@
     },
     "boundary->vcs": {
       "kind": "seam",
-      "fix": "publication-boundary owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication-boundary",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "boundary->views": {
       "kind": "seam",
-      "fix": "publication-boundary owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication-boundary owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication-boundary while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication-boundary",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "boundary->yaml": {
       "kind": "shared",
@@ -1134,7 +1159,12 @@
     },
     "branchname->boundary": {
       "kind": "seam",
-      "fix": "plan-model owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-model owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "BoundaryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "branchname->error": {
       "kind": "shared",
@@ -1142,7 +1172,12 @@
     },
     "branchname->ledger": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "LedgerProvider",
+        "adapter": "onepipeline"
+      }
     },
     "branchname->plan": {
       "kind": "shared",
@@ -1150,7 +1185,12 @@
     },
     "branchname->publicid": {
       "kind": "seam",
-      "fix": "plan-model owns a publicid provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-model owns a publicid provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "PublicidProvider",
+        "adapter": "onepipeline"
+      }
     },
     "changes->event": {
       "kind": "shared",
@@ -1174,11 +1214,21 @@
     },
     "changes->telemetry": {
       "kind": "seam",
-      "fix": "task-store owns a telemetry provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-telemetry. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a telemetry provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-telemetry. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "changes->vcs": {
       "kind": "seam",
-      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver."
+      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "channel->error": {
       "kind": "shared",
@@ -1194,7 +1244,12 @@
     },
     "channel->note": {
       "kind": "seam",
-      "fix": "Channel owns an EnvelopeValidator interface (envelope JSON plus immutable run snapshot -> accepted/rejected); facade installs plan-edits validation."
+      "fix": "Channel owns an EnvelopeValidator interface (envelope JSON plus immutable run snapshot -> accepted/rejected); facade installs plan-edits validation.",
+      "interface": {
+        "owner": "planner-channel",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "channel->plan": {
       "kind": "shared",
@@ -1210,7 +1265,12 @@
     },
     "channel->views": {
       "kind": "seam",
-      "fix": "Channel owns an EnvelopeValidator interface (envelope JSON plus immutable run snapshot -> accepted/rejected); facade installs plan-edits validation."
+      "fix": "Channel owns an EnvelopeValidator interface (envelope JSON plus immutable run snapshot -> accepted/rejected); facade installs plan-edits validation.",
+      "interface": {
+        "owner": "planner-channel",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "channel->vocabulary": {
       "kind": "shared",
@@ -1218,15 +1278,30 @@
     },
     "checkpoint->agentgraph": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "AgentgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->channel": {
       "kind": "seam",
-      "fix": "run-record owns a channel provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with planner-channel. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-record owns a channel provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with planner-channel. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->edits": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "EditsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->event": {
       "kind": "shared",
@@ -1234,19 +1309,39 @@
     },
     "checkpoint->filter": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "FilterProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->graph": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "GraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->hooks": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "HooksProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->journal": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "JournalProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->ledger": {
       "kind": "shared",
@@ -1254,7 +1349,12 @@
     },
     "checkpoint->loopstats": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "LoopstatsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->payload": {
       "kind": "shared",
@@ -1266,11 +1366,21 @@
     },
     "checkpoint->projection": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ProjectionProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->readjust": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ReadjustProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->report": {
       "kind": "shared",
@@ -1282,27 +1392,57 @@
     },
     "checkpoint->telemetry": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->vcs": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "checkpoint->views": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "cli->agentgraph": {
       "kind": "seam",
-      "fix": "cli-schema owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cli-schema owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cli-schema",
+        "trait": "AgentgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "cli->channel": {
       "kind": "seam",
-      "fix": "Move argument value DTOs into cli-schema and re-export their old paths; parsing must not call command implementations."
+      "fix": "Move argument value DTOs into cli-schema and re-export their old paths; parsing must not call command implementations.",
+      "interface": {
+        "owner": "cli-schema",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "cli->engine": {
       "kind": "seam",
-      "fix": "cli-schema owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cli-schema owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cli-schema while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cli-schema",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "closures->event": {
       "kind": "shared",
@@ -1342,7 +1482,12 @@
     },
     "closures->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "closures->writeback": {
       "kind": "shared",
@@ -1446,7 +1591,12 @@
     },
     "crossdag->engine": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "crossdag->error": {
       "kind": "shared",
@@ -1466,7 +1616,12 @@
     },
     "crossdag->loopstats": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "LoopstatsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "crossdag->projection": {
       "kind": "shared",
@@ -1506,7 +1661,12 @@
     },
     "discharge->views": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "dispatchenv->cli": {
       "kind": "shared",
@@ -1546,11 +1706,13 @@
     },
     "driver->agents": {
       "kind": "move",
-      "fix": "Move the agents dispatch arm and command-only preparation from driver into cmd-agents; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the agents dispatch arm and command-only preparation from driver into cmd-agents; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-agents"
     },
     "driver->ask": {
       "kind": "move",
-      "fix": "Move the ask dispatch arm and command-only preparation from driver into cmd-ask; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the ask dispatch arm and command-only preparation from driver into cmd-ask; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-ask"
     },
     "driver->boundary": {
       "kind": "shared",
@@ -1610,11 +1772,13 @@
     },
     "driver->flow": {
       "kind": "move",
-      "fix": "Move the flow dispatch arm and command-only preparation from driver into cmd-flow; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the flow dispatch arm and command-only preparation from driver into cmd-flow; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-flow"
     },
     "driver->flowwatch": {
       "kind": "move",
-      "fix": "Move the flowwatch dispatch arm and command-only preparation from driver into cmd-flow; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the flowwatch dispatch arm and command-only preparation from driver into cmd-flow; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-flow"
     },
     "driver->graph": {
       "kind": "shared",
@@ -1642,7 +1806,8 @@
     },
     "driver->land": {
       "kind": "move",
-      "fix": "Move the land dispatch arm and command-only preparation from driver into cmd-publish-branch; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the land dispatch arm and command-only preparation from driver into cmd-publish-branch; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-publish-branch"
     },
     "driver->ledger": {
       "kind": "shared",
@@ -1654,7 +1819,8 @@
     },
     "driver->note": {
       "kind": "move",
-      "fix": "Move the note dispatch arm and command-only preparation from driver into cmd-note; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the note dispatch arm and command-only preparation from driver into cmd-note; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-note"
     },
     "driver->ordering": {
       "kind": "shared",
@@ -1670,7 +1836,8 @@
     },
     "driver->plancheck": {
       "kind": "move",
-      "fix": "Move the plancheck dispatch arm and command-only preparation from driver into cmd-plan-check; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the plancheck dispatch arm and command-only preparation from driver into cmd-plan-check; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-plan-check"
     },
     "driver->projection": {
       "kind": "shared",
@@ -1690,11 +1857,13 @@
     },
     "driver->reply": {
       "kind": "move",
-      "fix": "Move the reply dispatch arm and command-only preparation from driver into cmd-reply; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the reply dispatch arm and command-only preparation from driver into cmd-reply; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-reply"
     },
     "driver->scratch": {
       "kind": "move",
-      "fix": "Move the scratch dispatch arm and command-only preparation from driver into cmd-scratch-discard; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the scratch dispatch arm and command-only preparation from driver into cmd-scratch-discard; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-scratch-discard"
     },
     "driver->shutdown": {
       "kind": "shared",
@@ -1702,7 +1871,8 @@
     },
     "driver->stopguard": {
       "kind": "move",
-      "fix": "Move the stopguard dispatch arm and command-only preparation from driver into cmd-stop-guard; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the stopguard dispatch arm and command-only preparation from driver into cmd-stop-guard; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-stop-guard"
     },
     "driver->storeops": {
       "kind": "shared",
@@ -1726,7 +1896,8 @@
     },
     "driver->templates": {
       "kind": "move",
-      "fix": "Move the templates dispatch arm and command-only preparation from driver into cmd-template; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the templates dispatch arm and command-only preparation from driver into cmd-template; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-template"
     },
     "driver->unanswered": {
       "kind": "shared",
@@ -1734,7 +1905,8 @@
     },
     "driver->unwatched": {
       "kind": "move",
-      "fix": "Move the unwatched dispatch arm and command-only preparation from driver into cmd-unwatched; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the unwatched dispatch arm and command-only preparation from driver into cmd-unwatched; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-unwatched"
     },
     "driver->vcs": {
       "kind": "shared",
@@ -1742,15 +1914,26 @@
     },
     "driver->verbs": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
+      "fix": "run-control owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-control",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "driver->views": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
+      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-control",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "driver->watch": {
       "kind": "move",
-      "fix": "Move the watch dispatch arm and command-only preparation from driver into cmd-watch; the facade calls it, so run-control no longer reaches this command."
+      "fix": "Move the watch dispatch arm and command-only preparation from driver into cmd-watch; the facade calls it, so run-control no longer reaches this command.",
+      "movedTo": "cmd-watch"
     },
     "driver->withdrawal": {
       "kind": "shared",
@@ -1770,7 +1953,12 @@
     },
     "edits->driver": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "DriverProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->error": {
       "kind": "shared",
@@ -1786,7 +1974,12 @@
     },
     "edits->note": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->plan": {
       "kind": "shared",
@@ -1794,23 +1987,48 @@
     },
     "edits->storeops": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "StoreopsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->taskgraph": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->telemetry": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->vcs": {
       "kind": "seam",
-      "fix": "plan-edits owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-edits owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "edits->views": {
       "kind": "seam",
-      "fix": "plan-edits owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths."
+      "fix": "plan-edits owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-edits while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "plan-edits",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->agentgraph": {
       "kind": "shared",
@@ -1842,7 +2060,12 @@
     },
     "engine->continuation": {
       "kind": "seam",
-      "fix": "scheduler owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "scheduler owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ContinuationProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->controls": {
       "kind": "shared",
@@ -1862,7 +2085,12 @@
     },
     "engine->driver": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the driver operation: accept input DTOs and return result DTOs; the facade supplies the real run-control adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "DriverProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->edits": {
       "kind": "shared",
@@ -1918,7 +2146,12 @@
     },
     "engine->note": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the note operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-note adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->ordering": {
       "kind": "shared",
@@ -1950,7 +2183,12 @@
     },
     "engine->reply": {
       "kind": "seam",
-      "fix": "scheduler owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "scheduler owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ReplyProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->review": {
       "kind": "shared",
@@ -1962,11 +2200,21 @@
     },
     "engine->scratch": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the scratch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-scratch-discard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the scratch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-scratch-discard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ScratchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->shutdown": {
       "kind": "seam",
-      "fix": "scheduler owns a shutdown provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "scheduler owns a shutdown provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ShutdownProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->stack": {
       "kind": "shared",
@@ -2002,7 +2250,12 @@
     },
     "engine->views": {
       "kind": "seam",
-      "fix": "scheduler owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "scheduler owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "engine->withdrawal": {
       "kind": "shared",
@@ -2014,7 +2267,12 @@
     },
     "error->channel": {
       "kind": "seam",
-      "fix": "Move the structured rejection value into diagnostics and re-export the same type from channel; keep conversion/rendering at the caller."
+      "fix": "Move the structured rejection value into diagnostics and re-export the same type from channel; keep conversion/rendering at the caller.",
+      "interface": {
+        "owner": "diagnostics",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "error->sys": {
       "kind": "shared",
@@ -2034,7 +2292,12 @@
     },
     "executor->agents": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "AgentsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "executor->channel": {
       "kind": "shared",
@@ -2078,11 +2341,21 @@
     },
     "executor->reply": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "ReplyProvider",
+        "adapter": "onepipeline"
+      }
     },
     "executor->scratch": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "ScratchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "executor->sys": {
       "kind": "shared",
@@ -2090,7 +2363,12 @@
     },
     "executor->templates": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "TemplatesProvider",
+        "adapter": "onepipeline"
+      }
     },
     "executor->vcs": {
       "kind": "shared",
@@ -2106,7 +2384,12 @@
     },
     "filter->dispatchenv": {
       "kind": "seam",
-      "fix": "event-filter owns a dispatchenv provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "event-filter owns a dispatchenv provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "event-filter",
+        "trait": "DispatchenvProvider",
+        "adapter": "onepipeline"
+      }
     },
     "filter->error": {
       "kind": "shared",
@@ -2118,15 +2401,30 @@
     },
     "filter->hooks": {
       "kind": "seam",
-      "fix": "event-filter owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "event-filter owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "event-filter",
+        "trait": "HooksProvider",
+        "adapter": "onepipeline"
+      }
     },
     "filter->maintenance": {
       "kind": "seam",
-      "fix": "event-filter owns a provider for the maintenance operation: accept input DTOs and return result DTOs; the facade supplies the real pool-maintenance adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths."
+      "fix": "event-filter owns a provider for the maintenance operation: accept input DTOs and return result DTOs; the facade supplies the real pool-maintenance adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "event-filter",
+        "trait": "MaintenanceProvider",
+        "adapter": "onepipeline"
+      }
     },
     "filter->templates": {
       "kind": "seam",
-      "fix": "event-filter owns a provider for the templates operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-template adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths."
+      "fix": "event-filter owns a provider for the templates operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-template adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "event-filter",
+        "trait": "TemplatesProvider",
+        "adapter": "onepipeline"
+      }
     },
     "filter->vocabulary": {
       "kind": "shared",
@@ -2134,7 +2432,12 @@
     },
     "filter->writeback": {
       "kind": "seam",
-      "fix": "event-filter owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "event-filter owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-filter while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "event-filter",
+        "trait": "WritebackProvider",
+        "adapter": "onepipeline"
+      }
     },
     "filter->yaml": {
       "kind": "shared",
@@ -2162,7 +2465,12 @@
     },
     "findings->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "flow->channel": {
       "kind": "shared",
@@ -2202,11 +2510,21 @@
     },
     "flow->verbs": {
       "kind": "seam",
-      "fix": "cmd-flow owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cmd-flow owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cmd-flow",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "flow->watchers": {
       "kind": "seam",
-      "fix": "cmd-flow owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths."
+      "fix": "cmd-flow owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-flow",
+        "trait": "WatchersProvider",
+        "adapter": "onepipeline"
+      }
     },
     "flowwatch->channel": {
       "kind": "shared",
@@ -2238,7 +2556,12 @@
     },
     "flowwatch->land": {
       "kind": "seam",
-      "fix": "cmd-flow owns a land provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-publish-branch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cmd-flow owns a land provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-publish-branch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cmd-flow",
+        "trait": "LandProvider",
+        "adapter": "onepipeline"
+      }
     },
     "flowwatch->ledger": {
       "kind": "shared",
@@ -2250,7 +2573,12 @@
     },
     "flowwatch->watch": {
       "kind": "seam",
-      "fix": "cmd-flow owns a provider for the watch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths."
+      "fix": "cmd-flow owns a provider for the watch operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-flow while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-flow",
+        "trait": "WatchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "flowwatch->watchers": {
       "kind": "shared",
@@ -2258,11 +2586,21 @@
     },
     "freespace->views": {
       "kind": "seam",
-      "fix": "free-space owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in free-space while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "free-space owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in free-space while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "free-space",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->boundary": {
       "kind": "seam",
-      "fix": "plan-validation owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "BoundaryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->controls": {
       "kind": "shared",
@@ -2270,11 +2608,21 @@
     },
     "graph->crossdag": {
       "kind": "seam",
-      "fix": "Validation owns repository/node query interfaces (validated node -> facts/refusal); composition supplies the real host queries and boundary policy."
+      "fix": "Validation owns repository/node query interfaces (validated node -> facts/refusal); composition supplies the real host queries and boundary policy.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "CrossdagProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->engine": {
       "kind": "seam",
-      "fix": "plan-validation owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->error": {
       "kind": "shared",
@@ -2282,7 +2630,12 @@
     },
     "graph->lifecycle": {
       "kind": "seam",
-      "fix": "plan-validation owns a lifecycle provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a lifecycle provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "LifecycleProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->plan": {
       "kind": "shared",
@@ -2294,19 +2647,39 @@
     },
     "graph->reply": {
       "kind": "seam",
-      "fix": "plan-validation owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "ReplyProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->taskgraph": {
       "kind": "seam",
-      "fix": "Validation owns repository/node query interfaces (validated node -> facts/refusal); composition supplies the real host queries and boundary policy."
+      "fix": "Validation owns repository/node query interfaces (validated node -> facts/refusal); composition supplies the real host queries and boundary policy.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->vcs": {
       "kind": "seam",
-      "fix": "plan-validation owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->views": {
       "kind": "seam",
-      "fix": "plan-validation owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-validation owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-validation while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-validation",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "graph->yaml": {
       "kind": "shared",
@@ -2326,35 +2699,75 @@
     },
     "home->checkpoint": {
       "kind": "seam",
-      "fix": "home owns a provider for the checkpoint operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the checkpoint operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "CheckpointProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->journal": {
       "kind": "seam",
-      "fix": "home owns a provider for the journal operation: accept input DTOs and return result DTOs; the facade supplies the real journal adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the journal operation: accept input DTOs and return result DTOs; the facade supplies the real journal adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "JournalProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->ledger": {
       "kind": "seam",
-      "fix": "home owns a provider for the ledger operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the ledger operation: accept input DTOs and return result DTOs; the facade supplies the real run-record adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "LedgerProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->payload": {
       "kind": "seam",
-      "fix": "home owns a provider for the payload operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the payload operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "PayloadProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->storeops": {
       "kind": "seam",
-      "fix": "home owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the storeops operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "StoreopsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->taskgraph": {
       "kind": "seam",
-      "fix": "home owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the taskgraph operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->views": {
       "kind": "seam",
-      "fix": "home owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "home->writeback": {
       "kind": "seam",
-      "fix": "home owns a provider for the writeback operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths."
+      "fix": "home owns a provider for the writeback operation: accept input DTOs and return result DTOs; the facade supplies the real task-store adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in home while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "home",
+        "trait": "WritebackProvider",
+        "adapter": "onepipeline"
+      }
     },
     "hooks->cli": {
       "kind": "shared",
@@ -2398,7 +2811,12 @@
     },
     "hooks->scratch": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "ScratchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "hooks->sys": {
       "kind": "shared",
@@ -2406,7 +2824,12 @@
     },
     "hooks->views": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "hostview->checkpoint": {
       "kind": "shared",
@@ -2478,7 +2901,12 @@
     },
     "journal->summary": {
       "kind": "seam",
-      "fix": "Inject the registry/fold callback into journal; journal owns its byte/lock/recovery protocol and calls no producer or renderer."
+      "fix": "Inject the registry/fold callback into journal; journal owns its byte/lock/recovery protocol and calls no producer or renderer.",
+      "interface": {
+        "owner": "journal",
+        "trait": "SummaryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "journal->sys": {
       "kind": "shared",
@@ -2486,7 +2914,12 @@
     },
     "journal->views": {
       "kind": "seam",
-      "fix": "Inject the registry/fold callback into journal; journal owns its byte/lock/recovery protocol and calls no producer or renderer."
+      "fix": "Inject the registry/fold callback into journal; journal owns its byte/lock/recovery protocol and calls no producer or renderer.",
+      "interface": {
+        "owner": "journal",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "journal->vocabulary": {
       "kind": "shared",
@@ -2506,7 +2939,12 @@
     },
     "labels->journal": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "JournalProvider",
+        "adapter": "onepipeline"
+      }
     },
     "labels->ledger": {
       "kind": "shared",
@@ -2514,7 +2952,12 @@
     },
     "labels->projection": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ProjectionProvider",
+        "adapter": "onepipeline"
+      }
     },
     "labels->sys": {
       "kind": "shared",
@@ -2522,19 +2965,39 @@
     },
     "labels->taskgraph": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "labels->verbs": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "labels->views": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "labels->watchers": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "WatchersProvider",
+        "adapter": "onepipeline"
+      }
     },
     "land->cli": {
       "kind": "shared",
@@ -2570,7 +3033,8 @@
     },
     "land->flow": {
       "kind": "move",
-      "fix": "Move the flow command-only call out of land into cmd-flow; dispatch composes the command through its entry point."
+      "fix": "Move the flow command-only call out of land into cmd-flow; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-flow"
     },
     "land->journal": {
       "kind": "shared",
@@ -2618,7 +3082,12 @@
     },
     "ledger->channel": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->cli": {
       "kind": "shared",
@@ -2634,19 +3103,39 @@
     },
     "ledger->filter": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "FilterProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->flow": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "FlowProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->loopstats": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "LoopstatsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->maintenance": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "MaintenanceProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->ordering": {
       "kind": "shared",
@@ -2654,7 +3143,12 @@
     },
     "ledger->readprobe": {
       "kind": "seam",
-      "fix": "run-record owns a readprobe provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with journal. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-record owns a readprobe provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with journal. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-record while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ReadprobeProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ledger->rendercost": {
       "kind": "shared",
@@ -3006,7 +3500,12 @@
     },
     "lifecycle->agentgraph": {
       "kind": "seam",
-      "fix": "publication owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication owns a agentgraph provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication",
+        "trait": "AgentgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "lifecycle->boundary": {
       "kind": "shared",
@@ -3038,7 +3537,12 @@
     },
     "lifecycle->engine": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "lifecycle->error": {
       "kind": "shared",
@@ -3050,7 +3554,12 @@
     },
     "lifecycle->executor": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ExecutorProvider",
+        "adapter": "onepipeline"
+      }
     },
     "lifecycle->filter": {
       "kind": "shared",
@@ -3070,7 +3579,12 @@
     },
     "lifecycle->note": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "lifecycle->payload": {
       "kind": "shared",
@@ -3082,7 +3596,12 @@
     },
     "lifecycle->readjust": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ReadjustProvider",
+        "adapter": "onepipeline"
+      }
     },
     "lifecycle->release": {
       "kind": "shared",
@@ -3106,7 +3625,12 @@
     },
     "lifecycle->views": {
       "kind": "seam",
-      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "loopstats->error": {
       "kind": "shared",
@@ -3126,7 +3650,12 @@
     },
     "maintenance->engine": {
       "kind": "seam",
-      "fix": "pool-maintenance owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths."
+      "fix": "pool-maintenance owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "pool-maintenance",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "maintenance->error": {
       "kind": "shared",
@@ -3186,7 +3715,12 @@
     },
     "maintenance->views": {
       "kind": "seam",
-      "fix": "pool-maintenance owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "pool-maintenance owns a views provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-views. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in pool-maintenance while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "pool-maintenance",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "maintenance->yaml": {
       "kind": "shared",
@@ -3238,31 +3772,66 @@
     },
     "ordering->error": {
       "kind": "seam",
-      "fix": "Move the failpoint/process-observation hook into processes as a callback; inject it from the caller without reaching into engine or ledger."
+      "fix": "Move the failpoint/process-observation hook into processes as a callback; inject it from the caller without reaching into engine or ledger.",
+      "interface": {
+        "owner": "processes",
+        "trait": "ErrorProvider",
+        "adapter": "onepipeline"
+      }
     },
     "ordering->ledger": {
       "kind": "seam",
-      "fix": "Move the failpoint/process-observation hook into processes as a callback; inject it from the caller without reaching into engine or ledger."
+      "fix": "Move the failpoint/process-observation hook into processes as a callback; inject it from the caller without reaching into engine or ledger.",
+      "interface": {
+        "owner": "processes",
+        "trait": "LedgerProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->channel": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->criteria": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "CriteriaProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->driver": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "DriverProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->edits": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "EditsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->engine": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->event": {
       "kind": "shared",
@@ -3270,35 +3839,75 @@
     },
     "payload->flow": {
       "kind": "seam",
-      "fix": "event-payloads owns a flow provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-flow. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "event-payloads owns a flow provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-flow. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "FlowProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->graph": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "GraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->hooks": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "HooksProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->journal": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "JournalProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->lifecycle": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "LifecycleProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->note": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->shutdown": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "ShutdownProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->vcs": {
       "kind": "seam",
-      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations."
+      "fix": "Move the event payload DTO to event-payloads and re-export its original path; supply producer registrations from the facade, not by importing implementations.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "payload->vocabulary": {
       "kind": "shared",
@@ -3306,15 +3915,30 @@
     },
     "payload->writeback": {
       "kind": "seam",
-      "fix": "event-payloads owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "event-payloads owns a writeback provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with task-store. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in event-payloads while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "event-payloads",
+        "trait": "WritebackProvider",
+        "adapter": "onepipeline"
+      }
     },
     "plan->ledger": {
       "kind": "seam",
-      "fix": "plan-model owns a ledger provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-model owns a ledger provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-record. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "LedgerProvider",
+        "adapter": "onepipeline"
+      }
     },
     "plan->note": {
       "kind": "seam",
-      "fix": "plan-model owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "plan-model owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in plan-model while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "plancheck->cli": {
       "kind": "shared",
@@ -3362,7 +3986,12 @@
     },
     "pool->engine": {
       "kind": "seam",
-      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them."
+      "fix": "Execution owns DispatchContext/CompletionSink interfaces (node plus launch DTO -> dispatch handle; result DTO -> completion); scheduler supplies them.",
+      "interface": {
+        "owner": "agent-execution",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "pool->error": {
       "kind": "shared",
@@ -3402,23 +4031,48 @@
     },
     "projection->agentgraph": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "AgentgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->boundary": {
       "kind": "seam",
-      "fix": "run-projection owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a boundary provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication-boundary. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "BoundaryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->channel": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "ChannelProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->edits": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "EditsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->engine": {
       "kind": "seam",
-      "fix": "run-projection owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->event": {
       "kind": "shared",
@@ -3426,11 +4080,21 @@
     },
     "projection->graph": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "GraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->hooks": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "HooksProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->journal": {
       "kind": "shared",
@@ -3442,7 +4106,12 @@
     },
     "projection->note": {
       "kind": "seam",
-      "fix": "run-projection owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a note provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-note. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->payload": {
       "kind": "shared",
@@ -3454,7 +4123,12 @@
     },
     "projection->readjust": {
       "kind": "seam",
-      "fix": "run-projection owns a readjust provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a readjust provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "ReadjustProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->readprobe": {
       "kind": "shared",
@@ -3462,7 +4136,12 @@
     },
     "projection->release": {
       "kind": "seam",
-      "fix": "run-projection owns a release provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with release-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a release provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with release-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "ReleaseProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->report": {
       "kind": "shared",
@@ -3474,11 +4153,21 @@
     },
     "projection->vcs": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "projection->views": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "publicid->ledger": {
       "kind": "shared",
@@ -3486,7 +4175,12 @@
     },
     "publicid->taskgraph": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "readjust->channel": {
       "kind": "shared",
@@ -3542,7 +4236,12 @@
     },
     "readjust->views": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "readprobe->event": {
       "kind": "shared",
@@ -3574,7 +4273,12 @@
     },
     "release->engine": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the engine operation: accept input DTOs and return result DTOs; the facade supplies the real scheduler adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "release->error": {
       "kind": "shared",
@@ -3602,11 +4306,21 @@
     },
     "release->lifecycle": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the lifecycle operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the lifecycle operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "LifecycleProvider",
+        "adapter": "onepipeline"
+      }
     },
     "release->loopstats": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the loopstats operation: accept input DTOs and return result DTOs; the facade supplies the real loop-statistics adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "LoopstatsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "release->payload": {
       "kind": "shared",
@@ -3626,11 +4340,21 @@
     },
     "release->telemetry": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "release->vcs": {
       "kind": "seam",
-      "fix": "release-watch owns a provider for the vcs operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths."
+      "fix": "release-watch owns a provider for the vcs operation: accept input DTOs and return result DTOs; the facade supplies the real publication adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in release-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "release-watch",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "reply->boundary": {
       "kind": "shared",
@@ -3718,7 +4442,12 @@
     },
     "report->journal": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "JournalProvider",
+        "adapter": "onepipeline"
+      }
     },
     "report->sys": {
       "kind": "shared",
@@ -3726,7 +4455,12 @@
     },
     "report->views": {
       "kind": "seam",
-      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering."
+      "fix": "Keep persisted DTOs and paths in run-record; pass decoded configuration and fold results to its writers, with no command invocation or view rendering.",
+      "interface": {
+        "owner": "run-record",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "review->boundary": {
       "kind": "shared",
@@ -3778,7 +4512,12 @@
     },
     "review->reply": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the reply operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-reply adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the reply operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-reply adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ReplyProvider",
+        "adapter": "onepipeline"
+      }
     },
     "review->sys": {
       "kind": "shared",
@@ -3794,11 +4533,21 @@
     },
     "rules->event": {
       "kind": "seam",
-      "fix": "executor-rules owns a provider for the event operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths."
+      "fix": "executor-rules owns a provider for the event operation: accept input DTOs and return result DTOs; the facade supplies the real event-payloads adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "executor-rules",
+        "trait": "EventProvider",
+        "adapter": "onepipeline"
+      }
     },
     "rules->executor": {
       "kind": "seam",
-      "fix": "executor-rules owns a provider for the executor operation: accept input DTOs and return result DTOs; the facade supplies the real agent-execution adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths."
+      "fix": "executor-rules owns a provider for the executor operation: accept input DTOs and return result DTOs; the facade supplies the real agent-execution adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in executor-rules while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "executor-rules",
+        "trait": "ExecutorProvider",
+        "adapter": "onepipeline"
+      }
     },
     "rules->yaml": {
       "kind": "shared",
@@ -3898,11 +4647,21 @@
     },
     "shutdown->verbs": {
       "kind": "seam",
-      "fix": "run-control owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-control owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-control",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "shutdown->views": {
       "kind": "seam",
-      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths."
+      "fix": "run-control owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-control while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-control",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "stack->graph": {
       "kind": "shared",
@@ -3942,11 +4701,17 @@
     },
     "stopguard->unwatched": {
       "kind": "move",
-      "fix": "Move the unwatched command-only call out of stopguard into cmd-unwatched; dispatch composes the command through its entry point."
+      "fix": "Move the unwatched command-only call out of stopguard into cmd-unwatched; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-unwatched"
     },
     "stopguard->verbs": {
       "kind": "seam",
-      "fix": "cmd-stop-guard owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-stop-guard while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cmd-stop-guard owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-stop-guard while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cmd-stop-guard",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "storeops->sys": {
       "kind": "shared",
@@ -3958,11 +4723,21 @@
     },
     "summary->crossdag": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "CrossdagProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->engine": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->error": {
       "kind": "shared",
@@ -3978,7 +4753,12 @@
     },
     "summary->graph": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "GraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->journal": {
       "kind": "shared",
@@ -4010,19 +4790,39 @@
     },
     "summary->telemetry": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->vcs": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->verbs": {
       "kind": "seam",
-      "fix": "run-projection owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-projection owns a verbs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with onepipeline. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-projection while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "summary->views": {
       "kind": "seam",
-      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result."
+      "fix": "Supply immutable event/launch DTOs to the fold; its caller performs runtime operations after receiving the fold result.",
+      "interface": {
+        "owner": "run-projection",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "supersession->checkpoint": {
       "kind": "shared",
@@ -4034,7 +4834,12 @@
     },
     "supersession->engine": {
       "kind": "seam",
-      "fix": "publication owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "publication owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in publication while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "publication",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "supersession->error": {
       "kind": "shared",
@@ -4082,7 +4887,12 @@
     },
     "taskgraph->continuation": {
       "kind": "seam",
-      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "ContinuationProvider",
+        "adapter": "onepipeline"
+      }
     },
     "taskgraph->crossdag": {
       "kind": "shared",
@@ -4182,7 +4992,12 @@
     },
     "templates->verbs": {
       "kind": "seam",
-      "fix": "cmd-template owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-template while facade re-exports preserve the public type paths."
+      "fix": "cmd-template owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-template while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-template",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "templates->yaml": {
       "kind": "shared",
@@ -4226,7 +5041,12 @@
     },
     "trigger->views": {
       "kind": "seam",
-      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths."
+      "fix": "scheduler owns a provider for the views operation: accept input DTOs and return result DTOs; the facade supplies the real run-views adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in scheduler while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "scheduler",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "unanswered->channel": {
       "kind": "shared",
@@ -4234,7 +5054,12 @@
     },
     "unanswered->engine": {
       "kind": "seam",
-      "fix": "task-store owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a engine provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with scheduler. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "unanswered->error": {
       "kind": "shared",
@@ -4266,7 +5091,12 @@
     },
     "unanswered->vcs": {
       "kind": "seam",
-      "fix": "task-store owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a vcs provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "unpublished->error": {
       "kind": "shared",
@@ -4278,11 +5108,17 @@
     },
     "unpublished->flow": {
       "kind": "move",
-      "fix": "Move the flow command-only call out of unpublished into cmd-flow; dispatch composes the command through its entry point."
+      "fix": "Move the flow command-only call out of unpublished into cmd-flow; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-flow"
     },
     "unpublished->land": {
       "kind": "seam",
-      "fix": "cmd-unpublished owns a provider for the land operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-publish-branch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths."
+      "fix": "cmd-unpublished owns a provider for the land operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-publish-branch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-unpublished",
+        "trait": "LandProvider",
+        "adapter": "onepipeline"
+      }
     },
     "unpublished->ledger": {
       "kind": "shared",
@@ -4290,7 +5126,12 @@
     },
     "unpublished->stopguard": {
       "kind": "seam",
-      "fix": "cmd-unpublished owns a provider for the stopguard operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-stop-guard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths."
+      "fix": "cmd-unpublished owns a provider for the stopguard operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-stop-guard adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-unpublished while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-unpublished",
+        "trait": "StopguardProvider",
+        "adapter": "onepipeline"
+      }
     },
     "unpublished->sys": {
       "kind": "shared",
@@ -4334,7 +5175,8 @@
     },
     "unwatched->watchers": {
       "kind": "move",
-      "fix": "Move the watchers command-only call out of unwatched into cmd-watch; dispatch composes the command through its entry point."
+      "fix": "Move the watchers command-only call out of unwatched into cmd-watch; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-watch"
     },
     "vcs->branchname": {
       "kind": "shared",
@@ -4342,7 +5184,12 @@
     },
     "vcs->engine": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "vcs->error": {
       "kind": "shared",
@@ -4354,7 +5201,12 @@
     },
     "vcs->executor": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ExecutorProvider",
+        "adapter": "onepipeline"
+      }
     },
     "vcs->filter": {
       "kind": "shared",
@@ -4386,7 +5238,12 @@
     },
     "vcs->views": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "verbs->agentgraph": {
       "kind": "shared",
@@ -4394,7 +5251,8 @@
     },
     "verbs->agents": {
       "kind": "move",
-      "fix": "Move the agents command-only call out of verbs into cmd-agents; dispatch composes the command through its entry point."
+      "fix": "Move the agents command-only call out of verbs into cmd-agents; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-agents"
     },
     "verbs->boundary": {
       "kind": "shared",
@@ -4474,11 +5332,13 @@
     },
     "verbs->telemetry": {
       "kind": "move",
-      "fix": "Move the telemetry command-only call out of verbs into cmd-telemetry; dispatch composes the command through its entry point."
+      "fix": "Move the telemetry command-only call out of verbs into cmd-telemetry; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-telemetry"
     },
     "verbs->templates": {
       "kind": "move",
-      "fix": "Move the templates command-only call out of verbs into cmd-template; dispatch composes the command through its entry point."
+      "fix": "Move the templates command-only call out of verbs into cmd-template; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-template"
     },
     "verbs->trigger": {
       "kind": "shared",
@@ -4486,11 +5346,13 @@
     },
     "verbs->unpublished": {
       "kind": "move",
-      "fix": "Move the unpublished command-only call out of verbs into cmd-unpublished; dispatch composes the command through its entry point."
+      "fix": "Move the unpublished command-only call out of verbs into cmd-unpublished; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-unpublished"
     },
     "verbs->unwatched": {
       "kind": "move",
-      "fix": "Move the unwatched command-only call out of verbs into cmd-unwatched; dispatch composes the command through its entry point."
+      "fix": "Move the unwatched command-only call out of verbs into cmd-unwatched; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-unwatched"
     },
     "verbs->views": {
       "kind": "shared",
@@ -4498,7 +5360,8 @@
     },
     "verbs->watch": {
       "kind": "move",
-      "fix": "Move the watch command-only call out of verbs into cmd-watch; dispatch composes the command through its entry point."
+      "fix": "Move the watch command-only call out of verbs into cmd-watch; dispatch composes the command through its entry point.",
+      "movedTo": "cmd-watch"
     },
     "verbs->writeback": {
       "kind": "shared",
@@ -4538,7 +5401,12 @@
     },
     "views_refresh_tests->verbs": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
+      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views_transcript->event": {
       "kind": "shared",
@@ -4610,7 +5478,12 @@
     },
     "views->hostview": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the hostview operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-host adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
+      "fix": "run-views owns a provider for the hostview operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-host adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "HostviewProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->journal": {
       "kind": "shared",
@@ -4658,7 +5531,12 @@
     },
     "views->scratch": {
       "kind": "seam",
-      "fix": "run-views owns a scratch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-scratch-discard. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-views owns a scratch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-scratch-discard. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "ScratchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->summary": {
       "kind": "shared",
@@ -4670,7 +5548,12 @@
     },
     "views->telemetry": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
+      "fix": "run-views owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->unanswered": {
       "kind": "shared",
@@ -4682,15 +5565,30 @@
     },
     "views->verbs": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
+      "fix": "run-views owns a provider for the verbs operation: accept input DTOs and return result DTOs; the facade supplies the real onepipeline adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "VerbsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->watch": {
       "kind": "seam",
-      "fix": "run-views owns a watch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "run-views owns a watch provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "WatchProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->watchers": {
       "kind": "seam",
-      "fix": "run-views owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths."
+      "fix": "run-views owns a provider for the watchers operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-watch adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in run-views while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "run-views",
+        "trait": "WatchersProvider",
+        "adapter": "onepipeline"
+      }
     },
     "views->withdrawal": {
       "kind": "shared",
@@ -4702,11 +5600,21 @@
     },
     "vocabulary->event": {
       "kind": "seam",
-      "fix": "Keep labels and envelope vocabulary producer-owned; consumers register payload schemas in the facade registry assembly."
+      "fix": "Keep labels and envelope vocabulary producer-owned; consumers register payload schemas in the facade registry assembly.",
+      "interface": {
+        "owner": "event-vocabulary",
+        "trait": "EventProvider",
+        "adapter": "onepipeline"
+      }
     },
     "vocabulary->payload": {
       "kind": "seam",
-      "fix": "Keep labels and envelope vocabulary producer-owned; consumers register payload schemas in the facade registry assembly."
+      "fix": "Keep labels and envelope vocabulary producer-owned; consumers register payload schemas in the facade registry assembly.",
+      "interface": {
+        "owner": "event-vocabulary",
+        "trait": "PayloadProvider",
+        "adapter": "onepipeline"
+      }
     },
     "watch->channel": {
       "kind": "shared",
@@ -4758,7 +5666,12 @@
     },
     "watch->telemetry": {
       "kind": "seam",
-      "fix": "cmd-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths."
+      "fix": "cmd-watch owns a provider for the telemetry operation: accept input DTOs and return result DTOs; the facade supplies the real cmd-telemetry adapter. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths.",
+      "interface": {
+        "owner": "cmd-watch",
+        "trait": "TelemetryProvider",
+        "adapter": "onepipeline"
+      }
     },
     "watch->views": {
       "kind": "shared",
@@ -4782,7 +5695,12 @@
     },
     "watchers->unwatched": {
       "kind": "seam",
-      "fix": "cmd-watch owns a unwatched provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-unwatched. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "cmd-watch owns a unwatched provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-unwatched. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in cmd-watch while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "cmd-watch",
+        "trait": "UnwatchedProvider",
+        "adapter": "onepipeline"
+      }
     },
     "withdrawal->channel": {
       "kind": "shared",
@@ -4810,7 +5728,12 @@
     },
     "withdrawal->note": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "NoteProvider",
+        "adapter": "onepipeline"
+      }
     },
     "withdrawal->projection": {
       "kind": "shared",
@@ -4822,7 +5745,12 @@
     },
     "withdrawal->views": {
       "kind": "seam",
-      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler."
+      "fix": "Publication owns a SettlementSink callback (settlement DTO -> append/result); scheduler implements the callback without publication importing scheduler.",
+      "interface": {
+        "owner": "publication",
+        "trait": "ViewsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->boundary": {
       "kind": "shared",
@@ -4842,11 +5770,21 @@
     },
     "writeback->closures": {
       "kind": "seam",
-      "fix": "task-store owns a closures provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a closures provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with publication. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "ClosuresProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->continuation": {
       "kind": "seam",
-      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a continuation provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with run-control. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "ContinuationProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->edits": {
       "kind": "shared",
@@ -4854,7 +5792,12 @@
     },
     "writeback->engine": {
       "kind": "seam",
-      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver."
+      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "EngineProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->graph": {
       "kind": "shared",
@@ -4866,7 +5809,12 @@
     },
     "writeback->hooks": {
       "kind": "seam",
-      "fix": "task-store owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a hooks provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with agent-execution. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "HooksProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->ledger": {
       "kind": "shared",
@@ -4898,7 +5846,12 @@
     },
     "writeback->reply": {
       "kind": "seam",
-      "fix": "task-store owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a reply provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-reply. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "ReplyProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->storeops": {
       "kind": "shared",
@@ -4914,11 +5867,21 @@
     },
     "writeback->vcs": {
       "kind": "seam",
-      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver."
+      "fix": "Task-store owns a ProjectionSource callback (snapshot revision -> projection DTO); run-control supplies it without the store importing the driver.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "VcsProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->watchers": {
       "kind": "seam",
-      "fix": "task-store owns a watchers provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation."
+      "fix": "task-store owns a watchers provider interface: pass the operation's existing input DTOs and return its existing result DTOs; the facade implements that provider with cmd-watch. Keep public/shared DTOs at their lowest named concept owner; keep private port request/result types in task-store while facade re-exports preserve the public type paths; this edge no longer imports the implementation.",
+      "interface": {
+        "owner": "task-store",
+        "trait": "WatchersProvider",
+        "adapter": "onepipeline"
+      }
     },
     "writeback->yaml": {
       "kind": "shared",
@@ -4930,19 +5893,39 @@
     },
     "yaml->filter": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "FilterProvider",
+        "adapter": "onepipeline"
+      }
     },
     "yaml->graph": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "GraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "yaml->maintenance": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "MaintenanceProvider",
+        "adapter": "onepipeline"
+      }
     },
     "yaml->rules": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "RulesProvider",
+        "adapter": "onepipeline"
+      }
     },
     "yaml->sys": {
       "kind": "shared",
@@ -4950,11 +5933,21 @@
     },
     "yaml->taskgraph": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "TaskgraphProvider",
+        "adapter": "onepipeline"
+      }
     },
     "yaml->templates": {
       "kind": "seam",
-      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model."
+      "fix": "Keep the serializable configuration DTO in plan-model; inject validation/resolution as a caller-owned function, with no launch or filesystem operation in the model.",
+      "interface": {
+        "owner": "plan-model",
+        "trait": "TemplatesProvider",
+        "adapter": "onepipeline"
+      }
     }
   },
   "suites": {
@@ -11020,5 +12013,574 @@
       ],
       "reason": "Retain the existing full production binary/facade dependency until a separate runner migration is demonstrated. Preserve this tier and all assertions; the cited binary(e2e) profile does not weight this project."
     }
-  }
+  },
+  "commands": {
+    "src/hostview.rs": "cmd-host",
+    "src/templates.rs": "cmd-template",
+    "src/ask.rs": "cmd-ask",
+    "src/flow.rs": "cmd-flow",
+    "src/flowwatch.rs": "cmd-flow",
+    "src/agents.rs": "cmd-agents",
+    "src/note.rs": "cmd-note",
+    "src/watch.rs": "cmd-watch",
+    "src/watchers.rs": "cmd-watch",
+    "src/unwatched.rs": "cmd-unwatched",
+    "src/unpublished.rs": "cmd-unpublished",
+    "src/stopguard.rs": "cmd-stop-guard",
+    "src/telemetry.rs": "cmd-telemetry",
+    "src/land.rs": "cmd-publish-branch",
+    "src/scratch.rs": "cmd-scratch-discard",
+    "src/reply.rs": "cmd-reply",
+    "src/plancheck.rs": "cmd-plan-check"
+  },
+  "dispatcher": {
+    "crate": "cli-dispatcher",
+    "routingFiles": [
+      "src/main.rs"
+    ],
+    "routingFunctions": [
+      "main",
+      "exit"
+    ],
+    "functionMoves": {
+      "src/main.rs::reads_take_no_optional_locks": "processes"
+    }
+  },
+  "generatedEdges": [
+    {
+      "from": "cli-dispatcher",
+      "to": "onepipeline",
+      "reason": "main calls the public run facade"
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-start",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "agent-execution",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "cli-schema",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "cmd-drive-run",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "run-control",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "run-views",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "scheduler",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-start",
+      "to": "task-store",
+      "reason": "Extract only the start dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-plan-check",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "cli-schema",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "cmd-template",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "diagnostics",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "plan-model",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "plan-validation",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "run-control",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "scheduler",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-plan-check",
+      "to": "task-store",
+      "reason": "Extract only the plan-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-boundary-guidance",
+      "reason": "Extract only the boundary-guidance dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-boundary-guidance",
+      "to": "cli-schema",
+      "reason": "Extract only the boundary-guidance dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-boundary-guidance",
+      "to": "publication-boundary",
+      "reason": "Extract only the boundary-guidance dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-boundary-validate-envelope",
+      "reason": "Extract only the boundary-validate-envelope dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-boundary-validate-envelope",
+      "to": "cli-schema",
+      "reason": "Extract only the boundary-validate-envelope dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-boundary-validate-envelope",
+      "to": "planner-channel",
+      "reason": "Extract only the boundary-validate-envelope dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-boundary-validate-envelope",
+      "to": "publication-boundary",
+      "reason": "Extract only the boundary-validate-envelope dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-adopt",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "cli-schema",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "cmd-drive-run",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "run-control",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "run-views",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "scheduler",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-adopt",
+      "to": "task-store",
+      "reason": "Extract only the adopt dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-channel-queue",
+      "reason": "Extract only the channel-queue dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-channel-queue",
+      "to": "cli-schema",
+      "reason": "Extract only the channel-queue dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-channel-queue",
+      "to": "planner-channel",
+      "reason": "Extract only the channel-queue dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-next",
+      "reason": "Extract only the next dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-next",
+      "to": "cli-schema",
+      "reason": "Extract only the next dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-next",
+      "to": "planner-channel",
+      "reason": "Extract only the next dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-next",
+      "to": "run-control",
+      "reason": "Extract only the next dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-review",
+      "reason": "Extract only the review dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-review",
+      "to": "cli-schema",
+      "reason": "Extract only the review dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-review",
+      "to": "run-control",
+      "reason": "Extract only the review dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-review",
+      "to": "scheduler",
+      "reason": "Extract only the review dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-readjust",
+      "reason": "Extract only the readjust dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-readjust",
+      "to": "cli-schema",
+      "reason": "Extract only the readjust dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-readjust",
+      "to": "run-control",
+      "reason": "Extract only the readjust dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-readjust",
+      "to": "scheduler",
+      "reason": "Extract only the readjust dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-surface",
+      "reason": "Extract only the surface dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-surface",
+      "to": "cli-schema",
+      "reason": "Extract only the surface dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-surface",
+      "to": "planner-channel",
+      "reason": "Extract only the surface dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-attest",
+      "reason": "Extract only the attest dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-attest",
+      "to": "cli-schema",
+      "reason": "Extract only the attest dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-attest",
+      "to": "planner-channel",
+      "reason": "Extract only the attest dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-stop",
+      "reason": "Extract only the stop dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-stop",
+      "to": "cli-schema",
+      "reason": "Extract only the stop dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-stop",
+      "to": "run-control",
+      "reason": "Extract only the stop dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-label",
+      "reason": "Extract only the label dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-label",
+      "to": "cli-schema",
+      "reason": "Extract only the label dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-label",
+      "to": "run-record",
+      "reason": "Extract only the label dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-shutdown",
+      "reason": "Extract only the shutdown dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-shutdown",
+      "to": "cli-schema",
+      "reason": "Extract only the shutdown dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-shutdown",
+      "to": "run-control",
+      "reason": "Extract only the shutdown dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-runs",
+      "reason": "Extract only the runs dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-runs",
+      "to": "cli-schema",
+      "reason": "Extract only the runs dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-runs",
+      "to": "run-views",
+      "reason": "Extract only the runs dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-status",
+      "reason": "Extract only the status dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-status",
+      "to": "cli-schema",
+      "reason": "Extract only the status dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-status",
+      "to": "run-views",
+      "reason": "Extract only the status dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-observer-view",
+      "reason": "Extract only the monitor dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-observer-view",
+      "to": "cli-schema",
+      "reason": "Extract only the monitor dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-observer-view",
+      "to": "run-views",
+      "reason": "Extract only the monitor dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-repo-recover",
+      "reason": "Extract only the repo-recover dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-repo-recover",
+      "to": "cli-schema",
+      "reason": "Extract only the repo-recover dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-repo-recover",
+      "to": "cmd-publish-branch",
+      "reason": "Extract only the repo-recover dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-integrate",
+      "reason": "Extract only the integrate dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-integrate",
+      "to": "cli-schema",
+      "reason": "Extract only the integrate dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-integrate",
+      "to": "cmd-publish-branch",
+      "reason": "Extract only the integrate dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-results",
+      "reason": "Extract only the results dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-results",
+      "to": "cli-schema",
+      "reason": "Extract only the results dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-results",
+      "to": "run-views",
+      "reason": "Extract only the results dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-supersessions",
+      "reason": "Extract only the supersessions dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-supersessions",
+      "to": "cli-schema",
+      "reason": "Extract only the supersessions dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-supersessions",
+      "to": "run-views",
+      "reason": "Extract only the supersessions dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-goals",
+      "reason": "Extract only the goals dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-goals",
+      "to": "cli-schema",
+      "reason": "Extract only the goals dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-goals",
+      "to": "run-views",
+      "reason": "Extract only the goals dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-transcript",
+      "reason": "Extract only the transcript dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-transcript",
+      "to": "cli-schema",
+      "reason": "Extract only the transcript dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-transcript",
+      "to": "run-views",
+      "reason": "Extract only the transcript dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-drive-run",
+      "reason": "Extract only the drive-run dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive-run",
+      "to": "cli-schema",
+      "reason": "Extract only the drive-run dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive-run",
+      "to": "run-control",
+      "reason": "Extract only the drive-run dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive-run",
+      "to": "scheduler",
+      "reason": "Extract only the drive-run dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-drive",
+      "reason": "Extract only the drive dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive",
+      "to": "cli-schema",
+      "reason": "Extract only the drive dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive",
+      "to": "run-control",
+      "reason": "Extract only the drive dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive",
+      "to": "scheduler",
+      "reason": "Extract only the drive dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-drive",
+      "to": "task-store",
+      "reason": "Extract only the drive dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-template-list",
+      "reason": "Extract only the template-list dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-list",
+      "to": "cli-schema",
+      "reason": "Extract only the template-list dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-list",
+      "to": "cmd-template",
+      "reason": "Extract only the template-list dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-template-resolve",
+      "reason": "Extract only the template-resolve dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-resolve",
+      "to": "cli-schema",
+      "reason": "Extract only the template-resolve dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-resolve",
+      "to": "cmd-template",
+      "reason": "Extract only the template-resolve dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "onepipeline",
+      "to": "cmd-template-check",
+      "reason": "Extract only the template-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-check",
+      "to": "cli-schema",
+      "reason": "Extract only the template-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    },
+    {
+      "from": "cmd-template-check",
+      "to": "cmd-template",
+      "reason": "Extract only the template-check dispatch arm from driver::dispatch and its CLI/verbs adapter; retain shared implementations in their named concept crate."
+    }
+  ]
 }

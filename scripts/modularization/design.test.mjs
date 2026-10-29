@@ -135,7 +135,7 @@ test("source graph ignores literal/comment dependencies and sees grouped imports
       root,
       "src/a.rs",
       readFileSync(join(root, "src/a.rs"), "utf8") +
-        String.raw`
+        `
 fn quoted<'life>(v: &'life str) { let double = '"'; crate::e::real(); }`,
     );
     for (const name of ["b", "c", "d", "e"]) put(root, `src/${name}.rs`, "");
@@ -374,6 +374,14 @@ test("suite-input command follows borrowed helpers, records runtime fixtures, an
       ),
     );
     modular.crates["cmd-template-inspect"] = { files: [], deps: [] };
+    modular.schema = 2;
+    modular.commands = {};
+    modular.dispatcher = {
+      crate: "onepipeline",
+      routingFiles: ["src/main.rs", "src/cli.rs"],
+      routingFunctions: ["main"],
+    };
+    modular.generatedEdges = [];
     put(root, "layout.json", modular);
     assert.equal(run().status, 0);
     assert.ok(
@@ -561,7 +569,7 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     assert.deepEqual(report.platforms.windows.missingModules.sort(), modules.sort());
     assert.equal(report.migration[0].crate, "render-cost");
     assert.equal(report.migration[0].skippedSuiteFraction, 519 / (144 * 88));
-    assert.equal(report.migration.length, 73);
+    assert.equal(report.migration.length, 74);
     assert.equal(report.migration.at(-1).skippedSuiteFraction, 519 / (144 * 88));
     put(
       root,
@@ -609,7 +617,7 @@ test("CLI replay weights, malformed profile recovery, and render write/freshness
     put(
       root,
       "docs/modularization-design.md",
-      readFileSync(join(root, "docs/modularization-design.md"), "utf8") + "stale\n",
+      `${readFileSync(join(root, "docs/modularization-design.md"), "utf8")}stale\n`,
     );
     assert.equal(run("render").status, 1);
     assert.equal(run("render", "--write").status, 0);
@@ -792,6 +800,112 @@ test("render CLI refuses missing or repeated generation markers without writing"
         assert.equal(readFileSync(join(root, "docs/modularization-design.md"), "utf8"), document);
       }
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("graph CLI transforms source edges, enforces command ownership and routing-only dispatch", () => {
+  const root = scratch();
+  const cli = resolve("scripts/modularization/graph.mjs");
+  try {
+    put(root, "src/main.rs", "fn main() {}\n");
+    put(root, "src/status.rs", "use crate::record::Record;\nfn status() {}\n");
+    put(root, "src/record.rs", "use crate::status::Status;\npub struct Record;\n");
+    const layout = {
+      schema: 2,
+      generatedEdges: [],
+      crates: {
+        dispatcher: { files: ["src/main.rs"], deps: ["cmd-status", "record"] },
+        "cmd-status": { files: ["src/status.rs"], deps: ["record"] },
+        record: { files: ["src/record.rs"], deps: [] },
+      },
+      commands: { "src/status.rs": "cmd-status" },
+      dispatcher: {
+        crate: "dispatcher",
+        routingFiles: ["src/main.rs"],
+        routingFunctions: ["main"],
+      },
+      edges: {
+        "status->record": { kind: "shared", fix: "Read the shared run record." },
+        "record->status": {
+          kind: "seam",
+          fix: "Record owns the StatusProvider trait, installed by composition.",
+          interface: { owner: "record", trait: "StatusProvider", adapter: "dispatcher" },
+        },
+      },
+    };
+    const run = () => {
+      put(root, "layout.json", layout);
+      return spawnSync(process.execPath, [cli, "layout.json", "graph.json"], {
+        cwd: root,
+        encoding: "utf8",
+      });
+    };
+    assert.equal(run().status, 0);
+    const report = JSON.parse(readFileSync(join(root, "graph.json"), "utf8"));
+    assert.deepEqual(report.transformedCrates.record.deps, []);
+    assert.deepEqual(report.transformedCrates.dispatcher.deps, ["cmd-status", "record"]);
+    assert.ok(
+      report.transformedEdges.some(
+        (e) => e.from === "record" && e.to === "record" && e.via === "StatusProvider",
+      ),
+    );
+    const savePort = layout.edges["record->status"].interface;
+    for (const moves of [
+      null,
+      [],
+      "bad",
+      { "src/main.rs::missing": "record" },
+      { "src/main.rs::main": "absent" },
+    ]) {
+      layout.dispatcher.functionMoves = moves;
+      assert.match(run().stderr, /invalid dispatcher functionMoves/);
+    }
+    delete layout.dispatcher.functionMoves;
+    for (const port of [
+      { ...savePort, owner: "absent" },
+      { ...savePort, adapter: 4 },
+      { ...savePort, trait: "bad-trait" },
+    ]) {
+      layout.edges["record->status"].interface = port;
+      assert.match(run().stderr, /invalid interface record->status/);
+    }
+    layout.edges["record->status"].interface = savePort;
+    layout.edges["main->status"] = { kind: "shared", fix: "Stale edge must fail." };
+    assert.match(run().stderr, /stale source edge main->status/);
+    delete layout.edges["main->status"];
+    layout.edges["status->record"].interface = {
+      owner: "absent",
+      trait: "UnusedProvider",
+      adapter: "dispatcher",
+    };
+    assert.match(run().stderr, /invalid interface status->record/);
+    delete layout.edges["status->record"].interface;
+    layout.edges["record->status"] = {
+      kind: "shared",
+      fix: "Deliberately leave the import in place.",
+    };
+    assert.match(run().stderr, /cmd-status -> record -> cmd-status/);
+    layout.edges["record->status"] = {
+      kind: "seam",
+      fix: "Inject provider.",
+      interface: { owner: "record", trait: "StatusProvider", adapter: "dispatcher" },
+    };
+    layout.crates.record.files.push("src/status.rs");
+    layout.crates["cmd-status"].files = [];
+    assert.match(run().stderr, /command module src\/status.rs: expected command crate cmd-status/);
+    layout.crates.record.files = ["src/record.rs"];
+    layout.crates["cmd-status"].files = ["src/status.rs"];
+    put(root, "src/main.rs", "fn main() {}\nfn perform_business_logic() {}\n");
+    assert.match(
+      run().stderr,
+      /dispatcher holds non-routing function src\/main.rs::perform_business_logic/,
+    );
+    put(root, "src/main.rs", "fn main() {}\n");
+    layout.crates.dispatcher.files.push("src/record.rs");
+    layout.crates.record.files = [];
+    assert.match(run().stderr, /dispatcher holds non-routing module src\/record.rs/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

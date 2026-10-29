@@ -107,7 +107,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (Object.hasOwn(mapping, "schema")) validate(mapping, moduleGraph());
     else compileMapping(mapping);
     for (const suite of Object.values(mapping.suites)) {
-      if (mapping.schema === 1)
+      if ([1, 2].includes(mapping.schema))
         suite.crates = [
           ...new Set([
             ...suite.crates,

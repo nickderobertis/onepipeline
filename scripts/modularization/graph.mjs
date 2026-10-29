@@ -170,10 +170,21 @@ export function validate(mapping, graph, root = ".") {
   };
   object(
     mapping,
-    ["schema", "evidenceRevision", "crates", "edges", "suites", "assets", "auxiliarySuites"],
+    [
+      "schema",
+      "evidenceRevision",
+      "crates",
+      "edges",
+      "suites",
+      "assets",
+      "auxiliarySuites",
+      "commands",
+      "dispatcher",
+      "generatedEdges",
+    ],
     "layout",
   );
-  if (mapping.schema !== 1) throw new Error("layout must use schema 1");
+  if (![1, 2].includes(mapping.schema)) throw new Error("layout must use schema 1 or 2");
   if (mapping.evidenceRevision !== undefined && !/^[a-f0-9]{40}$/.test(mapping.evidenceRevision))
     throw new Error("invalid evidenceRevision");
   if (!mapping.crates || typeof mapping.crates !== "object" || Array.isArray(mapping.crates))
@@ -189,13 +200,78 @@ export function validate(mapping, graph, root = ".") {
   if (!mapping.edges || typeof mapping.edges !== "object" || Array.isArray(mapping.edges))
     throw new Error("edges must be an object");
   for (const [name, edge] of Object.entries(mapping.edges)) {
-    object(edge, ["kind", "fix"], `edge ${name}`);
+    object(edge, ["kind", "fix", "interface", "movedTo"], `edge ${name}`);
     if (
       !["move", "shared", "seam"].includes(edge.kind) ||
       typeof edge.fix !== "string" ||
       !edge.fix.trim()
     )
       throw new Error(`invalid edge ${name}`);
+  }
+  if (mapping.schema === 2) {
+    if (
+      !mapping.commands ||
+      typeof mapping.commands !== "object" ||
+      Array.isArray(mapping.commands)
+    )
+      throw new Error("commands must be an object");
+    for (const [file, name] of Object.entries(mapping.commands))
+      if (!Object.hasOwn(graph.files, file) || typeof name !== "string")
+        throw new Error(`invalid command owner: ${file}`);
+    object(
+      mapping.dispatcher,
+      ["crate", "routingFiles", "routingFunctions", "functionMoves"],
+      "dispatcher",
+    );
+    strings(mapping.dispatcher.routingFiles, "dispatcher.routingFiles");
+    strings(mapping.dispatcher.routingFunctions, "dispatcher.routingFunctions");
+    const moves =
+      mapping.dispatcher.functionMoves === undefined ? {} : mapping.dispatcher.functionMoves;
+    if (!moves || typeof moves !== "object" || Array.isArray(moves))
+      throw new Error("invalid dispatcher functionMoves object");
+    const functions = new Set(
+      mapping.crates[mapping.dispatcher.crate]?.files.flatMap((file) =>
+        [...codeOnly(readFileSync(join(root, file), "utf8")).matchAll(/\bfn\s+(\w+)\s*[(<]/g)].map(
+          (match) => `${file}::${match[1]}`,
+        ),
+      ),
+    );
+    for (const [name, destination] of Object.entries(moves))
+      if (
+        !functions.has(name) ||
+        typeof destination !== "string" ||
+        !Object.hasOwn(mapping.crates, destination) ||
+        destination === mapping.dispatcher.crate
+      )
+        throw new Error(`invalid dispatcher functionMoves entry: ${name}`);
+    if (!Array.isArray(mapping.generatedEdges)) throw new Error("generatedEdges must be an array");
+    for (const edge of mapping.generatedEdges) {
+      object(edge, ["from", "to", "reason"], "generated edge");
+      if (
+        ![edge.from, edge.to, edge.reason].every(
+          (value) => typeof value === "string" && value.trim(),
+        )
+      )
+        throw new Error("generated edge must name endpoints and a reason");
+    }
+    const sourceEdges = new Set(graph.edges.map((edge) => `${edge.from}->${edge.to}`));
+    for (const [name, edge] of Object.entries(mapping.edges)) {
+      if (!sourceEdges.has(name)) throw new Error(`stale source edge ${name}`);
+      if (edge.interface !== undefined) {
+        object(edge.interface, ["owner", "trait", "adapter"], `interface ${name}`);
+        const port = edge.interface;
+        if (
+          ![port.owner, port.adapter].every(
+            (value) => typeof value === "string" && Object.hasOwn(mapping.crates, value),
+          ) ||
+          typeof port.trait !== "string" ||
+          !/^[A-Z][A-Za-z0-9]*$/.test(port.trait)
+        )
+          throw new Error(`invalid interface ${name}`);
+      }
+      if (edge.kind === "move" && typeof edge.movedTo !== "string")
+        throw new Error(`edge ${name}: movedTo is required`);
+    }
   }
   for (const field of ["suites", "auxiliarySuites"]) {
     const suites = mapping[field] ?? {};
@@ -289,20 +365,97 @@ export function validate(mapping, graph, root = ".") {
       crate.files.map((file) => [graph.files[file], name]),
     ),
   );
+  const transformed = Object.fromEntries(
+    Object.keys(mapping.crates).map((name) => [name, { deps: [] }]),
+  );
+  const transformedEdges = [];
+  const add = (from, to, source, via) => {
+    if (!transformed[from] || !transformed[to])
+      throw new Error(`unknown transformed owner ${from}->${to}`);
+    transformedEdges.push({ from, to, source, ...(via ? { via } : {}) });
+    if (from !== to && !transformed[from].deps.includes(to)) transformed[from].deps.push(to);
+  };
+  // A root module and its directory children must move together: root-level edges
+  // otherwise have no unambiguous crate owner.
+  for (const module of graph.modules) {
+    const owners = new Set(
+      Object.entries(graph.files)
+        .filter(([, name]) => name === module)
+        .map(([file]) =>
+          Object.keys(mapping.crates).find((name) => mapping.crates[name].files.includes(file)),
+        ),
+    );
+    if (owners.size !== 1) throw new Error(`module ${module}: split ownership`);
+  }
+  if (mapping.schema === 2) {
+    for (const [file, expected] of Object.entries(mapping.commands ?? {})) {
+      if (!expected.startsWith("cmd-") || !mapping.crates[expected]?.files.includes(file))
+        throw new Error(`command module ${file}: expected command crate ${expected}`);
+    }
+    const dispatcher = mapping.dispatcher;
+    if (!dispatcher || !mapping.crates[dispatcher.crate]) throw new Error("missing dispatcher");
+    for (const file of mapping.crates[dispatcher.crate].files) {
+      if (!dispatcher.routingFiles.includes(file))
+        throw new Error(`dispatcher holds non-routing module ${file}`);
+      const functions = [
+        ...codeOnly(readFileSync(join(root, file), "utf8")).matchAll(/\bfn\s+(\w+)\s*[(<]/g),
+      ].map((match) => match[1]);
+      for (const name of functions) {
+        const moved = dispatcher.functionMoves?.[`${file}::${name}`];
+        if (!dispatcher.routingFunctions.includes(name) && !moved)
+          throw new Error(`dispatcher holds non-routing function ${file}::${name}`);
+        if (moved) add(dispatcher.crate, moved, `${file}::${name}`);
+      }
+    }
+  }
   for (const edge of graph.edges) {
     const [from, to] = [owner[edge.from], owner[edge.to]];
-    if (from === to) continue;
-    const fix = mapping.edges[`${edge.from}->${edge.to}`];
-    if (!fix?.fix || !["move", "shared", "seam"].includes(fix.kind))
-      throw new Error(`unclassified edge ${edge.from}->${edge.to}`);
-    if (fix.kind === "shared" && !mapping.crates[from].deps.includes(to))
-      throw new Error(`missing dependency ${from}->${to}`);
+    const key = `${edge.from}->${edge.to}`;
+    const fix = mapping.edges[key];
+    if (from !== to && (!fix?.fix || !["move", "shared", "seam"].includes(fix.kind)))
+      throw new Error(`unclassified edge ${key}`);
+    if (fix?.kind === "seam" && from !== to) {
+      const port = fix.interface;
+      if (
+        mapping.schema === 2 &&
+        (!port || port.owner !== from || !/^[A-Z][A-Za-z0-9]*$/.test(port.trait))
+      )
+        throw new Error(`edge ${key}: interface must name a trait owned by ${from}`);
+      // The implementation import becomes a local trait reference. Composition
+      // must still depend on both the trait owner and its real implementation.
+      add(from, from, key, port?.trait ?? "LegacyProvider");
+      if (port) {
+        add(port.adapter, from, key, port.trait);
+        add(port.adapter, to, key, port.trait);
+      }
+    } else if (fix?.kind === "move" && from !== to) {
+      const destination = fix.movedTo ?? to;
+      if (destination !== to) throw new Error(`edge ${key}: move must land in command owner ${to}`);
+      add(destination, to, key);
+      if (mapping.schema === 2)
+        add(
+          "onepipeline" in transformed ? "onepipeline" : mapping.dispatcher.crate,
+          destination,
+          key,
+        );
+    } else add(from, to, key);
+  }
+  if (mapping.schema === 2)
+    for (const edge of mapping.generatedEdges ?? []) add(edge.from, edge.to, edge.reason);
+  assertAcyclic(transformed);
+  for (const [from, crate] of Object.entries(transformed)) {
+    crate.deps.sort();
+    for (const to of crate.deps)
+      if (!mapping.crates[from].deps.includes(to))
+        throw new Error(`missing dependency ${from}->${to}`);
   }
   return {
     files: Object.keys(graph.files).length,
     crates: Object.keys(mapping.crates).length,
     cyclicComponents: components(graph.modules, graph.edges).filter((group) => group.length > 1),
     edges: graph.edges.length,
+    transformedCrates: transformed,
+    transformedEdges,
   };
 }
 
