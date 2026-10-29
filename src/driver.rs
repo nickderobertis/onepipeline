@@ -2077,6 +2077,11 @@ fn observe(
         return Ok(None);
     }
     let launched = launch_graph(paths, record, goal, output)?;
+    // Test ordering only: the observer can already have started a judge while
+    // its identity has not yet been persisted in the driver's launch record.
+    if let Err(error) = crate::ordering::meet("ONEPIPELINE_TEST_OBSERVER_UNRECORDED_GATE") {
+        eprintln!("onepipeline: {error}");
+    }
     record.watched_by(
         launched
             .run_id()
