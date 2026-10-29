@@ -124,9 +124,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
     writeFileSync(file, `${JSON.stringify(mapping, null, 2)}\n`);
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: correct the named mapping/module, then rerun node scripts/modularization/suite-inputs.mjs MAPPING.json`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same suite-inputs.mjs invocation"
+        : "correct the named mapping/module, then rerun node scripts/modularization/suite-inputs.mjs MAPPING.json";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

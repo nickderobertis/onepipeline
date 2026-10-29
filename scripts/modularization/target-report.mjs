@@ -357,6 +357,10 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       !Number.isFinite(platform.secondsPerRun) ||
       platform.secondsPerRun <= 0 ||
       !platform.suiteSeconds ||
+      typeof platform.suiteSeconds !== "object" ||
+      Object.values(platform.suiteSeconds).some(
+        (seconds) => typeof seconds !== "number" || !Number.isFinite(seconds) || seconds < 0,
+      ) ||
       JSON.stringify(Object.keys(platform.suiteSeconds).sort()) !==
         JSON.stringify(Object.keys(result.mapping.suites).sort()) ||
       Math.abs(
@@ -843,9 +847,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `target layout: rendered ${evidence.result.originalTests} original tests in ${evidence.result.tests} phases`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: generate a target replay and restore exactly one target layout marker`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-report.mjs invocation"
+        : "generate a target replay and restore exactly one target layout marker";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

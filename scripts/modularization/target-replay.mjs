@@ -53,9 +53,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `target replay: ${output.result.rows.length} PRs; ${output.result.suites} suites; ${(output.result.platforms.linux.suiteSkip * 100).toFixed(2)}% suite runs skipped; wrote ${process.argv[2]}`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: reconcile the target graph/test catalog with the source and 144-PR history; rerun target-replay.mjs OUTPUT.json`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-replay.mjs invocation"
+        : "reconcile the target graph/test catalog with the source and 144-PR history; rerun target-replay.mjs OUTPUT.json";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

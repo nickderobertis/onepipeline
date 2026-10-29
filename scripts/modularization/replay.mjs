@@ -177,9 +177,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `modularization replay: ${report.changes} PRs; ${(100 * report.platforms.linux.summary.skippedSuiteFraction).toFixed(2)}% suite runs skipped; wrote ${process.argv[3]}`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: correct the named layout/timing input or restore the 144-PR origin/main history; rerun with LAYOUT.json REPORT.json`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same replay.mjs invocation"
+        : "correct the named layout/timing input or restore the 144-PR origin/main history; rerun with LAYOUT.json REPORT.json";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

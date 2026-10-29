@@ -382,9 +382,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `target graph: ${Object.keys(result.crates).length} crates; acyclic; every command isolated; thin dispatcher verified from source`,
     );
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: correct target-moves.json's named symbol or dependency; rerun target-graph.mjs [OUTPUT.json]`,
-    );
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-graph.mjs invocation"
+        : "correct target-moves.json's named symbol or dependency; rerun target-graph.mjs [OUTPUT.json]";
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

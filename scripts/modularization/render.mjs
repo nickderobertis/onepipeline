@@ -116,7 +116,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       `modularization design: ${process.argv[2] === "--write" ? "updated" : "verified"} ${file}`,
     );
   } catch (error) {
-    console.error(`${error.message}\nnext: ${recovery}`);
+    const next =
+      error.code && /^(?:EACCES|EPERM|ENOENT|EISDIR|ENOTDIR|EEXIST|ENOSPC|EROFS)$/.test(error.code)
+        ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same render.mjs invocation"
+        : recovery;
+    console.error(`${error.message}\nnext: ${next}`);
     process.exitCode = 1;
   }
 }

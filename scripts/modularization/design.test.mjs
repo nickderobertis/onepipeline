@@ -19,6 +19,37 @@ const put = (root, path, value) => {
   writeFileSync(join(root, path), typeof value === "string" ? value : JSON.stringify(value));
 };
 
+test("research CLIs name the path, not their inputs, when an output or input path is unusable", () => {
+  const root = scratch();
+  try {
+    put(root, "not-a-directory", "a file where a directory is expected");
+    const blocked = join(root, "not-a-directory", "out.json");
+    const cli = (name, ...args) =>
+      spawnSync(process.execPath, [`scripts/modularization/${name}`, ...args], {
+        encoding: "utf8",
+      });
+    for (const [name, args] of [
+      ["replay.mjs", ["scripts/modularization/layout.json", blocked]],
+      ["target-graph.mjs", [blocked]],
+      ["suite-inputs.mjs", [root]],
+      ["target-report.mjs", [root]],
+    ]) {
+      const result = cli(name, ...args);
+      assert.equal(result.status, 1, name);
+      assert.match(result.stderr, /EEXIST|ENOTDIR|EISDIR/, name);
+      assert.match(
+        result.stderr,
+        new RegExp(
+          `next: check the named path's type.*rerun the same ${name.replace(".", "\\.")} invocation`,
+        ),
+        name,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("graph CLI accepts a mapped dependency and names a deliberately introduced cycle", () => {
   const root = scratch();
   try {
@@ -1743,8 +1774,8 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
         cwd: root,
         encoding: "utf8",
       });
-    // project.json targets.test runs this file; targets.check depends on test.
-    // justfile's check runs Nx check targets, so this regeneration comparison gates the catalog.
+    // scripts/modularization/project.json targets.test runs this file and its targets.check depends on
+    // test; justfile's check runs Nx check targets, so this regeneration comparison gates the catalog.
     const inventoried = run("--inventory");
     assert.equal(inventoried.status, 0, inventoried.stderr);
     assert.deepEqual(
@@ -1898,6 +1929,19 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     put(root, "target.json", evidence);
     assert.match(render().stderr, /invalid target platform data/);
     evidence.result.platforms.linux.secondsSkip = seconds;
+    // Each suite's weight must be a finite nonnegative number, even when offsetting values keep the total.
+    const weights = structuredClone(evidence.result.platforms.linux.suiteSeconds);
+    const [first, second] = Object.keys(weights);
+    for (const corrupt of [
+      { [first]: -1, [second]: weights[second] + weights[first] + 1 },
+      { [first]: "12" },
+      { [first]: Number.NaN },
+    ]) {
+      evidence.result.platforms.linux.suiteSeconds = { ...weights, ...corrupt };
+      put(root, "target.json", evidence);
+      assert.match(render().stderr, /invalid target platform data/);
+    }
+    evidence.result.platforms.linux.suiteSeconds = weights;
     const migration = structuredClone(evidence.result.migration);
     for (const mutate of [
       (value) => {
