@@ -6,7 +6,9 @@
 //! GitHub is `tests/e2e/github_world.py`: a loopback holding repositories with a visibility,
 //! Projects with a `public` flag and the issues and items on them, answering every GraphQL
 //! document the store sends by executing it against that model, and each repository's
-//! visibility over REST. Everything else is the compiled binary and the real linked store.
+//! visibility over REST — checking every field it answers against the GitHub schema the linked
+//! `onetaskgraph-github-projects` release pins. Everything else is the compiled binary and the
+//! real linked store.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
 // boundary and nothing inside the crate under test, which is driven as a real compiled binary.
@@ -49,6 +51,7 @@ impl GitHub {
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/e2e/github_world.py"))
             .arg(&dir)
             .arg(&seeded)
+            .arg(linked_schema())
             .spawn()
             .expect("the loopback GitHub starts");
         let endpoint = dir.join("endpoint");
@@ -91,6 +94,38 @@ impl Drop for GitHub {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The GitHub GraphQL schema subset the linked `onetaskgraph-github-projects` release ships and
+/// validates its own documents against, read from that release's source as `Cargo.lock` resolves
+/// it, so the double is held to the very schema the store it answers was checked by.
+fn linked_schema() -> std::path::PathBuf {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = onepipeline_testfakes::profile::process::Command::new(cargo)
+        .args(["metadata", "--offline", "--locked", "--format-version", "1"])
+        .arg("--manifest-path")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Value = serde_json::from_slice(&output.stdout).expect("cargo metadata is JSON");
+    let manifest = metadata["packages"]
+        .as_array()
+        .expect("the packages")
+        .iter()
+        .find(|package| package["name"] == "onetaskgraph-github-projects")
+        .and_then(|package| package["manifest_path"].as_str())
+        .expect("the linked onetaskgraph-github-projects");
+    let schema = Path::new(manifest)
+        .parent()
+        .expect("the crate's directory")
+        .join("tests/fixtures/schema.graphql");
+    assert!(schema.is_file(), "{} is not shipped", schema.display());
+    schema
 }
 
 /// `content` with `metadata` in the trailing slot the `github-projects` plugin keeps it in.

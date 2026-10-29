@@ -5,9 +5,13 @@ about where the linked store files an issue.
 one models what those requests are about — repositories with a visibility, Projects with a
 `public` flag, the items on them and the issues the items hold — and answers every GraphQL
 document by executing it against that model, so the store's own documents are answered as
-GitHub answers them without this file restating any of them. A field the model does not hold
-fails the request loudly, naming the type and the field, rather than answering it with
-nothing.
+GitHub answers them without this file restating any of them. Every type and field a document
+reaches is checked against the GitHub schema the linked `onetaskgraph-github-projects` release
+pins and validates its own documents against (`tests/fixtures/schema.graphql` in that crate):
+a field that schema does not define fails the request, and so does one the model does not hold,
+each naming the type and the field, rather than answering it with nothing. What a fragment's
+type condition matches, and the type of every object a field answers, are read from that schema
+too.
 
 GraphQL is served at `/board/<number>/graphql`, so the request log says which board's source
 sent each request; every board reads the one model, as every GitHub endpoint does. `GET
@@ -16,7 +20,7 @@ before filing an issue on a board declared private. `GET /state` answers the who
 the request log.
 
 The first argument names the directory the URL is published to, whole, as `endpoint`; the
-second a JSON file seeding the model: `{"owner": LOGIN, "repositories": {"owner/name":
+second a JSON file seeding the model, and the third the schema: `{"owner": LOGIN, "repositories": {"owner/name":
 "public" | "private"}, "boards": {"<number>": {"public": BOOL}}, "issues": [{"id": ID,
 "repository": "owner/name", "title": T, "body": B, "board": NUMBER, "status": OPTION,
 "parent": ID | null}]}`.
@@ -38,11 +42,40 @@ class Unsupported(Exception):
     """A request naming something this model does not hold."""
 
 
-# ---------------------------------------------------------------------------------------------
-# GraphQL: a parser and an executor for the subset of the language the store's documents use —
-# operations with variables, aliases, arguments, inline fragments, named fragments and the
-# `@include` and `@skip` directives.
-# ---------------------------------------------------------------------------------------------
+class Schema:
+    """The object and interface types of an SDL document, each with its fields' named types,
+    and which concrete types each interface and union stands for."""
+
+    def __init__(self, text):
+        text = re.sub(r'"[^"\n]*"', "", re.sub(r"#[^\n]*", "", text))
+        self.fields, self.members = {}, {}
+        for kind, name, implements, body in re.findall(
+                r"\b(type|interface)\s+(\w+)(?:\s+implements\s+([\w\s&]+?))?\s*\{([^}]*)\}",
+                text):
+            self.fields[name] = {
+                field: returned
+                for field, returned in re.findall(
+                    r"(\w+)\s*(?:\([^)]*\))?\s*:\s*\[*\s*(\w+)", body)}
+            for interface in re.findall(r"\w+", implements or ""):
+                self.members.setdefault(interface, set()).add(name)
+        for name, members in re.findall(r"\bunion\s+(\w+)\s*=\s*([\w\s|]+?)(?=\n\s*\n|"
+                                        r"\n\s*(?:type|interface|union|enum|input|scalar)\b|$)",
+                                        text):
+            self.members.setdefault(name, set()).update(re.findall(r"\w+", members))
+
+    def matches(self, condition, typename):
+        return (condition is None or condition == typename
+                or typename in self.members.get(condition, ()))
+
+    def returned(self, typename, field):
+        """The named type `typename.field` answers, refused when the schema defines no such
+        field."""
+        defined = self.fields.get(typename)
+        if defined is None or field not in defined:
+            raise Unsupported("GitHub's schema defines no %s.%s" % (typename, field))
+        return defined[field]
+
+
 
 TOKEN = re.compile(r'''
     (?P<skip>[\s,]+|\#[^\n]*)
@@ -235,8 +268,8 @@ def merge(into, value):
 
 
 class Execution:
-    def __init__(self, fragments, variables):
-        self.fragments, self.variables = fragments, variables
+    def __init__(self, schema, fragments, variables):
+        self.schema, self.fragments, self.variables = schema, fragments, variables
 
     def select(self, target, selections):
         answer = {}
@@ -248,40 +281,39 @@ class Execution:
                 if name == "__typename":
                     merge(answer, {alias: target.typename})
                     continue
+                returned = self.schema.returned(target.typename, name)
                 supplied = {key: evaluate(value, self.variables)
                             for key, value in arguments.items()}
-                merge(answer, {alias: self.shape(target.field(name, supplied), nested)})
+                merge(answer, {alias: self.shape(target.field(name, supplied), returned,
+                                                 nested)})
             elif selection[0] == "inline":
                 _, condition, directives, nested = selection
-                if included(directives, self.variables) and target.is_a(condition):
+                if (included(directives, self.variables)
+                        and self.schema.matches(condition, target.typename)):
                     merge(answer, self.select(target, nested))
             else:
                 _, name, directives = selection
                 condition, nested = self.fragments[name]
-                if included(directives, self.variables) and target.is_a(condition):
+                if (included(directives, self.variables)
+                        and self.schema.matches(condition, target.typename)):
                     merge(answer, self.select(target, nested))
         return answer
 
-    def shape(self, value, nested):
+    def shape(self, value, returned, nested):
         if isinstance(value, list):
-            return [self.shape(item, nested) for item in value]
+            return [self.shape(item, returned, nested) for item in value]
         if isinstance(value, Node):
+            if value.typename is None:
+                value.typename = returned
             if nested is None:
                 raise Unsupported("%s needs a selection" % value.typename)
             return self.select(value, nested)
         return value
 
 
-# ---------------------------------------------------------------------------------------------
-# The model.
-# ---------------------------------------------------------------------------------------------
 
 class Node:
-    typename = "Node"
-    kinds = ()
-
-    def is_a(self, condition):
-        return condition is None or condition == self.typename or condition in self.kinds
+    typename = None
 
     def field(self, name, arguments):
         resolver = getattr(self, "f_" + name, None)
@@ -291,10 +323,11 @@ class Node:
 
 
 class Plain(Node):
-    """An object answered field by field from a dict, for small result shapes."""
+    """An object answered field by field from a dict, for small result shapes: its type is the
+    one the schema says the field answering it returns, unless it is named here."""
 
-    def __init__(self, typename, fields, kinds=()):
-        self.typename, self.fields, self.kinds = typename, fields, kinds
+    def __init__(self, fields, typename=None):
+        self.fields, self.typename = fields, typename
 
     def field(self, name, arguments):
         if name not in self.fields:
@@ -306,30 +339,60 @@ class Plain(Node):
 def connection(nodes, arguments=None):
     first = (arguments or {}).get("first")
     shown = nodes if first is None else nodes[:first]
-    return Plain("Connection", {
+    return Plain({
         "nodes": shown, "totalCount": len(nodes),
-        "pageInfo": Plain("PageInfo", {"hasNextPage": len(shown) < len(nodes),
-                                       "endCursor": None}),
+        "pageInfo": Plain({"hasNextPage": len(shown) < len(nodes), "endCursor": None}),
     })
+
+
+SLUG = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+NUMBER = re.compile(r"^[1-9]\d*$")
+
+
+def seeded(seed):
+    """The seed, refused unless every part is one this model can hold as GitHub would."""
+    if (not isinstance(seed, dict) or set(seed) != {"owner", "repositories", "boards", "issues"}
+            or not isinstance(seed["owner"], str) or not re.match(r"^[A-Za-z0-9-]+$", seed["owner"])
+            or not isinstance(seed["repositories"], dict) or not isinstance(seed["boards"], dict)
+            or not isinstance(seed["issues"], list)):
+        raise SystemExit("a seed names an owner, its repositories, its boards and its issues")
+    for slug, visibility in seed["repositories"].items():
+        if not SLUG.match(slug) or visibility not in ("public", "private"):
+            raise SystemExit("repository %r must be owner/name, public or private" % slug)
+    for number, board in seed["boards"].items():
+        if (not NUMBER.match(number) or not isinstance(board, dict) or set(board) != {"public"}
+                or not isinstance(board["public"], bool)):
+            raise SystemExit("board %r must be a number declaring `public` true or false" % number)
+    ids = set()
+    for issue in seed["issues"]:
+        if (not isinstance(issue, dict)
+                or set(issue) != {"id", "repository", "title", "body", "board", "status", "parent"}
+                or not all(isinstance(issue[key], str) for key in ("id", "title", "body"))
+                or issue["id"] in ids or issue["repository"] not in seed["repositories"]
+                or str(issue["board"]) not in seed["boards"]
+                or issue["status"] not in STATUS_OPTIONS
+                or (issue["parent"] is not None and issue["parent"] not in ids)):
+            raise SystemExit("issue %r must name a seeded repository, board, Status option and "
+                             "earlier parent" % issue)
+        ids.add(issue["id"])
+    return seed
 
 
 class World:
     def __init__(self, seed):
+        seed = seeded(seed)
         self.owner = seed["owner"]
         self.repositories = {}
         for slug, visibility in seed["repositories"].items():
-            if visibility not in ("public", "private"):
-                raise SystemExit("a repository is public or private")
             self.repositories[slug] = {"id": "R_" + slug.replace("/", "_"),
                                        "visibility": visibility, "issues": 0}
         self.boards = {}
         for number, board in seed["boards"].items():
             self.boards[int(number)] = {
-                "id": "PVT_%s" % number, "public": bool(board["public"]), "items": [],
+                "id": "PVT_%s" % number, "public": board["public"], "items": [],
                 "fields": [
                     {"id": "STATUS_%s" % number, "name": "Status", "kind": "select"},
                     {"id": "ORIGIN_%s" % number, "name": ORIGIN_FIELD, "kind": "text"},
-                    {"id": "TITLE_%s" % number, "name": "Title", "kind": "title"},
                 ],
             }
         self.issues, self.items, self.minted = {}, {}, 0
@@ -395,13 +458,9 @@ class World:
 
 class Owner(Node):
     typename = "Organization"
-    kinds = ("RepositoryOwner", "ProjectV2Owner", "Node")
 
     def __init__(self, world):
         self.world = world
-
-    def f_login(self, _):
-        return self.world.owner
 
     def f_projectV2(self, arguments):
         number = arguments["number"]
@@ -410,7 +469,6 @@ class Owner(Node):
 
 class Board(Node):
     typename = "ProjectV2"
-    kinds = ("Node",)
 
     def __init__(self, world, number):
         self.world, self.number = world, number
@@ -428,17 +486,8 @@ class Board(Node):
     def f_public(self, _):
         return self.held["public"]
 
-    def f_url(self, _):
-        return "https://github.com/orgs/%s/projects/%d" % (self.world.owner, self.number)
-
     def f_fields(self, arguments):
         return connection([Field(self.number, held) for held in self.held["fields"]], arguments)
-
-    def f_field(self, arguments):
-        for held in self.held["fields"]:
-            if held["name"] == arguments["name"]:
-                return Field(self.number, held)
-        return None
 
     def f_items(self, arguments):
         items = [Item(self.world, item) for item in self.held["items"]]
@@ -453,7 +502,6 @@ class Board(Node):
 
 
 class Field(Node):
-    kinds = ("ProjectV2FieldConfiguration", "ProjectV2FieldCommon", "Node")
 
     def __init__(self, number, held):
         self.number, self.held = number, held
@@ -467,20 +515,18 @@ class Field(Node):
         return self.held["name"]
 
     def f_dataType(self, _):
-        return {"select": "SINGLE_SELECT", "text": "TEXT", "title": "TITLE"}[self.held["kind"]]
+        return {"select": "SINGLE_SELECT", "text": "TEXT"}[self.held["kind"]]
 
     def f_options(self, _):
         if self.held["kind"] != "select":
             raise Unsupported("a text field has no options")
-        return [Plain("ProjectV2SingleSelectFieldOption",
-                      {"id": "%s_%s" % (self.held["id"], option), "name": option,
+        return [Plain({"id": "%s_%s" % (self.held["id"], option), "name": option,
                        "color": "GRAY", "description": ""})
                 for option in STATUS_OPTIONS]
 
 
 class Item(Node):
     typename = "ProjectV2Item"
-    kinds = ("Node",)
 
     def __init__(self, world, item):
         self.world, self.held = world, world.items[item]
@@ -501,14 +547,14 @@ class Item(Node):
             if value is None:
                 continue
             if field["kind"] == "select":
-                found.append(Plain("ProjectV2ItemFieldSingleSelectValue", {
+                found.append(Plain({
                     "name": value, "optionId": "%s_%s" % (field["id"], value),
                     "field": Field(self.held["board"], field)},
-                    ("ProjectV2ItemFieldValue",)))
+                    "ProjectV2ItemFieldSingleSelectValue"))
             else:
-                found.append(Plain("ProjectV2ItemFieldTextValue", {
+                found.append(Plain({
                     "text": value, "field": Field(self.held["board"], field)},
-                    ("ProjectV2ItemFieldValue",)))
+                    "ProjectV2ItemFieldTextValue"))
         return found
 
     def f_id(self, _):
@@ -516,15 +562,6 @@ class Item(Node):
 
     def f_updatedAt(self, _):
         return STAMP
-
-    def f_createdAt(self, _):
-        return STAMP
-
-    def f_isArchived(self, _):
-        return False
-
-    def f_type(self, _):
-        return "ISSUE"
 
     def f_project(self, _):
         return Board(self.world, self.held["board"])
@@ -544,8 +581,6 @@ class Item(Node):
 
 class Issue(Node):
     typename = "Issue"
-    kinds = ("Node", "ProjectV2ItemContent", "Closable", "Assignable", "Labelable",
-             "Comment", "UniformResourceLocatable")
 
     def __init__(self, world, node):
         self.world, self.held = world, world.issues[node]
@@ -571,9 +606,6 @@ class Issue(Node):
     def f_updatedAt(self, _):
         return STAMP
 
-    def f_closed(self, _):
-        return self.held["state"] == "CLOSED"
-
     def f_state(self, _):
         return self.held["state"]
 
@@ -594,7 +626,7 @@ class Issue(Node):
     def f_subIssuesSummary(self, _):
         children = self.held["subIssues"]
         done = sum(1 for child in children if self.world.issues[child]["state"] == "CLOSED")
-        return Plain("SubIssuesSummary", {"total": len(children), "completed": done,
+        return Plain({"total": len(children), "completed": done,
                                           "percentCompleted": 0})
 
     def f_comments(self, arguments):
@@ -604,9 +636,6 @@ class Issue(Node):
         return connection([], arguments)
 
     def f_labels(self, arguments):
-        return connection([], arguments)
-
-    def f_assignees(self, arguments):
         return connection([], arguments)
 
     def f_projectItems(self, arguments):
@@ -625,7 +654,6 @@ class Issue(Node):
 
 class Repository(Node):
     typename = "Repository"
-    kinds = ("Node",)
 
     def __init__(self, world, slug):
         self.world, self.slug = world, slug
@@ -639,18 +667,6 @@ class Repository(Node):
 
     def f_nameWithOwner(self, _):
         return self.slug
-
-    def f_name(self, _):
-        return self.slug.split("/")[1]
-
-    def f_owner(self, _):
-        return Owner(self.world)
-
-    def f_visibility(self, _):
-        return self.held["visibility"].upper()
-
-    def f_isPrivate(self, _):
-        return self.held["visibility"] == "private"
 
     def f_issue(self, arguments):
         for node, held in self.world.issues.items():
@@ -668,9 +684,6 @@ class Query(Node):
     def f_repositoryOwner(self, arguments):
         return Owner(self.world) if arguments["login"] == self.world.owner else None
 
-    def f_organization(self, arguments):
-        return self.f_repositoryOwner(arguments)
-
     def f_repository(self, arguments):
         slug = "%s/%s" % (arguments["owner"], arguments["name"])
         return Repository(self.world, slug) if slug in self.world.repositories else None
@@ -685,9 +698,6 @@ class Query(Node):
             if board["id"] == node:
                 return Board(self.world, number)
         return None
-
-    def f_nodes(self, arguments):
-        return [self.f_node({"id": node}) for node in arguments["ids"]]
 
     def f_search(self, arguments):
         """GitHub's issue search, over the qualifiers the store scopes it with: `project:`,
@@ -719,10 +729,6 @@ class Query(Node):
                 found.append(Issue(self.world, node))
         return connection(found, arguments)
 
-    def f_rateLimit(self, _):
-        return Plain("RateLimit", {"cost": 1, "remaining": 4999, "limit": 5000,
-                                   "resetAt": STAMP, "used": 1, "nodeCount": 1})
-
 
 class Mutation(Node):
     typename = "Mutation"
@@ -737,13 +743,13 @@ class Mutation(Node):
                                        supplied.get("parentIssueId"))
         for board in supplied.get("projectV2Ids") or []:
             self.world.add_item(self.world.board_by_id(board), node)
-        return Plain("CreateIssuePayload", {"issue": Issue(self.world, node)})
+        return Plain({"issue": Issue(self.world, node)})
 
     def f_addProjectV2ItemById(self, arguments):
         supplied = arguments["input"]
         item = self.world.add_item(self.world.board_by_id(supplied["projectId"]),
                                    supplied["contentId"])
-        return Plain("AddProjectV2ItemByIdPayload", {"item": Item(self.world, item)})
+        return Plain({"item": Item(self.world, item)})
 
     def f_updateIssue(self, arguments):
         supplied = arguments["input"]
@@ -759,7 +765,7 @@ class Mutation(Node):
         if movement:
             held["state"] = movement["value"]
             held["stateReason"] = movement.get("stateReason")
-        return Plain("UpdateIssuePayload", {"issue": Issue(self.world, supplied["id"])})
+        return Plain({"issue": Issue(self.world, supplied["id"])})
 
     def write(self, supplied, clear):
         item = self.world.items.get(supplied["itemId"])
@@ -779,7 +785,7 @@ class Mutation(Node):
             item["values"][field["id"]] = option[len(prefix):]
         else:
             item["values"][field["id"]] = supplied["value"]["text"]
-        return Plain("Payload", {"projectV2Item": Item(self.world, item["id"])})
+        return Plain({"projectV2Item": Item(self.world, item["id"])})
 
     def f_updateProjectV2ItemFieldValue(self, arguments):
         return self.write(arguments["input"], False)
@@ -790,7 +796,7 @@ class Mutation(Node):
     def f_addSubIssue(self, arguments):
         supplied = arguments["input"]
         self.world.add_sub_issue(supplied["issueId"], supplied["subIssueId"])
-        return Plain("AddSubIssuePayload", {"issue": Issue(self.world, supplied["issueId"]),
+        return Plain({"issue": Issue(self.world, supplied["issueId"]),
                                             "subIssue": Issue(self.world, supplied["subIssueId"])})
 
     def f_addBlockedBy(self, arguments):
@@ -798,29 +804,29 @@ class Mutation(Node):
         held = self.world.issues[supplied["issueId"]]
         if supplied["blockingIssueId"] not in held["blockedBy"]:
             held["blockedBy"].append(supplied["blockingIssueId"])
-        return Plain("AddBlockedByPayload", {
+        return Plain({
             "issue": Issue(self.world, supplied["issueId"]),
             "blockingIssue": Issue(self.world, supplied["blockingIssueId"])})
 
 
-# ---------------------------------------------------------------------------------------------
-# The server.
-# ---------------------------------------------------------------------------------------------
 
 world = World(json.loads(pathlib.Path(sys.argv[2]).read_text()))
+schema = Schema(pathlib.Path(sys.argv[3]).read_text())
 requests = []
 unsupported = []
 lock = threading.Lock()
 
 
 def answer_graphql(path, request):
-    query, variables = request.get("query"), request.get("variables") or {}
-    if not isinstance(query, str) or not isinstance(variables, dict):
-        raise Unsupported("GraphQL requires a query string and an object of variables")
+    if (not isinstance(request, dict) or set(request) - {"query", "variables", "operationName"}
+            or not isinstance(request.get("query"), str)
+            or not isinstance(request.get("variables", {}), dict)):
+        raise Unsupported("GraphQL requires an object of a query string and its variables")
+    query, variables = request["query"], request.get("variables", {})
     requests.append({"path": path, "query": query, "variables": variables})
     (kind, selections), fragments = Parser(query).document()
     root = Mutation(world) if kind == "mutation" else Query(world)
-    return {"data": Execution(fragments, variables).select(root, selections)}
+    return {"data": Execution(schema, fragments, variables).select(root, selections)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -849,8 +855,11 @@ class Handler(BaseHTTPRequestHandler):
                 if held is None:
                     self.reply({"message": "Not Found"}, 404)
                     return
-                self.reply({"id": 1, "node_id": held["id"], "full_name": slug,
-                            "private": held["visibility"] == "private",
+                # llmlint: ignore[contracts_have_one_source_or_a_drift_gate] GitHub publishes no
+                # REST schema the linked store pins, as it pins `schema.graphql`; this answer carries
+                # only the two fields of "Get a repository" (docs.github.com/en/rest/repos/repos)
+                # the store reads, which its own `visibility` module validates on every answer.
+                self.reply({"private": held["visibility"] == "private",
                             "visibility": held["visibility"]})
                 return
         self.reply({"message": "Not Found"}, 404)
