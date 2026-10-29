@@ -15,6 +15,10 @@ interrupts pass through and no engine outlives the launcher, on any Node.js.
 `npm/test/launcher-process.test.mjs` holds both; CI enforces it on Linux and
 macOS and runs it on Windows in the advisory `launcher.yml`.
 
+**The journeys start a command through `test/spawn-support.mjs`'s `spawnable`.**
+On Windows `npm` and every installed bin are `.cmd` batch files, which a direct
+spawn never finds (ENOENT) and Node will not start without a shell (EINVAL).
+
 Five places name the platform matrix and must move together:
 
 1. `bin/onepipeline.js`'s `PACKAGES` map,
