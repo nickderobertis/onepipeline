@@ -1343,6 +1343,29 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
       "pub struct World; impl World { pub fn run(&self, args: &[&str]) {} pub fn cmd(&self, args: &[&str]) {} pub fn cmd_on(&self, program: &Path, args: &[&str]) {} }",
     );
     put(root, "tests/e2e/example.rs", source);
+    const { sourceHash } = await import("./attribution.mjs");
+    const { functions } = await import("./rust-syntax.mjs");
+    const writeAudit = (text) =>
+      put(root, "scripts/modularization/command-attributions.json", {
+        schema: 1,
+        functions: Object.fromEntries(
+          ["dynamic_family", "generic_args", "explicit_binary"].map((name) => {
+            const fn = functions(text).find((entry) => entry.name === name);
+            return [
+              `example::${name}`,
+              {
+                sha256: sourceHash(text.slice(fn.start, fn.end)),
+                moduleSha256: sourceHash(text),
+                commands: [],
+                kind: "dispatch",
+                reason:
+                  "This fixture explicitly exercises the parser refusal boundary with dynamic argv.",
+              },
+            ];
+          }),
+        ),
+      });
+    writeAudit(source);
     const baseline = {
       schema: 1,
       tests: {
@@ -1452,6 +1475,34 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
           .reduce((n, t) => n + t.share, 0),
         1,
       );
+    const heldAudit = readFileSync(
+      join(root, "scripts/modularization/command-attributions.json"),
+      "utf8",
+    );
+    put(root, "scripts/modularization/command-attributions.json", { schema: 1, functions: {} });
+    expectFailure(/unreviewed dispatcher attribution/);
+    for (const bad of [null, { schema: 2, functions: {} }, { schema: 1, functions: [] }]) {
+      put(root, "scripts/modularization/command-attributions.json", bad);
+      expectFailure(/invalid command attribution audit/);
+    }
+    const parsedAudit = JSON.parse(heldAudit);
+    const auditId = "example::dynamic_family";
+    for (const patch of [
+      { commands: ["cmd-imaginary"] },
+      { forward: null },
+      { boundary: "unknown" },
+      { sha256: "a".repeat(64) },
+      { typo: true },
+      { kind: "integration" },
+    ]) {
+      const changed = structuredClone(parsedAudit);
+      Object.assign(changed.functions[auditId], patch);
+      put(root, "scripts/modularization/command-attributions.json", changed);
+      expectFailure(
+        /invalid command attribution|invalid attribution|stale attribution|incompatible commands/,
+      );
+    }
+    put(root, "scripts/modularization/command-attributions.json", heldAudit);
     expectFailure(/usage: decompose.mjs/, "extra");
     for (const bad of [
       { ...baseline, typo: true },
@@ -1497,7 +1548,10 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
       "tests/e2e/harness.rs",
       "pub struct World; impl World { pub fn run(&self, cwd: &Path, args: &[&str]) {} pub fn cmd(&self, args: &[&str]) {} pub fn cmd_on(&self, program: &Path, args: &[&str]) {} }",
     );
-    put(root, "tests/e2e/example.rs", source.replaceAll("w.run(&[", "w.run(path, &["));
+    const changedSource = source.replaceAll("w.run(&[", "w.run(path, &[");
+    put(root, "tests/e2e/example.rs", changedSource);
+    expectFailure(/stale attribution source/);
+    writeAudit(changedSource);
     assert.equal(run().status, 0);
     assert.deepEqual(
       expandCatalog(JSON.parse(readFileSync(join(root, outputPath), "utf8"))).dispositions,
@@ -1517,7 +1571,7 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
 test("catalog expansion refuses malformed records, inherited reason names and duplicate owners", async () => {
   const { expandCatalog, baselineHash } = await import("./catalog.mjs");
   const good = {
-    schema: 3,
+    schema: 4,
     baselineSha256: baselineHash({ schema: 1, tests: {} }),
     dispositions: {
       "example::works": {
@@ -1530,7 +1584,7 @@ test("catalog expansion refuses malformed records, inherited reason names and du
   assert.equal(Object.keys(expandCatalog(JSON.parse(JSON.stringify(good))).tests).length, 2);
   for (const dispositions of [true, 42, [], null])
     assert.throws(() => expandCatalog({ ...good, dispositions }), /invalid decomposition catalog/);
-  assert.throws(() => expandCatalog({ ...good, schema: 4 }), /invalid decomposition catalog/);
+  assert.throws(() => expandCatalog({ ...good, schema: 3 }), /invalid decomposition catalog/);
   for (const reason of ["constructor", "toString", 42]) {
     const broken = structuredClone(good);
     broken.dispositions["example::works"].reason = reason;
@@ -1567,6 +1621,8 @@ test("inventory and documentation CLIs preserve prefixes and refuse missing/dupl
       "catalog.mjs",
       "rust-syntax.mjs",
       "phase-inputs.mjs",
+      "attribution.mjs",
+      "command-attributions.json",
       "source-projection.mjs",
       "manifest-projection.mjs",
       "cli-commands.json",
@@ -1647,8 +1703,16 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     assert.equal(doc.split(TARGET_MARKER).length, 2);
     assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \|/);
     assert.match(doc, /frees at least one suite on \*\*12 PRs\*\*/);
-    assert.match(doc, /removes \*\*87 suite runs\*\*/);
+    assert.match(doc, /removes \*\*104 suite runs\*\*/);
     assert.equal(`${TARGET_MARKER}${doc.split(TARGET_MARKER)[1]}`, targetAppendix(evidence));
+    const agentsRow = doc.split("\n").find((line) => line.startsWith("| agents | cmd-agents |"));
+    assert(agentsRow);
+    assert.match(
+      agentsRow,
+      /agents::every_dispatch_of_a_run_is_visible_through_its_pointer_file_with_nothing_configured \(cross-command\)/,
+    );
+    assert.match(doc, /Exception suite \| Complete runner crate closure/);
+    assert.match(doc, /Source-backed argv and boundary audit/);
     symlinkSync(resolve("src"), join(root, "src"), "dir");
     mkdirSync(join(root, "tests"), { recursive: true });
     symlinkSync(resolve("tests/e2e"), join(root, "tests/e2e"), "dir");
@@ -1938,5 +2002,63 @@ test("narrow docs/scripts inputs free only unreachable suites, matching real Nx"
         { commit: "x", subject: "bad", files: [], effectiveFiles: 42 },
       ]),
     /needs validated PR rows/,
+  );
+});
+
+test("reviewed argv attribution keeps release transitions, agents identities and double teardown in their actual suites", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      `
+    import {readFileSync} from "node:fs";
+    import {decompose} from "./scripts/modularization/decompose.mjs";
+    console.log(JSON.stringify(decompose(JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8")))));
+  `,
+    ],
+    { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const catalog = JSON.parse(result.stdout);
+  assert.equal(catalog.schema, 4);
+  const release =
+    catalog.dispositions[
+      "adoption::the_three_release_kinds_reach_a_planner_through_the_shipped_profile"
+    ];
+  assert.equal(release.kind, "integration");
+  assert.deepEqual(release.originalCommands, ["cmd-observer-view", "cmd-start", "cmd-stop"]);
+  assert.match(release.rationale, /releases_at.*monitor/);
+  const status =
+    catalog.dispositions[
+      "adoption::status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued"
+    ];
+  assert.equal(status.kind, "integration");
+  assert.deepEqual(status.originalCommands, ["cmd-start", "cmd-status"]);
+  const agents =
+    catalog.dispositions[
+      "agents::every_dispatch_of_a_run_is_visible_through_its_pointer_file_with_nothing_configured"
+    ];
+  assert.equal(agents.kind, "integration");
+  assert(agents.originalCommands.includes("cmd-agents"));
+  for (const [id, entry] of Object.entries(catalog.dispositions)) {
+    if (id.startsWith("harness::")) assert.notEqual(entry.kind, "dispatch", id);
+    if (entry.kind === "dispatch") assert(id.startsWith("surface::"), id);
+  }
+  assert.equal(
+    catalog.dispositions[
+      "harness::a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started"
+    ].kind,
+    "support",
+  );
+  assert.equal(
+    catalog.dispositions["closures::publish_branch_closes_the_issues_its_landing_closes"].kind,
+    "isolated",
+  );
+  assert.deepEqual(
+    catalog.dispositions[
+      "templates::a_dangling_link_at_a_layer_is_refused_rather_than_passed_to_the_layer_under_it"
+    ].originalCommands,
+    ["cmd-template-resolve"],
   );
 });

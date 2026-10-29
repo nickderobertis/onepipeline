@@ -180,13 +180,13 @@ export function resolvedChanges(crates, before, after, toolBefore, toolAfter) {
 }
 
 export function commandMapping(layout, catalog) {
-  if (![1, 3].includes(catalog.schema))
-    throw new Error("command test catalog must use schema 1 or 3");
+  if (![1, 4].includes(catalog.schema))
+    throw new Error("command test catalog must use schema 1 or 4");
   if (
     Object.keys(catalog).some(
       (key) =>
         !(
-          catalog.schema === 3
+          catalog.schema === 4
             ? ["schema", "baselineSha256", "tests", "dispositions"]
             : ["schema", "tests"]
         ).includes(key),
@@ -201,7 +201,7 @@ export function commandMapping(layout, catalog) {
       Object.keys(entry).some(
         (key) =>
           !(
-            catalog.schema === 3
+            catalog.schema === 4
               ? ["original", "suite", "commands", "reason", "share"]
               : ["suite", "commands", "reason"]
           ).includes(key),
@@ -220,7 +220,7 @@ export function commandMapping(layout, catalog) {
         throw new Error(`test command attribution drift: ${name}`);
   } else {
     const normalized = expandCatalog({
-      schema: 3,
+      schema: 4,
       baselineSha256: catalog.baselineSha256,
       dispositions: catalog.dispositions,
     });
@@ -262,7 +262,7 @@ export function commandMapping(layout, catalog) {
   const packageName = (alias) =>
     externalDefinitions.find((entry) => entry.alias === alias)?.packageName ?? alias;
   const phases =
-    catalog.schema === 3
+    catalog.schema === 4
       ? Object.fromEntries(
           Object.entries(catalog.tests).map(([name, entry]) => [
             name,
@@ -329,7 +329,7 @@ export function commandMapping(layout, catalog) {
     modules: [],
     tests: [],
   };
-  if (catalog.schema === 3) {
+  if (catalog.schema === 4) {
     suites["test-support"] = { paths: [], crates: [], modules: [], tests: [] };
     suites["public-api"] = { paths: [], crates: ["onepipeline"], modules: [], tests: [] };
     suites["full-dispatch"] = {
@@ -362,17 +362,17 @@ export function commandMapping(layout, catalog) {
       delete suites[name];
       continue;
     }
-    if (catalog.schema === 3 && layout.crates["run-files"])
+    if (catalog.schema === 4 && layout.crates["run-files"])
       suite.crates.push("run-files", "processes");
     suite.crates = sorted(suite.crates);
     suite.modules = sorted(suite.modules);
     suite.paths =
-      catalog.schema === 3
+      catalog.schema === 4
         ? sorted(suite.tests.flatMap((id) => phases[id].paths))
         : [...suiteInputs(suite.modules), `migrated-tests/${name}/**`];
     // Migrated helpers are linked per command; source attribution remains conservative.
     suite.paths = suite.paths.filter((path) => !path.startsWith("src/"));
-    if (catalog.schema === 3) {
+    if (catalog.schema === 4) {
       const reaches = (crate, target, seen = new Set()) => {
         if (crate === target) return true;
         if (seen.has(crate)) return false;
@@ -386,10 +386,10 @@ export function commandMapping(layout, catalog) {
       suite.paths.push("crates/testfakes/src/profile.rs", "crates/testfakes/src/profile/**");
     }
     const phaseExternal = new Set(
-      catalog.schema === 3 ? suite.tests.flatMap((id) => phases[id].external) : [],
+      catalog.schema === 4 ? suite.tests.flatMap((id) => phases[id].external) : [],
     );
     const usesProcessDouble =
-      catalog.schema === 3 &&
+      catalog.schema === 4 &&
       (phaseExternal.has("onepipeline_testfakes") ||
         suite.paths.some((path) => path.startsWith("crates/testfakes/src/bin/")));
     if (usesProcessDouble)
@@ -409,7 +409,7 @@ export function commandMapping(layout, catalog) {
         ...external.filter(
           (dep) =>
             (catalog.schema === 1 || dep !== "onepipeline-testfakes") &&
-            (catalog.schema === 3
+            (catalog.schema === 4
               ? phaseExternal.has(dep.replaceAll("-", "_"))
               : suite.modules.some((module) =>
                   new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(moduleCode(module)),
@@ -449,7 +449,7 @@ export function commandMapping(layout, catalog) {
     selection,
     crates,
     suites,
-    ...(catalog.schema === 3
+    ...(catalog.schema === 4
       ? {
           helperConsumers: Object.fromEntries(
             Object.entries(suites).map(([name, suite]) => [
@@ -515,7 +515,7 @@ export function run(layout, catalog, weights, changes, projector) {
         );
     }
     if (files.includes("Cargo.toml")) {
-      if (catalog.schema === 3)
+      if (catalog.schema === 4)
         files.push(
           ...manifestChanges(
             mapping.crates,
@@ -630,11 +630,11 @@ export function run(layout, catalog, weights, changes, projector) {
     });
   }
   return {
-    schema: catalog.schema === 3 ? 2 : 1,
+    schema: catalog.schema === 4 ? 2 : 1,
     migration,
     suites: Object.keys(mapping.suites).length,
     tests: Object.keys(catalog.tests).length,
-    ...(catalog.schema === 3 ? { originalTests: originals.size } : {}),
+    ...(catalog.schema === 4 ? { originalTests: originals.size } : {}),
     platforms,
     rows,
     mapping,

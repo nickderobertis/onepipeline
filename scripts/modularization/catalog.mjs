@@ -13,7 +13,7 @@ export const REASONS = {
   "support-boundary":
     "The real support subprocess/fixture boundary is the subject; keep these assertions in test-support rather than a production command suite.",
   "dispatch-contract":
-    "Retain the complete parser/routing or dynamically constructed argv journey against the shipped dispatcher; no command-specific prefix can be resolved safely.",
+    "Retain the complete parser/routing or version/help/usage-error journey against the shipped dispatcher; its assertions prove the public parser or routing boundary.",
   "public-api":
     "No CLI command is invoked: retain the existing public-library/contract assertions against the compatibility facade. A profile-area fallback is not a reason to invent command phases.",
   "command-phases":
@@ -24,7 +24,7 @@ export const REASONS = {
 
 export function expandCatalog(catalog) {
   if (
-    catalog?.schema !== 3 ||
+    catalog?.schema !== 4 ||
     Object.keys(catalog).some(
       (key) => !["schema", "baselineSha256", "dispositions"].includes(key),
     ) ||
@@ -44,11 +44,15 @@ export function expandCatalog(catalog) {
       !["support", "library", "dispatch", "integration", "decompose", "isolated"].includes(
         entry.kind,
       ) ||
+      (entry.rationale !== undefined &&
+        (typeof entry.rationale !== "string" || !entry.rationale.trim())) ||
       !Array.isArray(entry.originalCommands) ||
       !entry.originalCommands.every(
         (name) => typeof name === "string" && /^cmd-[a-z][a-z0-9-]*$/.test(name),
       ) ||
-      Object.keys(entry).some((key) => !["kind", "originalCommands", "reason"].includes(key))
+      Object.keys(entry).some(
+        (key) => !["kind", "originalCommands", "reason", "rationale"].includes(key),
+      )
     )
       throw new Error(`invalid disposition ${id}`);
     const owners =
@@ -77,7 +81,7 @@ export function expandCatalog(catalog) {
                 ? entry.originalCommands
                 : [owner],
         share: 1 / owners.length,
-        reason: REASONS[entry.reason],
+        reason: [REASONS[entry.reason], entry.rationale].filter(Boolean).join(" "),
       };
     }
   }

@@ -1,0 +1,1950 @@
+{
+  "schema": 1,
+  "functions": {
+    "adoption::a_run_held_only_on_a_published_release_reads_parked_and_still_driven": {
+      "sha256": "58cfbc3922f48a75dd13ce97aa37975a1385f7dc40764c9405f8cff4ba043031",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-watch"
+      ],
+      "reason": "The launch stays alive while status parks, adoption refuses and a watch outlasts the quiet transition; advancing releases_at dispatches the held consumer under the identical driver PID. Preserve the launch/control/watch timing and identity checks together.",
+      "kind": "integration",
+      "moduleSha256": "886106b99fb39a92a779fce1e0c92061e4b6ea31d81ec2c2e3de5cefad55c142"
+    },
+    "adoption::start_with": {
+      "sha256": "c7cb950ad23f5800a3da9b01337858f1e3383f115b7bf8a635c59707942635ca",
+      "commands": [
+        "cmd-start"
+      ],
+      "reason": "The typed Vec<String> begins with start; iter().map(String::as_str) borrows its words and extra only appends launch options.",
+      "moduleSha256": "886106b99fb39a92a779fce1e0c92061e4b6ea31d81ec2c2e3de5cefad55c142"
+    },
+    "adoption::status_names_the_release_a_held_node_awaits_rather_than_calling_it_queued": {
+      "sha256": "ec8757f2a93ca1e9bf4a2a038092580f249f62ce1efd3f4310ae0819d50c0550",
+      "commands": [
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "start holds the consumer on version 0.1.0; status is polled until held, releases_at advances to 0.2.0, and status must stop saying held. This asserts the live release-to-view transition, not two independent status fixtures.",
+      "kind": "integration",
+      "moduleSha256": "886106b99fb39a92a779fce1e0c92061e4b6ea31d81ec2c2e3de5cefad55c142"
+    },
+    "adoption::the_three_release_kinds_reach_a_planner_through_the_shipped_profile": {
+      "sha256": "afd79941d5b514017659623e0d394d422cfde5a46baa3f38c7297488d5617b52",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-start",
+        "cmd-stop"
+      ],
+      "reason": "start opens the held consumer, releases_at advances the real probe, until observes release-wait/arrived/adopted, then monitor default/all verifies the events from that very driver. Keep the live producer-to-profile relay; stop exit assertions remain in this journey.",
+      "kind": "integration",
+      "moduleSha256": "886106b99fb39a92a779fce1e0c92061e4b6ea31d81ec2c2e3de5cefad55c142"
+    },
+    "agents::a_re_asked_dispatchs_lines_carry_the_attempt_the_record_names": {
+      "sha256": "26bdfc6698352022da00a3105e55a4038ce5374779de2dd9914911306eee37b4",
+      "commands": [
+        "cmd-agents",
+        "cmd-start"
+      ],
+      "reason": "The re-asked dispatch produces new history under its recorded attempt; agents must read those session identities and their attempt labels from the same run. Retain this retry-to-history-reader integration.",
+      "kind": "integration",
+      "moduleSha256": "785a37f19e4435bfbb829a4fb7238001b8ffab064f3a5f4cf1df75aa9f33525b"
+    },
+    "agents::every_dispatch_of_a_run_is_visible_through_its_pointer_file_with_nothing_configured": {
+      "sha256": "fc95a71e5e6495f1aff4a0080fdd051494d7c3656af16c1b80843564a11a394a",
+      "commands": [
+        "cmd-agents",
+        "cmd-start"
+      ],
+      "reason": "The real start launches node, lifecycle, drafting and observer turns under the inherited history environment. agents must list exactly those emitted session identities, including the separately configured second run; retain the producer-to-reader identity integration.",
+      "kind": "integration",
+      "moduleSha256": "785a37f19e4435bfbb829a4fb7238001b8ffab064f3a5f4cf1df75aa9f33525b"
+    },
+    "amend::an_amendment_binds_every_later_dispatch_and_a_second_one_replaces_it": {
+      "sha256": "21ba314dc638e4989ec3458d7ffb7879085e7dbca4626ebc53847b2f92456de1",
+      "commands": [
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an amendment binds every later dispatch and a second one replaces it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "c35c91ffadf8521cd8b820055a1b4f8107f24f0381b12e1128e61ac6663865b3"
+    },
+    "ask::asking": {
+      "sha256": "a9657a692a8c6168c2eb63c0d6a284cedfb546a7572bbd3e3e05f3e405ee71e6",
+      "commands": [
+        "cmd-ask"
+      ],
+      "reason": "The concatenation starts with literal ask; supplied arguments only follow that prefix. The spawned asker and reply-window assertions belong to ask.",
+      "moduleSha256": "bd636d542deac168784e544f1c68f6e86350e8c29401ac88c745949915746439"
+    },
+    "cancellation::an_adoption_ends_a_cancellation_the_driver_it_replaced_was_waiting_on": {
+      "sha256": "6846e5593f119b79e10e8e965d983289647e45e73f4e4cbaced544047ca6eef0",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an adoption ends a cancellation the driver it replaced was waiting on are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "804f39418b5f795dd1e440d292eb6439f7b76dbe4ca79fae9eed86494262e323"
+    },
+    "channel::a_surface_whose_server_exited_with_its_asker_gone_stops_counting_as_unread": {
+      "sha256": "7f84ab2a2413a36985b9263957a7c9333ec1ccb252a7766f988ebc623cd11b99",
+      "commands": [
+        "cmd-next",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a surface whose server exited with its asker gone stops counting as unread are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "58bd4f3935cbe363ca664def96a87f8c1074021d65bdef8dc557ddd7184ca5ee"
+    },
+    "channel::the_unread_line_names_the_kinds_waiting_so_a_question_is_not_buried": {
+      "sha256": "f4067de9517bea59844f93c5ca5aa58e476092576a95d23a5dd2a3681468661c",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for the unread line names the kinds waiting so a question is not buried are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "58bd4f3935cbe363ca664def96a87f8c1074021d65bdef8dc557ddd7184ca5ee"
+    },
+    "closures::a_board_home_is_written_done_once_its_last_node_settles_and_not_before": {
+      "sha256": "aee9b88040c03be5af32e5d817a9755480a3775f15e3e9dc5eaad4c3de06020d",
+      "commands": [
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "a board home is written done once its last node settles and not before selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_failed_run_writes_its_home_only_once_a_settle_carries_it_to_success": {
+      "sha256": "8f6085f71cc7e23ebfaf2241b8e7f4ca7dbadf0f56bb44eca5888b70d1d44d36",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-start"
+      ],
+      "reason": "a failed run writes its home only once a settle carries it to success selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_home_the_board_refuses_is_recorded_failed_and_surfaced_without_touching_the_run": {
+      "sha256": "bc2822134f9c868cc5594fd054de865865e14e068a60cff39305a503f4a270d5",
+      "commands": [
+        "cmd-adopt",
+        "cmd-results",
+        "cmd-start"
+      ],
+      "reason": "a home the board refuses is recorded failed and surfaced without touching the run selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_home_write_that_fails_for_now_is_asked_again_by_the_same_driver": {
+      "sha256": "3152c2dac3a510e44aae859c7b5071727ac534652c4be567f5b480bb7df0e542",
+      "commands": [
+        "cmd-start"
+      ],
+      "reason": "a home write that fails for now is asked again by the same driver selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_landing_verb_ends_a_closure_the_board_never_answers_at_its_deadline": {
+      "sha256": "e47ad538cc596c55e7fcd82adaab0602956526309aeabc41c52602d975eee151",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "a landing verb ends a closure the board never answers at its deadline selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_landing_verb_lands_where_the_store_configuration_does_not_load": {
+      "sha256": "ac0df5e1f53aeab85b0ca89eb9a368bf7bc83ce6408fecdc72d9260d902fcb92",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "a landing verb lands where the store configuration does not load selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_landing_verb_relays_past_a_read_of_its_stream_that_fails_for_now": {
+      "sha256": "6cf067bf88696e20079bea9b6f9203b48f7f885ddf4a704b4d2c0144a2acab9f",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "a landing verb relays past a read of its stream that fails for now selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::a_stopped_run_writes_its_home_nothing": {
+      "sha256": "27cf60a125f27c4073e83fcfe0e02fc0f83ca4fc3a2f8c5a85c5792612b6c2b0",
+      "commands": [
+        "cmd-start",
+        "cmd-stop"
+      ],
+      "reason": "a stopped run writes its home nothing selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::an_adoption_writes_the_home_a_settled_run_could_not_reach_once": {
+      "sha256": "30d590b3a8be5012e34dd6f72b30b9b149645896b0a133416ff8a4c9af3a9512",
+      "commands": [
+        "cmd-adopt",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "an adoption writes the home a settled run could not reach once selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::an_unowned_landing_closes_the_issues_it_closes": {
+      "sha256": "261738fcb869ef900ae0867d0117fe2e1fb7218facfccf98380c789cd3d66f5d",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "an unowned landing closes the issues it closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::from_launch": {
+      "sha256": "19d7954b68c2e7177663ad3dfec637922d16e05fc9aeacab2b59cf7473da158d",
+      "commands": [],
+      "reason": "This helper forwards parameter 2 unchanged to the selected command; inspect the calling argv rather than its historical suite label.",
+      "forward": {
+        "argument": 2,
+        "prefix": []
+      },
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::integrate_closes_the_issues_its_train_lands": {
+      "sha256": "98939fd6b6f837fb74b89cbf8e08589e2304febea86d70e27dcbd6ce857ca68d",
+      "commands": [
+        "cmd-integrate"
+      ],
+      "reason": "integrate closes the issues its train lands selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::publish_branch_closes_the_issues_its_landing_closes": {
+      "sha256": "c9e8872e665172de9a64db83ca7164ce9686d567aa68e8283d0c96fa1de8b9a0",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "publish branch closes the issues its landing closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::publish_branch_lands_whatever_the_board_answers": {
+      "sha256": "cb185ff38cc8ae0a0453e79398da927baffedcbd68d1e3f062853ee899899a79",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "publish branch lands whatever the board answers selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::repo_recover_closes_the_issues_its_landing_closes": {
+      "sha256": "7d6993139186aed9881d128907db3ab3edf6a05ac3472bb9ac05631c22f78b96",
+      "commands": [
+        "cmd-repo-recover"
+      ],
+      "reason": "repo recover closes the issues its landing closes selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "closures::repo_recover_lands_whatever_the_board_answers": {
+      "sha256": "c663611de191ca5604f17cb16ba35ba2ba47c38549814d761e9c593e17f9b458",
+      "commands": [
+        "cmd-repo-recover"
+      ],
+      "reason": "repo recover lands whatever the board answers selects its Verb variant or calls from_launch with explicit start/adopt argv. Keep the landing's store-write assertions in the selected command; constructing the command's environment is not dispatcher coverage.",
+      "moduleSha256": "8b4ac9ec13afc8c2626ed71fd04990cf5abe3003f4fd3e7883bba5de91e02d5f"
+    },
+    "compatibility::this_build_reads_a_journal_carrying_a_monitor_edit_surface_as_the_build_that_wrote_it_did": {
+      "sha256": "3d68cc14239b2c4810d367ff66bd6033d606b0c79d536b59c6aa14923bf5855f",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-results"
+      ],
+      "reason": "The source's explicit argv alternatives for this build reads a journal carrying a monitor edit surface as the build that wrote it did are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "695d0cbfe7ce7cb37db636018581dc37e52b74b89b20662cb20ab064e3bab4e7"
+    },
+    "compatibility::this_build_renders_a_journal_of_bounded_copies_as_the_build_before_references_did": {
+      "sha256": "17f4264cd7dddb1a7f8f3cff3bb7871402d0e5c173e5b7e1a00d37be2df1441e",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-transcript",
+        "cmd-watch"
+      ],
+      "reason": "The source's explicit argv alternatives for this build renders a journal of bounded copies as the build before references did are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "695d0cbfe7ce7cb37db636018581dc37e52b74b89b20662cb20ab064e3bab4e7"
+    },
+    "compatibility::views_of": {
+      "sha256": "49d10d089b6efeb674eae041a96ad06d4d5ee1a9a8a11a0ac5a911a96831902a",
+      "commands": [
+        "cmd-status",
+        "cmd-results"
+      ],
+      "reason": "The local read closure is called exactly with status and results at the final format expression; each response is compared with the recorded release.",
+      "moduleSha256": "695d0cbfe7ce7cb37db636018581dc37e52b74b89b20662cb20ab064e3bab4e7"
+    },
+    "crossdag::a_run_id_that_climbs_out_of_the_runs_root_reaches_nothing": {
+      "sha256": "372ac11e9300187ff7701d4e1a3cbb20b481ec5c93e5099853dd1ef10e8a5301",
+      "commands": [
+        "cmd-adopt",
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-stop"
+      ],
+      "reason": "The source's explicit argv alternatives for a run id that climbs out of the runs root reaches nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "b3d861038a911bd627a0335ec028bb639888e91f088f7245a59db878e8210b54"
+    },
+    "dispatch_env_hook::nothing_kept_holds": {
+      "sha256": "3e2185422d456b57ba2f2f44d6ccb4a0a735c1a9a6ce5a865373351a904bfe08",
+      "commands": [
+        "cmd-results",
+        "cmd-status",
+        "cmd-runs",
+        "cmd-observer-view"
+      ],
+      "reason": "The four explicitly constructed view vectors are results, status, runs and monitor --all; every output must omit the secret sentinel.",
+      "moduleSha256": "060a35d595b89fbf05129ed9c9c14559981b5ece05de7a4ee39db3cecd700135"
+    },
+    "dispatch::a_judged_codex_dispatch_retires_its_shared_server_and_sweeper": {
+      "sha256": "7d4d4406a28288ff4119835ea0869379edb4f9810f2bf3a7c8b4d4002b9b9cfc",
+      "commands": [],
+      "reason": "a judged codex dispatch retires its shared server and sweeper drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion.",
+      "kind": "library",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::a_killed_observer_is_replaced_and_the_run_goes_on_being_watched": {
+      "sha256": "f2f43744b486035193a446b212881f3727d6db769c48b779c1ccb1937cf09701",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a killed observer is replaced and the run goes on being watched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::a_run_whose_observer_finished_before_its_drivers_first_append_is_listed_driven": {
+      "sha256": "021a7970c2cb762362f771723c59b889c6959a547d79165b56c360919ac4f393",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a run whose observer finished before its drivers first append is listed driven are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::a_run_whose_observer_graph_finished_is_reported_unwatched": {
+      "sha256": "ea48d30989b77ac90fd46100ec75af94a80fae1b7ce0de8dc28fb6ed23772305",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a run whose observer graph finished is reported unwatched are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::a_run_whose_observer_graph_is_watching_and_then_is_killed_reads_as_each": {
+      "sha256": "2b3e5d0823ff88576a842b2b02bf4deebd8cfb89b49d6cc835bd0c7247031115",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a run whose observer graph is watching and then is killed reads as each are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::an_observer_records_its_ending_before_anything_reads_that_it_has_gone": {
+      "sha256": "3778516fd2c3db245a9863f8915f6ef7ec489b544557571c99425266ed9708d3",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an observer records its ending before anything reads that it has gone are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::an_observers_monitor_runs_under_its_own_config_beside_a_launch_config_it_cannot_satisfy": {
+      "sha256": "74655867ab3e377bd2b00452a69f4ee845ff8750921838c912785bbb7673f095",
+      "commands": [
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an observers monitor runs under its own config beside a launch config it cannot satisfy are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::run_labels_foreign_exit_requires_released_ownership": {
+      "sha256": "6ad1ab249a592824c12d1525be8ef91ba0c750ac9024dcdb1182fa88435825d1",
+      "commands": [
+        "cmd-label",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for run labels foreign exit requires released ownership are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::the_codex_double_answers_each_exec_line_oneharness_builds_and_refuses_each_it_does_not": {
+      "sha256": "1d9ba62e6c74a06fdce97cb2b4e0bbf1f908b391f99d6fc042f104a19426469d",
+      "commands": [],
+      "reason": "the codex double answers each exec line oneharness builds and refuses each it does not asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::the_codex_doubles_overload_answer_is_the_one_the_linked_classifier_reads": {
+      "sha256": "bd2ea84e7fd100ee573fde0e5999cdc240084ec6248a7aeae02cf8a2645e89a6",
+      "commands": [],
+      "reason": "the codex doubles overload answer is the one the linked classifier reads asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::the_model_turn_double_refuses_an_argument_the_real_claude_does_not_take": {
+      "sha256": "537e70a92003005572ee62a1f8c7699d063052559b5ebdb88900815a9bc204a2",
+      "commands": [],
+      "reason": "the model turn double refuses an argument the real claude does not take asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "dispatch::the_siblings_own_refusals_still_exit_with_the_codes_this_crate_maps_onto": {
+      "sha256": "7263e9cd74df55025f8939e4c81bcab22ceb1f449dd3683d51956d043e65c8aa",
+      "commands": [],
+      "reason": "the siblings own refusals still exit with the codes this crate maps onto asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "d3b192a50ed1cbbf88e8e425eca9cf403287816915ee4b718499cdec44369273"
+    },
+    "driver_exit::readings": {
+      "sha256": "b0462cbb1a3c74c7117563ee2dd5ee70ae19838a3392bc2257cdb8bf3c4adcd2",
+      "commands": [
+        "cmd-status",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-watch"
+      ],
+      "reason": "The explicit loop adds results and runs to status and watch; normalized answers are compared before and after the driver-exit record.",
+      "moduleSha256": "8e4c8d9ba5ded18209b65621794d70a5e48a19119d175fc0006ef131d3678302"
+    },
+    "driver::a_live_driver_quiet_over_a_settled_graph_reads_parked_driven_and_not_ended": {
+      "sha256": "7abbd879c01f5c8bc77751746e3861aaf822ac5329558feb1549700ba4a92a09",
+      "commands": [
+        "cmd-adopt",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a live driver quiet over a settled graph reads parked driven and not ended are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4daad668255826ee810ae3648afe3dee6ce37f4242cd5bc12b76de23c5690dff"
+    },
+    "driver::a_live_driver_that_has_stopped_writing_reads_parked_driven_and_not_adoptable": {
+      "sha256": "e589d4a5a18ce53ba20e19a675291a134e5a55056ba7fecac8661182823ee0af",
+      "commands": [
+        "cmd-adopt",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-surface"
+      ],
+      "reason": "The source's explicit argv alternatives for a live driver that has stopped writing reads parked driven and not adoptable are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4daad668255826ee810ae3648afe3dee6ce37f4242cd5bc12b76de23c5690dff"
+    },
+    "driver::a_parked_run_whose_record_names_no_pid_is_advised_and_refused_without_one": {
+      "sha256": "a97bdd549a8e1b65b25ca02d0a11e969127b0d0dd6f9e22c5fab502fb0f199bd",
+      "commands": [
+        "cmd-adopt",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a parked run whose record names no pid is advised and refused without one are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4daad668255826ee810ae3648afe3dee6ce37f4242cd5bc12b76de23c5690dff"
+    },
+    "driver::an_observer_that_stops_watching_a_driven_run_is_started_again_within_a_bound": {
+      "sha256": "df92f94dfac89088f5d89fc9653d2079e61a85cf50968147a3cd43e631ebbd37",
+      "commands": [
+        "cmd-adopt",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an observer that stops watching a driven run is started again within a bound are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4daad668255826ee810ae3648afe3dee6ce37f4242cd5bc12b76de23c5690dff"
+    },
+    "envelope_reviewer::a_bar_named_by_the_environment_or_the_launch_config_keeps_passes_as_the_flag_does": {
+      "sha256": "16b2e080b82240d24f6a2aa8b10cd95b086815882fbc8c3df467d74d2b626488",
+      "commands": [
+        "cmd-reply",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a bar named by the environment or the launch config keeps passes as the flag does are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "fcd628af5b0cfd2fa81e7337d6f2b25c6fa878c832e19953ab88f0448732a405"
+    },
+    "envelope_reviewer::a_blank_rung_names_no_reviewer_and_an_unreadable_variable_is_refused": {
+      "sha256": "f103dc5913e1ec89085811e98a60731ed850d50339cfdfd1d740d59c23f6f800",
+      "commands": [
+        "cmd-reply",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a blank rung names no reviewer and an unreadable variable is refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "fcd628af5b0cfd2fa81e7337d6f2b25c6fa878c832e19953ab88f0448732a405"
+    },
+    "envelope_reviewer::live_run": {
+      "sha256": "c49b5b9f50eeeb23136e6db108ed16cb31c38c6cd57a2b463ba1db2f5ebbc46d",
+      "commands": [
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The borrowed argv comes from the start-prefixed Vec<String>; the until closure polls status for the held node to be running.",
+      "moduleSha256": "fcd628af5b0cfd2fa81e7337d6f2b25c6fa878c832e19953ab88f0448732a405"
+    },
+    "envelope_reviewer::the_flag_beats_the_environment_which_beats_the_config": {
+      "sha256": "806674576e60541c93103441bc83fdb281726201857371a27ae2671ec1f2b8f4",
+      "commands": [
+        "cmd-reply",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for the flag beats the environment which beats the config are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "fcd628af5b0cfd2fa81e7337d6f2b25c6fa878c832e19953ab88f0448732a405"
+    },
+    "filter::monitor_defaults_to_the_planner_profile_and_all_bypasses_it": {
+      "sha256": "03317051b6ddba4a8a98ef8d6f32e65902ee10910e8624cb2ef379d17fed79d5",
+      "commands": [
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for monitor defaults to the planner profile and all bypasses it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4315c3ec74f6c09b321f7d2d957a55922493fa24be79bc152c5a1c10c9ea18fc"
+    },
+    "filter::naming_both_a_filter_and_all_is_refused": {
+      "sha256": "f0a8bd014df7b10d8580ff2325cdb62c8c636c6c8b02a60ace0408d52133c039",
+      "commands": [
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for naming both a filter and all is refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4315c3ec74f6c09b321f7d2d957a55922493fa24be79bc152c5a1c10c9ea18fc"
+    },
+    "flow::a_flow_watch_says_what_it_waits_on_and_where": {
+      "sha256": "fabc58ee6cebafd70e443bb53c3e3c1ea24a2535e4929a9fb7e3856488e835f8",
+      "commands": [
+        "cmd-flow",
+        "cmd-watch"
+      ],
+      "reason": "The source's explicit argv alternatives for a flow watch says what it waits on and where are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "b9bf17912ad1f5244f26c49094184a0b6ed6822d1335a2bfb9f7e5feda384341"
+    },
+    "flow::ask_gives_way_to_a_named_run_and_waits_the_flows_own_window": {
+      "sha256": "0dbceb397d7062361407d69a9136e791d500bb691c401de4fadc8b75b532a5ee",
+      "commands": [
+        "cmd-ask",
+        "cmd-channel-queue",
+        "cmd-flow",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for ask gives way to a named run and waits the flows own window are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "b9bf17912ad1f5244f26c49094184a0b6ed6822d1335a2bfb9f7e5feda384341"
+    },
+    "flow::the_flow_flags_refuse_what_a_flow_cannot_be_asked": {
+      "sha256": "699359774a290a967e364287a0c036e20ee4cb1c3252ee4a9deddd0d4c860888",
+      "commands": [
+        "cmd-channel-queue",
+        "cmd-flow",
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-reply",
+        "cmd-start",
+        "cmd-surface",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "The source's explicit argv alternatives for the flow flags refuse what a flow cannot be asked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "b9bf17912ad1f5244f26c49094184a0b6ed6822d1335a2bfb9f7e5feda384341"
+    },
+    "harness::a_failing_tests_own_failure_survives_a_teardown_that_also_fails": {
+      "sha256": "ffd628a267b9b7e056d2676fb321088227fd68f810f905b589877220a8267793",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_parked_run_is_read_as_driven": {
+      "sha256": "ede6961adc8286256d5eb44fb72ed6f55588c9373d45213e744352802f23316e",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae",
+      "commands": [
+        "cmd-adopt",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "with_parked is called with status/runs argv from the explicit loop and with adopt --detach; adoption must refuse while the identical live driver still owns the parked run."
+    },
+    "harness::a_worlds_teardown_ends_a_descendant_whose_double_has_already_exited": {
+      "sha256": "1e3ebf2f2abc6638438efdeba76119b58bd061a95497db1cdf41185b8752e65b",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_ends_a_double_it_started_and_the_descendant_that_double_started": {
+      "sha256": "cd073c9af689deb4b48d8b11add97b151370009455f366a89204407dddecda5e",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_ends_a_process_ps_lists_in_a_state_it_could_not_classify": {
+      "sha256": "7fe7246fbf4124ab1f28c5474bbb4a6848ad12f0386b7d42dbc1ffa999ef697e",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_ends_more_descendants_than_its_first_look_has_room_for": {
+      "sha256": "7358b4f131691cffb0a27086dfb300678bbb35cc9f844812116188a2e807cbc9",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_given_a_patience_it_cannot_keep_fails_saying_so": {
+      "sha256": "62b165e358fdaee422463531786ab8f30dcf640a87526de31121c7309d51a422",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_names_a_killed_descendant_it_could_not_wait_out": {
+      "sha256": "cfd67388aef19abcea0a3cc7d78bd5787a4228f4b3d0ff472d2e04d33803597a",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_refuses_a_process_list_it_cannot_read": {
+      "sha256": "f8b915fd40260e65be3efb7a9f7707d002775a95296ad57813c09237d6073294",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_that_cannot_list_processes_fails_saying_why": {
+      "sha256": "85ee497e9ec6be9c65d092949d1b226bb1db716e4e600328483a316e17f0e8e6",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_that_runs_out_of_patience_names_what_it_left_running": {
+      "sha256": "582e6be43a6fa61f4b395f2255c87725e2eb760e8c2262a72d4892ba8b2b0362",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::a_worlds_teardown_waits_for_a_descendant_still_exiting_after_its_double_is_gone": {
+      "sha256": "7e044a808d212e755b399847e7c613f420257f0f769d9d79b999923bd60d1744",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::the_harness_double_draws_its_stream_as_the_released_cli_does": {
+      "sha256": "325e114ccd68ca981aaae92d2767ee3d4f4e07a896ac5ac831d32f2d0c8b9d30",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::the_harness_double_layers_a_repeated_config_in_order": {
+      "sha256": "4240d554e9887937148d1f0ba11e1290f12f61b7424c9a34ebe31c262263f423",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::the_harness_double_refuses_a_malformed_turn_gates_line": {
+      "sha256": "3f81a9c3fc3283eeb032e1471d2a13b4ebb99d49fdc2c8625f305cac8a00711d",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "harness::the_harness_double_selects_the_chain_an_extends_parent_declares": {
+      "sha256": "3fc72fe22e4798b9ce9104ddd6c28ebc7f4a4b95a0062a46675ebfb639e665ca",
+      "commands": [],
+      "reason": "The assertions exercise the real harness double, its configuration or World teardown and descendant cleanup. No onepipeline parser or routing result is asserted.",
+      "kind": "support",
+      "moduleSha256": "5f85226523f9744865ea5e265bb15740135f9bd8d4ca744e4089dacfbc36bcae"
+    },
+    "host_view::a_journal_past_the_bound_is_never_opened_and_a_run_it_leaves_undecided_is_refused": {
+      "sha256": "5da665a26988be1a41051c1a376e7abbd38ccbb077fee6816d936b7e703dc46d",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "a journal past the bound is never opened and a run it leaves undecided is refused reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::a_legacy_start_token_a_second_off_is_held_and_two_seconds_off_is_unproven": {
+      "sha256": "6249178c6445881754dc9cbc47bd72b10810fa07582d1b37134e26a10b45d991",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "a legacy start token a second off is held and two seconds off is unproven reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held": {
+      "sha256": "3550d3d49d01ff2f1ba9b02a63b5a7f3563dcd6732845b3e697e0b9bef0a9270",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "a live dispatch recorded with a legacy ps start token is held reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::a_reading_that_cannot_be_written_is_refused_not_panicked_on": {
+      "sha256": "f431a8352922f0c8257629a807ed06844ca0462ae6f9c8c44fccd23149f310c4",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "a reading that cannot be written is refused not panicked on reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::a_registry_less_runs_last_stop_decides_whether_its_dispatch_is_gone": {
+      "sha256": "1d21f743fa163a9ae38262a8af36eb260427f98a8060e78d27c5609fbc4a3aa0",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "a registry less runs last stop decides whether its dispatch is gone reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::generator": {
+      "sha256": "80cb6e3a7cfd65757b4b6b821285a95390e23e54598a304c6ce18e00a6ab4a2b",
+      "commands": [],
+      "reason": "cmd_on starts node with GENERATOR; this helper generates fixtures and does not invoke a onepipeline command.",
+      "boundary": "external",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::the_budget_measurement_records_what_each_scaling_read_opened": {
+      "sha256": "db2b0fa7e67e2fee2ba2639d045369dbd26c6f3cfd95fb8731815e3272e1afdb",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "the budget measurement records what each scaling read opened reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "host_view::the_host_view_answers_a_host_sized_root_steady_cold_and_steady_again": {
+      "sha256": "01e9538596623dfb26949aa5423ba85921d0019130f5a3758089b3e0a71da112",
+      "commands": [
+        "cmd-host"
+      ],
+      "reason": "the host view answers a host sized root steady cold and steady again reads the host command (Fixture::reading/measure invoke the host-view measurement boundary). Node fixture generation and ps commands are support inputs, not CLI routes.",
+      "moduleSha256": "4d4829c2f55854f4733ca1b9a87e182e7a8703c9cdc853c2b78a7c35106a6768"
+    },
+    "journal_scaling::a_run_in_the_shape_an_older_build_left_is_adopted_with_its_history_intact": {
+      "sha256": "2e36cdde91aa5adef7210eaa980cd6387fb5ff26f1d324313d7188b30db7f41f",
+      "commands": [
+        "cmd-adopt",
+        "cmd-observer-view",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-stop",
+        "cmd-transcript"
+      ],
+      "reason": "The source's explicit argv alternatives for a run in the shape an older build left is adopted with its history intact are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "44bbef512389a92e6e022682396787ab1a598d181516e695a93a66590a0afb27"
+    },
+    "landing::a_render_asks_the_landing_read_once_per_node_it_prints_and_does_nothing_else_per_node": {
+      "sha256": "fb78473f128190fb609a4f460706ae7ad03c9517ebc95c546a6b9850b43bbaad",
+      "commands": [
+        "cmd-adopt",
+        "cmd-goals",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a render asks the landing read once per node it prints and does nothing else per node are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "c6782f6e13f8f1f855698dde8e93442b82467ed5525f93bf8aa42a8011e459d1"
+    },
+    "lifecycle::a_dispatch_that_died_rather_than_failing_its_task_settles_naming_what_killed_it": {
+      "sha256": "cf2a1d339d9df88474d6c86fedf10794fcfd35522a8253fd8c2a2e0087cad15b",
+      "commands": [
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a dispatch that died rather than failing its task settles naming what killed it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4b180f5302b11d98c319bdfec783bbe875a6a923973be926a8a6fb118fcfb5a2"
+    },
+    "lifecycle::a_dispatch_whose_member_died_is_settled_from_the_classification_its_producer_published": {
+      "sha256": "e9130ca137bc3be61dd8bbb26f5b8f95452fb53e3ce951dee395bb6fbf5791bc",
+      "commands": [
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a dispatch whose member died is settled from the classification its producer published are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4b180f5302b11d98c319bdfec783bbe875a6a923973be926a8a6fb118fcfb5a2"
+    },
+    "linear_writeback::a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projections": {
+      "sha256": "f363567824a9412eecda6a47b2e2d2f8044ee5994d0f552ba9e5de32befbcb1e",
+      "commands": [],
+      "reason": "a private linear home copied through the linked store keeps its public projections drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion.",
+      "kind": "library",
+      "moduleSha256": "a6ad79b20b5bccd7976ad022976701b4a4ec7b1b7a201e30a974fed0e13b21e3"
+    },
+    "linear_writeback::from_the_launch_directory": {
+      "sha256": "85327126b09a4ad7e9e267f8b0e6f402e7925d432bd248e426fa78d17e41d0d1",
+      "commands": [],
+      "reason": "This helper forwards parameter 2 unchanged to the selected command; inspect the calling argv rather than its historical suite label.",
+      "forward": {
+        "argument": 2,
+        "prefix": []
+      },
+      "moduleSha256": "a6ad79b20b5bccd7976ad022976701b4a4ec7b1b7a201e30a974fed0e13b21e3"
+    },
+    "listing::a_host_sized_runs_root_lists_in_seconds_and_ten_times_the_journal_bytes_barely_moves_it": {
+      "sha256": "84ed1b489170789e9d2d1464e3c452609274a49da826a3556f9f5af9dae22565",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a host sized runs root lists in seconds and ten times the journal bytes barely moves it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "9ddea6c0341278249cfc799450e8b4916e4be84c3993ba982514a2104ccb113c"
+    },
+    "listing::a_listing_groups_runs_by_project_newest_first_and_keeps_every_run_line_as_it_was": {
+      "sha256": "9afc01498dd58a24834a0da9c21f213deb919f7b5dfe25bd09957d4261e7554f",
+      "commands": [
+        "cmd-goals",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-surface"
+      ],
+      "reason": "The source's explicit argv alternatives for a listing groups runs by project newest first and keeps every run line as it was are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "9ddea6c0341278249cfc799450e8b4916e4be84c3993ba982514a2104ccb113c"
+    },
+    "listing::listed": {
+      "sha256": "b2a32eb79dab8cf6e421d418b457fc51299e0c92c8681552f2939d1a7cc6440d",
+      "commands": [
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "LISTINGS contains runs, runs --mine and status; each successful listing is collected without changing its assertions.",
+      "moduleSha256": "9ddea6c0341278249cfc799450e8b4916e4be84c3993ba982514a2104ccb113c"
+    },
+    "listing::no_listing_command_opens_a_run_store_that_is_there": {
+      "sha256": "e7d7030b3cb2039f2913fcc2ba7f4265d302dadbfa201e058aa334b05b255b1a",
+      "commands": [
+        "cmd-results",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for no listing command opens a run store that is there are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "9ddea6c0341278249cfc799450e8b4916e4be84c3993ba982514a2104ccb113c"
+    },
+    "listing::the_listing_tells_a_driver_this_host_can_prove_is_gone_from_one_merely_quiet": {
+      "sha256": "0ca797480b97bb8d95ee4168c2da9dcd73a8758fb8b98a8d8574ebc073d92810",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-stop"
+      ],
+      "reason": "The source's explicit argv alternatives for the listing tells a driver this host can prove is gone from one merely quiet are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "9ddea6c0341278249cfc799450e8b4916e4be84c3993ba982514a2104ccb113c"
+    },
+    "live_edit::a_command_after_a_refusal_is_still_evaluated_and_answered_on_its_own": {
+      "sha256": "f397e66f84ad33a675428caf5464513a2f225d855e47d3aff94241a4a806e866",
+      "commands": [
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a command after a refusal is still evaluated and answered on its own are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "81729dd837cc064c378f68576fe808b58afa94f6caa2535681f1238da0215d91"
+    },
+    "live_edit::an_envelope_whose_second_command_refuses_leaves_no_record_of_any_of_it": {
+      "sha256": "be87a85a0fb95496e16a061c9eb5794dbdd236ff556e2a5b278761a42e5d6680",
+      "commands": [
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an envelope whose second command refuses leaves no record of any of it are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "81729dd837cc064c378f68576fe808b58afa94f6caa2535681f1238da0215d91"
+    },
+    "malformed_envelopes::a_waiting_approval_reparented_onto_unfinished_work_waits_for_it_again": {
+      "sha256": "27ef48747a971b71d7ba5faeca1407da51a79f144988c08b7f2f2752695740d2",
+      "commands": [
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a waiting approval reparented onto unfinished work waits for it again are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "cab316d224d13f294d72f15b6f7b5e9b19ba57c0dabf1df8e6757969583dbd6a"
+    },
+    "manager_landings::a_branch_acknowledgement_and_a_landing_registration_never_interleave": {
+      "sha256": "72b63503898910d2bfb16c50041135b13fbdc3a7bb103b917b0baefa248bdc6f",
+      "commands": [
+        "cmd-repo-recover",
+        "cmd-stop-guard",
+        "cmd-unpublished"
+      ],
+      "reason": "a branch acknowledgement and a landing registration never interleave passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_dead_landings_unreadable_operation_record_refuses_rather_than_dropping_its_evidence": {
+      "sha256": "02f14a968b29e70f694cb7795181039b7df88e38831ee8d488b3e997449f28a7",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "a dead landings unreadable operation record refuses rather than dropping its evidence passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_dead_landings_unreadable_operation_stream_is_named_in_its_death": {
+      "sha256": "a3902457deb89834b513fdb7ecf190eff8c4c168f47c1669b38daf58e3f73bf5",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "a dead landings unreadable operation stream is named in its death passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_hosted_landing_wakes_its_owner_on_opened_and_settled_checks_and_not_on_their_progress": {
+      "sha256": "4b1556039d48fee5a2bb5c81f6309d9aa2b57c408932869a0b6782a767a1b1eb",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-watch"
+      ],
+      "reason": "a hosted landing wakes its owner on opened and settled checks and not on their progress passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landing_in_a_longer_flow_keeps_its_own_liveness_beside_the_flows": {
+      "sha256": "201a569027dc3feb6f5b185126cb2f060d52451ed09085c1b6ddf44478379c79",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "a landing in a longer flow keeps its own liveness beside the flows passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landing_in_another_sessions_flow_is_refused_and_does_no_work": {
+      "sha256": "94a40f7a834f5d9e2e45d64875cc98b692309f6a24f086731ee9fbdb60e12acf",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch"
+      ],
+      "reason": "a landing in another sessions flow is refused and does no work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landing_is_owed_a_watch_that_wakes_within_the_wake_budget": {
+      "sha256": "d77d9b9f528706f2cd7d6e42092fb5c6c658b73667dcb3404fa8100a429f38a5",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-stop-guard",
+        "cmd-watch"
+      ],
+      "reason": "a landing is owed a watch that wakes within the wake budget passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landing_killed_before_its_operation_is_written_dead_as_coarse_work": {
+      "sha256": "d7d3b0d12c7104501522bbf161e7b7a7295c0c21d23412eda2077f9b87ee8c98",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "a landing killed before its operation is written dead as coarse work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landing_reads_the_managers_checkout_without_taking_its_index_lock": {
+      "sha256": "f972a0d5202430eef0f20664a1d0061f21beb3dcadfb5df11d59b81dffe5a304",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "a landing reads the managers checkout without taking its index lock passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_landings_progress_and_the_flows_own_conditions_are_each_reported_once": {
+      "sha256": "c06d6a46e605ed3e44cc3f6b223f43d14222b753ab2d681a5b3a4edc833ccebf",
+      "commands": [
+        "cmd-flow",
+        "cmd-next",
+        "cmd-publish-branch",
+        "cmd-start",
+        "cmd-surface",
+        "cmd-watch"
+      ],
+      "reason": "a landings progress and the flows own conditions are each reported once passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_live_landing_refuses_every_acknowledgement_that_would_hide_it_across_owners": {
+      "sha256": "77eaa391716c58b45827123b989a367fea41ad305cf30a31a0e89b68979e0f28",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-publish-branch",
+        "cmd-start",
+        "cmd-stop-guard",
+        "cmd-unpublished",
+        "cmd-unwatched"
+      ],
+      "reason": "a live landing refuses every acknowledgement that would hide it across owners passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_registration_that_cannot_be_kept_starts_no_work": {
+      "sha256": "5ef147c7775f7ecff2fac5cea7ad663016ce9ce89fb7ae5b2f58aacb14e376e4",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "a registration that cannot be kept starts no work passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_relay_that_fails_inside_a_longer_flow_is_its_landings_blocker_and_the_flow_goes_on": {
+      "sha256": "1c3b63a1fddc5fe3e2ab42d19dd787113754a9da02fc09ad8d2be6703bae329f",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "a relay that fails inside a longer flow is its landings blocker and the flow goes on passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_required_check_failing_wakes_the_owner_while_its_other_checks_are_still_pending": {
+      "sha256": "2d34162fdee160bfcdbd10558c3c5d70e7544409b457fc0611adaf12fc2cfb2c",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-watch"
+      ],
+      "reason": "a required check failing wakes the owner while its other checks are still pending passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::a_run_acknowledgement_and_a_landing_registration_never_interleave": {
+      "sha256": "c8eb837e9672f48d0dbfa91f84903533402f08be9bf5c666011eee20b9fa979c",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-start",
+        "cmd-unwatched"
+      ],
+      "reason": "a run acknowledgement and a landing registration never interleave passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::an_integration_train_records_local_progress_and_wakes_its_owner_on_the_gates_refusal": {
+      "sha256": "f869dbc0e07af6e93640106bb682c352d52ce97a0c52b92be8fe613ad18ec24a",
+      "commands": [
+        "cmd-integrate",
+        "cmd-watch"
+      ],
+      "reason": "an integration train records local progress and wakes its owner on the gates refusal passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::an_operation_that_cannot_be_prepared_forwards_nothing": {
+      "sha256": "e818d269788ea3a7b0c3ac262afd2ceedec6e9ff3db41bf372cda19ed3d1219f",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "an operation that cannot be prepared forwards nothing passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::an_operation_whose_id_cannot_be_kept_forwards_nothing": {
+      "sha256": "e286cddf64caccc236f7f9a5610510410822ae2a8519652e3bbd37e81fbcf2c6",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "an operation whose id cannot be kept forwards nothing passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::an_operators_own_optional_locks_setting_is_kept": {
+      "sha256": "96cc38f732d4401510a9b50e9d8a55b9d81338fdcc3260dcc74c1d1177769bff",
+      "commands": [
+        "cmd-publish-branch"
+      ],
+      "reason": "an operators own optional locks setting is kept passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::each_verb_held_mid_operation_is_supervised_and_finishes_under_its_owners_watch": {
+      "sha256": "a7cb896bc2efb63fd934db9d0eb6b735174a2253b87e4ae81e5a255152ef5024",
+      "commands": [
+        "cmd-flow",
+        "cmd-integrate",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-stop-guard",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "each verb held mid operation is supervised and finishes under its owners watch passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::each_verb_killed_mid_operation_is_reported_dead_and_closed_by_its_owner": {
+      "sha256": "8eae7734e3b47221a33f3b259a9995fde472eb6cace9c4f60a58cb5292598abf",
+      "commands": [
+        "cmd-flow",
+        "cmd-integrate",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-stop-guard",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "each verb killed mid operation is reported dead and closed by its owner passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::each_verb_refused_by_onevcs_ends_refused_and_owes_closure": {
+      "sha256": "427bfab1eddccd9e220b30609bb366863385eb2761ae23d1d816ce66e58ee5d1",
+      "commands": [
+        "cmd-integrate",
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-stop-guard",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "each verb refused by onevcs ends refused and owes closure passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::integrate_answers_in_onevcs_integrates_own_words_and_status": {
+      "sha256": "98b1cf2023da92eb9db5d61ce99b064edc5bc2a9cecf2a1c6fa4c17f842ef015",
+      "commands": [
+        "cmd-integrate"
+      ],
+      "reason": "integrate answers in onevcs integrates own words and status passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::landing_progress_is_a_flow_watchs_condition_to_name_or_leave_out": {
+      "sha256": "5b34d0e722dcdcfaad7ebdc851364fe6fa631567b9d023480fd001e306145053",
+      "commands": [
+        "cmd-flow",
+        "cmd-publish-branch",
+        "cmd-start",
+        "cmd-watch"
+      ],
+      "reason": "landing progress is a flow watchs condition to name or leave out passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::monitor_flow_resumes_from_its_own_cursor": {
+      "sha256": "61ad443b01471540ea6f38bba68de57fc8308fb3a2178c7b9d25305bd3fad2eb",
+      "commands": [
+        "cmd-flow",
+        "cmd-observer-view",
+        "cmd-publish-branch"
+      ],
+      "reason": "monitor flow resumes from its own cursor passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::publish_branch_is_owned_before_it_drafts_and_its_watch_wakes_on_milestones_alone": {
+      "sha256": "58387c6b1f92f667bfd382ac0565081f450d2bdfdbd6a7cdf7c79b4615964eea",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-publish-branch",
+        "cmd-stop-guard",
+        "cmd-watch"
+      ],
+      "reason": "publish branch is owned before it drafts and its watch wakes on milestones alone passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::repo_recover_is_owned_before_it_drafts": {
+      "sha256": "765d9682b1143f4bbcc97035c6cc4e39801d7c9e63bc1a57b6f10fd4a9cd72ec",
+      "commands": [
+        "cmd-repo-recover",
+        "cmd-watch"
+      ],
+      "reason": "repo recover is owned before it drafts passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::spawn": {
+      "sha256": "464d005cb35db94af448a05a0ea9f3e3ddd6be53e7cbc8e54b52cd813a5a81b7",
+      "commands": [],
+      "reason": "This helper forwards parameter 2 unchanged to the selected command; inspect the calling argv rather than its historical suite label.",
+      "forward": {
+        "argument": 2,
+        "prefix": []
+      },
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::three_hosted_landings_at_once_each_relay_their_whole_check_sequence_to_their_owner": {
+      "sha256": "2b5bd032f1330ed7d6f5ce86880606fba9e5c17a85e5b30529e18d774ffff3a2",
+      "commands": [
+        "cmd-observer-view",
+        "cmd-publish-branch",
+        "cmd-watch"
+      ],
+      "reason": "three hosted landings at once each relay their whole check sequence to their owner passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "manager_landings::three_managers_landing_at_once_are_each_supervised_alone": {
+      "sha256": "1ed14d413f39f829131e7d6265ea644ebbae0761564ff7021f33498370309161",
+      "commands": [
+        "cmd-integrate",
+        "cmd-publish-branch",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "three managers landing at once are each supervised alone passes the listed landing argv through Started::spawn or Verb::start. The watch/monitor/guard reads observe that same live operation's registration, progress, failure or ownership; retain those causal assertions with their producer, rather than replace them with a prebuilt sidecar.",
+      "kind": "integration",
+      "moduleSha256": "9c336cda6b739c494efa5e587c36d384424d93da47acd0c153f81a466bbd6dbd"
+    },
+    "multi_source::a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan": {
+      "sha256": "bac434dbd7253a918c13fe47c69954dcbaed0bb2e75c3597dd8088a4d61a6f8d",
+      "commands": [],
+      "reason": "a private drafts document is filed under the boards copy of its plan drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion.",
+      "kind": "library",
+      "moduleSha256": "7aebbdcb576b29ccf8456488afb831521957e17f1ff5cc31b2158a4b9ef1419c"
+    },
+    "node_validator::live_run": {
+      "sha256": "1046d8741dee0d38062a0f999b4ed528257033a47ecc8a092da226ce6be21035",
+      "commands": [
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The borrowed argv comes from the start-prefixed Vec<String>; the until closure polls status for the held node to be running.",
+      "moduleSha256": "ad71f5ebc5e0a31e8bcd61c9b199fef6e77514e4a1db57d1ca05ce033da92806"
+    },
+    "node_validator::the_flag_beats_the_environment_which_beats_the_config_and_naming_none_runs_nothing": {
+      "sha256": "4c708e1d89331219653f014dc178c6548abdea2d95bee41ef4ef841d0e68be91",
+      "commands": [
+        "cmd-reply",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for the flag beats the environment which beats the config and naming none runs nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "ad71f5ebc5e0a31e8bcd61c9b199fef6e77514e4a1db57d1ca05ce033da92806"
+    },
+    "out_of_band::a_green_branch_landed_on_a_team_repository_reports_the_review_draft_word": {
+      "sha256": "ab39213b87517dc16358e9aa6f4271038112b05c07e6fff953bd09a4f0a89c04",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover"
+      ],
+      "reason": "The source's explicit argv alternatives for a green branch landed on a team repository reports the review draft word are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "063ea09a938043ae75b4f0ab787e9ca02d7497a8b687fbe3f5a0a3d7470f57c2"
+    },
+    "out_of_band::a_named_term_scope_reaches_the_landing_it_fronts": {
+      "sha256": "60aa81197081cddba3d2cc3b4763e0e7adef4d5f286b3ab192e8ab91c8700d37",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover"
+      ],
+      "reason": "The source's explicit argv alternatives for a named term scope reaches the landing it fronts are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "063ea09a938043ae75b4f0ab787e9ca02d7497a8b687fbe3f5a0a3d7470f57c2"
+    },
+    "out_of_band::an_unusable_bound_is_refused_before_a_landing_pushes_or_writes_to_the_host": {
+      "sha256": "a32256f2f962d4dfd04a79d43e2f53d123bfd8dc06493517eab41e7c4d0bc252",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover"
+      ],
+      "reason": "The source's explicit argv alternatives for an unusable bound is refused before a landing pushes or writes to the host are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "063ea09a938043ae75b4f0ab787e9ca02d7497a8b687fbe3f5a0a3d7470f57c2"
+    },
+    "out_of_band::the_synopsis_the_register_proposes_is_the_one_the_binary_prints": {
+      "sha256": "b25c84abe1aee0a61e7c64ec56afe1e57c491389bf68af8d3bba55bbc8da18a9",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover"
+      ],
+      "reason": "The source's explicit argv alternatives for the synopsis the register proposes is the one the binary prints are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "063ea09a938043ae75b4f0ab787e9ca02d7497a8b687fbe3f5a0a3d7470f57c2"
+    },
+    "profiling::a_fixtures_nested_git_and_file_work_is_its_own_and_not_the_fixtures": {
+      "sha256": "2288f70225cd160d1f8a86743608afa4280b0197bf1577fea030f3717bc83526",
+      "commands": [],
+      "reason": "a fixtures nested git and file work is its own and not the fixtures asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "profiling::a_journeys_processes_git_commands_and_sleeps_are_each_counted_once": {
+      "sha256": "09a73e0d9636dc42591f227e9390a647f4c5f40996aa578b3ea6c4cd2f5502f4",
+      "commands": [],
+      "reason": "a journeys processes git commands and sleeps are each counted once asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "profiling::a_process_waited_on_is_counted_once_and_held_for_the_wait": {
+      "sha256": "d9af979aaa170f1be7ea81324fef7313d70721058072b659b86270f8b4695fc3",
+      "commands": [],
+      "reason": "a process waited on is counted once and held for the wait asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "profiling::a_profiled_journey_builds_a_fixture_and_a_binary_then_polls_and_writes": {
+      "sha256": "1a6fd5a3117aea0adcdc6707c239d173e06e39c3f7a2d3ede48fcaef9c7a96e3",
+      "commands": [],
+      "reason": "a profiled journey builds a fixture and a binary then polls and writes asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "profiling::a_status_and_a_program_named_by_its_path_are_counted_as_what_they_are": {
+      "sha256": "ac1ad4a897909508385279f8247663ae5729a74daea267aebcddf4a78169b6ab",
+      "commands": [],
+      "reason": "a status and a program named by its path are counted as what they are asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "profiling::nested_work_on_a_thread_the_test_started_is_counted_once": {
+      "sha256": "a1aef29607a65630289bebd98d33e722f4b6df255b37f5db24fcc54c58d54481",
+      "commands": [],
+      "reason": "nested work on a thread the test started is counted once asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "b42d3f0351f7692da8c5447fee6fb123f243ebfa0855520496adcc6f46c9d249"
+    },
+    "publication_boundary::a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_linked_store": {
+      "sha256": "c17bed7c3b4a260946f1a77a2c3c78598d3772fc63eeab98063778df8a3413e1",
+      "commands": [],
+      "reason": "a private plan whose public task carries an id anchor copies through the linked store drives the embedding executor or linked-store API and asserts its recorded effects; no CLI command is executed for the assertion.",
+      "kind": "library",
+      "moduleSha256": "15bf2df59ddb63305035024442401cb82be1a4a5805017d81e0552cb07f12115"
+    },
+    "publication_boundary::store_cli_command": {
+      "sha256": "99284fa19c67264d36f66e2e370d1d389df3667af8f3ce1b4ad307120789bf99",
+      "commands": [],
+      "reason": "The empty world.cmd constructs an environment template only; output is read from onetaskgraph_binary, never that unexecuted template.",
+      "boundary": "external",
+      "moduleSha256": "15bf2df59ddb63305035024442401cb82be1a4a5805017d81e0552cb07f12115"
+    },
+    "publication_boundary::store_cli_create": {
+      "sha256": "49b6b49cc3749a3aa65188d3b617434fb1415067a41f551cfbee5ead6b3b8935",
+      "commands": [],
+      "reason": "The empty world.cmd constructs an environment template only; output is read from onetaskgraph_binary, never that unexecuted template.",
+      "boundary": "external",
+      "moduleSha256": "15bf2df59ddb63305035024442401cb82be1a4a5805017d81e0552cb07f12115"
+    },
+    "publish_preserve::the_worker_file_check_refuses_a_missing_worktree_argument_without_panicking": {
+      "sha256": "c3fc9b1c55fafc42cd43de421c52ce5b1c372454d3c4a602332bacbca236fcd8",
+      "commands": [],
+      "reason": "the worker file check refuses a missing worktree argument without panicking asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "60c16420670f08bcbdf774014d558478a1dc5310a41ed538a5d63d63358828f5"
+    },
+    "recorded_channel::a_channel_with_no_command_queue_reads_as_the_release_that_wrote_it_read_it": {
+      "sha256": "836f87311e56669c9fc80c4d02d8f2410cb8c785f164a1699f2d323c801d9396",
+      "commands": [
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "answers_over removes queue.json, runs status, runs, results and next twice on the same recorded legacy channel, and compares both answers and the channel files left behind. Retain this reopen/consumption sequence: independent records cannot prove next never hands out a pending item twice.",
+      "kind": "integration",
+      "moduleSha256": "0b4490fec628c3e32ee6f5bb3a304712c6b20c378c4cba9827fd9168aca4f02e"
+    },
+    "recorded_channel::a_finished_runs_channel_reads_as_the_release_that_wrote_it_read_it": {
+      "sha256": "70afaa8a87b3e4b0f637dae59ce7d61d15fb061592a50bb66311d32e2446e447",
+      "commands": [
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "answers_over removes queue.json, runs status, runs, results and next twice on the same recorded legacy channel, and compares both answers and the channel files left behind. Retain this reopen/consumption sequence: independent records cannot prove next never hands out a pending item twice.",
+      "kind": "integration",
+      "moduleSha256": "0b4490fec628c3e32ee6f5bb3a304712c6b20c378c4cba9827fd9168aca4f02e"
+    },
+    "recorded_channel::a_pending_blocking_surface_is_neither_lost_nor_handed_out_twice_after_a_reopen": {
+      "sha256": "0271c2380941233d7796226ce4ef71d32fd3127dce0e53ef6db958bf81da5462",
+      "commands": [
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "answers_over removes queue.json, runs status, runs, results and next twice on the same recorded pending channel, and compares both answers and the channel files left behind. Retain this reopen/consumption sequence: independent records cannot prove next never hands out a pending item twice.",
+      "kind": "integration",
+      "moduleSha256": "0b4490fec628c3e32ee6f5bb3a304712c6b20c378c4cba9827fd9168aca4f02e"
+    },
+    "recorded_channel::the_pending_surface_the_bus_recorded_is_neither_lost_nor_handed_out_twice_after_a_reopen": {
+      "sha256": "844e6ebeda69741133fcec713ae3acf36e6d3d8584d0ae743c928eb75aeb537a",
+      "commands": [
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "answers_over removes queue.json, runs status, runs, results and next twice on the same recorded pending channel, and compares both answers and the channel files left behind. Retain this reopen/consumption sequence: independent records cannot prove next never hands out a pending item twice.",
+      "kind": "integration",
+      "moduleSha256": "0b4490fec628c3e32ee6f5bb3a304712c6b20c378c4cba9827fd9168aca4f02e"
+    },
+    "recorded_channel::updates_nobody_has_read_are_counted_and_handed_out_as_the_release_did": {
+      "sha256": "f5bc43188863b3e6893b580b16c13f1c3302ba069d508e52877114d8f019d75b",
+      "commands": [
+        "cmd-next",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "answers_over removes queue.json, runs status, runs, results and next twice on the same recorded legacy channel, and compares both answers and the channel files left behind. Retain this reopen/consumption sequence: independent records cannot prove next never hands out a pending item twice.",
+      "kind": "integration",
+      "moduleSha256": "0b4490fec628c3e32ee6f5bb3a304712c6b20c378c4cba9827fd9168aca4f02e"
+    },
+    "recorded_support::answered": {
+      "sha256": "5436abcfd3abff3e2362be898a3e172b24b66dbf72f0166663a5996bbd11716f",
+      "commands": [],
+      "reason": "This helper forwards parameter 2 unchanged to the selected command; inspect the calling argv rather than its historical suite label.",
+      "forward": {
+        "argument": 2,
+        "prefix": []
+      },
+      "moduleSha256": "480dd6e01ad882221f422090d969a193c741ec5f40495ffac0272765de75f965"
+    },
+    "retirement::a_died_dispatchs_branch_a_pass_retired_is_named_as_retired": {
+      "sha256": "b4a8b9aa051de5ec9e211ee52129eda325319dede1fd60bc07cdd423f3a858ef",
+      "commands": [
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-supersessions"
+      ],
+      "reason": "The source's explicit argv alternatives for a died dispatchs branch a pass retired is named as retired are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "798a3bc81253df0ffdfd81a030338b88519eec0c7e30d4386bb89f7fae6c093a"
+    },
+    "retirement::the_backfill_verb_answers_and_records_from_the_journal_alone": {
+      "sha256": "740b7c241b4ed1d7a6ec043c2dada513147a93b70916c3f9fad49588e0ea628b",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-supersessions"
+      ],
+      "reason": "The source's explicit argv alternatives for the backfill verb answers and records from the journal alone are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "798a3bc81253df0ffdfd81a030338b88519eec0c7e30d4386bb89f7fae6c093a"
+    },
+    "review_reply::both_views_on_both_hosts_name_the_rework_and_commits_that_answered_and_the_decline": {
+      "sha256": "ecb75b67984e57af14cea88ce6e4b70dc1d414cde704d1c58c464649abfa76b4",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for both views on both hosts name the rework and commits that answered and the decline are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "39bdd88ebadf4b7410742541349e62a3c6d8df244973505e9cb2b99eee208180"
+    },
+    "review_round::a_second_onevcs_read_of_an_identity_runs_beside_one_held_inside_its_clone": {
+      "sha256": "bf0ede31bdb02e0e1c16ab73bbf83e09640fed67dd86477b679783cf9892859e",
+      "commands": [],
+      "reason": "a second onevcs read of an identity runs beside one held inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::a_session_close_waits_for_an_onevcs_read_working_inside_its_clone": {
+      "sha256": "d64ecc4635c9ba4a0d358728f7d989441eed127693298a581db1c7df740d40df",
+      "commands": [],
+      "reason": "a session close waits for an onevcs read working inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_answers_with_the_real_gits_failing_exit_code": {
+      "sha256": "0778f35e314d0c0d2be78e89b041e59a28c7ef19fcb83a4815167bf11fb194dd",
+      "commands": [],
+      "reason": "held git answers with the real gits failing exit code asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_fails_when_the_real_git_is_killed_by_a_signal": {
+      "sha256": "beccb23516a2c22c8576cf934b7adbe0ac90860c43935673f1117ab1e279774a",
+      "commands": [],
+      "reason": "held git fails when the real git is killed by a signal asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_gives_up_a_hold_whose_control_directory_is_removed": {
+      "sha256": "a7a96764534d699818917e6554f6544f3b9346bc2be26a847933e6df11f87e95",
+      "commands": [],
+      "reason": "held git gives up a hold whose control directory is removed asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_holds_a_git_that_names_the_clones_git_directory_from_outside": {
+      "sha256": "8782c575f215525d72c7cdcfdf6d1d67d426f278724be2ca9da5f3bee7477305",
+      "commands": [],
+      "reason": "held git holds a git that names the clones git directory from outside asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_holds_only_the_first_start_inside_its_clone": {
+      "sha256": "7c2bf03dd068fc5e45f42e142ffcbc296bbff29e454695ec8b0cac8e2d246793",
+      "commands": [],
+      "reason": "held git holds only the first start inside its clone asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::held_git_refuses_a_hold_whose_clone_does_not_resolve": {
+      "sha256": "34a20c2e61b4363d2f61d55cba258890f2a3d946b3441d546e77b7e39e1fdd0a",
+      "commands": [],
+      "reason": "held git refuses a hold whose clone does not resolve asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review_round::the_counted_git_counts_each_start_and_is_the_real_git_for_it": {
+      "sha256": "638396fe3a6c5f76f9ab9a7aae99d8c8f97fca0f474b14aa900db79d635c29a1",
+      "commands": [],
+      "reason": "the counted git counts each start and is the real git for it asserts the real support subprocess, counter or double contract. Binary --version invocations, where present, provide work to count; no parser/routing behavior is asserted.",
+      "kind": "support",
+      "moduleSha256": "2cff69910b337689f57e025d8c6b6449da0fa8465dfe3cdcf5e470072a14323f"
+    },
+    "review::refuses_unknown_or_foreign_runs_and_keeps_a_failed_repository_read_atomic": {
+      "sha256": "5d89258d5e4b4a4971261bd1cd87ac0ae4fdb8a0b4d6c3362d92eeb3945bcf7e",
+      "commands": [
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for refuses unknown or foreign runs and keeps a failed repository read atomic are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "e83c437f08188b4b8fe78303d9ee87fe1975ca931dcc26cf7c36685d0e530561"
+    },
+    "review::state_comes_from_current_host_replies_and_rework_provenance": {
+      "sha256": "97f719422ac3ba9792d3f6ac4966d95d10b278c91839c077d1081d07d1b92a2a",
+      "commands": [
+        "cmd-adopt",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-review",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for state comes from current host replies and rework provenance are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "e83c437f08188b4b8fe78303d9ee87fe1975ca931dcc26cf7c36685d0e530561"
+    },
+    "shutdown::a_forced_shutdown_asks_nothing_and_waits_for_nothing": {
+      "sha256": "f675ee257580b08d88cc4777b6d69281df25edbc29fb3af42e05f00b3f86941c",
+      "commands": [
+        "cmd-shutdown",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for a forced shutdown asks nothing and waits for nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "3c745538964502dc843d941a33bbe3eeb331fb5b3fbb2b2b44d039cd8d90ad58"
+    },
+    "shutdown::a_shutdown_names_exactly_one_scope_or_is_refused_before_it_signals_anything": {
+      "sha256": "a0ba1a82b5b1c2d16276f2c3b61e5e07e56ab74ef7b3b16ac837bd9a5ad7d870",
+      "commands": [
+        "cmd-shutdown",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for a shutdown names exactly one scope or is refused before it signals anything are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "3c745538964502dc843d941a33bbe3eeb331fb5b3fbb2b2b44d039cd8d90ad58"
+    },
+    "stop_guard::a_hook_rendering_asks_a_source_about_the_payloads_session_and_its_continuation_ends_the_turn": {
+      "sha256": "afbdefa838e2b49eaceca5193c2b1a06fcd5e7dfcd0ce3ceb522b57ab8322de6",
+      "commands": [
+        "cmd-stop-guard"
+      ],
+      "reason": "The source's explicit argv alternatives for a hook rendering asks a source about the payloads session and its continuation ends the turn are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "stop_guard::a_source_not_delivered_its_whole_input_refuses_the_stop_and_its_continuation_ends_the_turn": {
+      "sha256": "fb1b0a311be5e8942e01b05e45f65e58fc8e9033ecf4147d1b58218e3a9e8a13",
+      "commands": [
+        "cmd-stop-guard"
+      ],
+      "reason": "The source's explicit argv alternatives for a source not delivered its whole input refuses the stop and its continuation ends the turn are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "stop_guard::a_source_that_cannot_be_consulted_refuses_the_stop_naming_itself_and_never_passes": {
+      "sha256": "7152e3bbdaafe44aed7881953309b7a95b130d699650ca1a861e461f49bae505",
+      "commands": [
+        "cmd-stop-guard"
+      ],
+      "reason": "The source's explicit argv alternatives for a source that cannot be consulted refuses the stop naming itself and never passes are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "stop_guard::declared_sources_are_consulted_together": {
+      "sha256": "7ec7b3f8dd26a147e4c1ef56e683d1e35e3489e7d347b971a19a8fbdf8c59cbd",
+      "commands": [
+        "cmd-stop-guard"
+      ],
+      "reason": "The source's explicit argv alternatives for declared sources are consulted together are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "stop_guard::declared_sources_combine_with_the_verbs_own_verdict_and_continue_per_source": {
+      "sha256": "385efe9f7f63e1b1bac0136ce725fbdd99bd18c2dcf0eb795062245942c4ef9f",
+      "commands": [
+        "cmd-start",
+        "cmd-stop-guard",
+        "cmd-unwatched"
+      ],
+      "reason": "The source's explicit argv alternatives for declared sources combine with the verbs own verdict and continue per source are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "stop_guard::the_documented_claude_code_wiring_reads_real_stop_payloads_and_answers_its_decision_shape": {
+      "sha256": "5d42e90495fc4848733052ed71b3e3222ac91429b981907c014d4f6545ed04b9",
+      "commands": [
+        "cmd-start",
+        "cmd-stop-guard",
+        "cmd-unwatched"
+      ],
+      "reason": "The source's explicit argv alternatives for the documented claude code wiring reads real stop payloads and answers its decision shape are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "efafc98513c8e410dc1ccca5adae9aefda7e039769fed11242c576fb4113bdce"
+    },
+    "surface::a_command_outside_the_surface_is_a_usage_error": {
+      "sha256": "81f73e13ea2487e7451b1aebb1cb7736f64d42d6c3037b05746153f682b00e79",
+      "commands": [],
+      "reason": "a command outside the surface is a usage error asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::a_message_argument_and_a_message_file_cannot_both_be_given": {
+      "sha256": "505edda0979cfed8715958ad50ccb501c5e02ed15ae13ab4108ca961ec40ddad",
+      "commands": [],
+      "reason": "a message argument and a message file cannot both be given asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::a_missing_required_argument_is_a_usage_error": {
+      "sha256": "a61126270a37bc4f05d7dd4c7d36b03770ba9288aec922da515f4d4a14da4b58",
+      "commands": [],
+      "reason": "a missing required argument is a usage error asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::a_surface_with_nothing_to_say_is_refused_whichever_way_it_was_asked": {
+      "sha256": "50a852eeaa3e057b72e61343d8a7aa234e6d76925c73d67b944759e0b113d2ac",
+      "commands": [
+        "cmd-next",
+        "cmd-start",
+        "cmd-surface"
+      ],
+      "reason": "The source's explicit argv alternatives for a surface with nothing to say is refused whichever way it was asked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::a_verb_that_names_a_run_nobody_recorded_refuses_and_says_where_it_looked": {
+      "sha256": "da265f226eef09b50ec3ae3f3cec062b94abfc7ca53ba6bbbae56af3d0b7a0bc",
+      "commands": [
+        "cmd-adopt",
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-results",
+        "cmd-shutdown",
+        "cmd-status",
+        "cmd-stop",
+        "cmd-transcript"
+      ],
+      "reason": "The source's explicit argv alternatives for a verb that names a run nobody recorded refuses and says where it looked are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::attach_and_detach_cannot_both_be_asked_for": {
+      "sha256": "60ad7f2be9cf8371707cde4aef6c5cf09ba4c8e70957ed5b1ea3c6eea317e780",
+      "commands": [],
+      "reason": "attach and detach cannot both be asked for asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::channel_help_does_not_offer_the_retired_server_and_serve_is_unknown": {
+      "sha256": "c5bfd118b9e3f156dd487243563ea3a2a88851792ba44eb055422ee8f1e63705",
+      "commands": [],
+      "reason": "channel help does not offer the retired server and serve is unknown asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::every_command_the_contract_names_reaches_its_implementation": {
+      "sha256": "ce5a6baf72baeb706e9b11e012a3816574540074d51ff3dbd3a5deb07df6ba27",
+      "commands": [
+        "cmd-adopt",
+        "cmd-attest",
+        "cmd-goals",
+        "cmd-host",
+        "cmd-next",
+        "cmd-observer-view",
+        "cmd-reply",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-shutdown",
+        "cmd-start",
+        "cmd-status",
+        "cmd-stop",
+        "cmd-surface",
+        "cmd-telemetry",
+        "cmd-transcript"
+      ],
+      "reason": "every command the contract names reaches its implementation asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::help_lists_every_documented_command": {
+      "sha256": "5a12ce157e17c62be1e7914a777d872ab96f760e0ade9f55696d45da6cf3002a",
+      "commands": [],
+      "reason": "help lists every documented command asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "surface::version_reports_the_crate_version": {
+      "sha256": "6ca011c093236b90285275af761eb6847434c7bccc2a962d0e383a3fcbcd03f3",
+      "commands": [],
+      "reason": "version reports the crate version asserts the shipped binary's help/version, canonical route reachability or usage/conflict refusal; this is a parser/routing contract, not unresolved argv.",
+      "kind": "dispatch",
+      "moduleSha256": "ccc1a71b9887bf9aaca2b03b1fc34aaaf0ab26d2e7b75bdefaff5cb4bc16dad6"
+    },
+    "templates::a_lower_file_that_is_not_text_is_refused_as_that_and_never_as_not_found": {
+      "sha256": "d724f53100d5c1162890d2ecd34f71e4b6d403c7529be3e7597496c1462a832b",
+      "commands": [
+        "cmd-template-check",
+        "cmd-template-resolve"
+      ],
+      "reason": "The source's explicit argv alternatives for a lower file that is not text is refused as that and never as not found are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "4df23213ff5133b38e995f1341d0a29d43ad0dab32f9454848467c25b73fd99d"
+    },
+    "templates::otg_with": {
+      "sha256": "39ab8942fdb130e2b338d0cf774c0de3951a32891034ada2b1688a1d20141763",
+      "commands": [],
+      "reason": "The executable is onetaskgraph_binary; run_on only waits for that external process and labels its invocation.",
+      "boundary": "external",
+      "moduleSha256": "4df23213ff5133b38e995f1341d0a29d43ad0dab32f9454848467c25b73fd99d"
+    },
+    "templates::verb": {
+      "sha256": "1a385a4858e8a0b77cfd932e6ac77a12e7a55285921ff38d1e68ec063d817277",
+      "commands": [],
+      "reason": "all starts with template, then copies args before appending the template-root option; resolve the supplied subcommand at each calling site.",
+      "forward": {
+        "argument": 3,
+        "prefix": [
+          "template"
+        ]
+      },
+      "moduleSha256": "4df23213ff5133b38e995f1341d0a29d43ad0dab32f9454848467c25b73fd99d"
+    },
+    "unpublished::a_printed_acknowledging_command_records_where_its_listing_reads": {
+      "sha256": "9bd3da0ab26826f786729bf275ead0d8497a4975fba8e28f3c3f3a233f5b79de",
+      "commands": [
+        "cmd-unpublished"
+      ],
+      "reason": "The source's explicit argv alternatives for a printed acknowledging command records where its listing reads are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d65bba590acf8c9ce9c9715c4d538fd99689dcf6a388b63cf796b36b3715140b"
+    },
+    "unpublished::a_printed_landing_command_runs_this_hosts_drafter": {
+      "sha256": "5caeba4a6fcebabd565136d72b85f9a7a5ff177a9b7fd90d68379525e7652c6e",
+      "commands": [
+        "cmd-publish-branch",
+        "cmd-repo-recover",
+        "cmd-stop-guard",
+        "cmd-unpublished"
+      ],
+      "reason": "The source's explicit argv alternatives for a printed landing command runs this hosts drafter are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d65bba590acf8c9ce9c9715c4d538fd99689dcf6a388b63cf796b36b3715140b"
+    },
+    "unpublished::flags_that_mean_nothing_together_are_refused": {
+      "sha256": "8ec3d5cc2638354ebf2875b13a368348599ae2fc62d9f096d4683ccb3f9103e5",
+      "commands": [
+        "cmd-stop-guard",
+        "cmd-unpublished"
+      ],
+      "reason": "The source's explicit argv alternatives for flags that mean nothing together are refused are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "d65bba590acf8c9ce9c9715c4d538fd99689dcf6a388b63cf796b36b3715140b"
+    },
+    "views::a_root_whose_every_run_is_refused_does_not_read_as_an_empty_one": {
+      "sha256": "1b2fa52555591dbd3b32e5d11a0da4fb1607d3d4678119503ae94366c8f1076a",
+      "commands": [
+        "cmd-goals",
+        "cmd-runs",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a root whose every run is refused does not read as an empty one are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::a_run_root_the_views_refuse_is_named_with_its_reason": {
+      "sha256": "cacd2c9747dc90759823295fc134de980542d9ca249d33e447f91dba6e8f5181",
+      "commands": [
+        "cmd-goals",
+        "cmd-host",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a run root the views refuse is named with its reason are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::a_run_root_written_before_any_of_the_five_launch_keys_is_still_reported": {
+      "sha256": "f46ee09ea9b1da7a0829f291923db15ad8f20e5b9f22b56186132ba2279801ad",
+      "commands": [
+        "cmd-goals",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-stop"
+      ],
+      "reason": "The source's explicit argv alternatives for a run root written before any of the five launch keys is still reported are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::a_run_whose_record_carries_a_field_this_build_never_had_is_still_reported": {
+      "sha256": "18c7a3b3a845f6da2658c3e58f227f8a0faddccc3a0bd53ac141237acc27080b",
+      "commands": [
+        "cmd-goals",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for a run whose record carries a field this build never had is still reported are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::a_view_of_a_run_with_no_events_still_renders": {
+      "sha256": "a4200d43240917ec944a57df0802a9d5f6c6321050c1bd0072ed34e3fcd7df28",
+      "commands": [
+        "cmd-goals",
+        "cmd-observer-view",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-telemetry"
+      ],
+      "reason": "The source's explicit argv alternatives for a view of a run with no events still renders are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::an_observer_this_host_cannot_ask_about_is_never_reported_dead": {
+      "sha256": "a7725269bbf7c75fe3134816f5f1c973b347bef3d6c5b375b41af73ab9a0e349",
+      "commands": [
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an observer this host cannot ask about is never reported dead are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::an_older_run_root_is_read_and_the_rest_are_counted_rather_than_listed_a_line_each": {
+      "sha256": "3dcbd07f765b28cf68fe3a9181fe569c62d3ad8c24322fe48498e0f75af82396",
+      "commands": [
+        "cmd-goals",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status"
+      ],
+      "reason": "The source's explicit argv alternatives for an older run root is read and the rest are counted rather than listed a line each are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::every_scoped_view_takes_the_run_id_the_launch_record_advertises": {
+      "sha256": "2b4a04483d06e5729a33ecdde749d53cf880706817457e3ac34ad7fa8e4c84a6",
+      "commands": [
+        "cmd-goals",
+        "cmd-observer-view",
+        "cmd-results",
+        "cmd-start",
+        "cmd-status",
+        "cmd-telemetry"
+      ],
+      "reason": "The source's explicit argv alternatives for every scoped view takes the run id the launch record advertises are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::monitor_writes_nothing_and_consumes_nothing": {
+      "sha256": "c99e786182e90cf030897883dec177dfe0ab4bf6fa4d57cecb4c40d881235e8a",
+      "commands": [
+        "cmd-goals",
+        "cmd-host",
+        "cmd-observer-view",
+        "cmd-results",
+        "cmd-runs",
+        "cmd-start",
+        "cmd-status",
+        "cmd-telemetry",
+        "cmd-transcript"
+      ],
+      "reason": "The source's explicit argv alternatives for monitor writes nothing and consumes nothing are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "views::status_without_providers_omits_the_report_asks_for_none_and_moves_no_other_line": {
+      "sha256": "c73306ab36807ea72b0bab10429f483fece579bdb02aac6f9028f182b732f34a",
+      "commands": [
+        "cmd-start",
+        "cmd-status",
+        "cmd-surface"
+      ],
+      "reason": "The source's explicit argv alternatives for status without providers omits the report asks for none and moves no other line are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "1d4efee33caee1a7e3245ba7449e3ec427520dbbba1b4a82124fa8721d0d9f6a"
+    },
+    "wake_budget::the_stop_guard_page_names_the_budget_the_binary_reads": {
+      "sha256": "b911566b148c80fce507b8882a2fe48be8bd345295f17dd6a8251f27f649ee1a",
+      "commands": [
+        "cmd-start",
+        "cmd-stop-guard",
+        "cmd-unwatched",
+        "cmd-watch"
+      ],
+      "reason": "The source's explicit argv alternatives for the stop guard page names the budget the binary reads are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "f202af52f4cac31bb69c80c74884b6aec8d6e1378adb8b8eac25580748748695"
+    },
+    "watch::an_edit_a_surface_and_a_settlement_each_reach_the_watch_as_a_line": {
+      "sha256": "f3052b96ccb1b6d91a1351bb48afd2ee9b259acaa145cc8ef14ecaf1c0faa185",
+      "commands": [
+        "cmd-reply",
+        "cmd-start",
+        "cmd-status",
+        "cmd-surface",
+        "cmd-watch"
+      ],
+      "reason": "The source's explicit argv alternatives for an edit a surface and a settlement each reach the watch as a line are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "83dc396f0fb6cb2b95a331a39cc00f0dc0f0e3cb453f114fcdab6ead591f721f"
+    },
+    "watch::logged_alike": {
+      "sha256": "c201509d0cffe30fbf05230a5c784858f473e7b3b7cd24b45a69f32d5aa2de75",
+      "commands": [
+        "cmd-watch"
+      ],
+      "reason": "Both concatenations prepend watch; the second only appends --log and its path, then compares the original outputs and logs.",
+      "moduleSha256": "83dc396f0fb6cb2b95a331a39cc00f0dc0f0e3cb453f114fcdab6ead591f721f"
+    },
+    "writeback_budget::the_flag_beats_the_variable_which_beats_the_config_and_an_adopt_replays_the_launch": {
+      "sha256": "50ed71d4e52e60b853b1b9bb1764e25b515641a53df9278c604fb855f5fd9fd4",
+      "commands": [
+        "cmd-adopt",
+        "cmd-start"
+      ],
+      "reason": "The source's explicit argv alternatives for the flag beats the variable which beats the config and an adopt replays the launch are assigned below. Labels passed to run_on are descriptions, not command prefixes; setup assertions move with their producer.",
+      "moduleSha256": "7db77aa2f2a202ab4a34c460fc596ac4dc056c052b5685dae83242bbad690cbe"
+    }
+  }
+}

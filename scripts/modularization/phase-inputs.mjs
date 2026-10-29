@@ -2,21 +2,23 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { declarations } from "./source-projection.mjs";
 import { calls, functions } from "./rust-syntax.mjs";
+import { loadAttributions } from "./attribution.mjs";
 import { codeOnly } from "./graph.mjs";
 
 const cache = new Map();
 const phases = new Map();
 const snippets = new Map();
 let argvSlots;
+let reviewedAttributions;
 function slots() {
   if (!argvSlots) {
     argvSlots = {};
     for (const fn of functions(readFileSync("tests/e2e/harness.rs", "utf8"))) {
-      if (!/^(?:run(?:_|$)|cmd(?:_|$))/.test(fn.name)) continue;
-      if (/\bself\.agentgraph_cmd\s*\(/.test(fn.body)) continue;
+      if (fn.name === "cmd_on") continue;
+      if (!/^(?:run(?:_|$)|cmd(?:_|$)|agentgraph_cmd(?:_|$))/.test(fn.name)) continue;
       const args = calls(fn.signature)[0]?.args ?? [];
       if (!/\bself\b/.test(args[0] ?? "")) continue;
-      const index = args.slice(1).findIndex((arg) => /^\s*args\s*:/.test(arg));
+      const index = args.slice(1).findIndex((arg) => /^\s*args\s*:\s*&\s*\[/.test(arg));
       if (index < 0) continue;
       if (Object.hasOwn(argvSlots, fn.name) && argvSlots[fn.name] !== index)
         throw new Error(`ambiguous harness argv position for ${fn.name}`);
@@ -47,7 +49,7 @@ function argvValue(expression, body) {
   )
     return undefined;
   const assigned = new RegExp(
-    `\\blet\\s+(?:mut\\s+)?${variable}\\s*=\\s*(?:vec!\\s*)?\\[\\s*"([a-z][a-z-]*)"(?:\\s*,\\s*"([a-z-]+)")?`,
+    `\\blet\\s+(?:mut\\s+)?${variable}(?:\\s*:[^=;]+)?\\s*=\\s*(?:vec!\\s*)?\\[\\s*"([a-z][a-z-]*)"(?:\\s*\\.to_(?:owned|string)\\(\\))?(?:\\s*,\\s*"([a-z-]+)")?`,
   ).exec(body);
   return assigned ? [assigned[1], assigned[2]] : undefined;
 }
@@ -103,7 +105,7 @@ function moduleSource(module) {
         helpers.get(fn.name).push(fn);
       }
     }
-    for (const fn of parsed.filter((entry) => !entry.test && !entry.methodOf)) {
+    for (const fn of parsed.filter((entry) => !entry.test)) {
       fn.parameters =
         parsedCalls(fn.signature)[0]?.args.map((arg) => /^\s*(\w+)\s*:/.exec(arg)?.[1]) ?? [];
       fn.argvRoles = [];
@@ -245,9 +247,13 @@ function snippet(module, body, scope, methodOf) {
         const invoked = parsedCalls(body).find(
           (entry) => entry.name === call.name && entry.at === call.at,
         );
-        const supplied = (helper.argvRoles ?? []).map((index) =>
-          argvValue(invoked?.args[index], body),
-        );
+        const review = reviewedAttributions?.[`${candidate}::${helper.name}`];
+        const supplied = (
+          review?.forward ? [review.forward.argument] : (helper.argvRoles ?? [])
+        ).map((index) => {
+          const value = argvValue(invoked?.args[index], body);
+          return value && [...(review?.forward?.prefix ?? []), ...value];
+        });
         for (const value of supplied.filter(Boolean)) adapterValues.push(value);
         pending.push({
           resolvedArgv: supplied.length > 0 && supplied.every(Boolean),
@@ -291,7 +297,8 @@ function snippet(module, body, scope, methodOf) {
   const publicApi =
     /\bonepipeline::/.test(erased) || imports.some((entry) => entry === "onepipeline::");
   const dynamicCli =
-    module !== "harness" && direct.some((call) => !argvValue(call.args[slots()[call.name]], body));
+    (module !== "harness" || methodOf !== "World") &&
+    direct.some((call) => !argvValue(call.args[slots()[call.name]], body));
   const result = {
     pending,
     paths: reads,
@@ -314,6 +321,7 @@ function snippet(module, body, scope, methodOf) {
 
 /** Inputs for the future phase's fixture snippets, excluding other tests that share today's source module. */
 export function phaseInputs(piece, disposition, commands) {
+  reviewedAttributions ??= loadAttributions(commands);
   const cacheKey = `${piece.original}:${piece.suite}:${disposition.kind}`;
   if (phases.has(cacheKey)) return phases.get(cacheKey);
   const [module, name] = piece.original.split("::");
@@ -332,8 +340,14 @@ export function phaseInputs(piece, disposition, commands) {
   let publicApi = false;
   let dynamicCli = false;
   let pipeline = false;
+  const unresolved = new Set();
   for (const held of pending) {
-    const diagnostic = held.diagnostic || /::dump(?:@|$)/.test(held.key);
+    const review = reviewedAttributions[held.key.split("@")[0]];
+    const diagnostic =
+      held.diagnostic ||
+      review?.boundary === "external" ||
+      ["support", "library"].includes(review?.kind) ||
+      /::dump(?:@|$)/.test(held.key);
     const visitKey = `${held.key}:${diagnostic}:${held.resolvedArgv ?? false}`;
     if (reached.has(visitKey)) continue;
     reached.add(visitKey);
@@ -347,8 +361,21 @@ export function phaseInputs(piece, disposition, commands) {
       pipeline ||=
         analysis.pipeline ||
         (held.methodOf === "World" &&
-          /::(?:cmd|run|run_from|run_in|run_with_stdin|run_recording_renders)@/.test(held.key));
-      dynamicCli ||= analysis.dynamicCli && !bound.length && !held.resolvedArgv;
+          /::(?:cmd|run|run_from|run_in|run_with_stdin|run_recording_renders|agentgraph_cmd|run_on_agentgraph)@/.test(
+            held.key,
+          ));
+      dynamicCli ||=
+        (analysis.dynamicCli || review?.forward) &&
+        !bound.length &&
+        !held.resolvedArgv &&
+        (!review || review.forward);
+      for (const owner of review?.commands ?? []) commandRoots.add(owner);
+      if (
+        (analysis.dynamicCli || review?.forward) &&
+        !held.resolvedArgv &&
+        (!review || review.forward)
+      )
+        unresolved.add(held.key.split("@")[0]);
       for (const owner of bound) commandRoots.add(owner);
       for (const [parent, child] of analysis.argumentCalls) {
         const owner = commands[`${parent} ${child}`] ?? commands[parent];
@@ -369,6 +396,7 @@ export function phaseInputs(piece, disposition, commands) {
     publicApi,
     dynamicCli: dynamicCli && (pipeline || commandRoots.size > 0),
     pipeline,
+    unresolved: [...unresolved].sort(),
     helpers: [...new Set([...consumers].map((key) => key.split("@")[0]))].sort(),
   };
   phases.set(cacheKey, result);

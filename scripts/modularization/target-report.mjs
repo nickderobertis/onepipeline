@@ -9,6 +9,7 @@ import { targetGraph } from "./target-graph.mjs";
 import { commandMapping } from "./command-replay.mjs";
 import { commandPaths } from "./source-projection.mjs";
 import { expandCatalog } from "./catalog.mjs";
+import { loadAttributions } from "./attribution.mjs";
 import { functions } from "./rust-syntax.mjs";
 import { compareGlobInputs } from "./glob-impact.mjs";
 
@@ -292,25 +293,48 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "",
     "## Every CLI route and its test dependencies",
     "",
-    "The command suite column lists its phases; integration coverage remains in the explicitly listed exception set. A route with no isolated phase keeps its existing assertions in that set or in full-dispatch. The machine-readable catalog gives exact original names, not a sample.",
+    "Command phases depend on their own command and its shared concepts. The retained journey column names every integration or parser/routing exception that actually invokes the command, including commands exercised through legacy-named helpers. The exception runner closures are listed immediately below; these are the only exceptions to command isolation.",
     "",
-    "| CLI route | Command crate | Isolated phase IDs | Runner closure |",
-    "| --- | --- | --- | --- |",
+    "| CLI route | Command crate | Command phase IDs | Retained integration / routing test IDs | Command runner closure |",
+    "| --- | --- | --- | --- | --- |",
   );
   const commands = commandPaths(JSON.parse(reviewed("scripts/modularization/cli-commands.json")));
   for (const [path, crate] of Object.entries(commands)) {
     const tests = Object.entries(catalog.tests)
       .filter(([, t]) => t.suite === crate)
       .map(([id]) => id);
+    const retained = Object.entries(catalog.tests)
+      .filter(
+        ([, test]) =>
+          ["cross-command", "full-dispatch"].includes(test.suite) && test.commands.includes(crate),
+      )
+      .map(([id, test]) => `${id} (${test.suite})`);
     lines.push(
-      `| ${path} | ${crate} | ${tests.join(", ") || "none; see retained integration/dispatcher assignments"} | ${[...(reach.suites[crate]?.crates ?? [])].sort().join(", ")} |`,
+      `| ${path} | ${crate} | ${tests.join(", ") || "none"} | ${retained.join(", ") || "none"} | ${[...(reach.suites[crate]?.crates ?? [])].sort().join(", ")} |`,
     );
   }
+  lines.push("", "| Exception suite | Complete runner crate closure |", "| --- | --- |");
+  for (const suite of ["cross-command", "full-dispatch"])
+    lines.push(`| ${suite} | ${[...(reach.suites[suite]?.crates ?? [])].sort().join(", ")} |`);
+  const audit = loadAttributions(commands, projectRoot);
+  lines.push(
+    "",
+    "## Source-backed argv and boundary audit",
+    "",
+    "Every exception below is checked against both its complete function definition and its source module SHA-256. Changes to helper argv, constants or assertions refuse regeneration until reviewed again. Unresolved argv is never a dispatcher contract. The former 499 dispatch dispositions (336 within the original cross-command bucket) at bc07e51b are all re-evaluated; only the explicit parser/routing cases remain full-dispatch.",
+    "",
+    "| Source function | Commands / boundary | Reviewed evidence | Function SHA-256 |",
+    "| --- | --- | --- | --- |",
+  );
+  for (const [id, entry] of Object.entries(audit))
+    lines.push(
+      `| ${id} | ${entry.commands.join(", ") || entry.kind || entry.boundary || "forward calling argv"}${entry.forward ? `; argument ${entry.forward.argument}, prefix ${entry.forward.prefix.join(" ") || "none"}` : ""} | ${cell(entry.reason)} | ${entry.sha256} |`,
+    );
   lines.push(
     "",
     "## Every original test and retained integration",
     "",
-    "Each row preserves all assertions. Decomposed rows move setup exit/output assertions to the producer's phase and consumer assertions to the consumer's phase over records written by the real production writers. Failure fixtures use the same envelope/schema validators and durable writers. Retained integrations exercise the listed commands in the original sequence, with the live ordering in the reason. full-dispatch retains parser/dynamic-argv assertions against the shipped binary; public-api retains facade identity/parity assertions. Shared helper imports and fixture paths are explicit runner inputs in the replay JSON.",
+    "Each row preserves all assertions. Decomposed rows move setup exit/output assertions to the producer's phase and consumer assertions to the consumer's phase over records written by the real production writers. Failure fixtures use the same envelope/schema validators and durable writers. Retained integrations exercise the listed commands in the original sequence, with the live ordering in the reason. full-dispatch retains parser/routing assertions against the shipped binary; public-api retains facade identity/parity assertions. Shared helper imports and fixture paths are explicit runner inputs in the replay JSON.",
     "",
     "| Original test | Disposition | Destination command phases / integration participants | Assertion/integration intent from its source | Why |",
     "| --- | --- | --- | --- | --- |",

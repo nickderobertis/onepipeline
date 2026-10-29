@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { loadAttributions } from "./attribution.mjs";
 import { baselineHash } from "./catalog.mjs";
 import { phaseInputs, commandCalls } from "./phase-inputs.mjs";
 import { commandPaths, cliPaths } from "./source-projection.mjs";
@@ -35,6 +36,7 @@ export function decompose(baseline) {
   const configured = commandPaths(
     JSON.parse(readFileSync("scripts/modularization/cli-commands.json", "utf8")),
   );
+  const attributions = loadAttributions(configured);
   cliPaths(readFileSync("src/cli.rs", "utf8"), configured);
   const knownCommands = new Set(Object.values(baseline.tests).flatMap((entry) => entry.commands));
   if (Object.values(configured).some((owner) => !knownCommands.has(owner)))
@@ -76,8 +78,8 @@ export function decompose(baseline) {
       { kind: "isolated", originalCommands: test.commands },
       configured,
     );
-    const unresolvedArgv = facts.dynamicCli;
-    const commandRoots = facts.commands;
+    const unresolvedArgv = facts.dynamicCli && !attributions[id];
+    const commandRoots = attributions[id]?.commands ?? facts.commands;
     const controlAt = commandCalls(body, configured).find((call) => controls.has(call.command))?.at;
     const pollAfterControl =
       controlAt !== undefined &&
@@ -95,23 +97,29 @@ export function decompose(baseline) {
     const integration =
       commandRoots.length > 1 &&
       ((liveName.test(name) && liveEvidence) || liveControl || concurrentObserver);
-    const kind = unresolvedArgv
-      ? "dispatch"
-      : !commandRoots.length
-        ? facts.pipeline
-          ? "dispatch"
-          : facts.publicApi
-            ? "library"
-            : "support"
-        : integration
-          ? "integration"
-          : commandRoots.length > 1
-            ? "decompose"
-            : "isolated";
+    const kind =
+      attributions[id]?.kind ??
+      (unresolvedArgv
+        ? "dispatch"
+        : !commandRoots.length
+          ? facts.pipeline
+            ? "dispatch"
+            : facts.publicApi
+              ? "library"
+              : "support"
+          : integration
+            ? "integration"
+            : commandRoots.length > 1
+              ? "decompose"
+              : "isolated");
+    if (kind === "dispatch" && attributions[id]?.kind !== "dispatch")
+      throw new Error(
+        `unreviewed dispatcher attribution ${id}; resolve argv or explicitly prove parser/routing assertions`,
+      );
     const reason =
       kind === "dispatch"
         ? "dispatch-contract"
-        : integration
+        : kind === "integration"
           ? liveControl
             ? "live-control"
             : concurrentObserver
@@ -130,9 +138,10 @@ export function decompose(baseline) {
       kind,
       originalCommands: commandRoots,
       reason,
+      ...(attributions[id] ? { rationale: attributions[id].reason } : {}),
     };
   }
-  return { schema: 3, baselineSha256: baselineHash(baseline), dispositions };
+  return { schema: 4, baselineSha256: baselineHash(baseline), dispositions };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
