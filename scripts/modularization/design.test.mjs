@@ -1927,6 +1927,10 @@ test("target replay CLI covers 144 PRs and every original assertion in fresh tar
     evidence.result.platforms.linux.secondsSkip = 2;
     put(root, "target.json", evidence);
     assert.match(render().stderr, /invalid target platform data/);
+    // A plausible fraction that contradicts the rows and weights is refused too.
+    evidence.result.platforms.linux.secondsSkip = seconds > 0.5 ? seconds / 2 : 0.5;
+    put(root, "target.json", evidence);
+    assert.match(render().stderr, /seconds skipped differs from its rows and weights/);
     evidence.result.platforms.linux.secondsSkip = seconds;
     // Each suite's weight must be a finite nonnegative number, even when offsetting values keep the total.
     const weights = structuredClone(evidence.result.platforms.linux.suiteSeconds);

@@ -371,6 +371,24 @@ export function targetAppendix({ layout, moves, catalog, result }) {
       !platform.missingModules.every((name) => typeof name === "string")
     )
       throw new Error("invalid target platform data");
+  // The published seconds fraction must be the one the validated rows and suite weights imply.
+  for (const platform of Object.values(result.platforms)) {
+    const skipped = result.rows.reduce(
+      (sum, row) =>
+        sum +
+        Object.entries(platform.suiteSeconds)
+          .filter(([suite]) => !row.affected.includes(suite))
+          .reduce((total, [, seconds]) => total + seconds, 0),
+      0,
+    );
+    if (
+      Math.abs(skipped / (platform.secondsPerRun * result.rows.length) - platform.secondsSkip) >
+      1e-9
+    )
+      throw new Error(
+        "invalid target platform data: seconds skipped differs from its rows and weights",
+      );
+  }
   if (result.migration.at(-1).suiteSkip !== suiteSkip)
     throw new Error("invalid target migration terminal skipped fraction");
   const baseline = JSON.parse(reviewed("scripts/modularization/command-tests.json"));
