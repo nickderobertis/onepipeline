@@ -272,11 +272,48 @@ it("npm's Windows bin shims forward only engine stdout and its status through th
 });
 
 describe("on this host, a command started through it", () => {
-  it("is npm itself, found however this platform installs it", () => {
-    const ran = spawnSync(...spawnable("npm", ["--version"], { encoding: "utf8" }));
+  // What every journey below sends: what cmd.exe and a shell read as syntax.
+  const SENT = [
+    "two words",
+    'say "hi"',
+    "trailing\\",
+    "a&b|c",
+    "(parens)",
+    "^caret",
+    "",
+    "C:\\Users\\RUNNER~1\\AppData\\program.cjs",
+  ];
+
+  it("is npm itself, found however this platform installs it, passing a script its arguments and status", () => {
+    const version = spawnSync(...spawnable("npm", ["--version"], { encoding: "utf8" }));
+    assert.equal(version.error, undefined);
+    assert.equal(version.status, 0, version.stderr);
+    assert.match(version.stdout, /^\d+\.\d+\.\d+/);
+
+    // A package script npm runs through this platform's shell, as `npm run` does.
+    const project = join(work, "npm-run");
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      join(project, "echo-args.cjs"),
+      "process.stdout.write(JSON.stringify(process.argv.slice(2))); process.exit(3);\n",
+    );
+    writeFileSync(
+      join(project, "package.json"),
+      JSON.stringify({
+        name: "npm-run",
+        version: "1.0.0",
+        scripts: { "echo-args": "node echo-args.cjs" },
+      }),
+    );
+    const ran = spawnSync(
+      ...spawnable("npm", ["run", "--silent", "echo-args", "--", ...SENT], {
+        cwd: project,
+        encoding: "utf8",
+      }),
+    );
     assert.equal(ran.error, undefined);
-    assert.equal(ran.status, 0, ran.stderr);
-    assert.match(ran.stdout, /^\d+\.\d+\.\d+/);
+    assert.equal(ran.status, 3, ran.stderr);
+    assert.deepEqual(JSON.parse(ran.stdout), SENT);
   });
 
   // A command installed the way npm installs one on this platform — a batch file
@@ -301,41 +338,39 @@ describe("on this host, a command started through it", () => {
       }
       // Windows' environment names are case-insensitive: replace the one it has.
       const pathKey = Object.keys(process.env).find((k) => k.toUpperCase() === "PATH") ?? "PATH";
-      const sent = [
-        "two words",
-        'say "hi"',
-        "trailing\\",
-        "a&b|c",
-        "(parens)",
-        "^caret",
-        "",
-        "C:\\Users\\RUNNER~1\\AppData\\program.cjs",
-      ];
       const ran = spawnSync(
-        ...spawnable("echo-args", sent, {
+        ...spawnable("echo-args", SENT, {
           encoding: "utf8",
           env: { ...process.env, [pathKey]: `${bin}${delimiter}${process.env[pathKey]}` },
         }),
       );
       assert.equal(ran.error, undefined);
       assert.equal(ran.status, 3, ran.stderr);
-      assert.deepEqual(JSON.parse(ran.stdout), sent);
+      assert.deepEqual(JSON.parse(ran.stdout), SENT);
     });
   }
 
   // A Windows temporary directory's path: backslashes, and a short name such as
   // RUNNER~1. Elsewhere a backslash is a character of the file's name, so the
   // same path is one file there.
-  it("preloads a file whose path holds backslashes and a short name, as NODE_OPTIONS names it", () => {
+  it("preloads a file whose path holds backslashes and a short name, as NODE_OPTIONS names it, passing its arguments and status", () => {
     const dir = WINDOWS ? join(work, "RUNNER~1", "AppData") : work;
     mkdirSync(dir, { recursive: true });
     const preload = join(dir, WINDOWS ? "preload.cjs" : "RUNNER~1\\AppData\\preload.cjs");
     writeFileSync(preload, 'process.stdout.write("preloaded");\n');
-    const ran = spawnSync(process.execPath, ["-e", ""], {
-      encoding: "utf8",
-      env: { ...process.env, NODE_OPTIONS: preloading(preload) },
-    });
-    assert.equal(ran.status, 0, ran.stderr);
-    assert.equal(ran.stdout, "preloaded");
+    const ran = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "process.stdout.write(JSON.stringify(process.argv.slice(1))); process.exit(4);",
+        "--",
+        ...SENT,
+      ],
+      { encoding: "utf8", env: { ...process.env, NODE_OPTIONS: preloading(preload) } },
+    );
+    assert.equal(ran.error, undefined);
+    assert.equal(ran.status, 4, ran.stderr);
+    // The preload ran first, then the program read back exactly what was sent.
+    assert.equal(ran.stdout, `preloaded${JSON.stringify(SENT)}`);
   });
 });
