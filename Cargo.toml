@@ -1257,7 +1257,8 @@ onevcs-testing = "0.19.22"
 # name, in the store's words.
 # **0.12.11 files a private GitHub Projects home's public-repository task privately**
 # (onetaskgraph #3804): its canonical issue goes to a private repository instead of the copy
-# being refused.
+# being refused. `tests/e2e/private_github_home.rs` drives a live add through it, and fails
+# on 0.12.9.
 onetaskgraph-core = "=0.12.11"
 onetaskgraph-plugin-api = "=0.12.11"
 onetaskgraph-local-md = "=0.12.11"
