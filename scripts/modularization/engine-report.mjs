@@ -3,7 +3,7 @@
 // `--collect A.json B.json C.json` gathers engine-replay.mjs outputs, one per migration step in
 // order, into engine-evidence.json; `--write` and `--check` render that file into the document.
 // Exit statuses follow cli.mjs.
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, KEEP, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { targetCatalog } from "./test-split.mjs";
@@ -51,6 +51,8 @@ export function testSplitOnly(splitDoc) {
       throw new Error(
         `${SPLIT_DOC} gives ${cells[0]} a crates-and-test-split figure that is not a share`,
       );
+    if (Object.hasOwn(rows, cells[0]))
+      throw new Error(`${SPLIT_DOC}'s crates-and-test-split table repeats ${cells[0]}`);
     rows[cells[0]] = { suites: shares[0], seconds: shares[1] };
   }
   if (PLATFORMS.some((platform) => !rows[platform]))
@@ -474,9 +476,25 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       if (read(DOC) !== expected)
         throw new Error(`${DOC} differs from what engine-report.mjs renders`);
     } else {
-      if (mode === "--collect")
-        writeFileSync(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`);
-      writeFileSync(DOC, expected);
+      // Both files are staged before either is replaced, so a failed write changes neither.
+      const writes = [
+        ...(mode === "--collect"
+          ? [[EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`]]
+          : []),
+        [DOC, expected],
+      ];
+      const staged = [];
+      try {
+        for (const [path, text] of writes) {
+          const temporary = `${path}.${process.pid}.tmp`;
+          staged.push(temporary);
+          writeFileSync(temporary, text, { flag: "wx" });
+        }
+      } catch (error) {
+        for (const temporary of staged) rmSync(temporary, { force: true });
+        throw error;
+      }
+      for (const [index, [path]] of writes.entries()) renameSync(staged[index], path);
     }
     console.log(`engine report: ${mode === "--check" ? "checked" : "wrote"} ${DOC}`);
   } catch (error) {

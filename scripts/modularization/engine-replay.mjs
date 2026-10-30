@@ -3,7 +3,8 @@
 // tests re-homed onto the engine crates engine-tests.json names, and writes that variant's figures.
 // `--parents` re-homes only the named parents' tests, which is the layout once those migration
 // steps have landed. Exit statuses follow cli.mjs.
-import { readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { classify, splitEvidence } from "./split-replay.mjs";
@@ -148,6 +149,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       throw new UsageError(
         `usage: engine-replay.mjs OUTPUT.json [--parents ${STEPS.join(",")}] (a subset, each once; all by default)`,
       );
+    // The output path is checked before the replay spends minutes, and nothing is created there.
+    const output = args[0];
+    if (existsSync(output)) {
+      if (statSync(output).isDirectory())
+        throw Object.assign(new Error(`EISDIR: output is a directory, '${output}'`), {
+          code: "EISDIR",
+        });
+      accessSync(output, constants.W_OK);
+    } else accessSync(dirname(resolve(output)), constants.W_OK);
     const summary = engineEvidence(parents);
     writeFileSync(args[0], `${JSON.stringify(summary, null, 2)}\n`);
     console.log(

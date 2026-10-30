@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -4649,7 +4650,63 @@ test("engine split attributes assertions to the crates naming their literals in 
       splitDoc.replace(/^(\| linux \|(?: [\d.]+% \|){5}) [\d.]+% \|$/m, "$1 999.99% |"),
     );
     untouched(tool("engine-report.mjs", "--write"), /gives linux a share over 100%/);
+    // A repeated platform row is refused rather than silently replacing the first.
+    writeFileSync(splitDocPath, splitDoc.replace(/^(\| linux \|(?: [\d.]+% \|){6})$/m, "$1\n$1"));
+    untouched(tool("engine-report.mjs", "--write"), /crates-and-test-split table repeats linux/);
     writeFileSync(splitDocPath, splitDoc);
+    // Evidence the replay could not have written is refused, and the document is left as it was.
+    const refusedEvidence = (mutate, pattern) => {
+      const copy = JSON.parse(evidence);
+      mutate(copy);
+      writeFileSync(evidencePath, JSON.stringify(copy));
+      const refused = tool("engine-report.mjs", "--write");
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, pattern);
+      assert.equal(readFileSync(docPath, "utf8"), doc);
+      writeFileSync(evidencePath, evidence);
+    };
+    refusedEvidence((copy) => {
+      copy.extra = true;
+    }, /^invalid scripts\/modularization\/engine-evidence.json\n/);
+    refusedEvidence((copy) => {
+      copy.schema = 2;
+    }, /^invalid scripts\/modularization\/engine-evidence.json\n/);
+    refusedEvidence((copy) => {
+      copy.steps[0].schema = 2;
+    }, /step 1 is not a 144-PR replay with exactly the replay's fields/);
+    refusedEvidence((copy) => {
+      copy.steps[1].prs = 143;
+    }, /step 2 is not a 144-PR replay/);
+    refusedEvidence((copy) => {
+      delete copy.steps[0].platforms.local;
+    }, /step 1 must give skip shares for exactly linux, macos, windows and local/);
+    refusedEvidence((copy) => {
+      copy.steps[0].broad = copy.steps[0].prs + 1;
+    }, /step 1 counts its broad PRs out of range/);
+    refusedEvidence((copy) => {
+      copy.steps[0].causes["engine source"] = copy.steps[0].broad + 1;
+    }, /step 1 counts causes out of its broad PRs/);
+    refusedEvidence((copy) => {
+      delete copy.steps[2].wall.local;
+    }, /step 3 must project the wall clock for every job and the local gate/);
+    refusedEvidence((copy) => {
+      copy.steps[2].wall.local.median = copy.steps[2].wall.local.max + 1;
+    }, /step 3 projects the local gate inconsistently/);
+    refusedEvidence((copy) => {
+      copy.steps[2].wall.local.max = copy.steps[2].wall.local.testPhase + 1;
+    }, /step 3 projects the local gate inconsistently/);
+    refusedEvidence((copy) => {
+      copy.steps[2].typical.pr = "the median one";
+    }, /step 3 does not explain its typical PR's selection/);
+    refusedEvidence((copy) => {
+      copy.steps[2].typical.universal[0].share = 0.5;
+    }, /step 3 does not explain its typical PR's selection/);
+    refusedEvidence((copy) => {
+      copy.steps[2].typical.kinds[0].prs = copy.steps[2].prs + 1;
+    }, /step 3 does not explain its typical PR's selection/);
+    refusedEvidence((copy) => {
+      copy.steps[2].typical.prs = 143;
+    }, /step 3 does not explain its typical PR's selection/);
     const [prefix, appendix] = doc.split(ENGINE_MARKER);
     writeFileSync(docPath, prefix);
     const missing = tool("engine-report.mjs", "--collect", ...stepFiles);
@@ -4666,6 +4723,46 @@ test("engine split attributes assertions to the crates naming their literals in 
     assert.equal(recovered.status, 0, recovered.stderr);
     assert.equal(readFileSync(docPath, "utf8"), doc);
     assert.equal(tool("engine-report.mjs", "--check").status, 0);
+    // --collect stages the evidence and the document before replacing either, so a document that
+    // cannot be written leaves the evidence as it was (here compacted, so a rewrite would show),
+    // and an evidence file that cannot be written leaves the document; each rerun then succeeds.
+    const staging = (dir) => readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+    const compact = JSON.stringify(JSON.parse(evidence));
+    writeFileSync(evidencePath, compact);
+    for (const [dir, code] of [
+      [join(clone, "docs"), "EACCES"],
+      [join(clone, "scripts/modularization"), "EACCES"],
+    ]) {
+      chmodSync(dir, 0o555);
+      let blocked;
+      try {
+        blocked = tool("engine-report.mjs", "--collect", ...stepFiles);
+      } finally {
+        chmodSync(dir, 0o755);
+      }
+      assert.equal(blocked.status, 1);
+      assert.match(
+        blocked.stderr,
+        new RegExp(`${code}.*\\nnext: check the named path's type`, "s"),
+      );
+      assert.equal(readFileSync(evidencePath, "utf8"), compact);
+      assert.equal(readFileSync(docPath, "utf8"), doc);
+      assert.deepEqual(staging(join(clone, "docs")), []);
+      assert.deepEqual(staging(join(clone, "scripts/modularization")), []);
+    }
+    const rerun = tool("engine-report.mjs", "--collect", ...stepFiles);
+    assert.equal(rerun.status, 0, rerun.stderr);
+    assert.equal(readFileSync(evidencePath, "utf8"), evidence);
+    assert.equal(readFileSync(docPath, "utf8"), doc);
+    // An output path the replay cannot write is refused before it replays, and nothing is created;
+    // the "engine replay CLI" test proves a writable output then receives the replay.
+    const unusable = tool("engine-replay.mjs", join(clone, "missing", "out.json"));
+    assert.equal(unusable.status, 1);
+    assert.match(unusable.stderr, /ENOENT.*\nnext: check the named path's type/s);
+    assert.throws(() => readFileSync(join(clone, "missing")), /ENOENT/);
+    const directory = tool("engine-replay.mjs", join(clone, "docs"));
+    assert.equal(directory.status, 1);
+    assert.match(directory.stderr, /EISDIR.*\nnext: check the named path's type/s);
     rmSync(path);
     mkdirSync(path);
     const replay = tool("engine-replay.mjs", join(clone, "out.json"));
