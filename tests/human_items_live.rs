@@ -154,6 +154,27 @@ fn ids(views: &Value) -> Vec<String> {
         .collect()
 }
 
+/// The live verbs `docs/contract.md` declares: every verb of its human-items CLI
+/// block, which without `--sample` acts on the live store, and `watch`. `config` is
+/// not one of them: the contract's Configuration paragraph makes it the reader of
+/// the effective settings, so it answers `enabled: false` rather than refusing.
+fn contract_live_verbs() -> Vec<String> {
+    let contract =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/contract.md"))
+            .unwrap();
+    let mut verbs: Vec<String> = contract
+        .lines()
+        .filter_map(|line| line.strip_prefix("onepipeline human-items --sample FILE "))
+        .map(|rest| rest.split_whitespace().next().unwrap().to_owned())
+        .collect();
+    assert!(
+        contract.contains("`onepipeline human-items watch"),
+        "the contract no longer declares watch"
+    );
+    verbs.push("watch".to_owned());
+    verbs
+}
+
 #[test]
 fn human_items_are_unavailable_until_configuration_enables_them() {
     for config in [None, Some("human_items:\n  enabled: false\n")] {
@@ -164,7 +185,7 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             "q",
             &item("q", "question", "low", "s", json!({"scope":"nothing"})),
         );
-        for args in [
+        let driven = [
             vec!["list"],
             vec!["report"],
             vec!["show", "hi-x"],
@@ -173,7 +194,14 @@ fn human_items_are_unavailable_until_configuration_enables_them() {
             vec!["complete", "hi-x"],
             vec!["dismiss", "hi-x"],
             vec!["watch", "--session", "s"],
-        ] {
+        ];
+        // Exactly the contract's live verbs, so a verb it adds is driven here too.
+        let mut names: Vec<String> = driven.iter().map(|args| args[0].to_owned()).collect();
+        let mut declared = contract_live_verbs();
+        names.sort();
+        declared.sort();
+        assert_eq!(names, declared);
+        for args in driven {
             world.refused(None, &args, r#"{"kind":"unavailable"}"#);
         }
         assert!(!world.store().join("events.ndjson").exists());
@@ -1219,12 +1247,12 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
         1,
         "the finding retired once every ticket had a priority"
     );
-    // The engine retired the finding, by its own name and reason, to the owner alone.
+    // The engine retired the finding as its own resolution, with its reason, to the owner alone.
     let finding = findings[0]["item"]["id"].as_str().unwrap();
     let retired = |events: &[Value], id: &str, reason: &str| {
         let matching: Vec<&Value> = events
             .iter()
-            .filter(|e| e["kind"] == "human-item-dismissed" && e["payload"]["item_id"] == id)
+            .filter(|e| e["kind"] == "human-item-auto-resolved" && e["payload"]["item_id"] == id)
             .collect();
         assert_eq!(matching.len(), 1, "{id}: {events:?}");
         let resolution = &matching[0]["payload"]["resolution"];

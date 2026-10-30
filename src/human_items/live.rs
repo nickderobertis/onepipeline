@@ -383,7 +383,7 @@ impl HumanItems {
                     writer.resolve(
                         &item,
                         HumanItemState::Dismissed,
-                        HumanItemEventAction::Dismissed,
+                        HumanItemEventAction::AutoResolved,
                         &engine,
                         None,
                         Some(reason),
