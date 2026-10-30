@@ -1206,3 +1206,146 @@ fn a_question_hook_expands_its_context_once_at_the_engine_boundary() {
     );
     assert_eq!(world.journal().len(), records);
 }
+
+/// A full disk, for real: the runs root is a 2 MiB tmpfs mounted in an
+/// unprivileged user and mount namespace, filled by a file, and every command
+/// is the compiled binary writing into it. Nothing is intercepted.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_journal_disk_raises_one_host_item_from_its_reserve_and_never_acknowledges_a_lost_write() {
+    let world = Live::enabled();
+    let big = "x".repeat(16 * 1024);
+    let raw = |dedup: &str, session: &str| {
+        let mut value = item(dedup, "task", "low", session, json!({"scope": "nothing"}));
+        value["body"] = json!(format!("{dedup}: {big}"));
+        world.input(dedup, &value)
+    };
+    let (a, b, c) = (raw("a", "s-a"), raw("b", "s-b"), raw("c", "s-c"));
+    let out = world.root.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let runs = world.runs();
+    let script = format!(
+        r#"set -u
+mount -t tmpfs -o size=2m tmpfs "{runs}" || exit 90
+cd "{repo}"
+run() {{ name=$1; shift; "{bin}" human-items "$@" > "{out}/$name.out" 2> "{out}/$name.err"; echo "$name=$?" >> "{out}/codes"; }}
+run a raise --input "{a}"
+dd if=/dev/zero of="{runs}/filler" bs=1k 2>/dev/null
+run b raise --input "{b}"
+run full list --json
+cp "{runs}/human-items/events.ndjson" "{out}/journal-full"
+dd if=/dev/zero of="{runs}/filler2" bs=1k 2>/dev/null
+run c raise --input "{c}"
+cp "{runs}/human-items/events.ndjson" "{out}/journal-refused"
+rm "{runs}/filler" "{runs}/filler2"
+run after list --json --state dismissed
+ONEPIPELINE_LAUNCHER_SESSION=s-b run watch watch
+cp "{runs}/human-items/events.ndjson" "{out}/journal-after"
+"#,
+        runs = runs.display(),
+        repo = world.repo().display(),
+        bin = BIN,
+        out = out.display(),
+    );
+    let status = Command::new("unshare")
+        .args(["-rm", "sh", "-c", &script])
+        .env("ONEPIPELINE_RUNS_DIR", &runs)
+        .env("XDG_CONFIG_HOME", world.root.join("xdg"))
+        .env("USER", "operator")
+        .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the namespace could not be set up: {status}"
+    );
+    let read = |name: &str| std::fs::read_to_string(out.join(name)).unwrap_or_default();
+    let codes = read("codes");
+    assert!(codes.contains("a=0\n"), "{codes}");
+    assert!(
+        codes.contains("b=0\n"),
+        "the write the reserve took is acknowledged: {codes}\n{}",
+        read("b.err")
+    );
+    assert!(codes.contains("full=0\n"), "{codes}\n{}", read("full.err"));
+    assert!(
+        !codes.contains("c=0\n"),
+        "a write nothing could hold is refused: {codes}"
+    );
+    assert!(
+        read("c.err").contains("could not record this durably"),
+        "{}",
+        read("c.err")
+    );
+    assert!(
+        read("c.out").is_empty(),
+        "no receipt for a lost write: {}",
+        read("c.out")
+    );
+    let journal = |name: &str| -> Vec<Value> {
+        read(name)
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    let refused = journal("journal-refused");
+    assert!(refused
+        .iter()
+        .all(|e| e["payload"]["item"]["dedup_key"] != "c"));
+    // Exactly one urgent host item for the condition, owned by the session whose
+    // write found the disk full, and it blocks the whole host.
+    let full: Value = serde_json::from_str(&read("full.out")).unwrap();
+    let hosts: Vec<&Value> = full
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["item"]["block"]["scope"] == "host")
+        .collect();
+    assert_eq!(hosts.len(), 1, "{full}");
+    assert_eq!(hosts[0]["item"]["priority"], "urgent");
+    assert_eq!(hosts[0]["item"]["owner"]["session"], "s-b");
+    let host_id = hosts[0]["item"]["id"].clone();
+    assert_eq!(
+        journal("journal-full")
+            .iter()
+            .filter(|e| e["payload"]["item"]["block"]["scope"] == "host")
+            .count(),
+        1
+    );
+    // Space returned: the next command's probe of the journal's own reserve
+    // resolved the item automatically, and the owner's watch was told.
+    let after: Value = serde_json::from_str(&read("after.out")).unwrap();
+    let resolved = after
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] == host_id)
+        .expect("resolved");
+    assert_eq!(resolved["item"]["resolution"]["actor"], "engine");
+    let kinds: Vec<String> = read("watch.out")
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "human-item-raised",
+            "human-item-raised",
+            "human-item-auto-resolved"
+        ],
+        "{}",
+        read("watch.err")
+    );
+    assert_eq!(
+        journal("journal-after")
+            .iter()
+            .filter(|e| e["kind"] == "human-item-auto-resolved")
+            .count(),
+        1
+    );
+}

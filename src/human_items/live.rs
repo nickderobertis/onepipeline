@@ -210,6 +210,8 @@ pub struct ReadTelemetry {
     pub index_io_ms: f64,
     /// Milliseconds spent computing blocked work.
     pub blocker_ms: f64,
+    /// Why the caught-up index could not be written back, where it could not.
+    pub index_unwritten: Option<String>,
 }
 
 impl ReadTelemetry {
@@ -226,6 +228,7 @@ impl ReadTelemetry {
             replay_ms: 0.0,
             index_io_ms: 0.0,
             blocker_ms: 0.0,
+            index_unwritten: None,
         }
     }
 }
@@ -359,6 +362,7 @@ impl HumanItems {
     /// Every matching item, ordered blocking first, then by priority, then by
     /// creation and id; state defaults to open.
     pub fn query(&self, filter: &HumanItemFilter) -> Result<Vec<HumanItemView>, HumanItemRefusal> {
+        self.recover();
         let (snapshot, mut telemetry) = self.read()?;
         let started = Instant::now();
         let views = query(&snapshot, filter);
@@ -369,6 +373,7 @@ impl HumanItems {
 
     /// One item with every blocked step.
     pub fn show(&self, id: &str) -> Result<HumanItemDetail, HumanItemRefusal> {
+        self.recover();
         let (snapshot, mut telemetry) = self.read()?;
         let started = Instant::now();
         let item = snapshot
@@ -543,6 +548,23 @@ impl HumanItems {
         }
     }
 
+    /// Probe a journal outage the store recorded, if one is open: a writer's
+    /// open allocates the reserve again, and that allocation is the probe. Only
+    /// the failed capability is asked; nothing is dispatched.
+    fn recover(&self) {
+        let open = self.items().is_ok_and(|items| {
+            let prefix = format!("{HOST_CONDITION_PREFIX}{JOURNAL_NO_SPACE}:");
+            items
+                .values()
+                .any(|i| i.state == HumanItemState::Open && i.dedup_key.starts_with(&prefix))
+        });
+        if open {
+            if let Ok(writer) = Writer::open(self) {
+                writer.finish();
+            }
+        }
+    }
+
     /// Every item, caught up with the journal, without reading any run: what a
     /// run's driver asks on its passes.
     pub(crate) fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
@@ -657,12 +679,16 @@ impl HumanItems {
                 serde_json::to_vec(&sealed).map_err(|e| storage("serialize", &self.index(), e))?;
             // A projection: the journal rebuilds it, so it is renamed into place
             // without the syncs a record takes.
-            crate::ledger::write_atomic(
+            // Best effort: what this read answers is the journal's, and a host
+            // with no room for the index — a full disk among them — costs the
+            // next reader a replay, never this reader its answer.
+            if let Err(why) = crate::ledger::write_atomic(
                 &self.index(),
                 &bytes,
                 crate::ledger::Durability::Projection,
-            )
-            .map_err(|e| storage("write", &self.index(), e))?;
+            ) {
+                telemetry.index_unwritten = Some(why.to_string());
+            }
             telemetry.index_io_ms += ms(started);
             index = sealed;
         }
