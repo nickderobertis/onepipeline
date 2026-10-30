@@ -325,7 +325,7 @@ function nextestScripts(configs, profiles) {
   const used = new Map();
   for (const config of configs)
     for (const key of profiles) {
-      const entries = config[key]?.scripts ?? [];
+      const entries = Object.hasOwn(config[key] ?? {}, "scripts") ? config[key].scripts : [];
       if (!Array.isArray(entries))
         throw new Error(`invalid nextest ${key}.scripts: expected an array of script entries`);
       for (const [index, entry] of entries.entries()) {
@@ -334,15 +334,21 @@ function nextestScripts(configs, profiles) {
         for (const field of Object.keys(entry))
           if (!scriptEntryFields.includes(field))
             throw unresolved("nextest script field", field, from);
-        for (const [field, kind] of Object.entries(scriptKinds))
-          for (const name of [entry[field] ?? []].flat())
-            used.set(`${kind}:${name}`, { kind, name, from });
+        for (const [field, kind] of Object.entries(scriptKinds)) {
+          if (!Object.hasOwn(entry, field)) continue;
+          const names = [entry[field]].flat();
+          if (!names.length || names.some((name) => typeof name !== "string" || !name))
+            throw new Error(
+              `invalid nextest script entry ${field}: expected a script name or a list of them (read from ${from})`,
+            );
+          for (const name of names) used.set(`${kind}:${name}`, { kind, name, from });
+        }
       }
     }
   for (const { kind, name, from } of used.values())
     if (
       typeof name !== "string" ||
-      !configs.some((config) => Object.hasOwn(config.scripts?.[kind] ?? {}, name))
+      !configs.some((config) => record(config.scripts?.[kind]?.[name]))
     )
       throw unresolved("nextest script", JSON.stringify(name), from);
   return used;

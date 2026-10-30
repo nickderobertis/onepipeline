@@ -3399,6 +3399,17 @@ test("configuration projection refuses an unresolved configuration section", () 
       missing,
       /unresolved nextest script "absent" \(read from .config\/nextest.toml profile.default.scripts\[0\]\)/,
     );
+    // A script name that is not a string, or a definition that is not a script table, refuses too.
+    const numbered = '[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetup=1\n';
+    refused(
+      ".config/nextest.toml",
+      numbered,
+      numbered,
+      /invalid nextest script entry setup: expected a script name or a list of them/,
+    );
+    const valued =
+      '[scripts.setup]\ndb=42\n[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetup="db"\n';
+    refused(".config/nextest.toml", valued, valued, /unresolved nextest script "db"/);
     refused("unknown.toml", "", "", /usage: config-projection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
