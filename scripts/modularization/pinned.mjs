@@ -66,11 +66,19 @@ export function pin(root, into) {
       { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     ).trim();
   try {
-    git(root, "cat-file", "-e", `${commit}^{commit}`);
-  } catch {
-    throw new Error(
-      `design snapshot commit ${commit} is not in this repository (read from ${SNAPSHOT})`,
+    git(root, "rev-parse", "--verify", "--quiet", `${commit}^{commit}`);
+  } catch (error) {
+    // `rev-parse --verify --quiet` exits 1, saying nothing, exactly when no such commit exists;
+    // anything else is git itself failing, and keeps its own cause.
+    if (error.status === 1 && !String(error.stderr ?? "").trim())
+      throw new Error(
+        `design snapshot commit ${commit} is not in this repository (read from ${SNAPSHOT})`,
+      );
+    const failure = new Error(
+      `git could not read ${root}: ${String(error.stderr ?? "").trim() || error.message}`,
     );
+    failure.git = true;
+    throw failure;
   }
   const files = designFiles(root, design);
   git(root, "clone", "--quiet", "--shared", "--no-checkout", root, into);
@@ -128,9 +136,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     // Each stage fails for its own reason, so each names its own repair.
     const next = {
       scratch: `make ${parent} an existing, writable directory (or point ONEPIPELINE_NODE_SCRATCH_DIR at one)`,
-      pin: error.code
-        ? `check that ${root} and ${parent} are readable and writable and the disk has space`
-        : `fetch the snapshot commit or correct ${SNAPSHOT}`,
+      pin:
+        error.code === "ENOENT" && error.path === "git"
+          ? "install git and put it on PATH"
+          : error.git
+            ? `check that git is installed and ${root} is a readable git repository`
+            : error.code
+              ? `check that ${root} and ${parent} are readable and writable and the disk has space`
+              : `fetch the snapshot commit or correct ${SNAPSHOT}`,
       command:
         error.code === "ENOENT"
           ? `install ${command[0]} or correct the command given after --`

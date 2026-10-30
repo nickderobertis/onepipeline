@@ -2211,6 +2211,31 @@ test("pinned runs a command over the reviewed source with the working tree's des
       commit: reviewed,
       design: ["docs/design.md", "scripts/modularization"],
     });
+    // git failing for its own reason is reported as that, not as a missing commit.
+    const broken = join(root, "not-a-repository");
+    mkdirSync(join(broken, "scripts/modularization"), { recursive: true });
+    for (const name of ["pinned.mjs", "snapshot.json"])
+      put(
+        broken,
+        `scripts/modularization/${name}`,
+        readFileSync(join(root, "scripts/modularization", name), "utf8"),
+      );
+    const unreadable = spawnSync(
+      process.execPath,
+      ["scripts/modularization/pinned.mjs", "--", "true"],
+      {
+        cwd: broken,
+        env: { ...env, GIT_CEILING_DIRECTORIES: root },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(unreadable.status, 1);
+    assert.match(unreadable.stderr, /git could not read .*not a git repository/i);
+    assert.match(
+      unreadable.stderr,
+      /next: check that git is installed and .* is a readable git repository/,
+    );
+    assert.doesNotMatch(unreadable.stderr, /is not in this repository/);
     // A missing command and an unusable scratch parent each name their own repair.
     const absent = pinned("--", "no-such-command-for-pinned");
     assert.equal(absent.status, 1);
