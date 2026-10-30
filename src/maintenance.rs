@@ -1358,6 +1358,13 @@ impl Maintenance {
                     Ok(message) => message,
                     // A relay that has gone or stalled past the wait: what the
                     // pass did is lost to the record, and said so.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user
+                    // can type reaches this arm: the relay forwards every message while the
+                    // loop holds its receiver, which it does until this returns, so a report
+                    // the sweep thread sent always arrives. The arm is the bound on a relay
+                    // that died, and the unit test
+                    // `a_closing_driver_records_the_retirement_its_relay_hands_on_late` drives
+                    // it through a relay that closes without handing the report on.
                     Err(why) => {
                         eprintln!(
                             "onepipeline: run '{}': the pool-maintenance sweep's retirement \
@@ -1366,7 +1373,7 @@ impl Maintenance {
                             paths.run
                         );
                         break;
-                    }
+                    } // llmlint: ignore-end[changed_behavior_has_e2e]
                 }
             } else {
                 match rx.try_recv() {
