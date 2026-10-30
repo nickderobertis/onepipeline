@@ -10163,6 +10163,7 @@ pub(crate) fn attempt(
             }
             Err(error) => {
                 conflicted = crate::vcs::session_open_conflicted(&error);
+                crate::human_items::runtime::dispatch_refused(&error);
                 Drained {
                     settlement: Settlement {
                         detail: Some(error.to_string()),

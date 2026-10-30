@@ -35,6 +35,48 @@ pub(crate) fn node_of(item: &HumanItem) -> Option<(&str, &str)> {
     item.dedup_key.strip_prefix("run:")?.split_once('#')
 }
 
+/// The store and session of the run this process drives, for the dispatch
+/// threads that report a host condition and know no launch.
+static DRIVING: std::sync::Mutex<Option<(HumanItems, String)>> = std::sync::Mutex::new(None);
+
+/// A dispatch the host refused before any work began: one refused for want of
+/// space raises the host's one dispatch-space item, owned by the driving
+/// session, probed afterwards by the directory that could not be written.
+/// Anything else — and any refusal not definitively a full filesystem — raises
+/// nothing.
+pub(crate) fn dispatch_refused(error: &crate::error::Error) {
+    let crate::error::Error::Ledger { path, source } = error else {
+        return;
+    };
+    if !super::durable::is_no_space(source) {
+        return;
+    }
+    let driving = DRIVING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some((store, session)) = driving else {
+        return;
+    };
+    let probe = path.parent().unwrap_or(path);
+    if let Err(why) = store.raise_condition(
+        super::live::DISPATCH_NO_SPACE,
+        &session,
+        "Free space where dispatches start",
+        &format!(
+            "A dispatch could not start: {} has no space left ({source}). No work starts on \
+             this host until it does; this resolves itself once that directory accepts \
+             writes again.",
+            path.display()
+        ),
+        probe,
+    ) {
+        eprintln!(
+            "onepipeline: a dispatch found no space, and its host item was not raised: {why}"
+        );
+    }
+}
+
 /// How often a driver looks at the human-item store.
 const EVERY: Duration = Duration::from_millis(250);
 /// How long a resolution is left to the process that recorded it before the
@@ -59,6 +101,10 @@ impl Gate {
     /// The gate for a launch whose effective configuration enables human items.
     pub(crate) fn for_launch(paths: &RunPaths, launch: &LaunchRecord) -> Option<Self> {
         let store = store_for(paths, launch)?;
+        *DRIVING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((store.clone(), launch.session.clone()));
         Some(Self {
             store,
             run: paths.run.clone(),
@@ -112,6 +158,12 @@ impl Gate {
                 return self.held.clone();
             }
         };
+        if items.values().any(|i| {
+            i.state == HumanItemState::Open
+                && i.dedup_key.starts_with(super::live::HOST_CONDITION_PREFIX)
+        }) {
+            self.store.probe();
+        }
         self.reconcile(paths, state, statuses, &items);
         self.held = held(&self.run, &self.plan, state, &items);
         self.held.clone()

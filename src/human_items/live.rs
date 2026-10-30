@@ -48,6 +48,8 @@ const RUN_TAIL: u64 = 512;
 pub const RUN_ENDED: &str = "the run ended";
 /// The host condition the journal running out of space raises.
 pub const JOURNAL_NO_SPACE: &str = "journal-no-space";
+/// The host condition a dispatch refused for want of space raises.
+pub const DISPATCH_NO_SPACE: &str = "dispatch-no-space";
 /// The dedup-key prefix of every host condition item, followed by the condition.
 pub const HOST_CONDITION_PREFIX: &str = "host:";
 /// The environment variable naming a file a read appends its telemetry line to.
@@ -455,77 +457,25 @@ impl HumanItems {
 
     /// Raise one urgent host item for a definitive host condition, owned by
     /// `session`, unless one is already open for that condition.
-    #[expect(dead_code, reason = "the scheduler's holds and host incidents call it")]
     pub(crate) fn raise_condition(
         &self,
         condition: &str,
         session: &str,
         title: &str,
         body: &str,
+        probe: &Path,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        let mut known = probes(self);
+        known.insert(condition.to_owned(), probe.to_path_buf());
+        let _ = crate::ledger::write_atomic(
+            &probes_path(self),
+            &serde_json::to_vec(&known).unwrap_or_default(),
+            crate::ledger::Durability::Record,
+        );
         let mut writer = Writer::open(self)?;
         let receipt = writer.condition(condition, session, title, body)?;
         writer.finish();
         Ok(receipt)
-    }
-
-    /// Resolve a host condition's open item automatically, because a probe of
-    /// the capability that failed found it working. Answers whether one was open.
-    #[expect(dead_code, reason = "the scheduler's holds and host incidents call it")]
-    pub(crate) fn clear_condition(
-        &self,
-        condition: &str,
-        reason: &str,
-    ) -> Result<bool, HumanItemRefusal> {
-        let mut writer = Writer::open(self)?;
-        let cleared = writer.clear(condition, reason)?;
-        writer.finish();
-        Ok(cleared)
-    }
-
-    /// The conditions with an open host item.
-    #[expect(dead_code, reason = "the scheduler's holds and host incidents call it")]
-    pub(crate) fn open_conditions(&self) -> Result<Vec<String>, HumanItemRefusal> {
-        let snapshot = self.snapshot()?;
-        Ok(snapshot
-            .items
-            .values()
-            .filter(|i| i.state == HumanItemState::Open)
-            .filter_map(|i| {
-                let rest = i.dedup_key.strip_prefix(HOST_CONDITION_PREFIX)?;
-                Some(rest.split(':').next()?.to_owned())
-            })
-            .collect())
-    }
-
-    /// The open blocks that hold `run`'s node `node`, if any do: a host hold, a
-    /// hold on the run's plan, or a work hold on the node or one it depends on.
-    #[expect(dead_code, reason = "the scheduler's holds and host incidents call it")]
-    pub(crate) fn holding(snapshot: &Snapshot, run: &str, node: &str) -> Vec<String> {
-        let Some(dag) = snapshot.runs.get(run) else {
-            return Vec::new();
-        };
-        let mut held = Vec::new();
-        for item in snapshot.items.values().filter(|i| i.is_blocking()) {
-            let holds = match &item.block {
-                HumanItemBlock::Host => true,
-                HumanItemBlock::Plan { plan } => *plan == dag.plan,
-                HumanItemBlock::Work { run: r, node: n } => {
-                    r == run && blocked_by_work(dag, n).iter().any(|b| b.id == node)
-                }
-                HumanItemBlock::Nothing => false,
-            };
-            if holds {
-                held.push(item.id.clone());
-            }
-        }
-        held
-    }
-
-    /// The current snapshot, caught up through the index.
-    #[expect(dead_code, reason = "the scheduler's holds and host incidents call it")]
-    pub(crate) fn snapshot(&self) -> Result<Snapshot, HumanItemRefusal> {
-        Ok(self.read()?.0)
     }
 
     fn report(&self, telemetry: &ReadTelemetry) {
@@ -537,18 +487,22 @@ impl HumanItems {
     /// the probe. Only the failed capability is asked; nothing is dispatched.
     fn recovered(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
         let (snapshot, telemetry) = self.read()?;
-        let prefix = format!("{HOST_CONDITION_PREFIX}{JOURNAL_NO_SPACE}:");
-        let open = snapshot
-            .items
-            .values()
-            .any(|i| i.state == HumanItemState::Open && i.dedup_key.starts_with(&prefix));
+        let open = snapshot.items.values().any(|i| {
+            i.state == HumanItemState::Open && i.dedup_key.starts_with(HOST_CONDITION_PREFIX)
+        });
         if !open {
             return Ok((snapshot, telemetry));
         }
+        self.probe();
+        Ok((self.read()?.0, telemetry))
+    }
+
+    /// Probe every open host condition by the capability that failed; a writer's
+    /// open is where each probe is made.
+    pub(crate) fn probe(&self) {
         if let Ok(writer) = Writer::open(self) {
             writer.finish();
         }
-        Ok((self.read()?.0, telemetry))
     }
 
     /// Every item, caught up with the journal, without reading any run: what a
@@ -794,6 +748,18 @@ impl HumanItems {
         telemetry.discovery_ms += ms(started);
         moved
     }
+}
+
+/// Where each host condition is probed, kept beside the journal.
+fn probes_path(store: &HumanItems) -> PathBuf {
+    store.dir().join("probes.json")
+}
+
+fn probes(store: &HumanItems) -> BTreeMap<String, PathBuf> {
+    std::fs::read(probes_path(store))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
 }
 
 /// Append one telemetry line to the file [`TELEMETRY_ENV`] names, if it names one.
@@ -1108,7 +1074,29 @@ impl<'a> Writer<'a> {
                 "the human-item journal's filesystem has space again",
             )?;
         }
+        writer.probe_dispatch_space()?;
         Ok(writer)
+    }
+
+    /// Probe each open dispatch outage by the one capability that failed: a file
+    /// created and removed in the directory a dispatch could not write.
+    fn probe_dispatch_space(&mut self) -> Result<(), HumanItemRefusal> {
+        if self.open_condition(DISPATCH_NO_SPACE).is_none() {
+            return Ok(());
+        }
+        let Some(dir) = probes(self.store).remove(DISPATCH_NO_SPACE) else {
+            return Ok(());
+        };
+        let probe = dir.join(format!(".onepipeline-space-probe-{}", crate::sys::pid()));
+        let written = std::fs::write(&probe, b"probe");
+        let _ = std::fs::remove_file(&probe);
+        if written.is_ok() {
+            self.clear(
+                DISPATCH_NO_SPACE,
+                &format!("{} accepts writes again", dir.display()),
+            )?;
+        }
+        Ok(())
     }
 
     /// Bring the index up to what this writer appended, best effort: the

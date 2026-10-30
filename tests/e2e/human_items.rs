@@ -675,3 +675,97 @@ fn the_cli_the_embedded_sdk_and_a_launch_read_one_shared_configuration() {
         }
     }
 }
+
+/// Run `steps`, a shell script of `onepipeline` invocations, inside an
+/// unprivileged user and mount namespace whose `mount` is the script's first
+/// line, with the environment this world gives the binary. Answers the script's
+/// exit code.
+#[cfg(target_os = "linux")]
+fn in_namespace(world: &World, script: &str) -> i32 {
+    let template = world.cmd(&[]);
+    let mut command = std::process::Command::new("unshare");
+    command.args(["-rm", "sh", "-c", script]);
+    for (key, value) in template.get_envs() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
+    command.env("ONEPIPELINE", template.get_program());
+    command.status().unwrap().code().unwrap_or(-1)
+}
+
+/// A dispatch refused for want of space, for real: the run's scratch directory is
+/// a tmpfs with no inode left, so the dispatch's own `mkdir` fails with `ENOSPC`
+/// while every journal stays writable.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_dispatch_refused_for_space_raises_one_host_item_that_its_probe_resolves() {
+    let world = World::new("human-item-dispatch-space");
+    enabled(&world);
+    let name = "spaceless";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                human("gate", &[]),
+                agent("b", &["gate"]),
+                agent("c", &["gate"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let gate = id_of(&items(&world, &[])[0]);
+    world.run(&["human-items", "complete", &gate]).exited(0);
+    let scratch = world.runs.join(name).join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let out = world.root.join("namespace-out");
+    std::fs::create_dir_all(&out).unwrap();
+    let script = format!(
+        r#"mount -t tmpfs -o size=64k,nr_inodes=1 tmpfs "{scratch}" || exit 90
+ONEPIPELINE_BOUNDARY_ATTEMPTS=1 "$ONEPIPELINE" adopt {name} > "{out}/adopt.out" 2> "{out}/adopt.err"
+"$ONEPIPELINE" human-items list --json --host > "{out}/full.json" 2> "{out}/full.err"
+umount "{scratch}" || exit 91
+"$ONEPIPELINE" human-items list --json --host --state dismissed > "{out}/after.json" 2> "{out}/after.err"
+"#,
+        scratch = scratch.display(),
+        out = out.display(),
+    );
+    assert_eq!(in_namespace(&world, &script), 0);
+    let read = |file: &str| std::fs::read_to_string(out.join(file)).unwrap();
+    let full: Value = serde_json::from_str(&read("full.json"))
+        .unwrap_or_else(|e| panic!("{e}: {}", read("full.err")));
+    let hosts = full.as_array().unwrap();
+    assert_eq!(
+        hosts.len(),
+        1,
+        "two dispatches refused, one item for the condition: {full}\n{}",
+        read("adopt.err")
+    );
+    let host = &hosts[0]["item"];
+    assert_eq!(host["priority"], "urgent");
+    assert_eq!(
+        host["owner"]["session"],
+        "session-human-item-dispatch-space"
+    );
+    assert!(host["body"].as_str().unwrap().contains("scratch"), "{host}");
+    // The run's own end retires its holds, never a host incident.
+    let after: Value = serde_json::from_str(&read("after.json"))
+        .unwrap_or_else(|e| panic!("{e}: {}", read("after.err")));
+    let resolved = &after[0]["item"];
+    assert_eq!(resolved["id"], host["id"]);
+    assert_eq!(resolved["resolution"]["actor"], "engine");
+    assert!(
+        resolved["resolution"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("accepts writes again"),
+        "{resolved}"
+    );
+    // The probe dispatched nothing: the refused nodes are where the refusal left them.
+    assert!(world.events_of(name, "node-dispatched").len() <= 2);
+    assert!(watch(&world, "session-human-item-dispatch-space")
+        .iter()
+        .any(|e| e["kind"] == "human-item-auto-resolved"));
+}
