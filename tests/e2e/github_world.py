@@ -21,7 +21,7 @@ the request log.
 
 The first argument names the directory the URL is published to, whole, as `endpoint`; the
 second a JSON file seeding the model, and the third the schema: `{"owner": LOGIN, "repositories": {"owner/name":
-"public" | "private"}, "boards": {"<number>": {"public": BOOL}}, "issues": [{"id": ID,
+"public" | "private"}, "boards": {"<number>": {"public": BOOL, "priority"?: BOOL}}, "issues": [{"id": ID,
 "repository": "owner/name", "title": T, "body": B, "board": NUMBER, "status": OPTION,
 "parent": ID | null}]}`.
 """
@@ -34,6 +34,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATUS_OPTIONS = ["Backlog", "Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled"]
+PRIORITY_OPTIONS = ["Urgent", "High", "Medium", "Low"]
 ORIGIN_FIELD = "onetaskgraph.origin"
 STAMP = "2026-10-01T00:00:00Z"
 
@@ -540,9 +541,12 @@ def seeded(seed):
         if not SLUG.match(slug) or visibility not in ("public", "private"):
             raise SystemExit("repository %r must be owner/name, public or private" % slug)
     for number, board in seed["boards"].items():
-        if (not NUMBER.match(number) or not isinstance(board, dict) or set(board) != {"public"}
-                or not isinstance(board["public"], bool)):
-            raise SystemExit("board %r must be a number declaring `public` true or false" % number)
+        if (not NUMBER.match(number) or not isinstance(board, dict)
+                or not {"public"} <= set(board) <= {"public", "priority"}
+                or not isinstance(board["public"], bool)
+                or not isinstance(board.get("priority", False), bool)):
+            raise SystemExit("board %r must be a number declaring `public` true or false, and "
+                             "optionally `priority`" % number)
     ids = set()
     for issue in seed["issues"]:
         if (not isinstance(issue, dict)
@@ -569,12 +573,19 @@ class World:
                                        "visibility": visibility, "issues": 0}
         self.boards = {}
         for number, board in seed["boards"].items():
+            fields = [
+                {"id": "STATUS_%s" % number, "name": "Status", "kind": "select",
+                 "options": STATUS_OPTIONS},
+                {"id": "ORIGIN_%s" % number, "name": ORIGIN_FIELD, "kind": "text"},
+            ]
+            # A board seeded `"priority": true` also carries the single-select `Priority`
+            # field a source's `priority_mapping` reads and writes.
+            if board.get("priority"):
+                fields.append({"id": "PRIORITY_%s" % number, "name": "Priority",
+                               "kind": "select", "options": PRIORITY_OPTIONS})
             self.boards[int(number)] = {
                 "id": "PVT_%s" % number, "public": board["public"], "items": [],
-                "fields": [
-                    {"id": "STATUS_%s" % number, "name": "Status", "kind": "select"},
-                    {"id": "ORIGIN_%s" % number, "name": ORIGIN_FIELD, "kind": "text"},
-                ],
+                "fields": fields,
             }
         self.issues, self.items, self.minted = {}, {}, 0
         for issue in seed["issues"]:
@@ -703,7 +714,7 @@ class Field(Node):
             raise Unsupported("a text field has no options")
         return [Plain({"id": "%s_%s" % (self.held["id"], option), "name": option,
                        "color": "GRAY", "description": ""})
-                for option in STATUS_OPTIONS]
+                for option in self.held["options"]]
 
 
 class Item(Node):
@@ -962,8 +973,8 @@ class Mutation(Node):
         elif field["kind"] == "select":
             option = supplied["value"]["singleSelectOptionId"]
             prefix = field["id"] + "_"
-            if not option.startswith(prefix) or option[len(prefix):] not in STATUS_OPTIONS:
-                raise Unsupported("an unknown Status option %r" % option)
+            if not option.startswith(prefix) or option[len(prefix):] not in field["options"]:
+                raise Unsupported("an unknown %s option %r" % (field["name"], option))
             item["values"][field["id"]] = option[len(prefix):]
         else:
             item["values"][field["id"]] = supplied["value"]["text"]

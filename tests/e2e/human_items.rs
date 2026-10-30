@@ -844,3 +844,174 @@ fn only_every_identity_refused_definitively_raises_one_host_item() {
     world.run(&["start", &project, "--attach"]).settled();
     assert!(host_items(&world).is_empty());
 }
+
+/// Open tasks are projected into the configured `task_source` through the
+/// linked store — the real `github-projects` plugin against the loopback GitHub
+/// — once each, resumed after a projection that never happened, and never twice
+/// however often it is replayed. Questions never reach the tracker.
+#[test]
+fn tasks_project_once_into_the_task_source_and_questions_never_do() {
+    use crate::private_github_home::{described, GitHub};
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = World::new("human-item-projection")
+        .with_env("HOSTNAME", "projection-host")
+        .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {"owner/service": "public"},
+            "boards": {"1": {"public": true, "priority": true}},
+            "issues": [{"id": "human", "repository": "owner/service", "title": "Human work", "board": 1,
+                        "status": "Todo", "parent": null,
+                        "body": described("## Plan\n- Work for people.", &json!({}))}],
+        }),
+    );
+    let repo = checkout(
+        &world,
+        Some("human_items:\n  enabled: true\n  task_source: board\n"),
+    );
+    let intents = world.root.join("intents");
+    std::fs::create_dir_all(&intents).unwrap();
+    let store = |endpoint: &str| {
+        format!(
+            "sources:\n  board:\n    plugin: github-projects\n    visibility: public\n    \
+             task_projection:\n      host: projection-host\n      directory: {}\n      project: human\n    \
+             config:\n      owner: owner\n      project_number: 1\n      repository: owner/service\n      \
+             token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {endpoint}\n      status_mapping:\n        \
+             todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        \
+             done: Done\n        cancelled: Canceled\n      priority_mapping:\n        urgent: Urgent\n        \
+             high: High\n        medium: Medium\n        low: Low\n",
+            intents.display()
+        )
+    };
+    let in_repo = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.current_dir(&repo);
+        world.run_on(command, &args.join(" "))
+    };
+    let raise_in_repo = |file: &str, value: &Value| {
+        let path = world.root.join(format!("{file}.json"));
+        std::fs::write(&path, value.to_string()).unwrap();
+        in_repo(&["human-items", "raise", "--input", path.to_str().unwrap()])
+    };
+    let projected = |state: &Value| -> Vec<Value> {
+        state["issues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|issue| issue["title"] != "Human work")
+            .cloned()
+            .collect()
+    };
+
+    // The tracker is unreachable: the task is recorded and holds as it should,
+    // the refusal is said, and nothing reached any tracker.
+    std::fs::write(
+        repo.join("onetaskgraph.yaml"),
+        store("http://127.0.0.1:9/graphql"),
+    )
+    .unwrap();
+    let first = raise_in_repo(
+        "first",
+        &input("first", "task", "mgr", None, None, json!({"scope": "host"})),
+    );
+    first.exited(0).err_has("its projection into board failed");
+    let id: String = serde_json::from_str::<Value>(&first.stdout).unwrap()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(projected(&github.state()).is_empty());
+    let held: Value =
+        serde_json::from_str(&in_repo(&["human-items", "list", "--json", "--host"]).stdout)
+            .unwrap();
+    assert_eq!(
+        held.as_array().unwrap().len(),
+        1,
+        "the hold stands while the projection is owed"
+    );
+
+    // The tracker returns: the next write projects what was owed, once, and binds it.
+    std::fs::write(repo.join("onetaskgraph.yaml"), store(&github.board(1))).unwrap();
+    let resumed = raise_in_repo(
+        "question",
+        &input(
+            "asked",
+            "question",
+            "mgr",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    resumed.exited(0);
+    let state = github.state();
+    let issues = projected(&state);
+    assert_eq!(
+        issues.len(),
+        1,
+        "{issues:#?}\nstderr: {}\nunsupported: {}",
+        resumed.stderr,
+        state["unsupported"]
+    );
+    assert_eq!(issues[0]["title"], "Decide first");
+    let shown: Value =
+        serde_json::from_str(&in_repo(&["human-items", "show", &id, "--json"]).stdout).unwrap();
+    let tracker = &shown["item"]["tracker"];
+    assert!(
+        tracker["url"].as_str().unwrap().starts_with("http"),
+        "{shown}"
+    );
+
+    // Replayed as though the record of it were lost: the store's intent answers
+    // the same task, and no second one is created.
+    std::fs::remove_file(world.runs.join("human-items/projected.json")).unwrap();
+    raise_in_repo(
+        "again",
+        &input("first", "task", "mgr", None, None, json!({"scope": "host"})),
+    )
+    .exited(0);
+    raise_in_repo(
+        "third",
+        &input(
+            "third",
+            "task",
+            "mgr",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    )
+    .exited(0);
+    assert_eq!(projected(&github.state()).len(), 2);
+
+    // Completing projects the terminal state onto the same task.
+    in_repo(&["human-items", "complete", &id]).exited(0);
+    let state = github.state();
+    let done = projected(&state)
+        .into_iter()
+        .find(|i| i["title"] == "Decide first")
+        .unwrap();
+    let item = state["items"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|it| it["content"] == done["id"])
+        .unwrap();
+    assert_eq!(item["values"]["STATUS_1"], "Done", "{item:#}");
+    assert_eq!(item["values"]["PRIORITY_1"], "High");
+    // The question was never written anywhere.
+    assert!(projected(&state)
+        .iter()
+        .all(|i| i["title"] != "Decide asked"));
+}

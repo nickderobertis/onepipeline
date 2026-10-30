@@ -403,7 +403,7 @@ fn store_for(paths: &RunPaths, launch: &LaunchRecord) -> Option<HumanItems> {
         launch.dir.clone()
     };
     match super::config::effective(&dir) {
-        Ok(config) if config.human_items.enabled => Some(HumanItems::at(root, config)),
+        Ok(config) if config.human_items.enabled => Some(HumanItems::at(root, config).in_dir(dir)),
         Ok(_) => None,
         Err(why) => {
             eprintln!(

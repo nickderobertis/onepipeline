@@ -5,6 +5,7 @@ mod delivery;
 mod durable;
 mod live;
 pub mod phases;
+mod projection;
 pub(crate) mod runtime;
 pub use approval::REREAD;
 pub use live::{item_id_for, Actor, HumanItems, ReadMode, ReadTelemetry, RUN_ENDED, TELEMETRY_ENV};

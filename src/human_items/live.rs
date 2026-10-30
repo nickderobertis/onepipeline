@@ -258,6 +258,9 @@ fn storage(what: &str, path: &Path, error: impl std::fmt::Display) -> HumanItemR
 pub struct HumanItems {
     root: PathBuf,
     config: super::config::EffectiveConfig,
+    /// Where the store `task_source` names is configured from: the checkout a
+    /// command runs in, or a run's launch directory.
+    dir: PathBuf,
 }
 
 /// The state a read or a write works from: every item, and every run DAG.
@@ -274,7 +277,15 @@ impl HumanItems {
         Self {
             root: root.into(),
             config,
+            dir: std::env::current_dir().unwrap_or_default(),
         }
+    }
+
+    /// This store, projecting through the plan store configured from `dir`.
+    #[must_use]
+    pub fn in_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.dir = dir.into();
+        self
     }
 
     /// The store under `root` for a consumer working in `dir`: the effective
@@ -290,7 +301,7 @@ impl HumanItems {
         if !config.human_items.enabled {
             return Err(HumanItemRefusal::Unavailable);
         }
-        Ok(Self::at(root, config))
+        Ok(Self::at(root, config).in_dir(dir))
     }
 
     /// The effective configuration this store acts under.
@@ -499,6 +510,66 @@ impl HumanItems {
         }
         self.probe();
         Ok((self.read()?.0, telemetry))
+    }
+
+    /// Project every task whose state is ahead of what was last projected into
+    /// the configured `task_source`, outside the journal's lock. A refusal is
+    /// said and retried by the next write; the local item and its hold stand.
+    fn project_pending(&self) {
+        thread_local! {
+            static PROJECTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        let Some(source) = self.config.human_items.task_source.clone() else {
+            return;
+        };
+        if PROJECTING.with(std::cell::Cell::get) {
+            return;
+        }
+        PROJECTING.with(|p| p.set(true));
+        let journal = self.journal();
+        let pending = self
+            .items()
+            .map(|items| super::projection::pending(&journal, items.values()))
+            .unwrap_or_default();
+        for item in pending {
+            match super::projection::project(&self.dir, &source, &item) {
+                Ok(tracker) => {
+                    super::projection::record(&journal, &item);
+                    if item.state == HumanItemState::Open && item.tracker.as_ref() != Some(&tracker)
+                    {
+                        if let Err(why) = self.bind_tracker(&item.id, tracker) {
+                            eprintln!(
+                                "onepipeline: {} was projected and its tracker not recorded: {why}",
+                                item.id
+                            );
+                        }
+                    }
+                }
+                Err(why) => eprintln!(
+                    "onepipeline: the task {} is recorded and held as it is, and its projection \
+                     into {source} failed: {why}; the next human-items write projects it again",
+                    item.id
+                ),
+            }
+        }
+        PROJECTING.with(|p| p.set(false));
+    }
+
+    fn bind_tracker(
+        &self,
+        id: &str,
+        tracker: super::HumanItemTracker,
+    ) -> Result<(), HumanItemRefusal> {
+        let mut writer = Writer::open(self)?;
+        if let Some(mut item) = writer.snapshot.items.get(id).cloned() {
+            if item.state == HumanItemState::Open {
+                item.tracker = Some(tracker);
+                item.updated_at = crate::sys::now_rfc3339();
+                writer.append(&item, HumanItemEventAction::Raised)?;
+            }
+        }
+        writer.finish();
+        Ok(())
     }
 
     /// Probe every open host condition by the capability that failed; a writer's
@@ -1158,6 +1229,7 @@ impl<'a> Writer<'a> {
         if self.last.is_some() {
             let _ = self.store.read();
         }
+        self.store.project_pending();
     }
 
     fn append(
