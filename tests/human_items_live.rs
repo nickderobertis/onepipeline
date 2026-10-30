@@ -2069,3 +2069,24 @@ fn the_sdk_refuses_an_action_naming_no_actor_and_records_nothing() {
         "completed"
     );
 }
+
+/// `config` without `--json` prints the effective settings, every hook by its
+/// phase and every file they were read from.
+#[test]
+fn config_prints_the_effective_settings_and_where_they_came_from() {
+    let world = hooked();
+    let text = world.ok(None, &["config"]);
+    assert!(text.contains("enabled: true\n"), "{text}");
+    assert!(text.contains("task_source: plans\n"), "{text}");
+    assert!(
+        text.contains("hooks: design-review, ticket-review, ask\n"),
+        "{text}"
+    );
+    let file = world.repo().join(".onepipeline/config.yaml");
+    assert!(
+        text.contains(&format!("read from: {}\n", file.display())),
+        "{text}"
+    );
+    let bare = Live::new(None).ok(None, &["config"]);
+    assert_eq!(bare, "enabled: false\ntask_source: (none)\nhooks: (none)\n");
+}

@@ -1204,14 +1204,14 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
                 "task_source: {}",
                 effective.task_source.as_deref().unwrap_or("(none)")
             );
+            let phases: Vec<&str> = effective.hooks.iter().map(|h| h.phase.as_str()).collect();
             println!(
                 "hooks: {}",
-                effective
-                    .hooks
-                    .iter()
-                    .map(|h| h.phase.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                if phases.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    phases.join(", ")
+                }
             );
             for source in &config.sources {
                 println!("read from: {}", source.display());
