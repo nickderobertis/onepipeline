@@ -79,7 +79,7 @@ fn still_there(file: &mut std::fs::File, length: u64, delivered: &Delivered) -> 
     if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut window).is_err() {
         return false;
     }
-    let Some((body, b"\n")) = window.split_last_chunk::<1>().map(|(b, nl)| (b, nl)) else {
+    let Some((body, b"\n")) = window.split_last_chunk::<1>() else {
         return false;
     };
     let line = match body.iter().rposition(|b| *b == b'\n') {
