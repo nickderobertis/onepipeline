@@ -1281,9 +1281,22 @@ onevcs-testing = "0.19.26"
 # (onetaskgraph #3804): its canonical issue goes to a private repository instead of the copy
 # being refused. `tests/e2e/private_github_home.rs` drives a live add through it, and fails
 # on 0.12.9.
-onetaskgraph-core = "=0.12.11"
-onetaskgraph-plugin-api = "=0.12.11"
-onetaskgraph-local-md = "=0.12.11"
+# **0.12.12 is the floor for re-copying a Linear-homed plan** (`otg-recopy-zero-write`): copying
+# an unchanged plan into Linear again sends no write, where an earlier store rewrote every task
+# whose repositories or status Linear holds in another form, and deleted and re-filed its
+# dependency links. A host copies its private plans again after every review, finish and
+# approval, and each write spends Linear's quota and notifies the item's followers.
+# `tests/e2e/linear_launch.rs`'s `an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write`
+# drives it and fails on 0.12.11 and on 0.12.7, where the second copy sends six issue updates
+# and deletes and re-files the dependency.
+onetaskgraph-core = "=0.12.12"
+onetaskgraph-plugin-api = "=0.12.12"
+onetaskgraph-local-md = "=0.12.12"
+# Test-support only: the Linear plugin the store links through its `linear` feature, named
+# directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
+# GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
+# the loopback Linear answers. Exact and at the family's one release, like the three above.
+onetaskgraph-linear = "=0.12.12"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1517,6 +1530,9 @@ windows-sys = { workspace = true, features = [
 [dev-dependencies]
 fs4 = "0.13"
 onepipeline-testfakes = { path = "crates/testfakes" }
+# The store's Linear plugin, at the release `onetaskgraph-core` links — see
+# `[workspace.dependencies]`.
+onetaskgraph-linear = { workspace = true }
 onevcs-testing = { workspace = true }
 # `tests/patch_pin.rs` holds this manifest's patch block equal to `deny.toml`'s
 # allow-git list, and what it compares are pins — so both sides are parsed as the
