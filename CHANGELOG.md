@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.0](https://github.com/nickderobertis/onepipeline/compare/v0.95.7...v0.96.0) - 2026-10-30
+
+### Added
+
+- declare additive human action item contracts ([#1297](https://github.com/nickderobertis/onepipeline/pull/1297))
+
+### Fixed
+
+- *(deps)* link the onevcs whose public boundary check never refuses a removal ([#1301](https://github.com/nickderobertis/onepipeline/pull/1301))
+- prove the human items schema exporter without compiling inside a test ([#1304](https://github.com/nickderobertis/onepipeline/pull/1304))
+- *(deps)* link the store that lets a private GitHub home hold public tasks ([#1299](https://github.com/nickderobertis/onepipeline/pull/1299))
+- *(test)* keep the pooled-slot tier green on Windows, where its tests do not apply ([#1295](https://github.com/nickderobertis/onepipeline/pull/1295))
+- *(npm)* keep the Windows node_modules/.bin launch's output the engine's own ([#1291](https://github.com/nickderobertis/onepipeline/pull/1291))
+
 ## [0.95.7](https://github.com/nickderobertis/onepipeline/compare/v0.95.6...v0.95.7) - 2026-10-29
 
 ### Fixed
