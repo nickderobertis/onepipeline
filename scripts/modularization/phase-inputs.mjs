@@ -4,7 +4,13 @@ import { declarations } from "./source-projection.mjs";
 import { calls, functions } from "./rust-syntax.mjs";
 import { loadAttributions } from "./attribution.mjs";
 import { codeOnly } from "./graph.mjs";
+import { SECTIONED_DOCS } from "./contract-sections.mjs";
 
+const unescapeRust = (literal) =>
+  literal.replace(
+    /\\(n|t|r|"|'|\\|0)/g,
+    (_, c) => ({ n: "\n", t: "\t", r: "\r", 0: "\0" })[c] ?? c,
+  );
 const cache = new Map();
 const phases = new Map();
 const snippets = new Map();
@@ -276,6 +282,15 @@ function snippet(module, body, scope, methodOf) {
     .filter(Boolean)
     .filter((path) => path !== "." && !path.startsWith("target"))
     .flatMap((path) => [path.replace(/\/$/, ""), `${path.replace(/\/$/, "")}/**`]);
+  // A read of a sectioned document keeps the literal needles this body locates its passage by.
+  const needles = [
+    ...body.matchAll(
+      /\.(?:starts_with|ends_with|contains|split|split_once|rsplit|find|strip_prefix|strip_suffix)\(\s*"((?:[^"\\]|\\.)*)"/g,
+    ),
+  ].map((match) => unescapeRust(match[1]));
+  const docReads = [...new Set(reads)]
+    .filter((path) => SECTIONED_DOCS.includes(path))
+    .map((path) => ({ path, needles: [...new Set(needles)].sort() }));
   const imports = owner.imports
     .filter((entry) => !entry.parentKey || entry.parentKey === scope)
     .filter((entry) => entry.bindings.some((binding) => words.has(binding) || /Ext$/.test(binding)))
@@ -302,6 +317,16 @@ function snippet(module, body, scope, methodOf) {
   const result = {
     pending,
     paths: reads,
+    docReads,
+    // The library items this snippet names through the published crate, as `module::item`;
+    // `*` for a path naming no item of a module.
+    library: [
+      ...new Set(
+        [...erased.matchAll(/\bonepipeline::(\w+)(?:::(\w+))?/g)].map((m) =>
+          m[2] ? `${m[1]}::${m[2]}` : "*",
+        ),
+      ),
+    ],
     argumentCalls,
     bindings,
     publicApi,
@@ -348,6 +373,8 @@ export function phaseInputs(piece, disposition, commands) {
   const unresolved = new Set();
   const doubles = new Set();
   const fakeModules = new Set();
+  const docReads = new Map();
+  const library = new Set();
   for (const held of pending) {
     const review = reviewedAttributions[held.key.split("@")[0]];
     const diagnostic =
@@ -390,6 +417,8 @@ export function phaseInputs(piece, disposition, commands) {
       }
     }
     for (const path of analysis.paths) paths.add(path);
+    for (const read of analysis.docReads) docReads.set(JSON.stringify(read), read);
+    for (const module of analysis.library) library.add(module);
     // Support and library tests still run the fakes they start; only a failure dump starts none.
     const dumping = held.dumping || /::dump(?:@|$)/.test(held.key);
     if (!dumping) {
@@ -413,6 +442,8 @@ export function phaseInputs(piece, disposition, commands) {
     helpers: [...new Set([...consumers].map((key) => key.split("@")[0]))].sort(),
     doubles: [...doubles].sort(),
     fakeModules: [...fakeModules].sort(),
+    docReads: [...docReads.keys()].sort().map((key) => docReads.get(key)),
+    library: [...library].sort(),
   };
   phases.set(cacheKey, result);
   return result;

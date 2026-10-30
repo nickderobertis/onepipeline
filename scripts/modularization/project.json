@@ -26,6 +26,7 @@
         "{workspaceRoot}/docs/modularization-design.md",
         "{workspaceRoot}/docs/modularization-target-layout.md",
         "{workspaceRoot}/docs/modularization-command-replay.md",
+        "{workspaceRoot}/docs/modularization-test-split.md",
         {
           "runtime": "git rev-parse origin/main HEAD"
         }

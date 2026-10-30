@@ -3906,3 +3906,271 @@ test("engine proposal CLI isolates query and effect capabilities, refuses cycles
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the test split assigns every phase to one suite, under the threshold, and refuses a dropped, duplicated or misplaced test", async () => {
+  const { checkSplit, linuxSeconds, targetCatalog, THRESHOLD, SPLIT_PATH } = await import(
+    "./test-split.mjs"
+  );
+  const catalog = targetCatalog();
+  const text = readFileSync(SPLIT_PATH, "utf8");
+  const checked = spawnSync(
+    process.execPath,
+    ["scripts/modularization/test-split.mjs", "--check"],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(checked.status, 0, checked.stderr);
+  const suiteOf = checkSplit(text, catalog);
+  assert.deepEqual([...suiteOf.keys()].sort(), Object.keys(catalog.tests).sort());
+  const seconds = linuxSeconds(catalog);
+  const total = Object.values(seconds).reduce((sum, value) => sum + value, 0);
+  const bySuite = {};
+  for (const [id, suite] of suiteOf) bySuite[suite] = (bySuite[suite] ?? 0) + seconds[id];
+  for (const [suite, value] of Object.entries(bySuite))
+    assert.ok(value / total <= THRESHOLD, `${suite} holds ${value / total}`);
+  const split = JSON.parse(text);
+  const [first, second] = Object.keys(split.suites).filter(
+    (name) => split.suites[name].tests.length > 1,
+  );
+  const refused = (mutate, pattern) => {
+    const copy = structuredClone(split);
+    mutate(copy);
+    assert.throws(() => checkSplit(JSON.stringify(copy, null, 2), catalog), pattern);
+  };
+  refused((copy) => copy.suites[first].tests.pop(), /is in no split suite/);
+  refused(
+    (copy) => copy.suites[second].tests.push(copy.suites[first].tests[0]),
+    /is in both|takes .* from/,
+  );
+  refused((copy) => copy.suites[first].tests.push(copy.suites[first].tests[0]), /is in both/);
+  refused((copy) => copy.suites[first].tests.push("views::no_such_test"), /unknown test/);
+  refused((copy) => {
+    copy.suites[first].parent = "cmd-label";
+  }, /invalid split suite|takes .* from/);
+  refused((copy) => {
+    copy.typo = 1;
+  }, /invalid test split/);
+  const twice = text.replace(
+    `    "${first}": {`,
+    `    "${first}": { "parent": "x", "tests": ["x"] },\n    "${first}": {`,
+  );
+  assert.throws(() => checkSplit(twice, catalog), new RegExp(`names suite ${first} twice`));
+});
+
+test("a sectioned document read follows the section its needles name and keeps the whole file when they name none", async () => {
+  const { scope, scopeChanged, scopePath } = await import("./contract-sections.mjs");
+  const doc = [
+    "# Record",
+    "",
+    "## 44. Earlier",
+    "Mentions entry 45. in passing. Shared phrase.",
+    "## 45. Reviewer",
+    "```json",
+    '{ "reviewer": { "flag": "--x" } }',
+    "# not a heading inside a fence",
+    "```",
+    "### 45a. Detail",
+    "Refined text.",
+    "## 46. Later",
+    '{ "other": 1 } Shared phrase.',
+    "",
+  ].join("\n");
+  const entry = ["\n## ", "45.", "```json", "```"];
+  const held = scope(doc, entry);
+  assert.deepEqual(
+    held.map((section) => section.key),
+    ["## 45. Reviewer"],
+  );
+  assert.match(
+    scopePath("docs/contract-divergences.md", entry, held),
+    /#45-reviewer-[0-9a-f]{10}$/,
+  );
+  // A key the reader finds inside the entry refines it, a key naming another section adds that
+  // section, and a key the document repeats outside the scope leaves the whole file.
+  assert.deepEqual(
+    scope(doc, ["45.", "Refined text."]).map((section) => section.key),
+    ["## 45. Reviewer"],
+  );
+  assert.deepEqual(
+    scope(doc, ["45.", '"other"']).map((section) => section.key),
+    ["## 45. Reviewer", "## 46. Later"],
+  );
+  assert.equal(scope(doc, ["45.", "Shared phrase."]), null);
+  assert.equal(scope(doc, ["Shared phrase."]), null);
+  assert.equal(scope(doc, ["```json"]), null);
+  assert.deepEqual(
+    scope(doc, ['"reviewer"']).map((section) => section.key),
+    ["## 45. Reviewer"],
+  );
+  assert.equal(scopeChanged(doc, doc.replace("Later", "Last"), entry), false);
+  assert.equal(scopeChanged(doc, doc.replace("Refined", "Changed"), entry), true);
+  assert.equal(scopeChanged(doc, doc.replace("## 45. Reviewer", "## 47. Reviewer"), entry), true);
+  assert.equal(scopeChanged(doc, `${doc}## 45. Again\n`, entry), true);
+});
+
+test("a test file's hunks reach the items they touch: doc comments with their item, blank lines nowhere, imports everywhere", async () => {
+  const { projectSourceChange } = await import("./source-projection.mjs");
+  const { typeOwners } = await import("./split-replay.mjs");
+  const root = scratch();
+  const git = (...args) =>
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@localhost",
+        "-c",
+        "commit.gpgsign=false",
+        ...args,
+      ],
+      { cwd: root, encoding: "utf8", stdio: "pipe" },
+    ).trim();
+  const file = "tests/e2e/demo.rs";
+  const source = (doc, gap, imports) =>
+    [
+      `use std::path::Path;${imports}`,
+      "",
+      `/// ${doc}`,
+      "pub fn helper_a() -> u8 {",
+      "    1",
+      "}",
+      gap,
+      "pub struct Shape {",
+      "    pub side: u8,",
+      "}",
+      "",
+      "pub fn helper_b() -> Shape {",
+      "    Shape { side: 2 }",
+      "}",
+      "",
+    ].join("\n");
+  const commit = (text) => {
+    put(root, file, text);
+    git("add", "-A");
+    git("commit", "--quiet", "-m", "change");
+    return git("rev-parse", "HEAD");
+  };
+  const previous = process.cwd();
+  try {
+    git("init", "--quiet");
+    commit(source("Helper a.", "", ""));
+    const owners = {
+      [file]: new Map([
+        ["helper_a", new Set(["suite:a"])],
+        ["helper_b", new Set(["suite:b"])],
+      ]),
+    };
+    process.chdir(root);
+    typeOwners(owners);
+    process.chdir(previous);
+    assert.deepEqual([...owners[file].get("Shape")], ["suite:b"]);
+    const project = (sha, options) =>
+      projectSourceChange({ commit: sha, files: [file] }, owners, {}, root, options).projected[0];
+    const documented = commit(source("Helper a, reworded.", "", ""));
+    assert.deepEqual(project(documented, { testItems: true }), {
+      file,
+      destinations: ["suite:a"],
+      retainedWholeFile: false,
+    });
+    // Without item attribution the same doc-comment hunk falls outside every item.
+    assert.equal(project(documented, {}).retainedWholeFile, true);
+    const spaced = commit(source("Helper a, reworded.", "\n\n", ""));
+    assert.deepEqual(project(spaced, { testItems: true }).destinations, []);
+    const reshaped = commit(
+      source("Helper a, reworded.", "\n\n", "").replace("side: u8", "side: u16"),
+    );
+    assert.deepEqual(project(reshaped, { testItems: true }).destinations, ["suite:b"]);
+    const imported = commit(source("Helper a, reworded.", "\n\n", "\nuse std::fs;"));
+    assert.deepEqual(project(imported, { testItems: true }), {
+      file,
+      destinations: ["suite:a", "suite:b"],
+      retainedWholeFile: true,
+    });
+  } finally {
+    process.chdir(previous);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("split replay CLI replays crates and test split on the 144 PRs and renders fresh test-split documentation", {
+  timeout: 1500000,
+}, async () => {
+  const root = scratch();
+  try {
+    const { checkSplit, targetCatalog, SPLIT_PATH } = await import("./test-split.mjs");
+    const { splitAppendix, SPLIT_MARKER } = await import("./split-report.mjs");
+    const output = join(root, "split.json");
+    const run = spawnSync(process.execPath, ["scripts/modularization/split-replay.mjs", output], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const evidence = JSON.parse(readFileSync(output, "utf8"));
+    const { result, split } = evidence;
+    assert.equal(result.rows.length, 144);
+    // Every phase runs in exactly one suite of the replayed mapping.
+    const suiteOf = checkSplit(readFileSync(SPLIT_PATH, "utf8"), targetCatalog());
+    assert.equal(result.suites, new Set(suiteOf.values()).size);
+    assert.deepEqual(
+      Object.keys(result.mapping.selection.suites).sort(),
+      [...new Set(suiteOf.values())].sort(),
+    );
+    for (const platform of ["linux", "macos", "windows", "local"]) {
+      assert.ok(
+        result.platforms[platform].secondsSkip > 0 && result.platforms[platform].secondsSkip < 1,
+      );
+      // The step sums per merged suite, the replay per suite, so they agree to rounding.
+      assert.ok(
+        Math.abs(
+          result.splitMigration.at(-1).secondsSkip[platform] -
+            result.platforms[platform].secondsSkip,
+        ) < 1e-9,
+      );
+    }
+    assert.equal(result.splitMigration.at(-1).suiteSkip, result.platforms.linux.suiteSkip);
+    assert.equal(result.splitMigration[0].suites, 43);
+    for (const platform of ["linux", "macos", "windows"]) {
+      const wall = result.wall[platform];
+      assert.ok(wall.residual + wall.e2e === wall.today);
+      assert.ok(wall.projected.median <= wall.projected.max && wall.projected.max <= wall.today);
+    }
+    // A cross-command part links the commands it drives, not the facade, unless a phase is unattributed.
+    const crates = result.mapping.crates;
+    const parts = Object.keys(split.suites).filter((name) => name.startsWith("cross-command--"));
+    assert.ok(parts.some((name) => !crates[`runner-${name}`].deps.includes("onepipeline")));
+    assert.ok(parts.some((name) => crates[`runner-${name}`].deps.includes("cli-dispatcher")));
+    assert.ok(Object.keys(result.scopes).length > 0);
+    assert.ok(
+      result.rows.some((row) =>
+        row.effectiveFiles.some((file) => Object.hasOwn(result.scopes, file)),
+      ),
+    );
+    const doc = readFileSync("docs/modularization-test-split.md", "utf8");
+    const targetDoc = readFileSync("docs/modularization-target-layout.md", "utf8");
+    assert.equal(doc.split(SPLIT_MARKER).length, 2);
+    assert.equal(
+      `${SPLIT_MARKER}${doc.split(SPLIT_MARKER)[1]}`,
+      splitAppendix(evidence, targetDoc),
+    );
+    assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \| 13\.52% \| 6\.39% \|/);
+    const renderer = resolve("scripts/modularization/split-report.mjs");
+    const render = () =>
+      spawnSync(process.execPath, [renderer, output], { cwd: root, encoding: "utf8" });
+    put(root, "docs/modularization-target-layout.md", targetDoc);
+    put(root, "docs/modularization-test-split.md", "prefix kept\n");
+    assert.match(render().stderr, /expected one test split marker/);
+    put(root, "docs/modularization-test-split.md", `prefix kept\n${SPLIT_MARKER}\n`);
+    const rendered = render();
+    assert.equal(rendered.status, 0, rendered.stderr);
+    assert.equal(
+      readFileSync(join(root, "docs/modularization-test-split.md"), "utf8"),
+      `prefix kept\n${splitAppendix(evidence, targetDoc)}`,
+    );
+    evidence.typo = true;
+    put(root, "split.json", evidence);
+    assert.match(render().stderr, /unknown split evidence field/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

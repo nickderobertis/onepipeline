@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "source": "GitHub Actions run 40947970908 (pull request #1280 at head f561d6cad855e7f6e660cc9af9f26396d6986c0b), a full sweep with no merge base: job seconds from each job's started_at/completed_at, e2e seconds from the nextest Summary line of the onepipeline-e2e tier in that job's log",
+  "limitSeconds": 1800,
+  "platforms": {
+    "linux": {
+      "legs": [{ "job": 123708232415, "name": "gate", "jobSeconds": 6474, "bootstrapSeconds": 302, "e2eSeconds": 3502.824, "e2eTests": 1918 }],
+      "compileStressSeconds": 1160.3
+    },
+    "macos": {
+      "legs": [{ "job": 123708377377, "name": "Mac PR proofs", "jobSeconds": 7890, "bootstrapSeconds": 440, "e2eSeconds": 6224.416, "e2eTests": 1890 }],
+      "compileStressSeconds": 471.0
+    },
+    "windows": {
+      "legs": [
+        { "job": 123708377355, "name": "cross proof (windows-latest, shard 1/2)", "jobSeconds": 6429, "bootstrapSeconds": 754, "e2eSeconds": 4647.258, "e2eTests": 817 },
+        { "job": 123708377246, "name": "cross proof (windows-latest, shard 2/2)", "jobSeconds": 6095, "bootstrapSeconds": 765, "e2eSeconds": 4482.407, "e2eTests": 816 }
+      ],
+      "compileStressSeconds": 545.8
+    }
+  },
+  "local": { "source": "the profile's local run F, its test phase under shared-host load", "testPhaseSeconds": 10293.5 }
+}

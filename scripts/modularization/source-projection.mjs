@@ -407,7 +407,12 @@ export function driverLineOwners(text, decls, fileOwners) {
 const lineResolved = new Set(["src/driver.rs", "crates/testfakes/src/lib.rs"]);
 
 /** Historical hunks are charged to both old and new declaration owners. Unknown lines retain the whole-file input. */
-export function projectSourceChange(change, owners, layout, root = ".") {
+/**
+ * `options.testItems` attributes a test file's doc comments and attributes to the item below them,
+ * so a change to a helper's documentation or a test's `#[test]` line selects that item's users
+ * rather than every user of the file.
+ */
+export function projectSourceChange(change, owners, layout, root = ".", options = {}) {
   const git = (...args) =>
     execFileSync("git", args, {
       cwd: root,
@@ -429,6 +434,12 @@ export function projectSourceChange(change, owners, layout, root = ".") {
         const text = git("show", `${rev}:${file}`);
         texts[index] = text;
         snapshots[index] = declarations(text);
+        if (options.testItems && file.startsWith("tests/e2e/")) {
+          const lines = text.split("\n");
+          for (const decl of snapshots[index])
+            while (decl.start > 1 && /^\s*(?:\/\/\/|#\[|\/\/(?!!))/.test(lines[decl.start - 2]))
+              decl.start--;
+        }
         if (file === "src/cli.rs") snapshots[index].push(...cliVariants(text));
         if (file === "src/driver.rs") {
           const arms = [...codeOnly(text).matchAll(/^ {8}Verb::([A-Z]\w*)/gm)];
@@ -460,6 +471,7 @@ export function projectSourceChange(change, owners, layout, root = ".") {
       "--",
       file,
     );
+    const lineTexts = texts.map((text) => text.split("\n"));
     let unknown = false;
     const destinations = new Set();
     for (const hunk of diff.matchAll(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm)) {
@@ -467,6 +479,13 @@ export function projectSourceChange(change, owners, layout, root = ".") {
         const first = Number(hunk[index === 0 ? 1 : 3]);
         const count = Number(hunk[index === 0 ? 2 : 4] ?? 1);
         for (let line = first; line < first + count; line++) {
+          // A whitespace-only line between a test file's items changes no test.
+          if (
+            options.testItems &&
+            file.startsWith("tests/e2e/") &&
+            !(lineTexts[index][line - 1] ?? "").trim()
+          )
+            continue;
           let held = snapshots[index].filter(
             (decl) => decl.start <= line && decl.end >= line && owners[file].has(decl.name),
           );

@@ -13,6 +13,7 @@ import {
 import { historicalConfigChanges } from "./config-projection.mjs";
 import { testFakeManifestChanges, testFakes } from "./test-fakes.mjs";
 import { phaseInputs } from "./phase-inputs.mjs";
+import { scope, scopePath } from "./contract-sections.mjs";
 import { cliPaths, declarations, commandPaths } from "./source-projection.mjs";
 import { codeOnly, moduleGraph, validate } from "./graph.mjs";
 import { suiteInputs } from "./suite-inputs.mjs";
@@ -225,7 +226,12 @@ export function historicalCrates(crates, current, oldManifest, newManifest, befo
   );
 }
 
-export function commandMapping(layout, catalog) {
+/**
+ * `options.suiteOf` maps each catalog test to the suite it runs in after a test split (see
+ * test-split.mjs); `options.sections` scopes reads of sectioned documents to the sections their
+ * needles name. Without options this is the crate-only target mapping.
+ */
+export function commandMapping(layout, catalog, options = {}) {
   if (![1, 4].includes(catalog.schema))
     throw new Error("command test catalog must use schema 1 or 4");
   if (
@@ -407,9 +413,25 @@ export function commandMapping(layout, catalog) {
       tests: [],
     };
   }
+  const scopes = {};
+  const owned = new Map();
   for (const [name, test] of Object.entries(catalog.tests)) {
+    const owner = options.suiteOf?.get(name) ?? test.suite;
+    owned.set(name, owner);
+    if (!suites[owner] && suites[test.suite] && owner.startsWith(`${test.suite}--`))
+      // A cross-command part routes through the dispatcher's own machinery to the commands its
+      // journeys drive, rather than through the facade that registers every command.
+      suites[owner] = {
+        paths: [],
+        crates:
+          test.suite === "cross-command"
+            ? layout.crates["cli-dispatcher"].deps.filter((dep) => dep !== "onepipeline")
+            : [...suites[test.suite].crates],
+        modules: [],
+        tests: [],
+      };
     if (
-      !suites[test.suite] ||
+      !suites[owner] ||
       !Array.isArray(test.commands) ||
       !test.reason ||
       test.commands.some((c) => !c.startsWith("cmd-") || !crates[c])
@@ -420,11 +442,65 @@ export function commandMapping(layout, catalog) {
       (test.commands.length !== 1 || test.commands[0] !== test.suite)
     )
       throw new Error(`command suite has foreign root: ${name}`);
-    const suite = suites[test.suite];
+    const suite = suites[owner];
     suite.tests.push(name);
     suite.modules.push(name.split("::")[0]);
     suite.crates.push(...test.commands);
+    if (owner !== test.suite && test.suite === "cross-command") {
+      // A library item the journey names links the crate owning it: a submodule's file, else the
+      // crates that took that symbol from its file, else the file's own crate. An item resolving to
+      // no crate keeps the facade, and so does a journey whose argv is not fully attributed.
+      for (const path of phases[name].library) {
+        const [module, item] = path.split("::");
+        const filesOf = (crate) => layout.crates[crate].files;
+        const crates = Object.keys(layout.crates);
+        const submodule = crates.filter((crate) =>
+          filesOf(crate).some((file) =>
+            [`src/${module}/${item}.rs`, `src/${module}/${item}/mod.rs`].includes(file),
+          ),
+        );
+        const took = crates.filter((crate) =>
+          (layout.symbolSources?.[crate] ?? []).some(
+            (source) => source.file === `src/${module}.rs` && source.symbols.includes(item),
+          ),
+        );
+        const primary = crates.filter((crate) =>
+          filesOf(crate).some((file) =>
+            [`src/${module}.rs`, `src/${module}/mod.rs`].includes(file),
+          ),
+        );
+        const owning = item ? [submodule, took, primary].find((found) => found.length) : undefined;
+        suite.crates.push(...(owning ?? ["onepipeline"]));
+      }
+      if (phases[name].unresolved.length || phases[name].dynamicCli)
+        suite.crates.push("cli-dispatcher", "onepipeline");
+    }
   }
+  const phasePaths = (id) => {
+    let paths = phases[id].paths.map((path) =>
+      path === `migrated-tests/${catalog.tests[id].suite}/**`
+        ? `migrated-tests/${owned.get(id)}/**`
+        : path,
+    );
+    if (!options.sections) return paths;
+    const scoped = new Map();
+    for (const doc of phases[id].docReads) {
+      const held = scope(read(doc.path), doc.needles);
+      if (!scoped.has(doc.path)) scoped.set(doc.path, []);
+      scoped.get(doc.path).push(held && { held, doc });
+    }
+    for (const [path, reads] of scoped) {
+      // A document read anywhere in the phase without a scope keeps the whole file.
+      if (reads.some((entry) => !entry)) continue;
+      paths = paths.filter((entry) => entry !== path && entry !== `${path}/**`);
+      for (const { held, doc } of reads) {
+        const key = scopePath(path, doc.needles, held);
+        scopes[key] = doc;
+        paths.push(key);
+      }
+    }
+    return paths;
+  };
   for (const [name, suite] of Object.entries(suites)) {
     if (!suite.tests.length) {
       delete suites[name];
@@ -437,7 +513,7 @@ export function commandMapping(layout, catalog) {
     suite.modules = sorted(suite.modules);
     suite.paths =
       catalog.schema === 4
-        ? sorted(suite.tests.flatMap((id) => phases[id].paths))
+        ? sorted(suite.tests.flatMap(phasePaths))
         : [...suiteInputs(suite.modules), `migrated-tests/${name}/**`];
     // Migrated helpers are linked per command; source attribution remains conservative.
     suite.paths = suite.paths.filter((path) => !path.startsWith("src/"));
@@ -530,6 +606,7 @@ export function commandMapping(layout, catalog) {
     selection,
     crates,
     suites,
+    ...(options.sections ? { scopes } : {}),
     ...(catalog.schema === 4
       ? {
           helperConsumers: Object.fromEntries(
@@ -543,8 +620,8 @@ export function commandMapping(layout, catalog) {
   };
 }
 
-export function run(layout, catalog, weights, changes, projector) {
-  const mapping = commandMapping(layout, catalog);
+export function run(layout, catalog, weights, changes, projector, options = {}) {
+  const mapping = commandMapping(layout, catalog, options);
   const compiled = compileMapping(mapping.selection);
   const testFakeSplit = catalog.schema === 4 ? testFakes() : null;
   const moduleCounts = {};
@@ -731,7 +808,8 @@ export function run(layout, catalog, weights, changes, projector) {
     ...Object.entries(layout.crates).map(([name, crate]) => [name, crate.deps]),
     ...Object.entries(testFakeSplit?.crates ?? {}).map(([name, crate]) => [name, crate.deps]),
   ]);
-  while (extracted.size < Object.keys(migrating).length) {
+  // `options.crateMigration: false` skips the per-crate stages, for a replay that reports its own.
+  while (options.crateMigration !== false && extracted.size < Object.keys(migrating).length) {
     const next = Object.keys(migrating).find(
       (name) => !extracted.has(name) && migrating[name].every((dep) => extracted.has(dep)),
     );
