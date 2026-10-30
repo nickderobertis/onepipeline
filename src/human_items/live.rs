@@ -362,8 +362,7 @@ impl HumanItems {
     /// Every matching item, ordered blocking first, then by priority, then by
     /// creation and id; state defaults to open.
     pub fn query(&self, filter: &HumanItemFilter) -> Result<Vec<HumanItemView>, HumanItemRefusal> {
-        self.recover();
-        let (snapshot, mut telemetry) = self.read()?;
+        let (snapshot, mut telemetry) = self.recovered()?;
         let started = Instant::now();
         let views = query(&snapshot, filter);
         telemetry.blocker_ms += ms(started);
@@ -373,8 +372,7 @@ impl HumanItems {
 
     /// One item with every blocked step.
     pub fn show(&self, id: &str) -> Result<HumanItemDetail, HumanItemRefusal> {
-        self.recover();
-        let (snapshot, mut telemetry) = self.read()?;
+        let (snapshot, mut telemetry) = self.recovered()?;
         let started = Instant::now();
         let item = snapshot
             .items
@@ -548,21 +546,23 @@ impl HumanItems {
         }
     }
 
-    /// Probe a journal outage the store recorded, if one is open: a writer's
-    /// open allocates the reserve again, and that allocation is the probe. Only
-    /// the failed capability is asked; nothing is dispatched.
-    fn recover(&self) {
-        let open = self.items().is_ok_and(|items| {
-            let prefix = format!("{HOST_CONDITION_PREFIX}{JOURNAL_NO_SPACE}:");
-            items
-                .values()
-                .any(|i| i.state == HumanItemState::Open && i.dedup_key.starts_with(&prefix))
-        });
-        if open {
-            if let Ok(writer) = Writer::open(self) {
-                writer.finish();
-            }
+    /// The caught-up snapshot, after probing a journal outage it records as
+    /// open: a writer's open allocates the reserve again, and that allocation is
+    /// the probe. Only the failed capability is asked; nothing is dispatched.
+    fn recovered(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
+        let (snapshot, telemetry) = self.read()?;
+        let prefix = format!("{HOST_CONDITION_PREFIX}{JOURNAL_NO_SPACE}:");
+        let open = snapshot
+            .items
+            .values()
+            .any(|i| i.state == HumanItemState::Open && i.dedup_key.starts_with(&prefix));
+        if !open {
+            return Ok((snapshot, telemetry));
         }
+        if let Ok(writer) = Writer::open(self) {
+            writer.finish();
+        }
+        Ok((self.read()?.0, telemetry))
     }
 
     /// Every item, caught up with the journal, without reading any run: what a
