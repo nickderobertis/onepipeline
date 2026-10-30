@@ -282,7 +282,9 @@ _crate-lint:
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`, and
+# `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
+# `test` through `just human-items-budget`. Nor
 # are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
 # whole host-shaped workload, so its project (`onepipeline-pool-workload`,
 # `onepipeline-scratch-workload`, `onepipeline-journal-workload`) runs it only
