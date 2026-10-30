@@ -10,8 +10,9 @@
 //! re-measures.
 //!
 //! What it records, separately:
-//! - **cold**: the first read with no index, then after the index is deleted and
-//!   after it is corrupted — each a full replay, disclosed, never the budget;
+//! - **cold**: the first read with no index and no run checkpoints, then after
+//!   the index is deleted and after it is corrupted — each a full replay of every
+//!   one of the fixture's million run records, disclosed, never the budget;
 //! - **warm**: ten unchanged reads of each of `list --json`, `list` and `report`,
 //!   each asserted to replay nothing — the budget's operation of record;
 //! - **tail**: ten item events appended behind a saved index, consumed by exactly
@@ -121,9 +122,23 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     let telemetry = world.root.join("telemetry.ndjson");
     let index = world.runs.join("human-items/index.json");
 
-    // Cold: no index yet, then deleted, then corrupt. Each replays every run and
-    // every item event, and each answers what the journal holds.
+    // Cold: no index yet, then deleted, then corrupt. Each replays every record of
+    // every run and every item event, and each answers what the journal holds. The
+    // launches left each run a checkpoint covering its first records; a checkpoint
+    // is a cache the journal regenerates, and the read rewrites none, so with them
+    // gone each cold read folds the whole fixture from its first record.
     std::fs::remove_file(&index).ok();
+    for run in &runs {
+        match std::fs::remove_file(world.runs.join(run).join("checkpoint.json")) {
+            Err(why) if why.kind() != std::io::ErrorKind::NotFound => panic!("{run}: {why}"),
+            _ => {}
+        }
+    }
+    let fixture = (generate::RUNS * generate::EVENTS) as u64;
+    assert!(
+        fixture >= 1_000_000,
+        "the fixture holds {fixture} run records"
+    );
     let cold = sample(&world, &["list", "--json"], &telemetry);
     let authoritative: Value = serde_json::from_str(&cold.stdout).unwrap();
     let views = authoritative.as_array().unwrap();
@@ -205,6 +220,8 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     phases.push(record("cold-after-corruption", &corrupt));
     for p in &phases {
         assert_eq!(p["mode"], "cold", "{p}");
+        assert_eq!(p["run_events_replayed"], fixture, "every run record: {p}");
+        assert_eq!(p["runs_rederived"], generate::RUNS, "{p}");
     }
 
     // Warm: ten unchanged reads of each printed form; none replays anything.
