@@ -991,6 +991,110 @@ esac
   });
 });
 
+describe("the stop-verdict tier's builds", () => {
+  // The tier times the release binary, so its `test` admits nothing beside it;
+  // its builds need no such quiet and run ahead of it as `test-build`. Driven
+  // through the real Nx and the committed project graph in a scratch repository;
+  // only `just` is a double. Each recipe it stands in for logs when it started
+  // and ended, the build writes the binary the journeys time, and the journeys
+  // record the binary they found, as the real producer records the one it timed.
+  const DOUBLE = `#!/usr/bin/env bash
+now() { node -e 'process.stdout.write(String(Date.now()))'; }
+echo "start $1 $(now)" >> "$JUST_CALLS"
+case "$1" in
+  _stop-verdict-build)
+    sleep 2
+    [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
+    mkdir -p target/release && echo "binary $$ $RANDOM" > target/release/onepipeline ;;
+  stop-verdict-journeys)
+    [ -f target/release/onepipeline ] || { echo "journeys: no release binary" >&2; exit 1; }
+    mkdir -p target/budget-records
+    cp target/release/onepipeline target/budget-records/stop-guard-unpublished-onepipeline
+    echo '{}' > target/budget-records/stop-guard-unpublished.json
+    echo '{}' > target/budget-records/stop-guard-unpublished-invocation.json
+    sleep 1 ;;
+  *) sleep 2 ;;
+esac
+echo "end $1 $(now)" >> "$JUST_CALLS"
+`;
+
+  function check(repo, env = {}) {
+    const calls = join(repo.path, "just.calls");
+    writeFileSync(calls, "");
+    const result = run(
+      ["scripts/nx.sh", "run", "onepipeline-stop-verdict:check"],
+      { PATH: `${join(repo.path, "bin")}:${process.env.PATH}`, JUST_CALLS: calls, ...env },
+      repo.path,
+    );
+    const spans = {};
+    for (const line of readFileSync(calls, "utf8").split("\n").filter(Boolean)) {
+      const [edge, recipe, at] = line.split(" ");
+      spans[recipe] = { ...spans[recipe], [edge]: Number(at) };
+    }
+    return { result, spans };
+  }
+
+  const overlap = (a, b) => a.start < b.end && b.start < a.end;
+
+  function scratch(t) {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    return repo;
+  }
+
+  it("builds beside the rest of the gate, then times what it built alone", (t) => {
+    const repo = scratch(t);
+    const { result, spans } = check(repo);
+    assert.equal(result.status, 0, result.stderr);
+    const build = spans["_stop-verdict-build"];
+    const journeys = spans["stop-verdict-journeys"];
+    assert.ok(build?.end && journeys?.end, JSON.stringify(spans));
+    assert.ok(build.end <= journeys.start, "the journeys started before their build ended");
+    const others = Object.entries(spans).filter(
+      ([recipe]) => !["_stop-verdict-build", "stop-verdict-journeys"].includes(recipe),
+    );
+    assert.ok(others.length > 0, JSON.stringify(spans));
+    assert.ok(
+      others.some(([, span]) => overlap(span, build)),
+      `the build ran alone rather than beside the tier's lint and format check: ${JSON.stringify(spans)}`,
+    );
+    for (const [recipe, span] of others) {
+      assert.ok(!overlap(span, journeys), `${recipe} ran beside the timed journeys`);
+    }
+    assert.equal(
+      readFileSync(
+        join(repo.path, "target", "budget-records", "stop-guard-unpublished-onepipeline"),
+        "utf8",
+      ),
+      readFileSync(join(repo.path, "target", "release", "onepipeline"), "utf8"),
+      "the journeys timed a binary other than the one the build made",
+    );
+
+    // Unchanged, both replay together: a warm cache builds nothing.
+    const warm = check(repo);
+    assert.equal(warm.result.status, 0, warm.result.stderr);
+    assert.deepEqual(Object.keys(warm.spans), [], JSON.stringify(warm.spans));
+  });
+
+  it("fails the gate, timing nothing, when the build does", (t) => {
+    const repo = scratch(t);
+    const { result, spans } = check(repo, { BREAK_BUILD: "1" });
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /build: broken input/);
+    assert.ok(spans["_stop-verdict-build"]?.start, JSON.stringify(spans));
+    assert.equal(
+      spans["stop-verdict-journeys"],
+      undefined,
+      "the journeys ran after a failed build",
+    );
+    assert.equal(
+      existsSync(join(repo.path, "target", "budget-records", "stop-guard-unpublished.json")),
+      false,
+    );
+  });
+});
+
 describe("the build targets", () => {
   it("compiles the crate's binary, library, and tests with warnings denied", () => {
     // The crate's own build command, run the way its Nx target runs it. A
