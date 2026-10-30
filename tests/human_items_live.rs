@@ -2090,3 +2090,52 @@ fn config_prints_the_effective_settings_and_where_they_came_from() {
     let bare = Live::new(None).ok(None, &["config"]);
     assert_eq!(bare, "enabled: false\ntask_source: (none)\nhooks: (none)\n");
 }
+
+/// A phase context naming a blank identity, a blank document version, or a
+/// ticket with a blank id or URL is refused and raises nothing.
+#[test]
+fn a_phase_context_with_blank_identities_is_refused_without_raising() {
+    let world = hooked();
+    let owner = |session: &str| json!({"session": session, "run": null, "plan": "plans:alpha"});
+    for (phase, ctx, refusal) in [
+        (
+            "ask",
+            json!({"owner": owner("mgr"), "dedup_key": "  ", "vars": {"thing": "x"}}),
+            "names its owner session and dedup_key",
+        ),
+        (
+            "ask",
+            json!({"owner": owner(" "), "dedup_key": "k", "vars": {"thing": "x"}}),
+            "names its owner session and dedup_key",
+        ),
+        (
+            "design-review",
+            json!({"owner": owner("mgr"), "dedup_key": "d", "approval": {"board_copy": " ", "key": "v1"}}),
+            "nonblank board_copy and key",
+        ),
+        (
+            "design-review",
+            json!({"owner": owner("mgr"), "dedup_key": "d", "approval": {"board_copy": "plans:doc-1", "key": ""}}),
+            "nonblank board_copy and key",
+        ),
+        (
+            "ticket-review",
+            json!({"owner": owner("mgr"), "dedup_key": "t", "tickets": [{"id": " ", "url": "https://tracker/a", "priority": "low"}]}),
+            "nonblank id and url",
+        ),
+        (
+            "ticket-review",
+            json!({"owner": owner("mgr"), "dedup_key": "t", "tickets": [{"id": "a", "url": "", "priority": "low"}]}),
+            "nonblank id and url",
+        ),
+    ] {
+        let path = context(&world, "blank", &ctx);
+        world.refused(
+            None,
+            &["raise", "--phase", phase, "--context", &path],
+            refusal,
+        );
+    }
+    assert!(world.journal().is_empty());
+    assert!(lines(&world.root.join("requests.ndjson")).is_empty());
+}
