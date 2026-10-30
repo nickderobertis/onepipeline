@@ -807,7 +807,8 @@ fn only_every_identity_refused_definitively_raises_one_host_item() {
     };
     let world = exhausted(
         "claude-code:work quota out of extra usage until 5pm\n\
-         codex auth 401 Unauthorized: token expired\n",
+         codex auth 401 Unauthorized: token expired\n\
+         gemini server_overloaded 503 the provider is unavailable\n",
     );
     let hosts = host_items(&world);
     assert_eq!(hosts.len(), 1, "{hosts:?}");
@@ -816,7 +817,9 @@ fn only_every_identity_refused_definitively_raises_one_host_item() {
     assert_eq!(host["owner"]["session"], "session-human-item-identities");
     let body = host["body"].as_str().unwrap();
     assert!(
-        body.contains("claude-code:work [quota]") && body.contains("codex [auth]"),
+        body.contains("claude-code:work [quota]")
+            && body.contains("codex [auth]")
+            && body.contains("gemini [server_overloaded]"),
         "{body}"
     );
     // The probe asks the harness's own zero-turn usage read of exactly those

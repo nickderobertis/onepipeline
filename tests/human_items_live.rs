@@ -1740,3 +1740,159 @@ fn raises_refuse_conflicting_keys_and_blank_identities_without_writing() {
     assert_eq!(world.journal().len(), 1);
     assert_eq!(world.json(None, &["show", &id, "--json"]), before);
 }
+
+/// The shared default is the nearest `.onepipeline/config.yaml` at or above the
+/// working directory, never past the repository root; the host's own override is
+/// `ONEPIPELINE_CONFIG`, else `~/.config` when no `XDG_CONFIG_HOME` is set, and an
+/// override naming no file is refused.
+#[test]
+fn configuration_is_found_where_the_checkout_and_the_host_keep_it() {
+    let world = Live::new(Some(
+        "human_items:\n  enabled: true\n  task_source: shared\n",
+    ));
+    let deep = world.repo().join("crates/inner");
+    std::fs::create_dir_all(&deep).unwrap();
+    let in_dir = |dir: &Path, envs: &[(&str, Option<&Path>)]| {
+        let mut command = world.cmd(None, &["config", "--json"]);
+        command.current_dir(dir);
+        for (key, value) in envs {
+            match value {
+                Some(value) => command.env(key, value),
+                None => command.env_remove(key),
+            };
+        }
+        command.output().unwrap()
+    };
+    let read: Value = serde_json::from_slice(&in_dir(&deep, &[]).stdout).unwrap();
+    assert_eq!(read["human_items"]["task_source"], "shared");
+    // A checkout nested inside another stops at its own root.
+    let nested = world.repo().join("vendor/other");
+    std::fs::create_dir_all(nested.join(".git")).unwrap();
+    let read: Value = serde_json::from_slice(&in_dir(&nested, &[]).stdout).unwrap();
+    assert_eq!(read["human_items"]["enabled"], false);
+    assert!(read["sources"].as_array().unwrap().is_empty());
+    // `~/.config` when no XDG_CONFIG_HOME is set.
+    let home = world.root.join("home");
+    std::fs::create_dir_all(home.join(".config/onepipeline")).unwrap();
+    std::fs::write(
+        home.join(".config/onepipeline/config.yaml"),
+        "human_items:\n  task_source: hosted\n",
+    )
+    .unwrap();
+    let read: Value = serde_json::from_slice(
+        &in_dir(&deep, &[("XDG_CONFIG_HOME", None), ("HOME", Some(&home))]).stdout,
+    )
+    .unwrap();
+    assert_eq!(read["human_items"]["task_source"], "hosted");
+    assert_eq!(read["human_items"]["enabled"], true);
+    // An override naming nothing is refused, not ignored.
+    let missing = world.root.join("missing.yaml");
+    let refused = in_dir(&deep, &[("ONEPIPELINE_CONFIG", Some(&missing))]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("which is not a file"));
+}
+
+/// Without a launcher session the actor is the login user, from the first of
+/// USER, USERNAME and LOGNAME that is set and not blank, else `operator`.
+#[test]
+fn a_direct_actor_is_the_first_login_variable_set() {
+    let world = Live::enabled();
+    for (n, (user, username, logname, expected)) in [
+        (Some("alice"), Some("bob"), Some("carol"), "user:alice"),
+        (Some(" "), Some("bob"), Some("carol"), "user:bob"),
+        (None, None, Some("carol"), "user:carol"),
+        (None, None, None, "user:operator"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = world.raise(&item(
+            &format!("a-{n}"),
+            "task",
+            "low",
+            "s",
+            json!({"scope": "nothing"}),
+        ));
+        let mut command = world.cmd(None, &["complete", &id]);
+        command
+            .env_remove("USER")
+            .env_remove("USERNAME")
+            .env_remove("LOGNAME");
+        for (key, value) in [("USER", user), ("USERNAME", username), ("LOGNAME", logname)] {
+            if let Some(value) = value {
+                command.env(key, value);
+            }
+        }
+        let receipt: Value = serde_json::from_slice(&command.output().unwrap().stdout).unwrap();
+        assert_eq!(receipt["item"]["item"]["resolution"]["actor"], expected);
+    }
+}
+
+#[test]
+fn run_and_plan_selectors_choose_by_the_items_owner() {
+    let world = Live::enabled();
+    let owned = |dedup: &str, run: Option<&str>, plan: Option<&str>| {
+        let mut value = item(dedup, "task", "low", "s", json!({"scope": "nothing"}));
+        value["owner"] = json!({"session": "s", "run": run, "plan": plan});
+        world.raise(&value)
+    };
+    let a = owned("a", Some("run-a"), Some("plan-a"));
+    let b = owned("b", Some("run-b"), Some("plan-a"));
+    owned("c", None, None);
+    assert_eq!(
+        ids(&world.json(None, &["list", "--json", "--run", "run-a"])),
+        vec![a.clone()]
+    );
+    let mut by_plan = ids(&world.json(None, &["list", "--json", "--plan", "plan-a"]));
+    by_plan.sort();
+    let mut expected = vec![a.clone(), b];
+    expected.sort();
+    assert_eq!(by_plan, expected);
+    assert_eq!(
+        ids(&world.json(
+            None,
+            &["list", "--json", "--plan", "plan-a", "--run", "run-a"]
+        )),
+        vec![a]
+    );
+}
+
+#[test]
+fn a_host_hook_raises_a_host_hold_and_sample_mode_takes_no_live_verb() {
+    let world = Live::new(Some(
+        "human_items:\n  enabled: true\n  hooks:\n    - phase: outage\n      kind: task\n      title: Restore it\n      \
+         body: The service is down.\n      priority: urgent\n      block: {scope: host}\n",
+    ));
+    let ctx = world.input(
+        "ctx",
+        &json!({"owner": {"session": "mgr", "run": null, "plan": null}, "dedup_key": "x"}),
+    );
+    let raised = world.json(None, &["raise", "--phase", "outage", "--context", &ctx]);
+    assert_eq!(raised["item"]["item"]["block"], json!({"scope": "host"}));
+    let sample = world.root.join("sample.json");
+    for args in [
+        vec![
+            "--sample",
+            sample.to_str().unwrap(),
+            "watch",
+            "--session",
+            "s",
+        ],
+        vec!["--sample", sample.to_str().unwrap(), "config"],
+        vec![
+            "--sample",
+            sample.to_str().unwrap(),
+            "raise",
+            "--phase",
+            "outage",
+            "--context",
+            ctx.as_str(),
+        ],
+    ] {
+        std::fs::write(&sample, include_str!("fixtures/human-items.json")).unwrap();
+        world.refused(None, &args, "no --sample");
+    }
+    // A watch names whose events it reads.
+    world.refused(None, &["watch"], "no session to watch");
+    world.refused(None, &["watch", "--session", " "], "no session to watch");
+}

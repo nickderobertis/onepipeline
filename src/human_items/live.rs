@@ -237,7 +237,8 @@ pub struct ReadTelemetry {
     pub run_events_replayed: u64,
     /// Runs discovered under the root.
     pub runs_discovered: u64,
-    /// Milliseconds spent discovering runs and checking their cache keys.
+    /// Milliseconds spent discovering runs and checking their cache keys, the
+    /// rederivation of any run excluded (it is replay).
     pub discovery_ms: f64,
     /// Milliseconds spent replaying journals.
     pub replay_ms: f64,
@@ -862,6 +863,7 @@ impl HumanItems {
     /// entry changed.
     fn refresh_runs(&self, index: &mut Index, telemetry: &mut ReadTelemetry) -> bool {
         let started = Instant::now();
+        let mut rederiving = 0.0;
         let runs = crate::ledger::all_runs(&self.root);
         telemetry.runs_discovered = runs.runs.len() as u64;
         let mut moved = false;
@@ -888,12 +890,15 @@ impl HumanItems {
             telemetry.run_events_replayed +=
                 crate::loopstats::records_folded_total().saturating_sub(before);
             telemetry.runs_rederived += 1;
-            telemetry.replay_ms += ms(replay);
+            let spent = ms(replay);
+            rederiving += spent;
+            telemetry.replay_ms += spent;
         }
         let before = index.runs.len();
         index.runs.retain(|run, _| seen.contains(run));
         moved |= index.runs.len() != before;
-        telemetry.discovery_ms += ms(started);
+        // Discovery alone: the rederivations inside the walk are replay.
+        telemetry.discovery_ms += (ms(started) - rederiving).max(0.0);
         moved
     }
 }

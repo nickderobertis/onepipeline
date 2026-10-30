@@ -237,6 +237,13 @@ pub fn expand(
         },
     };
     let approval = match (&hook.approval, &context.approval) {
+        (Some(_), Some(approval))
+            if approval.board_copy.trim().is_empty() || approval.key.trim().is_empty() =>
+        {
+            return Err(format!(
+                "phase {phase}'s document version names a nonblank board_copy and key"
+            ))
+        }
         (Some(_), Some(approval)) => Some(approval.clone()),
         (Some(_), None) => {
             return Err(format!(
