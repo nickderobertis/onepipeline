@@ -2216,11 +2216,43 @@ fn config_prints_the_effective_settings_and_where_they_came_from() {
         text.contains("hooks: design-review, ticket-review, ask\n"),
         "{text}"
     );
+    // Each `read from:` path names the file it was read from. The working
+    // directory may be reached through a symbolic link, as a temporary
+    // directory is on macOS, and the path printed is then the resolved one, so
+    // it is compared by the file it resolves to rather than by its spelling.
     let file = world.repo().join(".onepipeline/config.yaml");
-    assert!(
-        text.contains(&format!("read from: {}\n", file.display())),
+    let resolved = |path: &str| std::fs::canonicalize(path).unwrap();
+    let read = |text: &str| -> Vec<PathBuf> {
+        text.lines()
+            .filter_map(|line| line.strip_prefix("read from: "))
+            .map(resolved)
+            .collect()
+    };
+    assert_eq!(
+        read(&text),
+        [std::fs::canonicalize(&file).unwrap()],
         "{text}"
     );
+    // Creating a symbolic link needs a privilege a Windows runner does not
+    // grant, so the reach-through-a-link leg is a Unix one; the comparison by
+    // resolved file above holds on every platform.
+    #[cfg(unix)]
+    {
+        let linked = world.root.join("linked");
+        std::os::unix::fs::symlink(world.repo(), &linked).unwrap();
+        let through_link = world
+            .cmd(None, &["config"])
+            .current_dir(&linked)
+            .output()
+            .unwrap();
+        assert!(through_link.status.success());
+        let text = String::from_utf8(through_link.stdout).unwrap();
+        assert_eq!(
+            read(&text),
+            [std::fs::canonicalize(&file).unwrap()],
+            "{text}"
+        );
+    }
     let bare = Live::new(None).ok(None, &["config"]);
     assert_eq!(bare, "enabled: false\ntask_source: (none)\nhooks: (none)\n");
 }
