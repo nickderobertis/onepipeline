@@ -2028,3 +2028,44 @@ fn raising_a_resolved_key_again_changes_nothing() {
     assert_eq!(receipt, completed);
     assert_eq!(world.journal().len(), 2);
 }
+
+/// The SDK an embedding UI links acts on the same store as the CLI, and refuses
+/// an action that names no actor without recording anything.
+#[test]
+fn the_sdk_refuses_an_action_naming_no_actor_and_records_nothing() {
+    use onepipeline::human_items::{HumanItemAction, HumanItemRefusal, HumanItems};
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "sdk",
+        "task",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let store = HumanItems::open(world.runs(), &world.repo()).unwrap();
+    let refused = store
+        .apply(HumanItemAction::Complete {
+            id: id.clone(),
+            actor: "  ".into(),
+            on_behalf_of: None,
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&refused, HumanItemRefusal::Conflict { reason } if reason.contains("names its actor")),
+        "{refused:?}"
+    );
+    assert_eq!(world.journal().len(), 1);
+    // The same SDK, with an actor, completes it; the CLI reads the result.
+    let done = store
+        .apply(HumanItemAction::Complete {
+            id: id.clone(),
+            actor: "ui:operator".into(),
+            on_behalf_of: None,
+        })
+        .unwrap();
+    assert_eq!(done.item.item.resolution.unwrap().actor, "ui:operator");
+    assert_eq!(
+        world.json(None, &["show", &id, "--json"])["item"]["state"],
+        "completed"
+    );
+}
