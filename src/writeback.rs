@@ -8471,6 +8471,7 @@ mod tests {
             title: "Build".to_owned(),
             source: None,
             repositories: Vec::new(),
+            priority: None,
         });
         let empty = Baseline {
             path: known.dir.join(crate::cli::WRITEBACK_LANDED_FILE),
@@ -8775,6 +8776,7 @@ mod tests {
             title: node.to_owned(),
             source: None,
             repositories: Vec::new(),
+            priority: None,
         });
     }
 

@@ -134,6 +134,7 @@ mod filter;
 mod flow;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod holds;
+mod human_items;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
 // 100-run root's ~260 MB of journals by this suite's debug build, two of them the budget

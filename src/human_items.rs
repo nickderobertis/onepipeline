@@ -5,6 +5,7 @@ mod delivery;
 mod durable;
 mod live;
 pub mod phases;
+pub(crate) mod runtime;
 pub use approval::REREAD;
 pub use live::{item_id_for, Actor, HumanItems, ReadMode, ReadTelemetry, RUN_ENDED, TELEMETRY_ENV};
 /// The store priority vocabulary; human-item boundaries reject None.
@@ -1297,6 +1298,12 @@ fn live_dispatch(command: HumanItemsCommand) -> crate::error::Result<i32> {
     };
     let receipt = store.apply(action).map_err(|e| refused(&e))?;
     println!("{}", to_json(&receipt)?);
+    // The resolution is durable; the step it stands for is released through the
+    // run's own commands. One that cannot be released now is released by the
+    // run's driver, so this is said and the receipt stands.
+    if let Err(why) = runtime::release(&receipt.item.item) {
+        eprintln!("onepipeline: {why}");
+    }
     Ok(0)
 }
 

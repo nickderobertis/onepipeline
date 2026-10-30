@@ -543,14 +543,52 @@ impl HumanItems {
         }
     }
 
+    /// Every item, caught up with the journal, without reading any run: what a
+    /// run's driver asks on its passes.
+    pub(crate) fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
+        Ok(self.read_with(false)?.0.items)
+    }
+
+    /// Resolve one open item automatically with `reason`. Answers whether it was open.
+    pub(crate) fn auto_resolve_item(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<bool, HumanItemRefusal> {
+        let mut writer = Writer::open(self)?;
+        let Some(item) = writer.snapshot.items.get(id).cloned() else {
+            return Ok(false);
+        };
+        if item.state != HumanItemState::Open {
+            return Ok(false);
+        }
+        writer.resolve(
+            &item,
+            HumanItemState::Dismissed,
+            HumanItemEventAction::AutoResolved,
+            &Actor {
+                actor: "engine".into(),
+                on_behalf_of: None,
+            },
+            None,
+            Some(reason.to_owned()),
+        )?;
+        writer.finish();
+        Ok(true)
+    }
+
     /// Catch the index up under its lock, and answer the snapshot it holds.
     fn read(&self) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
+        self.read_with(true)
+    }
+
+    fn read_with(&self, runs: bool) -> Result<(Snapshot, ReadTelemetry), HumanItemRefusal> {
         let lock_path = self.index_lock();
         std::fs::create_dir_all(self.dir()).map_err(|e| storage("create", &self.dir(), e))?;
         let _lock = crate::sys::open_locked_append(&lock_path)
             .map_err(|e| storage("lock", &lock_path, e))?;
         let mut telemetry = ReadTelemetry::new();
-        let index = self.caught_up(&mut telemetry)?;
+        let index = self.caught_up(&mut telemetry, runs)?;
         Ok((
             Snapshot {
                 items: index.items,
@@ -563,7 +601,11 @@ impl HumanItems {
 
     /// The index brought up to the journal and to every run journal, written
     /// back when it moved. Called with the index lock held.
-    fn caught_up(&self, telemetry: &mut ReadTelemetry) -> Result<Index, HumanItemRefusal> {
+    fn caught_up(
+        &self,
+        telemetry: &mut ReadTelemetry,
+        runs: bool,
+    ) -> Result<Index, HumanItemRefusal> {
         let started = Instant::now();
         let stored: Option<Index> = std::fs::read(self.index())
             .ok()
@@ -605,7 +647,9 @@ impl HumanItems {
         }
         telemetry.item_events_replayed += folded.0;
         telemetry.item_bytes_replayed += folded.1;
-        moved |= self.refresh_runs(&mut index, telemetry);
+        if runs {
+            moved |= self.refresh_runs(&mut index, telemetry);
+        }
         if moved {
             let started = Instant::now();
             let sealed = index.clone().sealed();

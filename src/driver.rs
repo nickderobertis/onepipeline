@@ -3557,6 +3557,8 @@ pub(crate) fn stop_run(
             (journal::STOP_TEARDOWN, json!(established)),
         ]),
     )?;
+    // A stopped run's work will not run: the items holding it are retired.
+    crate::human_items::runtime::run_ended(paths);
     let stopped = crate::verbs::Stopped {
         run: paths.run.clone(),
         owner,
