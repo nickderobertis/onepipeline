@@ -226,11 +226,6 @@ export function historicalCrates(crates, current, oldManifest, newManifest, befo
   );
 }
 
-/**
- * `options.suiteOf` maps each catalog test to the suite it runs in after a test split (see
- * test-split.mjs); `options.sections` scopes reads of sectioned documents to the sections their
- * needles name. Without options this is the crate-only target mapping.
- */
 /** Erased code with every `#[cfg(test)]` module removed, braces balanced. */
 export function withoutTestModules(code) {
   let out = code;
@@ -246,6 +241,11 @@ export function withoutTestModules(code) {
   }
 }
 
+/**
+ * `options.suiteOf` maps each catalog test to the suite it runs in after a test split (see
+ * test-split.mjs); `options.sections` scopes reads of sectioned documents to the sections their
+ * needles name. Without options this is the crate-only target mapping.
+ */
 export function commandMapping(layout, catalog, options = {}) {
   if (![1, 4].includes(catalog.schema))
     throw new Error("command test catalog must use schema 1 or 4");
