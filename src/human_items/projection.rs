@@ -40,10 +40,22 @@ fn projected_path(journal: &Path) -> PathBuf {
     journal.with_file_name("projected.json")
 }
 
+/// What a task was projected as: the state it last reached, and the content it
+/// was first projected with — which the store binds its projection to, so every
+/// later state is projected with that same content.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Record {
+    state: Projected,
+    title: String,
+    body: String,
+    priority: super::Priority,
+}
+
 /// Each task's last projected state, by item id. A record that is not one is
 /// said and read as empty: every task is then projected again, which the store's
 /// intent answers without a second ticket.
-fn projected(journal: &Path) -> BTreeMap<String, Projected> {
+fn projected(journal: &Path) -> BTreeMap<String, Record> {
     let path = projected_path(journal);
     let Ok(bytes) = std::fs::read(&path) else {
         return BTreeMap::new();
@@ -66,19 +78,29 @@ pub(crate) fn pending<'a>(
     let done = projected(journal);
     items
         .filter(|item| item.kind == HumanItemKind::Task)
-        .filter(|item| done.get(&item.id) != Some(&Projected::of(item.state)))
+        .filter(|item| done.get(&item.id).map(|r| r.state) != Some(Projected::of(item.state)))
         .cloned()
         .collect()
 }
 
 /// Project one task into `source`, as the store configured from `dir` places it.
 /// Answers its tracker binding.
+/// The content `item` is projected with: what it was first projected as, else its own.
+fn content(journal: &Path, item: &HumanItem) -> (String, String, super::Priority) {
+    projected(journal).remove(&item.id).map_or_else(
+        || (item.title.clone(), item.body.clone(), item.priority),
+        |r| (r.title, r.body, r.priority),
+    )
+}
+
 pub(crate) fn project(
     dir: &Path,
+    journal: &Path,
     source: &str,
     item: &HumanItem,
 ) -> Result<HumanItemTracker, String> {
     let resolution = item.resolution.as_ref();
+    let (title, body, priority) = content(journal, item);
     use onetaskgraph_core::task_projection as wire;
     let refused =
         |what: &str, why: String| format!("the task's {what} is not one the store accepts: {why}");
@@ -103,9 +125,9 @@ pub(crate) fn project(
                 .transpose()
                 .map_err(|e| refused("owner plan", e))?,
         },
-        title: wire::ProjectionTitle::new(item.title.clone()).map_err(|e| refused("title", e))?,
-        body: item.body.clone(),
-        priority: item.priority,
+        title: wire::ProjectionTitle::new(title).map_err(|e| refused("title", e))?,
+        body,
+        priority,
         repositories: Vec::new(),
         project: item
             .owner
@@ -146,8 +168,17 @@ pub(crate) fn project(
 
 /// Record that `item` has been projected at its current state.
 pub(crate) fn record(journal: &Path, item: &HumanItem) {
+    let (title, body, priority) = content(journal, item);
     let mut done = projected(journal);
-    done.insert(item.id.clone(), Projected::of(item.state));
+    done.insert(
+        item.id.clone(),
+        Record {
+            state: Projected::of(item.state),
+            title,
+            body,
+            priority,
+        },
+    );
     if let Err(why) = crate::ledger::write_atomic(
         &projected_path(journal),
         &serde_json::to_vec(&done).unwrap_or_default(),

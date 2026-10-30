@@ -197,6 +197,7 @@ const GRACE: Duration = Duration::from_secs(10);
 /// A run driver's view of the human items that concern its run.
 pub(crate) struct Gate {
     store: HumanItems,
+    // llmlint: ignore[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id and its launch record's session and project, written once in `for_launch` and only read; the item they build is validated as every raise is.
     run: String,
     session: String,
     plan: String,
@@ -344,7 +345,7 @@ impl Gate {
                 HumanItemState::Open => {}
                 _ if waiting && !self.released.contains(&node.id) => {
                     let recorded = crate::sys::now_millis();
-                    let at = parse_millis(&item.updated_at).unwrap_or(recorded);
+                    let at = crate::projection::millis_of(&item.updated_at).unwrap_or(recorded);
                     if recorded.saturating_sub(at) >= GRACE.as_millis() as u64 {
                         self.queue(&crate::channel::ChannelState::new(paths), item);
                     }
@@ -422,38 +423,6 @@ impl Gate {
     pub(crate) fn run_ended(&self) {
         ended(&self.store, &self.run);
     }
-}
-
-fn parse_millis(stamp: &str) -> Option<u64> {
-    let parsed = time_from_rfc3339(stamp)?;
-    Some(parsed)
-}
-
-/// Milliseconds since the epoch of an RFC 3339 UTC stamp this crate wrote.
-fn time_from_rfc3339(stamp: &str) -> Option<u64> {
-    // `YYYY-MM-DDTHH:MM:SS.mmmZ`, the one shape `sys::now_rfc3339` writes.
-    let bytes = stamp.as_bytes();
-    if bytes.len() < 20 {
-        return None;
-    }
-    let n = |range: std::ops::Range<usize>| stamp.get(range)?.parse::<i64>().ok();
-    let (year, month, day) = (n(0..4)?, n(5..7)?, n(8..10)?);
-    let (hour, minute, second) = (n(11..13)?, n(14..16)?, n(17..19)?);
-    let millis = if bytes.get(19) == Some(&b'.') {
-        n(20..23).unwrap_or(0)
-    } else {
-        0
-    };
-    // Days from the civil date (Howard Hinnant's algorithm).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
-    u64::try_from(seconds * 1000 + millis).ok()
 }
 
 /// The store a run acts on, where its launch directory's effective

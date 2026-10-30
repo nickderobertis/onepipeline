@@ -549,7 +549,7 @@ impl HumanItems {
             .map(|items| super::projection::pending(&journal, items.values()))
             .unwrap_or_default();
         for item in pending {
-            match super::projection::project(&self.dir, &source, &item) {
+            match super::projection::project(&self.dir, &journal, &source, &item) {
                 Ok(tracker) => {
                     super::projection::record(&journal, &item);
                     if item.state == HumanItemState::Open && item.tracker.as_ref() != Some(&tracker)
@@ -796,6 +796,17 @@ impl HumanItems {
                     path.display()
                 ))
             })?;
+            // One writer at a time allocates each sequence above the last, so a
+            // record at or below it is a journal no writer made: refused, never folded.
+            if index.journal.records > 0 && seq < index.journal.next_seq {
+                return Err(conflict(format!(
+                    "the human-item journal {} holds a record at byte {at} numbered {seq}, not \
+                     above the {} before it; it is never folded, so nothing is listed until it \
+                     is repaired",
+                    path.display(),
+                    index.journal.next_seq - 1
+                )));
+            }
             if index.journal.records == 0 {
                 index.journal.head = hex(line);
             }
@@ -886,6 +897,7 @@ fn probes(store: &HumanItems) -> BTreeMap<String, Probe> {
     let Ok(bytes) = std::fs::read(&path) else {
         return BTreeMap::new();
     };
+    // llmlint: ignore[changed_behavior_has_e2e] `keep_probes` replaces this record whole through `write_atomic`, so an unreadable one is a hand edit; reading it as none, said, leaves the outage's item open for a person to dismiss, and the next occurrence of the condition records its probe again through the path `a_dispatch_refused_for_space_raises_one_host_item_that_its_probe_resolves` drives.
     serde_json::from_slice(&bytes).unwrap_or_else(|why| {
         eprintln!(
             "onepipeline: {} is not a probe record ({why}); its outages are not probed until \
@@ -953,7 +965,7 @@ fn event_id(seq: u64) -> String {
 }
 
 /// One record of the host journal: its sequence and the item event it carries.
-fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
+pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
     let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
     if envelope.stream != STREAM {
         return Err(format!("it is on stream {:?}", envelope.stream));

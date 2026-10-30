@@ -670,17 +670,34 @@ fn the_read_index_is_warm_tails_exactly_once_and_rebuilds_whatever_breaks_it() {
     std::fs::write(&index, b"{not json").unwrap();
     assert!(rebuilt("garbled").contains("cannot be parsed"));
 
-    // A journal replaced under the index — same length, other first record — is
-    // detected, never read through a stale index.
+    // A journal replaced under the index — same length, another first record — is
+    // detected, rebuilt and read as what it now holds, never through a stale index.
     let bytes = std::fs::read(&journal).unwrap();
     let text = String::from_utf8(bytes.clone()).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    let mut swapped = lines.clone();
-    swapped.swap(0, 1);
-    let replaced = format!("{}\n", swapped.join("\n"));
+    let replaced = text.replacen("\"title\":\"task i-0\"", "\"title\":\"task z-0\"", 2);
     assert_eq!(replaced.len(), bytes.len());
     std::fs::write(&journal, &replaced).unwrap();
-    assert!(rebuilt("replaced").contains("replaced"));
+    let (after, read) = list_with_telemetry(&world, &probe);
+    assert_eq!(read["mode"], "cold");
+    assert!(
+        read["rebuilt_because"]
+            .as_str()
+            .unwrap()
+            .contains("replaced"),
+        "{read}"
+    );
+    assert!(after
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v["item"]["title"] == "task z-0"));
+    // Records out of the order one writer gives them are a journal no writer made:
+    // refused out loud rather than folded.
+    let mut swapped = lines.clone();
+    swapped.swap(0, 1);
+    std::fs::write(&journal, format!("{}\n", swapped.join("\n"))).unwrap();
+    world.refused(None, &["list"], "not above the");
     std::fs::write(&journal, &bytes).unwrap();
     list_with_telemetry(&world, &probe);
 

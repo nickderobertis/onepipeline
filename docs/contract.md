@@ -798,7 +798,8 @@ of the first and last records it folded, and caches each run's DAG under that
 run journal's length and final bytes. An index that is absent, of another
 version, failing its checksum, or behind a journal that was truncated or replaced
 is rebuilt from the journals; a trailing record with no terminator waits; a whole
-record that cannot be read is refused out loud, never skipped. Readers serialize
+record that cannot be read, or that is not numbered above the record before it,
+is refused out loud, never skipped. Readers serialize
 on the index and replace it atomically, so an unchanged warm read replays nothing
 and a tail is consumed once across readers. On a full disk the store releases a
 preallocated reserve for the write, records one urgent host item for the
@@ -821,8 +822,11 @@ human-item-auto-resolved.
 **Projection.** With `task_source` set, every task — never a question — is
 projected through the linked store's `Engine::project_human` into that source
 after its event is durable and outside the journal's lock: open, then completed or
-dismissed with its reason, the open item recording its tracker `{task,url}`. What
-was last projected is kept beside the journal; a task whose projection is owed is
+dismissed with its reason, the open item recording its tracker `{task,url}`. The
+store binds a projection to the content it was first written with, so a task
+updated in place keeps that one tracker task, and every later state is projected
+with the content it was first projected as. What was last projected is kept
+beside the journal; a task whose projection is owed is
 projected by the next write, and the store's intent, keyed by the item's id,
 answers a replay without a second ticket. A refused projection is said on
 standard error and leaves the item and its hold as they are.

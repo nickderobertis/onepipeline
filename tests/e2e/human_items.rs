@@ -1028,6 +1028,33 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         .iter()
         .all(|i| i["title"] != "Decide asked"));
 
+    // An open task raised again with new content is updated in place locally and
+    // keeps the one tracker task it was projected as: the store binds a projection
+    // to the content it was first written with, so nothing second is filed.
+    let mut renamed = input(
+        "third",
+        "task",
+        "mgr",
+        None,
+        None,
+        json!({"scope": "nothing"}),
+    );
+    renamed["title"] = json!("Decide third, renamed");
+    renamed["priority"] = json!("urgent");
+    let updated = raise_in_repo("renamed", &renamed);
+    updated.exited(0);
+    let updated: Value = serde_json::from_str(&updated.stdout).unwrap();
+    assert_eq!(updated["item"]["item"]["title"], "Decide third, renamed");
+    assert!(
+        updated["item"]["item"]["tracker"]["url"].is_string(),
+        "{updated}"
+    );
+    assert_eq!(
+        projected(&github.state()).len(),
+        2,
+        "no second task for the update"
+    );
+
     // Dismissing projects the dismissal and its reason onto the same task.
     let third = projected(&state)
         .into_iter()
@@ -1039,7 +1066,7 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|v| v["item"]["title"] == "Decide third")
+        .find(|v| v["item"]["title"] == "Decide third, renamed")
         .unwrap()["item"]["id"]
         .as_str()
         .unwrap()
@@ -1323,4 +1350,62 @@ fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver() {
         "the driver to release the step",
         |w| settled(w, name, "b").as_deref() == Some("done"),
     );
+}
+
+/// A launch whose configuration is malformed says so and raises nothing; the run
+/// goes on as a run with human items off.
+#[test]
+fn a_launch_with_malformed_configuration_says_so_and_raises_nothing() {
+    let world = World::new("human-item-malformed-launch");
+    let dir = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("config.yaml"),
+        "human_items:\n  enabled: true\n  task_source: ' '\n",
+    )
+    .unwrap();
+    let name = "malformed";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world
+        .run(&["start", &project, "--attach"])
+        .exited(0)
+        .err_has("reads no human items, because its configuration is malformed");
+    assert!(!world.runs.join("human-items/events.ndjson").exists());
+}
+
+/// A driver that cannot read the item store keeps holding what it last read and
+/// says so; once the store reads again, the release it was waiting for arrives.
+#[cfg(unix)]
+#[test]
+fn a_driver_keeps_its_holds_while_the_item_store_is_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-unreadable");
+    enabled(&world);
+    let name = "unreadable";
+    let project = world.plan(name, &plan_of(name, vec![agent("a", &[])]));
+    let host = raise(
+        &world,
+        "host",
+        &input(
+            "outage",
+            "task",
+            "ops",
+            None,
+            None,
+            json!({"scope": "host"}),
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    stays_undispatched(&world, name, std::time::Duration::from_secs(2));
+    let store = world.runs.join("human-items");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+    stays_undispatched(&world, name, std::time::Duration::from_secs(2));
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+    world.run(&["human-items", "complete", &host]).exited(0);
+    world.until("the held node to run", |w| {
+        settled(w, name, "a").as_deref() == Some("done")
+    });
 }

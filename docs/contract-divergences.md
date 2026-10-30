@@ -13029,5 +13029,8 @@ each is a proposal until ruled.
    hold, but `node-held` names no `human-item` kind: adding one changes that record's
    registered payload, which is not this task's to version.
 10. **Beside the journal the store keeps `probes.json`** — how each open host condition is
-    probed — and **`projected.json`**, each task's last projected state; both are rebuilt
-    or re-derived by the next write if lost.
+    probed — and **`projected.json`**, each task's last projected state and the content it
+    was first projected with. A lost or unreadable projection record costs a replay the
+    store answers without a second ticket; a lost or unreadable probe record is said, and
+    the outage it described is not probed again until it is raised again — a person may
+    dismiss its item meanwhile.

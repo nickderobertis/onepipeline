@@ -74,8 +74,7 @@ pub(crate) fn deliver(root: &Path, _just: &Envelope) {
 /// One record of the journal or of an owner's queue, read as the item event it
 /// carries.
 fn item_event(line: &[u8]) -> Result<super::HumanItemEventPayload, String> {
-    let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
-    serde_json::from_value(serde_json::Value::Object(envelope.payload)).map_err(|e| e.to_string())
+    super::live::parse_record(line).map(|(_, payload)| payload)
 }
 
 fn journal_error(journal: &Path, error: impl std::fmt::Display) -> TransportError {

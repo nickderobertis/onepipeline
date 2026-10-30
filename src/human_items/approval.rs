@@ -33,7 +33,16 @@ struct Request<'a> {
 #[serde(deny_unknown_fields)]
 struct Answer {
     board_copy: String,
+    #[serde(deserialize_with = "version")]
     key: String,
+}
+
+fn version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let key = String::deserialize(d)?;
+    if key.trim().is_empty() {
+        return Err(serde::de::Error::custom("a blank document version"));
+    }
+    Ok(key)
 }
 
 fn refused(reason: impl Into<String>) -> HumanItemRefusal {
@@ -104,11 +113,6 @@ pub(crate) fn complete(
              task stays open"
         ))
     })?;
-    if answer.key.trim().is_empty() {
-        return Err(refused(
-            "the approval authority answered a blank document version; the task stays open",
-        ));
-    }
     if answer.board_copy != stored.board_copy {
         return Err(refused(format!(
             "the approval authority answered for board copy {}, not {}; the task stays open",

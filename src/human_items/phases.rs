@@ -60,6 +60,7 @@ pub struct PhaseContext {
     pub dedup_key: String,
     /// The node a work hold binds, for a hook whose block is `work`.
     #[serde(default)]
+    // llmlint: ignore[invalid_states_unrepresentable] the phase context is the task's data-only `{owner, dedup_key, ...}`; the node it names becomes a work block, which the raise validates as nonblank like every block, and which names a node of the owner's run or holds nothing.
     pub node: Option<String>,
     /// Template variables for the title and body.
     #[serde(default)]
