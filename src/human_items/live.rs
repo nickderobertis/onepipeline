@@ -122,6 +122,7 @@ impl Actor {
     }
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the private read index's cache of a run's DAG, rebuilt from the run journal through `checkpoint::current` whenever its key moves and checksummed with the index; its ids are the graph's own validated node ids and the run's launch project, and the two flags are what the derivation read off the node's kind and status.
 /// One node of a run's DAG as the blocked-step derivation reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -143,6 +144,7 @@ pub(crate) struct RunDag {
     pub plan: String,
     pub nodes: Vec<DagNode>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Where the index's fold of the host journal stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,8 +278,8 @@ pub(crate) struct Snapshot {
 
 impl HumanItems {
     /// The store under `root`, the runs root this process reads and writes,
-    /// acting under `config` whether or not it enables human items.
-    pub fn at(root: impl Into<PathBuf>, config: super::config::EffectiveConfig) -> Self {
+    /// acting under `config` — one the effective loader produced and validated.
+    pub(crate) fn at(root: impl Into<PathBuf>, config: super::config::EffectiveConfig) -> Self {
         Self {
             root: root.into(),
             config,
@@ -964,11 +966,28 @@ fn event_id(seq: u64) -> String {
     format!("{STREAM}:{seq}")
 }
 
+/// The item as the journal first recorded it with a tracker bound: the content
+/// its projection was first written with. Read only when the projection record
+/// that keeps that content is lost.
+pub(crate) fn first_tracked(journal: &Path, id: &str) -> Option<HumanItem> {
+    let text = std::fs::read(journal).ok()?;
+    text.split(|b| *b == b'\n')
+        .filter_map(|line| parse_record(line).ok())
+        .map(|(_, payload)| payload.item)
+        .find(|item| item.id == id && item.tracker.is_some())
+}
+
 /// One record of the host journal: its sequence and the item event it carries.
 pub(crate) fn parse_record(line: &[u8]) -> Result<(u64, HumanItemEventPayload), String> {
     let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
     if envelope.stream != STREAM {
         return Err(format!("it is on stream {:?}", envelope.stream));
+    }
+    if !crate::event::written_at_a_known_version(&envelope) {
+        return Err(format!(
+            "it is written at envelope version {}, which this build does not read",
+            envelope.v
+        ));
     }
     let payload: HumanItemEventPayload =
         serde_json::from_value(serde_json::Value::Object(envelope.payload))

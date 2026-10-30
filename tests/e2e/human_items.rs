@@ -1409,3 +1409,47 @@ fn a_driver_keeps_its_holds_while_the_item_store_is_unreadable() {
         settled(w, name, "a").as_deref() == Some("done")
     });
 }
+
+/// While a driver is running, a resolution whose resolver could not release its
+/// step — the run's command queue refused the resolver — is released by that same
+/// driver once the resolver has had its chance.
+#[cfg(unix)]
+#[test]
+fn a_running_driver_releases_a_resolution_its_resolver_could_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-grace");
+    enabled(&world);
+    world.script("side.wait", "hold");
+    let name = "grace";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                human("gate", &[]),
+                agent("b", &["gate"]),
+                agent("side", &[]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the gate's item and the held side", |w| {
+        dispatched(w, name).contains(&"side".to_owned())
+            && items(w, &[])
+                .iter()
+                .any(|v| v["item"]["dedup_key"] == format!("run:{name}#gate"))
+    });
+    let gate = id_of(&items(&world, &[])[0]);
+    let channel = world.runs.join(name).join("channel");
+    let mode = std::fs::metadata(&channel).unwrap().permissions().mode();
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let answered = world.run(&["human-items", "complete", &gate]);
+    std::fs::set_permissions(&channel, std::fs::Permissions::from_mode(mode)).unwrap();
+    answered.exited(0).err_has("was not released");
+    world.until_within(
+        std::time::Duration::from_secs(60),
+        "the driver to release the step",
+        |w| settled(w, name, "b").as_deref() == Some("done"),
+    );
+    world.release("side.go");
+}

@@ -21,6 +21,7 @@ use super::{HumanItem, HumanItemApproval, HumanItemInput, HumanItemRefusal};
 /// raised.
 pub const REREAD: &str = "Re-read the current document";
 
+// llmlint: ignore-block[invalid_states_unrepresentable] the adapter protocol the task fixes is `{board_copy,key,actor,on_behalf_of}` in and `{board_copy,key}` out, as JSON strings; the request copies the stored HumanItemApproval and the resolution's actor, and the answer's decoder refuses a blank version before it is compared with the stored board copy and key.
 #[derive(Serialize)]
 struct Request<'a> {
     board_copy: &'a str,
@@ -36,6 +37,8 @@ struct Answer {
     #[serde(deserialize_with = "version")]
     key: String,
 }
+
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 fn version<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let key = String::deserialize(d)?;
@@ -82,16 +85,20 @@ pub(crate) fn complete(
         on_behalf_of: actor.on_behalf_of.as_deref(),
     })
     .map_err(|e| refused(e.to_string()))?;
-    let mut command = Command::new(&adapter.command[0]);
+    let Some((program, arguments)) = adapter.command.split_first() else {
+        return Err(refused(
+            "the approval adapter names no program; the task stays open",
+        ));
+    };
+    let mut command = Command::new(program);
     command
-        .args(&adapter.command[1..])
+        .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().map_err(|e| {
         refused(format!(
-            "the approval adapter {} could not be started: {e}; the task stays open",
-            adapter.command[0]
+            "the approval adapter {program} could not be started: {e}; the task stays open"
         ))
     })?;
     if let Some(mut stdin) = child.stdin.take() {

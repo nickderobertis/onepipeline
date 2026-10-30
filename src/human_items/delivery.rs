@@ -177,16 +177,36 @@ pub(crate) fn watch(
     let queue = queue_of(session);
     let consumer: ConsumerName = name(WATCH);
     let document: DocumentName = name(&format!("watched-{}.json", queue.as_str()));
-    let since = transport.fingerprint(&queue).map_err(|e| e.to_string())?;
-    let mut batch = read_pending(&transport, &queue, &consumer, session)?;
-    if batch.is_empty() && !within.is_zero() {
+    if !within.is_zero() && read_pending(&transport, &queue, &consumer, session)?.is_empty() {
+        let since = transport.fingerprint(&queue).map_err(|e| e.to_string())?;
         transport
             .wait_for_change(&queue, &since, within)
             .map_err(|e| e.to_string())?;
-        batch = read_pending(&transport, &queue, &consumer, session)?;
     }
+    // Read, printed and committed as one section over the session's queue, so two
+    // watches of one session never print the same events: the second finds them
+    // committed.
+    let mut answered: Result<usize, String> = Ok(0);
+    transport
+        .exclusive(&queue, &mut |held| {
+            answered = print_pending(held, &queue, &consumer, &document, session, print);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    answered
+}
+
+fn print_pending(
+    transport: &dyn Transport,
+    queue: &QueueName,
+    consumer: &ConsumerName,
+    document: &DocumentName,
+    session: &str,
+    print: &mut dyn FnMut(&Envelope) -> std::io::Result<()>,
+) -> Result<usize, String> {
+    let batch = read_pending(transport, queue, consumer, session)?;
     let watched_record = transport
-        .document(&queue, &document)
+        .document(queue, document)
         .map_err(|e| e.to_string())?;
     let mut watched: Watched = match watched_record {
         None => Watched::default(),
@@ -211,20 +231,20 @@ pub(crate) fn watch(
     if let Some(after) = last {
         transport
             .replace_document(
-                &queue,
-                &document,
+                queue,
+                document,
                 &serde_json::to_vec(&watched).unwrap_or_default(),
             )
             .map_err(|e| e.to_string())?;
         transport
-            .commit(&queue, &consumer, &after)
+            .commit(queue, consumer, &after)
             .map_err(|e| e.to_string())?;
     }
     Ok(printed)
 }
 
 fn read_pending(
-    transport: &LocalTransport,
+    transport: &dyn Transport,
     queue: &QueueName,
     consumer: &ConsumerName,
     session: &str,

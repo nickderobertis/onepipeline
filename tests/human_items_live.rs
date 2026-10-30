@@ -1593,3 +1593,45 @@ fn delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print() {
     assert_eq!(after.len(), 1, "{after:?}");
     assert_eq!(after[0]["payload"]["item"]["dedup_key"], "three");
 }
+
+/// Watches of one session running at once print every event exactly once
+/// between them.
+#[test]
+fn concurrent_watches_of_one_session_print_each_event_once() {
+    let world = Live::enabled();
+    for n in 0..10 {
+        world.raise(&item(
+            &format!("w-{n}"),
+            "question",
+            "low",
+            "shared",
+            json!({"scope": "nothing"}),
+        ));
+    }
+    let watches: Vec<_> = (0..4)
+        .map(|_| {
+            world
+                .cmd(Some("shared"), &["watch"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    let mut seqs: Vec<u64> = watches
+        .into_iter()
+        .flat_map(|w| {
+            let out = w.wait_with_output().unwrap();
+            String::from_utf8(out.stdout)
+                .unwrap()
+                .lines()
+                .map(|l| {
+                    serde_json::from_str::<Value>(l).unwrap()["seq"]
+                        .as_u64()
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    seqs.sort_unstable();
+    assert_eq!(seqs, (0..10).collect::<Vec<_>>());
+}

@@ -25,17 +25,31 @@ pub const PHASE_PREFIX: &str = "phase:";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Ticket {
+    // llmlint: ignore-block[invalid_states_unrepresentable] the task's ticket shape is `{id: string, url: string, priority}`, arriving as a phase's JSON context; the decoder refuses blank ids and URLs, `expand` refuses them again for a context built in process, and the review prints them as given.
     /// The ticket's id; the last occurrence of an id wins.
     #[serde(deserialize_with = "nonblank")]
-    // llmlint: ignore[invalid_states_unrepresentable] the task's ticket shape is `{id: string, url: string, priority}`, arriving as a phase's JSON context; the decoder refuses blank ids and URLs, and the review prints them as given.
     pub id: String,
     /// Where a person opens it.
     #[serde(deserialize_with = "nonblank")]
     pub url: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// Its priority, absent or `none` when it has no usable one.
     #[serde(default)]
-    #[schemars(with = "Option<String>")]
+    #[schemars(schema_with = "ticket_priority_schema")]
     pub priority: Option<Priority>,
+}
+
+/// A ticket's priority as the store spells every value, `none` and absence alike
+/// meaning it has no usable one.
+fn ticket_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let values: Vec<_> = std::iter::once(serde_json::Value::Null)
+        .chain(
+            Priority::ALL
+                .into_iter()
+                .map(|p| serde_json::json!(p.as_str())),
+        )
+        .collect();
+    schemars::json_schema!({"type": ["string", "null"], "enum": values})
 }
 
 fn nonblank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -238,6 +252,16 @@ pub fn expand(
     let mut findings = Vec::new();
     let mut retired = Vec::new();
     let finding_key = format!("{dedup_key}:no-priority");
+    if hook.priority == Priority::None {
+        return Err(format!("phase {phase} states no usable priority"));
+    }
+    if context
+        .tickets
+        .iter()
+        .any(|t| t.id.trim().is_empty() || t.url.trim().is_empty())
+    {
+        return Err("a ticket names a nonblank id and url".into());
+    }
     if hook.aggregate == Some(HookAggregate::TicketReview) {
         let tickets = deduplicated(&context.tickets);
         if tickets.is_empty() {

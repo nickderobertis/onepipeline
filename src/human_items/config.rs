@@ -97,7 +97,8 @@ pub struct HumanItemHook {
     pub body: String,
     /// The priority, unless an aggregation derives one.
     #[serde(deserialize_with = "priority")]
-    #[schemars(with = "String")]
+    #[schemars(schema_with = "super::priority_schema")]
+    // llmlint: ignore[invalid_states_unrepresentable] the imported store Priority carries `none`, which this crate cannot remove from the sibling's enum; the decoder and `phases::expand` both refuse it, and the schema states the four usable values.
     pub priority: Priority,
     /// What the item holds while open.
     pub block: HookBlock,

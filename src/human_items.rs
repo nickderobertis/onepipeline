@@ -31,7 +31,7 @@ fn priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Priority, D::Error
     }
     Ok(value)
 }
-fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub(crate) fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = Priority::ALL
         .into_iter()
         .filter(|p| *p != Priority::None)
@@ -541,6 +541,7 @@ pub struct HumanItemsArgs {
 pub enum HumanItemsCommand {
     /// Raise an item from JSON immutable fields, or what a configured phase's
     /// hook expands to against a JSON context.
+    // llmlint: ignore[invalid_states_unrepresentable] clap's own `required_unless_present`, `conflicts_with_all` and `requires` admit exactly `--input FILE` or `--phase P --context FILE`, refusing any other combination before this value exists; the contract publishes the first spelling and the phase form beside it.
     Raise {
         /// JSON input file.
         #[arg(long, required_unless_present = "phase", conflicts_with_all = ["phase", "context"])]
@@ -1394,7 +1395,7 @@ fn optional_priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Pr
     }
     Ok(value)
 }
-fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub(crate) fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = std::iter::once(serde_json::Value::Null)
         .chain(
             Priority::ALL

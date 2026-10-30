@@ -207,6 +207,9 @@ pub(crate) struct Gate {
     looked: Option<Instant>,
     /// The host journal's length when the last pass read it.
     seen: u64,
+    /// When the earliest release this driver is giving its resolver the chance
+    /// to make falls due, in epoch milliseconds.
+    due: Option<u64>,
 }
 
 impl Gate {
@@ -227,6 +230,7 @@ impl Gate {
             held: BTreeSet::new(),
             looked: None,
             seen: 0,
+            due: None,
         })
     }
 
@@ -276,6 +280,7 @@ impl Gate {
         }) {
             self.store.probe();
         }
+        self.due = None;
         self.reconcile(paths, state, statuses, &items);
         self.held = held(&self.run, &self.plan, state, statuses, &items);
         self.held.clone()
@@ -346,8 +351,11 @@ impl Gate {
                 _ if waiting && !self.released.contains(&node.id) => {
                     let recorded = crate::sys::now_millis();
                     let at = crate::projection::millis_of(&item.updated_at).unwrap_or(recorded);
-                    if recorded.saturating_sub(at) >= GRACE.as_millis() as u64 {
+                    let due = at.saturating_add(GRACE.as_millis() as u64);
+                    if recorded >= due {
                         self.queue(&crate::channel::ChannelState::new(paths), item);
+                    } else {
+                        self.due = Some(self.due.map_or(due, |earlier| earlier.min(due)));
                     }
                 }
                 _ => {}
@@ -407,7 +415,7 @@ impl Gate {
     /// Whether the host journal moved since the last pass read it: one `stat`,
     /// which is what the loop's idle wait can afford to ask.
     pub(crate) fn moved(&self) -> bool {
-        self.length() != self.seen
+        self.length() != self.seen || self.due.is_some_and(|due| crate::sys::now_millis() >= due)
     }
 
     /// An exhausted identity chain one of this run's dispatches met.

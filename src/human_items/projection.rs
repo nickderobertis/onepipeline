@@ -83,16 +83,20 @@ pub(crate) fn pending<'a>(
         .collect()
 }
 
-/// Project one task into `source`, as the store configured from `dir` places it.
-/// Answers its tracker binding.
-/// The content `item` is projected with: what it was first projected as, else its own.
+/// The content `item` is projected with: what it was first projected as — the
+/// record's copy, or, where that is lost, the journal's own record of the item as
+/// it stood when its tracker was bound — else its own.
 fn content(journal: &Path, item: &HumanItem) -> (String, String, super::Priority) {
-    projected(journal).remove(&item.id).map_or_else(
-        || (item.title.clone(), item.body.clone(), item.priority),
-        |r| (r.title, r.body, r.priority),
-    )
+    if let Some(r) = projected(journal).remove(&item.id) {
+        return (r.title, r.body, r.priority);
+    }
+    let bound = super::live::first_tracked(journal, &item.id);
+    let first = bound.as_ref().unwrap_or(item);
+    (first.title.clone(), first.body.clone(), first.priority)
 }
 
+/// Project one task into `source`, as the store configured from `dir` places it.
+/// Answers its tracker binding.
 pub(crate) fn project(
     dir: &Path,
     journal: &Path,
