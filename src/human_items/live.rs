@@ -53,7 +53,7 @@ pub const DISPATCH_NO_SPACE: &str = "dispatch-no-space";
 /// The host condition every identity of a dispatched side being refused raises.
 pub const IDENTITIES_REFUSED: &str = "identities-refused";
 /// How often an identity outage is probed, at most.
-const IDENTITY_PROBE_EVERY_MS: u64 = 60_000;
+const IDENTITY_PROBE_EVERY_MS: u64 = 10_000;
 /// The dedup-key prefix of every host condition item, followed by the condition.
 pub const HOST_CONDITION_PREFIX: &str = "host:";
 /// The environment variable naming a file a read appends its telemetry line to.
@@ -1156,7 +1156,7 @@ impl<'a> Writer<'a> {
 
     /// Probe an open identity outage by the one capability that failed: the
     /// harness's own zero-turn usage read of exactly the identities that were
-    /// refused — never a dispatch, never a model turn — at most once a minute.
+    /// refused — never a dispatch, never a model turn — at most every ten seconds.
     /// It clears when every one of them reports headroom.
     fn probe_identities(&mut self) -> Result<(), HumanItemRefusal> {
         if self.open_condition(IDENTITIES_REFUSED).is_none() {

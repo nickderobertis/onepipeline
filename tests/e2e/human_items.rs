@@ -1109,3 +1109,104 @@ fn a_run_never_takes_the_human_item_stores_name() {
         .exited(0)
         .out_has("human-items-2");
 }
+
+/// The harness's own zero-turn usage read is the identity outage's only probe:
+/// the harness CLI here is a script answering `get_usage` the way `claude` does,
+/// and once it reports headroom for both refused identities the item resolves
+/// itself — with no dispatch made to find that out.
+#[cfg(unix)]
+#[test]
+fn an_identity_outage_resolves_when_the_usage_probe_reports_headroom() {
+    let world = World::new("human-item-identity-probe");
+    enabled(&world);
+    world.script(
+        "build.died-as",
+        "provider-failure fallback_chain_exhausted every candidate in the chain was attempted and none ran\n",
+    );
+    world.script(
+        "build.exhausted",
+        "claude-code:work quota out of extra usage\nclaude-code:home auth 401 Unauthorized\n",
+    );
+    let launch = checkout(&world, None);
+    let headroom = world.root.join("headroom");
+    let probes = world.root.join("probes.log");
+    let usage = world.root.join("usage-claude.sh");
+    std::fs::write(
+        &usage,
+        format!(
+            r#"#!/bin/sh
+echo "$@" >> "{probes}"
+read line
+id=$(printf '%s' "$line" | sed 's/.*"request_id":"\([^"]*\)".*/\1/')
+if [ -f "{headroom}" ]; then
+  limits='"rate_limits_available":true,"rate_limits":{{"five_hour":{{"utilization":10,"resets_at":"2026-07-29T18:30:00.000000+00:00"}}}}'
+else
+  limits='"rate_limits_available":false,"rate_limits":null'
+fi
+printf '{{"type":"control_response","response":{{"subtype":"success","request_id":"%s","response":{{"subscription_type":"max",%s}}}}}}\n' "$id" "$limits"
+"#,
+            probes = probes.display(),
+            headroom = headroom.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&usage, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(
+        launch.join("oneharness.toml"),
+        format!(
+            "[harness.claude-code]\nbin = \"{}\"\n[harness.claude-code.variant.work]\n[harness.claude-code.variant.home]\n",
+            usage.display()
+        ),
+    )
+    .unwrap();
+    let name = "probed";
+    let project = world.plan(name, &plan_of(name, vec![agent("build", &[])]));
+    let mut start = world.cmd(&["start", &project, "--attach"]);
+    start.current_dir(&launch);
+    world.run_on(start, "start").settled();
+    let host = host_items(&world);
+    assert_eq!(host.len(), 1, "{host:?}");
+    let id = id_of(&host[0]);
+    let dispatched_before = dispatched(&world, name).len();
+    // No headroom yet: probed, still open.
+    world.until_within(
+        std::time::Duration::from_secs(60),
+        "the usage probe to run",
+        |w| {
+            w.run(&["human-items", "list", "--host"]).exited(0);
+            std::fs::read_to_string(&probes)
+                .is_ok_and(|log| log.contains("--input-format stream-json"))
+        },
+    );
+    assert_eq!(state_of(&world, &id)["state"], "open");
+    // Headroom returns: the next probe resolves it automatically.
+    std::fs::write(&headroom, "").unwrap();
+    world.until_within(
+        std::time::Duration::from_secs(60),
+        "the outage to resolve",
+        |w| {
+            w.run(&["human-items", "list", "--host"]).exited(0);
+            state_of(w, &id)["state"] == "dismissed"
+        },
+    );
+    let resolved = state_of(&world, &id);
+    assert_eq!(resolved["resolution"]["actor"], "engine");
+    assert!(
+        resolved["resolution"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("report headroom again"),
+        "{resolved}"
+    );
+    assert_eq!(
+        dispatched(&world, name).len(),
+        dispatched_before,
+        "a probe dispatches nothing"
+    );
+    let log = std::fs::read_to_string(&probes).unwrap();
+    assert!(
+        log.lines()
+            .all(|l| l.contains("-p --input-format stream-json")),
+        "{log}"
+    );
+}
