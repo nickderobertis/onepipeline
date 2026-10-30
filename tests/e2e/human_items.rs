@@ -519,3 +519,159 @@ fn a_stopped_run_dismisses_its_work_and_plan_holds_and_host_holds_survive() {
         .iter()
         .all(|e| e["kind"] == "human-item-raised"));
 }
+
+#[test]
+fn plan_store_launches_raise_one_item_per_human_node_from_its_priority_or_metadata() {
+    let world = World::new("human-item-launch");
+    enabled(&world);
+    let name = "metadata";
+    let mut urgent = human("urgent-step", &[]);
+    urgent["priority"] = json!("urgent");
+    urgent["title"] = json!("Rotate the leaked key");
+    let mut unprioritised = human("plain-step", &[]);
+    unprioritised["priority"] = json!("none");
+    let mut question = human("ask-step", &[]);
+    question["human_item"] = json!({
+        "kind": "question",
+        "priority": "medium",
+        "title": "Which region hosts the pilot?",
+        "body": "Pick one region; it decides the latency budget."
+    });
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                urgent,
+                unprioritised,
+                question,
+                agent("after", &["urgent-step", "plain-step", "ask-step"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    let open = items(&world, &[]);
+    assert_eq!(
+        open.len(),
+        3,
+        "repeated scheduler reads raise nothing twice: {open:?}"
+    );
+    let by_node = |node: &str| {
+        open.iter()
+            .find(|v| v["item"]["dedup_key"] == format!("run:{name}#{node}"))
+            .unwrap_or_else(|| panic!("no item for {node}: {open:?}"))["item"]
+            .clone()
+    };
+    let urgent = by_node("urgent-step");
+    assert_eq!(urgent["priority"], "urgent");
+    assert_eq!(urgent["kind"], "task");
+    assert_eq!(urgent["title"], "Rotate the leaked key");
+    assert_eq!(
+        urgent["body"],
+        "Do urgent-step, which only a person can do."
+    );
+    assert_eq!(by_node("plain-step")["priority"], "low");
+    let asked = by_node("ask-step");
+    assert_eq!(asked["kind"], "question");
+    assert_eq!(asked["priority"], "medium");
+    assert_eq!(asked["title"], "Which region hosts the pilot?");
+    assert_eq!(
+        asked["body"],
+        "Pick one region; it decides the latency budget."
+    );
+    assert_eq!(asked["tracker"], Value::Null);
+    world
+        .run(&["human-items", "list"])
+        .exited(0)
+        .out_has("Critical")
+        .out_has("Medium")
+        .out_has("Low");
+    // Answering the question attests its step exactly as completing a task does.
+    world
+        .run(&[
+            "human-items",
+            "answer",
+            &id_of(&json!({"item": asked})),
+            "--text",
+            "eu-west",
+        ])
+        .exited(0);
+    for node in ["urgent-step", "plain-step"] {
+        world
+            .run(&[
+                "human-items",
+                "complete",
+                &id_of(&json!({"item": by_node(node)})),
+            ])
+            .exited(0);
+    }
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "after").as_deref(), Some("done"));
+}
+
+/// A checkout carrying the repository-tracked shared configuration.
+fn checkout(world: &World, config: Option<&str>) -> std::path::PathBuf {
+    let repo = world.root.join("shared-checkout");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join(".onepipeline")).unwrap();
+    if let Some(config) = config {
+        std::fs::write(repo.join(".onepipeline/config.yaml"), config).unwrap();
+    }
+    repo
+}
+
+#[test]
+fn the_cli_the_embedded_sdk_and_a_launch_read_one_shared_configuration() {
+    for shared in [true, false] {
+        let world = World::new("human-item-shared-config");
+        let repo = checkout(
+            &world,
+            shared.then_some("human_items:\n  enabled: true\n  task_source: plans\n"),
+        );
+        // The CLI, run in the checkout.
+        let mut cli = world.cmd(&["human-items", "config", "--json"]);
+        cli.current_dir(&repo);
+        let run = world.run_on(cli, "human-items config --json");
+        run.exited(0);
+        let read: Value = serde_json::from_str(&run.stdout).unwrap();
+        assert_eq!(read["human_items"]["enabled"], shared);
+        assert_eq!(
+            read["human_items"]["task_source"],
+            if shared { json!("plans") } else { Value::Null }
+        );
+
+        // The SDK an embedding UI links, asked of the same checkout.
+        let sdk = onepipeline::human_items::config::effective(&repo).unwrap();
+        assert_eq!(sdk.human_items.enabled, shared);
+        assert_eq!(
+            sdk.human_items.task_source.as_deref(),
+            shared.then_some("plans")
+        );
+        let opened = onepipeline::human_items::HumanItems::open(world.root.join("runs"), &repo);
+        assert_eq!(opened.is_ok(), shared);
+
+        // A launch from the checkout: the run acts on the same settings.
+        let name = "shared";
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+        );
+        let mut start = world.cmd(&["start", &project, "--attach"]);
+        start.current_dir(&repo);
+        world.run_on(start, "start").exited(0);
+        let mut list = world.cmd(&["human-items", "list", "--json"]);
+        list.current_dir(&repo);
+        let listed = world.run_on(list, "human-items list --json");
+        if shared {
+            listed.exited(0);
+            let views: Value = serde_json::from_str(&listed.stdout).unwrap();
+            assert_eq!(views.as_array().unwrap().len(), 1);
+            assert_eq!(views[0]["item"]["dedup_key"], format!("run:{name}#gate"));
+        } else {
+            listed.err_has(r#"{"kind":"unavailable"}"#);
+            assert!(!world.root.join("runs/human-items/events.ndjson").exists());
+        }
+    }
+}
