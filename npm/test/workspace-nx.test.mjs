@@ -37,6 +37,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { GATE_DEBUG_BUILD } from "./install-support.mjs";
 import { spawnable } from "./spawn-support.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -1001,6 +1002,27 @@ describe("the build targets", () => {
       existsSync(binary) || existsSync(`${binary}.exe`),
       "the crate's build target left no `onepipeline` binary behind",
     );
+  });
+
+  it("leaves nothing to compile for the debug build the npm publish journey packs", () => {
+    // After the build above, which is the tree every debug build in the gate
+    // shares. A publish build under other flags would compile a second tree,
+    // from every dependency up, and say so here as `Compiling`.
+    const result = spawnSync(
+      "cargo",
+      [...GATE_DEBUG_BUILD.args.filter((arg) => arg !== "--quiet"), "--verbose"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        env: { ...process.env, ...GATE_DEBUG_BUILD.env, CARGO_TERM_QUIET: "false" },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const compiled = result.stderr
+      .split("\n")
+      .filter((line) => /^\s+(Compiling|Dirty) /.test(line));
+    assert.deepEqual(compiled, [], "the publish build compiled what `_crate-build` had built");
+    assert.match(result.stderr, /^\s+Fresh onepipeline /m);
   });
 
   it("declares the command each project's build target actually runs", () => {

@@ -32,6 +32,16 @@ export function hostTarget() {
 // keeps them out of that lock and still reuses its build on the next run.
 export const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
 
+// The debug build `publish-gate.test.mjs` packs, under the flags of every other
+// debug build the gate makes (`just _crate-build`, the stop-verdict tier). Cargo
+// keys a build on its flags, so an unflagged one compiled the crate and every
+// dependency into a second tree; `workspace-nx.test.mjs` holds this one to the
+// tree `_crate-build` leaves.
+export const GATE_DEBUG_BUILD = {
+  args: ["build", "--locked", "--quiet"],
+  env: { RUSTFLAGS: "-D warnings" },
+};
+
 export function run(command, args, options = {}) {
   return execFileSync(
     ...spawnable(command, args, {
