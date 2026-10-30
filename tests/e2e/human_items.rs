@@ -1158,18 +1158,9 @@ fn a_run_its_planner_ends_retires_its_holds_with_the_run_ended() {
 fn a_run_never_takes_the_human_item_stores_name() {
     let world = World::new("human-item-namespace");
     enabled(&world);
-    raise(
-        &world,
-        "first",
-        &input(
-            "first",
-            "question",
-            "s",
-            None,
-            None,
-            json!({"scope": "nothing"}),
-        ),
-    );
+    // Nothing of the store exists yet: the name is refused for itself, not because
+    // a directory happened to be there.
+    assert!(!world.runs.join("human-items").exists());
     let project = world.plan(
         "human-items",
         &plan_of(

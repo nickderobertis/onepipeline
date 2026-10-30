@@ -104,13 +104,14 @@ pub struct HumanItemHook {
     pub priority: Priority,
     /// What the item holds while open.
     pub block: HookBlock,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the task prescribes the flat hook `{phase, kind, title, body, priority, block, approval}` and selects `ticket_review` on it; the loader's `validate` refuses a question carrying an approval or an aggregation before any consumer sees the configuration, and `phases::expand` refuses the same again for an in-process hook.
     /// The trusted approval adapter a completion of this task runs, if any.
     #[serde(default)]
-    // llmlint: ignore[invalid_states_unrepresentable] the task prescribes the flat hook `{phase, kind, title, body, priority, block, approval}`; the loader's `validate` refuses a question carrying an approval or an aggregation before any consumer sees the configuration.
     pub approval: Option<HookApproval>,
     /// An aggregation over the context, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregate: Option<HookAggregate>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 fn priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Priority, D::Error> {

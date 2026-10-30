@@ -195,9 +195,9 @@ const EVERY: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(10);
 
 /// A run driver's view of the human items that concern its run.
+// llmlint: ignore-block[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id, its launch record's session and project, and the graph's own node ids, written once in `for_launch` or read off the graph and only compared; every item they build is validated as every raise is.
 pub(crate) struct Gate {
     store: HumanItems,
-    // llmlint: ignore[invalid_states_unrepresentable] private copies of the run's validated `RunPaths` id and its launch record's session and project, written once in `for_launch` and only read; the item they build is validated as every raise is.
     run: String,
     session: String,
     plan: String,
@@ -210,7 +210,7 @@ pub(crate) struct Gate {
     /// When the earliest release this driver is giving its resolver the chance
     /// to make falls due, in epoch milliseconds.
     due: Option<u64>,
-}
+} // llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Gate {
     /// The gate for a launch whose effective configuration enables human items.
@@ -296,11 +296,9 @@ impl Gate {
                 record.and_then(|r| r.priority),
             )
         });
-        let body = if metadata.body.trim().is_empty() {
-            format!("Complete the human step {}.", node.id)
-        } else {
-            metadata.body
-        };
+        // A human node states its action prose (plan loading refuses one that does not),
+        // and that prose is the item's body.
+        let body = metadata.body;
         self.store
             .raise_engine(HumanItemInput {
                 schema_version: 1,

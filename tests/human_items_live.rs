@@ -1665,3 +1665,78 @@ fn a_design_task_whose_authority_is_no_longer_configured_stays_open() {
     );
     assert!(lines(&world.root.join("requests.ndjson")).is_empty());
 }
+
+/// A raise is refused, writing nothing, when its dedup key already names an
+/// item of another kind, owner or block, or when an identity it states is blank.
+#[test]
+fn raises_refuse_conflicting_keys_and_blank_identities_without_writing() {
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "held",
+        "task",
+        "low",
+        "mgr",
+        json!({"scope": "nothing"}),
+    ));
+    let before = world.json(None, &["show", &id, "--json"]);
+    for (name, value, refusal) in [
+        (
+            "kind",
+            item(
+                "held",
+                "question",
+                "low",
+                "mgr",
+                json!({"scope": "nothing"}),
+            ),
+            "another kind, owner or block",
+        ),
+        (
+            "owner",
+            item("held", "task", "low", "other", json!({"scope": "nothing"})),
+            "another kind, owner or block",
+        ),
+        (
+            "block",
+            item("held", "task", "low", "mgr", json!({"scope": "host"})),
+            "another kind, owner or block",
+        ),
+        (
+            "dedup",
+            item(" ", "task", "low", "mgr", json!({"scope": "nothing"})),
+            "dedup_key must not be blank",
+        ),
+        (
+            "session",
+            item("s", "task", "low", " ", json!({"scope": "nothing"})),
+            "owner.session must not be blank",
+        ),
+        (
+            "work",
+            item(
+                "w",
+                "task",
+                "low",
+                "mgr",
+                json!({"scope": "work", "run": " ", "node": "n"}),
+            ),
+            "names its run and node",
+        ),
+        (
+            "plan",
+            item(
+                "p",
+                "task",
+                "low",
+                "mgr",
+                json!({"scope": "plan", "plan": " "}),
+            ),
+            "names its plan",
+        ),
+    ] {
+        let path = world.input(name, &value);
+        world.refused(None, &["raise", "--input", &path], refusal);
+    }
+    assert_eq!(world.journal().len(), 1);
+    assert_eq!(world.json(None, &["show", &id, "--json"]), before);
+}

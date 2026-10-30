@@ -111,13 +111,14 @@ pub fn item_id_for(dedup_key: &str) -> String {
 /// Who an action was taken by: the human directly, or a manager session
 /// recording the human's chat input on their behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// llmlint: ignore-block[invalid_states_unrepresentable] the approved resolution records `actor` and `on_behalf_of` as strings on the published HumanItemResolution; this carries exactly those two values to it, minted only by `from_environment` (a nonblank session and login) and the engine's own `engine` actor.
 pub struct Actor {
     /// Who took the action.
-    // llmlint: ignore[invalid_states_unrepresentable] the approved resolution records `actor` and `on_behalf_of` as strings on the published HumanItemResolution; this carries exactly those two values to it, minted only by `from_environment` and the engine's own `engine` actor.
     pub actor: String,
     /// The human a manager acted for, when one did.
     pub on_behalf_of: Option<String>,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 impl Actor {
     /// The actor this process acts as: a manager session when

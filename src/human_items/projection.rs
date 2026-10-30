@@ -43,6 +43,7 @@ fn projected_path(journal: &Path) -> PathBuf {
 /// What a task was projected as: the state it last reached, and the content it
 /// was first projected with — which the store binds its projection to, so every
 /// later state is projected with that same content.
+// llmlint: ignore-block[invalid_states_unrepresentable] a private record of what the store accepted: its title, body and priority are copied from a HumanItem whose decoder refused a blank title and `none`, and the store's own ProjectionTitle refused them again before anything was recorded.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -51,6 +52,7 @@ struct Record {
     body: String,
     priority: super::Priority,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Each task's last projected state, by item id. A record that is not one is
 /// said and read as empty: every task is then projected again, which the store's

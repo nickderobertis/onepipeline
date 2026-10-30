@@ -204,6 +204,12 @@ pub fn expand(
     let hook: &HumanItemHook = config
         .hook(phase)
         .ok_or_else(|| format!("no hook is configured for phase {phase}"))?;
+    if hook.kind == HumanItemKind::Question && (hook.approval.is_some() || hook.aggregate.is_some())
+    {
+        return Err(format!(
+            "phase {phase} is a question, which carries no approval and no aggregation"
+        ));
+    }
     if context.dedup_key.trim().is_empty() || context.owner.session.trim().is_empty() {
         return Err("a phase context names its owner session and dedup_key".into());
     }
