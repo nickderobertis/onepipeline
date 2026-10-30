@@ -231,6 +231,21 @@ export function historicalCrates(crates, current, oldManifest, newManifest, befo
  * test-split.mjs); `options.sections` scopes reads of sectioned documents to the sections their
  * needles name. Without options this is the crate-only target mapping.
  */
+/** Erased code with every `#[cfg(test)]` module removed, braces balanced. */
+export function withoutTestModules(code) {
+  let out = code;
+  for (;;) {
+    const found = /#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/.exec(out);
+    if (!found) return out;
+    let end = found.index + found[0].length;
+    for (let depth = 1; end < out.length && depth; end++) {
+      if (out[end] === "{") depth++;
+      if (out[end] === "}") depth--;
+    }
+    out = out.slice(0, found.index) + out.slice(end);
+  }
+}
+
 export function commandMapping(layout, catalog, options = {}) {
   if (![1, 4].includes(catalog.schema))
     throw new Error("command test catalog must use schema 1 or 4");
@@ -364,8 +379,12 @@ export function commandMapping(layout, catalog, options = {}) {
         `resolved/${name}/**`,
       ],
       deps: crate.deps,
+      // A `#[cfg(test)]` module is the crate's own unit tests: its imports are dev-dependencies,
+      // which reach no dependent and no e2e suite. The schema-1 baseline keeps its historical roots.
       external: external.filter((dep) =>
-        new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(code),
+        new RegExp(`\\b${dep.replaceAll("-", "_")}\\s*::`).test(
+          catalog.schema === 4 ? withoutTestModules(code) : code,
+        ),
       ),
       toolchain: true,
     };

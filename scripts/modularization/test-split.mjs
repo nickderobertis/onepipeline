@@ -95,13 +95,44 @@ export function deriveSplit(catalog, threshold = THRESHOLD) {
   };
 }
 
+/** The first key any object of a JSON text names twice, whatever the text's layout; JSON.parse keeps only the last. */
+export function duplicateKey(text) {
+  const stack = [];
+  let expectKey = false;
+  for (let at = 0; at < text.length; at++) {
+    const c = text[at];
+    if (c === '"') {
+      let end = at + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const top = stack.at(-1);
+      if (top && expectKey) {
+        const key = JSON.parse(text.slice(at, end + 1));
+        if (top.has(key)) return key;
+        top.add(key);
+        expectKey = false;
+      }
+      at = end;
+    } else if (c === "{") {
+      stack.push(new Set());
+      expectKey = true;
+    } else if (c === "[") {
+      stack.push(null);
+    } else if (c === "}" || c === "]") {
+      stack.pop();
+    } else if (c === ",") {
+      expectKey = Boolean(stack.at(-1));
+    }
+  }
+  return undefined;
+}
+
 /**
  * The suite each catalog test runs in once the split applies. Refuses a split that drops a test of
  * a suite it splits, lists a test twice or under the wrong parent, or names a test the catalog lacks.
  */
 export function checkSplit(text, catalog) {
   const split = JSON.parse(text);
-  const keys = [...text.matchAll(/^ {4}"([^"]+)": \{/gm)].map((match) => match[1]);
+  const repeated = duplicateKey(text);
   if (
     !split ||
     typeof split !== "object" ||
@@ -115,10 +146,7 @@ export function checkSplit(text, catalog) {
     Array.isArray(split.suites)
   )
     throw new Error(`invalid test split ${SPLIT_PATH}`);
-  if (keys.length !== new Set(keys).size)
-    throw new Error(
-      `test split names suite ${keys.find((key, index) => keys.indexOf(key) !== index)} twice`,
-    );
+  if (repeated !== undefined) throw new Error(`test split names ${repeated} twice`);
   const parents = new Set(Object.values(catalog.tests).map((test) => test.suite));
   const suiteOf = new Map();
   for (const [name, suite] of Object.entries(split.suites)) {

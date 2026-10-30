@@ -30,6 +30,194 @@ export function crateOnly(targetDoc) {
   return rows;
 }
 
+const fraction = (value) =>
+  typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const close = (a, b) => Math.abs(a - b) < 1e-9;
+
+/**
+ * Refuses evidence whose figures do not follow from its own rows and selection: every row's suites
+ * are recomputed from its inputs, every platform's skip shares from the rows and suite weights,
+ * and the migration, wall projection and decision summary are checked against them.
+ */
+export function validateEvidence(evidence) {
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence))
+    throw new Error("split evidence is not an object");
+  if (Object.keys(evidence).some((key) => !["split", "result"].includes(key)))
+    throw new Error("unknown split evidence field");
+  const { split, result } = evidence;
+  if (
+    !split?.suites ||
+    !result?.mapping?.selection ||
+    !Array.isArray(result.rows) ||
+    !result.rows.length
+  )
+    throw new Error("split evidence needs a split, a selection and replayed rows");
+  const suites = Object.keys(result.mapping.selection.suites);
+  if (result.suites !== suites.length)
+    throw new Error("split evidence suite count differs from its selection");
+  for (const [name, suite] of Object.entries(split.suites))
+    if (!suites.includes(name) || !Array.isArray(suite.tests) || !suite.tests.length)
+      throw new Error(`split suite ${name} is not a replayed suite with tests`);
+  const compiled = compileMapping(result.mapping.selection);
+  for (const row of result.rows) {
+    if (!Array.isArray(row.effectiveFiles) || !Array.isArray(row.affected))
+      throw new Error("split evidence row needs its inputs and selection");
+    const affected = affectedSuites(compiled, row.effectiveFiles).affected;
+    if (JSON.stringify([...affected].sort()) !== JSON.stringify([...row.affected].sort()))
+      throw new Error(`split evidence row selection differs from its inputs: ${row.commit}`);
+  }
+  for (const platform of PLATFORMS) {
+    const data = result.platforms?.[platform];
+    if (
+      !data ||
+      !fraction(data.suiteSkip) ||
+      !fraction(data.secondsSkip) ||
+      !finite(data.secondsPerRun) ||
+      suites.some((suite) => !finite(data.suiteSeconds?.[suite]))
+    )
+      throw new Error(`invalid split platform data: ${platform}`);
+    const ran = result.rows.reduce(
+      (sum, row) => sum + row.affected.reduce((s, suite) => s + data.suiteSeconds[suite], 0),
+      0,
+    );
+    if (!close(1 - ran / (data.secondsPerRun * result.rows.length), data.secondsSkip))
+      throw new Error(`split seconds skipped differs from its rows and weights: ${platform}`);
+    const skipped = result.rows.reduce((sum, row) => sum + suites.length - row.affected.length, 0);
+    if (!close(skipped / (suites.length * result.rows.length), data.suiteSkip))
+      throw new Error(`split suite runs skipped differs from its rows: ${platform}`);
+    const last = Array.isArray(result.splitMigration) ? result.splitMigration.at(-1) : undefined;
+    if (!last || !(Math.abs(last.secondsSkip?.[platform] - data.secondsSkip) < 1e-9))
+      throw new Error(`split migration does not end at the replayed figure: ${platform}`);
+  }
+  for (const step of result.splitMigration)
+    if (
+      !fraction(step.suiteSkip) ||
+      !Number.isInteger(step.suites) ||
+      PLATFORMS.some((platform) => !fraction(step.secondsSkip?.[platform]))
+    )
+      throw new Error("invalid split migration step");
+  for (const platform of ["linux", "macos", "windows"]) {
+    const wall = result.wall?.[platform];
+    const ordered = (summary) =>
+      summary &&
+      [summary.median, summary.p90, summary.max].every(finite) &&
+      summary.median <= summary.p90 &&
+      summary.p90 <= summary.max &&
+      Number.isInteger(summary.over);
+    if (
+      !wall ||
+      ![wall.residual, wall.e2e, wall.today].every(finite) ||
+      !close(wall.residual + wall.e2e, wall.today) ||
+      !ordered(wall.projected) ||
+      !ordered(wall.withCompileStress) ||
+      wall.projected.max > wall.today + 1e-9 ||
+      !fraction(wall.typicalShare) ||
+      !fraction(wall.worstShare)
+    )
+      throw new Error(`invalid wall projection: ${platform}`);
+  }
+  const linux = result.platforms.linux;
+  const broad = result.rows.filter(
+    (row) =>
+      row.affected.reduce((sum, suite) => sum + linux.suiteSeconds[suite], 0) /
+        linux.secondsPerRun >=
+      0.9,
+  ).length;
+  const { causes } = result;
+  if (
+    !causes ||
+    causes.broad !== broad ||
+    Object.values(causes.prs ?? {}).some(
+      (count) => !Number.isInteger(count) || count < 0 || count > broad,
+    ) ||
+    ["sibling", "thirdParty", "both"].some((key) => !Number.isInteger(causes.lock?.[key])) ||
+    causes.lock.sibling + causes.lock.thirdParty + causes.lock.both !==
+      (causes.prs["lockfile resolution"] ?? 0) ||
+    !Array.isArray(causes.freed) ||
+    causes.freed.some(
+      (entry) =>
+        !fraction(entry.suiteSkip) ||
+        !fraction(entry.secondsSkip) ||
+        !Number.isInteger(entry.broad),
+    )
+  )
+    throw new Error("split decision summary differs from its rows");
+  const sib = result.siblings;
+  if (
+    !sib ||
+    !Array.isArray(sib.prs) ||
+    sib.prs.some(
+      (entry) => !Array.isArray(entry.moved) || !fraction(entry.lockShare) || entry.lockShare < 0.9,
+    ) ||
+    !fraction(sib.adapters?.suiteSkip) ||
+    !fraction(sib.adapters?.secondsSkip) ||
+    sib.adapters.secondsSkip + 1e-9 < result.platforms.linux.secondsSkip ||
+    Object.values(sib.roles ?? {}).some(
+      (entry) => !finite(entry.seconds) || entry.only > entry.seconds + 1e-9,
+    )
+  )
+    throw new Error("split sibling-engine paths differ from their rows");
+  for (const [key, entry] of Object.entries(result.scopes ?? {}))
+    if (!key.startsWith(`${entry?.path}#`) || !Array.isArray(entry.needles))
+      throw new Error(`invalid scoped input ${key}`);
+  return evidence;
+}
+
+const ROLE_LABELS = {
+  "a shared engine crate":
+    "a shared engine crate the suite reaches transitively, through its command's dependencies",
+  "a command crate": "the suite's own command crate",
+  "the suite's own test code": "the suite's own test code (its runner's imports)",
+  "the shared test-fake crates": "the test-fake crates the suite starts or links",
+  "the dispatcher or facade every e2e suite runs": "the dispatcher or facade",
+};
+
+/** The decision summary's answer to why a bump of only sibling engines reaches most suites. */
+function siblingSection(result) {
+  const { siblings } = result;
+  const total = result.platforms.linux.secondsPerRun;
+  const count = siblings.prs.length;
+  const roles = Object.entries(siblings.roles).sort((a, b) => b[1].seconds - a[1].seconds);
+  const shared = Object.entries(siblings.crates).filter(
+    ([, entry]) => entry.role === "a shared engine crate",
+  );
+  const reach = {};
+  for (const entry of Object.values(siblings.crates))
+    for (const kind of entry.reach) reach[kind] = (reach[kind] ?? 0) + 1;
+  const { adapters } = siblings;
+  return [
+    `**Projected** (replay model) for the ${count} broad PRs whose lockfile change moved only sibling-engine packages and whose lockfile resolution alone selects at least 90% of Linux seconds. This workspace's own \`onepipeline*\` packages are not counted as a moved dependency. A crate's resolved set changes when a package reachable from its own external roots moved; a suite is selected when any crate in its runner's closure changed. The seconds columns are each path's Linux suite-seconds, summed over the ${count} PRs as a share of their full runs: "alone" is what that path's crates select by themselves, "only through this path" is what no other path also selects.`,
+    "",
+    "| Path to the moved engine | PRs | Linux seconds it selects alone | Linux seconds only through this path |",
+    "| --- | ---: | ---: | ---: |",
+    ...roles.map(
+      ([role, entry]) =>
+        `| ${ROLE_LABELS[role] ?? role} | ${entry.prs} | ${pct(entry.seconds / (total * count))} | ${pct(entry.only / (total * count))} |`,
+    ),
+    "",
+    `Of the ${Object.keys(siblings.crates).length} crates whose resolved set changed in any of these PRs, ${reach["names the moved engine"] ?? 0} name a moved engine in their own production code (or, for a runner, in the test code its phases reach), ${reach["names a sibling engine that depends on the moved one"] ?? 0} also reach it through another sibling that depends on it (a crate may do both), and ${reach["through a third-party package that depends on it"] ?? 0} reach it only through a third-party package. No path in these PRs runs through a third-party package the bump also moved: by selection, these lockfile changes moved sibling packages only.`,
+    "",
+    "The shared engine crates every one of them reaches, with the sibling engines their production code names:",
+    "",
+    "| Shared engine crate | PRs in which its resolved set changed | Sibling engines it names |",
+    "| --- | ---: | --- |",
+    ...shared
+      .slice(0, 15)
+      .map(([name, entry]) => `| ${name} | ${entry.prs} | ${entry.roots.join(", ")} |`),
+    "",
+    "| PR / commit | Moved sibling packages | Shared engine crates changed | Command crates | Runners | Test fakes | Dispatcher or facade | Linux seconds the lockfile alone selects |",
+    "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ...siblings.prs.map(
+      (entry) =>
+        `| ${entry.pr ? `#${entry.pr}` : "—"} / ${entry.commit.slice(0, 8)} | ${entry.moved.join(", ")} | ${entry.byRole["a shared engine crate"] ?? 0} | ${entry.byRole["a command crate"] ?? 0} | ${entry.byRole["the suite's own test code"] ?? 0} | ${entry.byRole["the shared test-fake crates"] ?? 0} | ${entry.byRole["the dispatcher or facade every e2e suite runs"] ?? 0} | ${pct(entry.lockShare)} |`,
+    ),
+    "",
+    `**The design change, projected as an upper bound:** shared engine crates hold their own value types where today they embed a sibling's, and reach the engines only behind adapter crates the command crates wire, so a sibling bump changes only the crates that call that engine. Keeping sibling resolution only in command crates, runners, test fakes and the dispatcher, the replay reaches ${pct(adapters.suiteSkip)} of suite runs and ${pct(adapters.secondsSkip)} of Linux seconds skipped (from ${pct(result.platforms.linux.suiteSkip)} and ${pct(result.platforms.linux.secondsSkip)}). ${adapters.stillBroad} of these ${count} PRs and ${adapters.broad} of all ${result.rows.length} would still select at least 90% of the seconds, because the suites' own test code and their fakes call the engines themselves: the harness registers every checkout through \`onevcs\` in-process, reads \`oneagentgraph\`'s task-token schema version and drives task stores through \`onetaskgraph-core\`, and the agent, host and harness fakes link the engines they act out. Those are real dependencies of realistic tests, which this design does not replace.`,
+    "",
+  ];
+}
+
 export function splitAppendix({ split, result }, targetDoc) {
   const before = crateOnly(targetDoc);
   const compiled = compileMapping(result.mapping.selection);
@@ -109,6 +297,9 @@ export function splitAppendix({ split, result }, targetDoc) {
     `| third-party packages only | ${causes.lock.thirdParty} |`,
     `| both | ${causes.lock.both} |`,
     "",
+    "### Why a sibling-only lockfile change selects nearly everything",
+    "",
+    ...siblingSection(result),
     "## Where each job's residual goes",
     "",
     "**Measured** on run 40947970908. Segments add up to the job; Linux's quality-gate tasks run concurrently, so its task durations overlap and are listed apart.",
@@ -242,9 +433,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (process.argv.length !== 3) throw new Error("usage: split-report.mjs SPLIT-REPLAY.json");
     const parts = readFileSync(DOC, "utf8").split(SPLIT_MARKER);
     if (parts.length !== 2) throw new Error("expected one test split marker");
-    const evidence = JSON.parse(readFileSync(process.argv[2], "utf8"));
-    if (!evidence || Object.keys(evidence).some((key) => !["split", "result"].includes(key)))
-      throw new Error("unknown split evidence field");
+    const evidence = validateEvidence(JSON.parse(readFileSync(process.argv[2], "utf8")));
     writeFileSync(
       DOC,
       `${parts[0]}${splitAppendix(evidence, readFileSync("docs/modularization-target-layout.md", "utf8"))}`,

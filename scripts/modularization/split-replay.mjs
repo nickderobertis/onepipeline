@@ -12,6 +12,7 @@ import { commandMapping, lockPackages, run } from "./command-replay.mjs";
 import { SECTIONED_DOCS, scopeChanged } from "./contract-sections.mjs";
 import { SPLIT_PATH, checkSplit, deriveSplit, targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping, mergedChanges } from "../crate-split-replay.mjs";
+import { testFakes } from "./test-fakes.mjs";
 
 const read = (path) => readFileSync(path, "utf8");
 const show = (revision, file) => {
@@ -59,6 +60,86 @@ export function typeOwners(owners) {
     }
   }
   return owners;
+}
+
+const WALL_PATH = "scripts/modularization/ci-wall.json";
+const duration = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const record = (value, keys, where) => {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error(`invalid ${WALL_PATH}: ${where} is not an object`);
+  const unknown = Object.keys(value).find((key) => !keys.includes(key));
+  if (unknown !== undefined)
+    throw new Error(`invalid ${WALL_PATH}: ${where} has unknown field ${unknown}`);
+};
+
+/** The measured job inputs, refused unless every duration is a finite nonnegative number in place. */
+export function readWall(text) {
+  const wall = JSON.parse(text);
+  record(wall, ["schema", "source", "limitSeconds", "platforms", "local"], "the file");
+  if (wall.schema !== 1) throw new Error(`invalid ${WALL_PATH}: schema must be 1`);
+  if (typeof wall.source !== "string" || !wall.source.trim())
+    throw new Error(`invalid ${WALL_PATH}: source must name where the measurements come from`);
+  if (!duration(wall.limitSeconds) || wall.limitSeconds === 0)
+    throw new Error(`invalid ${WALL_PATH}: limitSeconds must be a positive number`);
+  record(wall.platforms, ["linux", "macos", "windows"], "platforms");
+  for (const platform of ["linux", "macos", "windows"]) {
+    const data = wall.platforms[platform];
+    record(data, ["legs", "compileStressSeconds", "breakdown"], platform);
+    if (!duration(data.compileStressSeconds))
+      throw new Error(`invalid ${WALL_PATH}: ${platform}.compileStressSeconds is not a duration`);
+    if (!Array.isArray(data.legs) || !data.legs.length)
+      throw new Error(`invalid ${WALL_PATH}: ${platform}.legs must list at least one job`);
+    for (const [index, leg] of data.legs.entries()) {
+      const where = `${platform}.legs[${index}]`;
+      record(
+        leg,
+        ["job", "name", "jobSeconds", "bootstrapSeconds", "e2eSeconds", "e2eTests"],
+        where,
+      );
+      if (
+        !Number.isInteger(leg.job) ||
+        typeof leg.name !== "string" ||
+        !Number.isInteger(leg.e2eTests)
+      )
+        throw new Error(`invalid ${WALL_PATH}: ${where} needs a job id, name and e2e test count`);
+      for (const key of ["jobSeconds", "bootstrapSeconds", "e2eSeconds"])
+        if (!duration(leg[key]))
+          throw new Error(`invalid ${WALL_PATH}: ${where}.${key} is not a duration`);
+      if (leg.e2eSeconds + leg.bootstrapSeconds > leg.jobSeconds)
+        throw new Error(
+          `invalid ${WALL_PATH}: ${where} spends more on bootstrap and e2e than the job took`,
+        );
+    }
+    const breakdown = data.breakdown;
+    record(
+      breakdown,
+      ["how", "segments", "legs", "overlapping", "unreported"],
+      `${platform}.breakdown`,
+    );
+    const legs = breakdown.legs ?? [{ segments: breakdown.segments }];
+    if (legs.length !== data.legs.length)
+      throw new Error(`invalid ${WALL_PATH}: ${platform}.breakdown must break down every leg`);
+    for (const [index, leg] of legs.entries()) {
+      if (!Array.isArray(leg.segments) || !leg.segments.length)
+        throw new Error(
+          `invalid ${WALL_PATH}: ${platform}.breakdown leg ${index + 1} has no segments`,
+        );
+      for (const segment of [...leg.segments, ...(breakdown.overlapping ?? [])])
+        if (typeof segment?.part !== "string" || !duration(segment.seconds))
+          throw new Error(
+            `invalid ${WALL_PATH}: ${platform}.breakdown has a segment without a part and duration`,
+          );
+      const total = leg.segments.reduce((sum, segment) => sum + segment.seconds, 0);
+      if (Math.abs(total - data.legs[index].jobSeconds) > 5)
+        throw new Error(
+          `invalid ${WALL_PATH}: ${platform}.breakdown leg ${index + 1} does not add up to its job`,
+        );
+    }
+  }
+  record(wall.local, ["source", "testPhaseSeconds"], "local");
+  if (!duration(wall.local.testPhaseSeconds) || typeof wall.local.source !== "string")
+    throw new Error(`invalid ${WALL_PATH}: local needs a source and a test-phase duration`);
+  return wall;
 }
 
 const median = (values) => {
@@ -197,7 +278,9 @@ export function splitMigration(result, split) {
 }
 
 /** Packages of the sibling engines this repository links, as the lockfile names them. */
-export const SIBLING = /^one[a-z]/;
+export const SIBLING = /^one(?!pipeline)[a-z]/;
+/** This workspace's own packages, whose lock entries move with its version, not with a dependency. */
+const WORKSPACE = /^onepipeline(?:-|$)/;
 
 /**
  * What kind of input a PR's effective path is, and the design change that would remove it. A test
@@ -322,6 +405,125 @@ export function causeAnalysis(result, lockChanges) {
   };
 }
 
+/** The kind of crate a resolved path belongs to, for following a sibling bump to the suites. */
+export function crateRole(name, fakes) {
+  if (name.startsWith("runner-")) return "the suite's own test code";
+  if (fakes.has(name)) return "the shared test-fake crates";
+  if (name === "cli-dispatcher" || name === "onepipeline")
+    return "the dispatcher or facade every e2e suite runs";
+  if (name.startsWith("cmd-")) return "a command crate";
+  return "a shared engine crate";
+}
+
+/**
+ * For the broad PRs whose lockfile change moved only sibling-engine packages: which crates' resolved
+ * sets changed, how each reaches the moved engine (naming it, naming another sibling that depends
+ * on it, or through a third-party package), and the Linux suite-seconds each crate role selects.
+ * The adapter projection keeps sibling resolution only where a command crate, a suite's test code,
+ * a test fake or the dispatcher names an engine, as if shared engine crates held their own value
+ * types and reached the engines only behind adapters the command crates wire: an upper bound.
+ */
+export function siblingPaths(result, lockChanges, fakes) {
+  const compiled = compileMapping(result.mapping.selection);
+  const linux = result.platforms.linux;
+  const seconds = (suites) => suites.reduce((sum, suite) => sum + linux.suiteSeconds[suite], 0);
+  const share = (suites) => seconds(suites) / linux.secondsPerRun;
+  const siblingOnly = (row) => {
+    const moved = lockChanges[row.commit];
+    return moved?.length && moved.every((name) => SIBLING.test(name)) ? moved : null;
+  };
+  const resolvedOf = (row) =>
+    row.effectiveFiles.filter(
+      (file) => file.startsWith("resolved/") && file.endsWith("/lock.json"),
+    );
+  const prs = [];
+  const roles = {};
+  const crates = {};
+  for (const row of result.rows) {
+    const moved = siblingOnly(row);
+    if (!moved || share(row.affected) < 0.9) continue;
+    const lockFiles = resolvedOf(row);
+    if (share(affectedSuites(compiled, lockFiles).affected) < 0.9) continue;
+    const byRole = {};
+    for (const file of lockFiles) {
+      const crate = file.split("/")[1];
+      const role = crateRole(crate, fakes);
+      byRole[role] ??= [];
+      byRole[role].push(file);
+      const roots = (result.mapping.crates[crate]?.external ?? []).filter((root) =>
+        SIBLING.test(root),
+      );
+      const reach = roots.some((root) => moved.includes(root))
+        ? "names the moved engine"
+        : roots.length
+          ? "names a sibling engine that depends on the moved one"
+          : "through a third-party package that depends on it";
+      crates[crate] ??= { role, reach: new Set(), prs: 0, roots };
+      crates[crate].reach.add(reach);
+      crates[crate].prs++;
+    }
+    const selectedBy = Object.fromEntries(
+      Object.entries(byRole).map(([role, files]) => [
+        role,
+        affectedSuites(compiled, files).affected,
+      ]),
+    );
+    for (const [role, suites] of Object.entries(selectedBy)) {
+      const others = new Set(
+        Object.entries(selectedBy)
+          .filter(([other]) => other !== role)
+          .flatMap(([, list]) => list),
+      );
+      roles[role] ??= { prs: 0, seconds: 0, only: 0 };
+      roles[role].prs++;
+      roles[role].seconds += seconds(suites);
+      roles[role].only += seconds(suites.filter((suite) => !others.has(suite)));
+    }
+    prs.push({
+      pr: /#(\d+)\)/.exec(row.subject)?.[1] ?? null,
+      commit: row.commit,
+      moved,
+      crates: lockFiles.length,
+      byRole: Object.fromEntries(
+        Object.entries(byRole).map(([role, files]) => [role, files.length]),
+      ),
+      lockShare: share(affectedSuites(compiled, lockFiles).affected),
+    });
+  }
+  const confined = (row) =>
+    siblingOnly(row)
+      ? row.effectiveFiles.filter(
+          (file) =>
+            !(
+              file.startsWith("resolved/") &&
+              /\/(lock|manifest)\.json$/.test(file) &&
+              crateRole(file.split("/")[1], fakes) === "a shared engine crate"
+            ),
+        )
+      : row.effectiveFiles;
+  const affected = result.rows.map((row) => affectedSuites(compiled, confined(row)).affected);
+  return {
+    prs,
+    roles,
+    crates: Object.fromEntries(
+      Object.entries(crates)
+        .sort((a, b) => b[1].prs - a[1].prs || (a[0] < b[0] ? -1 : 1))
+        .map(([name, entry]) => [name, { ...entry, reach: [...entry.reach].sort() }]),
+    ),
+    adapters: {
+      suiteSkip:
+        affected.reduce((sum, list) => sum + result.suites - list.length, 0) /
+        (result.suites * affected.length),
+      secondsSkip: 1 - affected.reduce((sum, list) => sum + share(list), 0) / affected.length,
+      broad: affected.filter((list) => share(list) >= 0.9).length,
+      stillBroad: prs.filter(
+        (entry) =>
+          share(affected[result.rows.findIndex((row) => row.commit === entry.commit)]) >= 0.9,
+      ).length,
+    },
+  };
+}
+
 /** The lockfile packages each PR changed, by name. */
 function lockChanges(changes) {
   const out = {};
@@ -338,7 +540,7 @@ function lockChanges(changes) {
     const names = new Set();
     for (const [key, block] of before) if (after.get(key) !== block) names.add(key.split(" ")[0]);
     for (const key of after.keys()) if (!before.has(key)) names.add(key.split(" ")[0]);
-    out[change.commit] = [...names].sort();
+    out[change.commit] = [...names].filter((name) => !WORKSPACE.test(name)).sort();
   }
   return out;
 }
@@ -395,7 +597,8 @@ export function splitEvidence() {
     ...options,
     crateMigration: false,
   });
-  const wall = JSON.parse(read("scripts/modularization/ci-wall.json"));
+  const wall = readWall(read(WALL_PATH));
+  const locks = lockChanges(changes);
   return {
     split,
     result: {
@@ -406,7 +609,8 @@ export function splitEvidence() {
         Object.entries(wall.platforms).map(([platform, data]) => [platform, data.breakdown]),
       ),
       splitMigration: splitMigration(result, split),
-      causes: causeAnalysis(result, lockChanges(changes)),
+      causes: causeAnalysis(result, locks),
+      siblings: siblingPaths(result, locks, new Set(Object.keys(testFakes().crates))),
     },
   };
 }

@@ -2206,6 +2206,29 @@ test("pinned runs a command over the reviewed source with the working tree's des
     const missing = pinned("--", "true");
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /design snapshot commit 0{40} is not in this repository/);
+    assert.match(missing.stderr, /next: fetch the snapshot commit/);
+    put(root, "scripts/modularization/snapshot.json", {
+      commit: reviewed,
+      design: ["docs/design.md", "scripts/modularization"],
+    });
+    // A missing command and an unusable scratch parent each name their own repair.
+    const absent = pinned("--", "no-such-command-for-pinned");
+    assert.equal(absent.status, 1);
+    assert.match(
+      absent.stderr,
+      /next: install no-such-command-for-pinned or correct the command given after --/,
+    );
+    const nowhere = spawnSync(
+      process.execPath,
+      ["scripts/modularization/pinned.mjs", "--", "true"],
+      {
+        cwd: root,
+        env: { ...env, ONEPIPELINE_NODE_SCRATCH_DIR: join(root, "missing", "dir") },
+        encoding: "utf8",
+      },
+    );
+    assert.equal(nowhere.status, 1);
+    assert.match(nowhere.stderr, /next: make .*missing\/dir an existing, writable directory/);
     assert.deepEqual(readdirSync(clones), []);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -3951,11 +3974,100 @@ test("the test split assigns every phase to one suite, under the threshold, and 
   refused((copy) => {
     copy.typo = 1;
   }, /invalid test split/);
+  // Duplicates are found whatever the layout: JSON.parse would keep only the last.
+  const minified = JSON.stringify(split).replace(
+    `"${first}":`,
+    `"${first}":{"parent":"x","tests":["x"]},"${first}":`,
+  );
+  assert.throws(() => checkSplit(minified, catalog), new RegExp(`names ${first} twice`));
   const twice = text.replace(
     `    "${first}": {`,
     `    "${first}": { "parent": "x", "tests": ["x"] },\n    "${first}": {`,
   );
-  assert.throws(() => checkSplit(twice, catalog), new RegExp(`names suite ${first} twice`));
+  assert.throws(() => checkSplit(twice, catalog), new RegExp(`names ${first} twice`));
+});
+
+test("test-split CLI writes the derived split, refuses a stale or invalid one with its repair, and recovers", {
+  timeout: 300000,
+}, () => {
+  const root = scratch();
+  try {
+    execFileSync("git", ["clone", "--quiet", "--shared", ".", root], { stdio: "pipe" });
+    const cli = (...args) =>
+      spawnSync(process.execPath, ["scripts/modularization/test-split.mjs", ...args], {
+        cwd: root,
+        encoding: "utf8",
+      });
+    const path = join(root, "scripts/modularization/test-split.json");
+    const committed = readFileSync(path, "utf8");
+    rmSync(path);
+    const written = cli("--write");
+    assert.equal(written.status, 0, written.stderr);
+    assert.equal(readFileSync(path, "utf8"), committed);
+    // A split the checker accepts but its rule would not produce is stale.
+    const split = JSON.parse(committed);
+    const [a, b] = Object.keys(split.suites).filter(
+      (name) => name.startsWith("cmd-start--continuation--") && split.suites[name].tests.length > 1,
+    );
+    split.suites[b].tests.push(split.suites[a].tests.pop());
+    writeFileSync(path, `${JSON.stringify(split, null, 2)}\n`);
+    const stale = cli("--check");
+    assert.equal(stale.status, 1);
+    assert.match(
+      stale.stderr,
+      /differs from the split its rule derives\nnext: regenerate with test-split.mjs --write/,
+    );
+    split.suites[a].tests.push(split.suites[b].tests.pop());
+    split.suites[a].tests.pop();
+    writeFileSync(path, `${JSON.stringify(split, null, 2)}\n`);
+    const dropped = cli("--check");
+    assert.equal(dropped.status, 1);
+    assert.match(dropped.stderr, /is in no split suite/);
+    assert.equal(cli("--write").status, 0);
+    assert.equal(cli("--check").status, 0);
+    const usage = cli("--both");
+    assert.equal(usage.status, 1);
+    assert.match(usage.stderr, /usage: test-split.mjs --write \| --check/);
+    rmSync(path);
+    mkdirSync(path);
+    const unreadable = cli("--check");
+    assert.equal(unreadable.status, 1);
+    assert.match(unreadable.stderr, /next: check the named path's type/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("ci-wall.json is refused unless every measured duration is a finite duration in place", async () => {
+  const { readWall } = await import("./split-replay.mjs");
+  const text = readFileSync("scripts/modularization/ci-wall.json", "utf8");
+  assert.ok(readWall(text).platforms.linux.legs.length);
+  const refused = (mutate, pattern) => {
+    const wall = JSON.parse(text);
+    mutate(wall);
+    assert.throws(() => readWall(JSON.stringify(wall)), pattern);
+  };
+  refused((wall) => {
+    wall.typo = 1;
+  }, /unknown field typo/);
+  refused((wall) => {
+    wall.platforms.linux.legs[0].e2eSeconds = "3502";
+  }, /linux.legs\[0\].e2eSeconds is not a duration/);
+  refused((wall) => {
+    wall.platforms.macos.legs[0].e2eSeconds = Number.MAX_VALUE;
+  }, /spends more on bootstrap and e2e than the job took/);
+  refused((wall) => {
+    delete wall.platforms.windows;
+  }, /windows is not an object/);
+  refused((wall) => {
+    wall.platforms.windows.breakdown.legs.pop();
+  }, /must break down every leg/);
+  refused((wall) => {
+    wall.platforms.linux.breakdown.segments[0].seconds += 60;
+  }, /does not add up to its job/);
+  refused((wall) => {
+    wall.limitSeconds = 0;
+  }, /limitSeconds must be a positive number/);
 });
 
 test("a sectioned document read follows the section its needles name and keeps the whole file when they name none", async () => {
@@ -4167,6 +4279,27 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
           `${platform} leg ${index + 1}`,
         );
     }
+    // The sibling-engine paths: each listed PR moved only sibling packages and its lockfile alone
+    // selects at least 90%, the adapter projection only adds skipping, and no production crate
+    // keeps a unit-test-only import as an external root.
+    const { siblings } = result;
+    assert.ok(siblings.prs.length > 0);
+    for (const entry of siblings.prs) {
+      assert.ok(
+        entry.moved.every((name) => /^one(?!pipeline)[a-z]/.test(name)),
+        entry.commit,
+      );
+      assert.ok(entry.lockShare >= 0.9, entry.commit);
+    }
+    assert.ok(siblings.adapters.secondsSkip >= result.platforms.linux.secondsSkip);
+    assert.ok(siblings.adapters.stillBroad <= siblings.prs.length);
+    for (const [name, crate] of Object.entries(result.mapping.crates))
+      if (!name.startsWith("runner-"))
+        assert.ok(
+          !crate.external.includes("onepipeline-testfakes") ||
+            /^(fake-|test-|scripted|label-strict)/.test(name),
+          `${name} keeps a unit-test import as a production root`,
+        );
     // A cross-command part links the commands it drives, not the facade, unless a phase is unattributed.
     const crates = result.mapping.crates;
     const parts = Object.keys(split.suites).filter((name) => name.startsWith("cross-command--"));
@@ -4199,9 +4332,32 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
       readFileSync(join(root, "docs/modularization-test-split.md"), "utf8"),
       `prefix kept\n${splitAppendix(evidence, targetDoc)}`,
     );
-    evidence.typo = true;
-    put(root, "split.json", evidence);
-    assert.match(render().stderr, /unknown split evidence field/);
+    const refusedRender = (mutate, pattern) => {
+      const copy = structuredClone(evidence);
+      mutate(copy);
+      put(root, "split.json", copy);
+      const refused = render();
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, pattern);
+    };
+    refusedRender((copy) => {
+      copy.typo = true;
+    }, /unknown split evidence field/);
+    refusedRender((copy) => {
+      copy.result.rows[0].affected = [];
+    }, /row selection differs from its inputs/);
+    refusedRender((copy) => {
+      copy.result.platforms.linux.secondsSkip /= 2;
+    }, /seconds skipped differs from its rows and weights: linux/);
+    refusedRender((copy) => {
+      copy.result.wall.macos.projected.max = Number.NaN;
+    }, /invalid wall projection: macos/);
+    refusedRender((copy) => {
+      copy.result.causes.broad += 1;
+    }, /decision summary differs from its rows/);
+    refusedRender((copy) => {
+      copy.result.siblings.adapters.secondsSkip = 0;
+    }, /sibling-engine paths differ from their rows/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

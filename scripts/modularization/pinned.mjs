@@ -109,22 +109,38 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(2);
   }
   const command = args.length > 1 ? args.slice(1) : DEFAULT_COMMAND;
-  const into = mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir(), "pinned-"));
+  const parent = process.env.ONEPIPELINE_NODE_SCRATCH_DIR ?? tmpdir();
+  let into;
+  let stage = "scratch";
   let status = 1;
   try {
+    into = mkdtempSync(join(parent, "pinned-"));
+    stage = "pin";
     const { commit } = pin(root, into);
     console.error(`pinned: running in ${into} (reviewed source ${commit.slice(0, 12)})`);
+    stage = "command";
     const run = spawnSync(command[0], command.slice(1), { cwd: into, stdio: "inherit" });
     if (run.error) throw run.error;
     status = run.status ?? 1;
+    stage = "write-back";
     if (back && status === 0) writeBack(root, into, readSnapshot(root).design);
   } catch (error) {
-    console.error(
-      `${error.message}\nnext: fetch the snapshot commit or correct ${SNAPSHOT}; rerun the same pinned.mjs invocation`,
-    );
+    // Each stage fails for its own reason, so each names its own repair.
+    const next = {
+      scratch: `make ${parent} an existing, writable directory (or point ONEPIPELINE_NODE_SCRATCH_DIR at one)`,
+      pin: error.code
+        ? `check that ${root} and ${parent} are readable and writable and the disk has space`
+        : `fetch the snapshot commit or correct ${SNAPSHOT}`,
+      command:
+        error.code === "ENOENT"
+          ? `install ${command[0]} or correct the command given after --`
+          : `check that ${command[0]} can be executed`,
+      "write-back": `check that the design paths under ${root} are writable; the clone's output was not copied back`,
+    }[stage];
+    console.error(`${error.message}\nnext: ${next}; rerun the same pinned.mjs invocation`);
     status = 1;
   } finally {
-    rmSync(into, { recursive: true, force: true });
+    if (into) rmSync(into, { recursive: true, force: true });
   }
   process.exit(status);
 }
