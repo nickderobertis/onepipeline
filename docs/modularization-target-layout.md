@@ -1010,41 +1010,41 @@ Every removed aggregate edge is listed here. The depending subsystem owns the po
 
 ### Remaining crate fan-out and the next boundary
 
-Counts include explicit cross-command, public-API and shipped-dispatch integration suites. These edges have not been erased from the replay. The next split narrows implementation changes; a change to a common wire grammar or atomic primitive still must test all its real consumers. No claim below treats moving a runtime dependency behind a callback as permission to omit the real callback implementation from a driving command's suite.
+Counts include explicit cross-command, public-API and shipped-dispatch integration suites. These edges have not been erased from the replay. The next split narrows implementation changes; a change to a common wire grammar or atomic primitive still must test all its real consumers, and the last column names that part and who reads it. The replay credits none of these splits with a saving. No claim below treats moving a runtime dependency behind a callback as permission to omit the real callback implementation from a driving command's suite.
 
-| Crate reaching more than half the suites | Suites | Further split |
-| --- | ---: | --- |
-| render-cost | 35 | Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it. |
-| processes | 35 | Separate host identity, process liveness, subprocess launch and handle detachment; replace generic sys imports with those capability crates. |
-| event-vocabulary | 35 | Separate scheduler, channel, publication and agent kind registries; assemble complete validation only in the journal registry integration. |
-| diagnostics | 42 | Move domain-specific refusal constructors/formatters to the owning subsystem; retain only the stable error envelope shared by all commands. |
-| plan-model | 41 | Separate node/edge schema, executor configuration, publication criteria and plan-loading IO; field-specific readers use the corresponding schema facet. Common strict schema validation remains shared. |
-| event-payloads | 35 | Separate scheduler, edit, publication and channel payload schemas from the generic bus envelope. Full history validators still compose all registries; a registry grammar change legitimately reaches them. |
-| run-record | 36 | Separate launch identity, agent configuration and invocation provenance; retain a facade LaunchRecord with identical serialization. Whole-record strict decoding remains a shared grammar input. |
-| event-filter | 31 | Separate selector AST, matcher and YAML document adapter; inline selectors need no file parser. |
-| run-projection | 34 | Separate scheduler frontier, branch/publication, channel debt and activity folds; views request their required facets. Full-state checkpoint compatibility retains a full-fold integration. |
-| plan-validation | 37 | Separate the graph value types run state records (NodeStatus, NodeRef, Landing, Settled) from graph and destination validation; run-state would then link the value types only, and validation reach the suites that validate. |
-| planner-channel | 28 | Separate envelope schema/allowlist, transport queue, delivery acknowledgements and document-layout validation. Reply transport does not compile scheduler-op validation. |
-| run-views | 27 | Separate snapshot assembly, activity/history queries, liveness refresh and upstream/publication refresh; each command runner retains only the refreshes it actually invokes. Full snapshot integrations retain all facets. |
-| member-liveness | 27 | Separate heartbeat wire decoding, freshness classification and heartbeat publication; observer views do not import publisher implementation. |
-| run-files | 39 | Separate atomic replacement/durability, append-tail healing, JSON codec and range reads; read-only facets cease importing append/lock implementations. Atomic replacement fixes still run all writers. |
-| branch-template | 41 | Separate branch-template parsing from expansion; commands validating plans need parsing, launch composition needs expansion. |
-| yaml-codec | 41 | Keep generic strict codec stable; move plan, channel-layout and executor document adapters into their owning crates. A generic strict-decoder fix remains a real shared input. |
-| run-paths | 39 | Separate run-id validation/root selection from checkpoint/channel/report/dispatch path builders, colocating each builder with its subsystem. Common root semantics remain shared. |
-| run-labels | 33 | Separate label record codec/query from update/atomic commit; display commands depend only on the query and schema. |
-| append-stamp | 32 | Separate stamp reading/comparison from publication; a changed shared stamp protocol remains an actual input of every stamp consumer. |
-| run-report | 32 | Separate terminal result record reading from report atomic publication and report presentation; preserve the existing result wire shape. |
-| journal-reader | 35 | Separate envelope decoding/version checks, merge ordering, loss accounting and byte-range iteration. Full-history readers still compose the same strict checks. |
-| checkpoint | 32 | Separate coverage/seal validation, bounded replay and derived-cache publication. Cache-writing readers still test the real cache writer. |
-| run-summary | 32 | Separate summary record/query from append-driven Maintainer; host/runs listing need query, writers compose maintenance. |
-| cross-run-query | 27 | Separate reference parsing, upstream status snapshot IO and resolution-cache tracking; only the views consuming upstream state retain those facets. |
-| publication-query | 31 | Separate landing evidence reread, branch status and debt classification; status needs landing evidence, debt commands need the corresponding debt facet. |
-| run-result | 32 | Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement. |
-| readjust-state | 34 | Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read. |
-| run-state | 34 | Separate node status and frontier records from activity, refusal and driver-claim records; status readers and activity views then link only their facet. The derived-status cache stays with the status facet. |
-| plan-criteria | 41 | Already the task-document grammar alone; plan-model renders tasks through it, so a grammar change legitimately reaches every plan reader. Splitting it further returns nothing until rendering moves out of plan-model. |
-| plan-compat | 37 | Reaches the plan-validation suites because validation gates on schema versions; separating the read-side version gate from the write-side retired-field refusal would leave writers alone linking the refusal. |
-| plan-preservation | 37 | Reaches exactly plan-validation's suites, its only consumer; it narrows further only when plan-validation's own reach does (see that row). |
+| Crate reaching more than half the suites | Suites | Further split | Still a shared input after it, and who reads it |
+| --- | ---: | --- | --- |
+| render-cost | 35 | Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it. | the counter record each consumer of a changed counter reads |
+| processes | 35 | Separate host identity, process liveness, subprocess launch and handle detachment; replace generic sys imports with those capability crates. | process liveness, which every command checking a run's owner reads |
+| event-vocabulary | 35 | Separate scheduler, channel, publication and agent kind registries; assemble complete validation only in the journal registry integration. | the complete kind registry the journal registry integration assembles |
+| diagnostics | 42 | Move domain-specific refusal constructors/formatters to the owning subsystem; retain only the stable error envelope shared by all commands. | the stable error envelope every command prints |
+| plan-model | 41 | Separate node/edge schema, executor configuration, publication criteria and plan-loading IO; field-specific readers use the corresponding schema facet. Common strict schema validation remains shared. | the common strict schema validation every plan loader runs |
+| event-payloads | 35 | Separate scheduler, edit, publication and channel payload schemas from the generic bus envelope. Full history validators still compose all registries; a registry grammar change legitimately reaches them. | the generic bus envelope, and every registry for the full-history validators |
+| run-record | 36 | Separate launch identity, agent configuration and invocation provenance; retain a facade LaunchRecord with identical serialization. Whole-record strict decoding remains a shared grammar input. | whole-record strict decoding of LaunchRecord |
+| event-filter | 31 | Separate selector AST, matcher and YAML document adapter; inline selectors need no file parser. | the selector AST matcher and document adapter share |
+| run-projection | 34 | Separate scheduler frontier, branch/publication, channel debt and activity folds; views request their required facets. Full-state checkpoint compatibility retains a full-fold integration. | the full-state checkpoint shape the full-fold integration reads |
+| plan-validation | 37 | Separate the graph value types run state records (NodeStatus, NodeRef, Landing, Settled) from graph and destination validation; run-state would then link the value types only, and validation reach the suites that validate. | graph and destination validation every command validating a plan runs |
+| planner-channel | 28 | Separate envelope schema/allowlist, transport queue, delivery acknowledgements and document-layout validation. Reply transport does not compile scheduler-op validation. | the envelope schema and allowlist every channel writer and reader checks |
+| run-views | 27 | Separate snapshot assembly, activity/history queries, liveness refresh and upstream/publication refresh; each command runner retains only the refreshes it actually invokes. Full snapshot integrations retain all facets. | the snapshot shape the full snapshot integrations assemble |
+| member-liveness | 27 | Separate heartbeat wire decoding, freshness classification and heartbeat publication; observer views do not import publisher implementation. | the heartbeat wire format publisher and observers share |
+| run-files | 39 | Separate atomic replacement/durability, append-tail healing, JSON codec and range reads; read-only facets cease importing append/lock implementations. Atomic replacement fixes still run all writers. | atomic replacement, which every writer uses |
+| branch-template | 41 | Separate branch-template parsing from expansion; commands validating plans need parsing, launch composition needs expansion. | the branch-template grammar parsing and expansion share |
+| yaml-codec | 41 | Keep generic strict codec stable; move plan, channel-layout and executor document adapters into their owning crates. A generic strict-decoder fix remains a real shared input. | the generic strict decoder |
+| run-paths | 39 | Separate run-id validation/root selection from checkpoint/channel/report/dispatch path builders, colocating each builder with its subsystem. Common root semantics remain shared. | run-id validation and common root semantics |
+| run-labels | 33 | Separate label record codec/query from update/atomic commit; display commands depend only on the query and schema. | the label record schema |
+| append-stamp | 32 | Separate stamp reading/comparison from publication; a changed shared stamp protocol remains an actual input of every stamp consumer. | the stamp protocol every stamp consumer compares |
+| run-report | 32 | Separate terminal result record reading from report atomic publication and report presentation; preserve the existing result wire shape. | the result wire shape |
+| journal-reader | 35 | Separate envelope decoding/version checks, merge ordering, loss accounting and byte-range iteration. Full-history readers still compose the same strict checks. | envelope decoding and version checks every history reader runs |
+| checkpoint | 32 | Separate coverage/seal validation, bounded replay and derived-cache publication. Cache-writing readers still test the real cache writer. | coverage and seal validation every bounded replay runs |
+| run-summary | 32 | Separate summary record/query from append-driven Maintainer; host/runs listing need query, writers compose maintenance. | the summary record |
+| cross-run-query | 27 | Separate reference parsing, upstream status snapshot IO and resolution-cache tracking; only the views consuming upstream state retain those facets. | reference parsing every upstream view runs |
+| publication-query | 31 | Separate landing evidence reread, branch status and debt classification; status needs landing evidence, debt commands need the corresponding debt facet. | landing evidence reread, which status and the debt commands share |
+| run-result | 32 | Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement. | the terminal settlement facts results and every liveness reader read |
+| readjust-state | 34 | Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read. | the readjust progress record detection and placement both read |
+| run-state | 34 | Separate node status and frontier records from activity, refusal and driver-claim records; status readers and activity views then link only their facet. The derived-status cache stays with the status facet. | the node status record and derived-status cache every status reader reads |
+| plan-criteria | 41 | Already the task-document grammar alone; plan-model renders tasks through it, so a grammar change legitimately reaches every plan reader. Splitting it further returns nothing until rendering moves out of plan-model. | the task-document grammar, which every plan reader renders through plan-model |
+| plan-compat | 37 | Reaches the plan-validation suites because validation gates on schema versions; separating the read-side version gate from the write-side retired-field refusal would leave writers alone linking the refusal. | the schema-version gate every plan reader passes |
+| plan-preservation | 37 | Reaches exactly plan-validation's suites, its only consumer; it narrows further only when plan-validation's own reach does (see that row). | nothing of its own: it reaches only plan-validation's consumers |
 
 ### Test time each crate forces
 

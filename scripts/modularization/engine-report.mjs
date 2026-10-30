@@ -9,6 +9,7 @@ import { ENGINE_PATH, KEEP, STEPS, checkEngineSplit, targetLayout } from "./engi
 import { targetCatalog } from "./test-split.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
 import { typicalLines } from "./split-report.mjs";
+import { FURTHER_SPLITS, STILL_SHARED } from "./further-splits.mjs";
 
 export const ENGINE_MARKER = "<!-- BEGIN ENGINE TESTS -->";
 export const EVIDENCE_PATH = "scripts/modularization/engine-evidence.json";
@@ -239,6 +240,29 @@ export function engineAppendix(evidence, split, splitDoc) {
   const lines = [ENGINE_MARKER, ""];
   const moved = Object.entries(split.moved);
   const kept = Object.entries(split.kept);
+  const layout = targetLayout();
+  const closures = Object.fromEntries(
+    STEPS.map((command) => {
+      const seen = new Set();
+      const pending = [command];
+      while (pending.length) {
+        const crate = pending.pop();
+        if (seen.has(crate)) continue;
+        seen.add(crate);
+        pending.push(...(layout.crates[crate]?.deps ?? []));
+      }
+      return [command, seen];
+    }),
+  );
+  for (const entry of final.crateReach)
+    if (
+      Object.hasOwn(layout.crates, entry.crate) &&
+      !STEPS.every((command) => closures[command].has(entry.crate))
+    )
+      throw new Error(`broad crate ${entry.crate} is outside the closure of ${STEPS.join(", ")}`);
+  const keptByParent = STEPS.map(
+    (command) => `${command} ${kept.filter(([, entry]) => entry.parent === command).length}`,
+  ).join(", ");
   lines.push(
     "## Replay of crates, test split and engine re-homing together",
     "",
@@ -290,14 +314,17 @@ export function engineAppendix(evidence, split, splitDoc) {
     ...typicalLines(final.typical),
     "### Crates whose change still selects more than half the suites",
     "",
-    "**Projected**: what a change to the crate alone selects, and how many of the 144 PRs changed its source, its resolved dependencies or its manifest requirement. Every production crate here is in the closure of `cmd-start`, `cmd-reply` or `cmd-adopt`, whose kept full journeys link the whole command, and every test-fake crate here is one those journeys start or link; no further crate split removes that. Only moving more of those journeys onto engine crates, which needs attributable assertions (see the kept reasons below), frees it.",
+    `**Projected**: what a change to the crate alone selects, and how many of the 144 PRs changed its source, its resolved dependencies or its manifest requirement, with the further split that narrows its reach and what stays a real shared input after that split. Every production crate here is in the closure of ${STEPS.join(", ")}, whose kept full journeys (${keptByParent} tests) link the whole command, so they read every part of it after any split; every test-fake crate here is one those journeys start or link. The replay credits none of these further splits with a saving: the figures below are for the layout as designed, without them. Only moving more of those journeys onto engine crates, which needs attributable assertions (see the kept reasons below), frees them.`,
     "",
-    "| Crate | Suites selected | Linux seconds selected | PRs changing it |",
-    "| --- | ---: | ---: | ---: |",
-    ...final.crateReach.map(
-      (entry) =>
-        `| ${entry.crate} | ${entry.suites}/${final.suites} | ${pct(entry.linuxShare)} | ${entry.prs} |`,
-    ),
+    "| Crate | Suites selected | Linux seconds selected | PRs changing it | Further split | Still a shared input after it, and who reads it |",
+    "| --- | ---: | ---: | ---: | --- | --- |",
+    ...final.crateReach.map((entry) => {
+      if (!FURTHER_SPLITS[entry.crate] || !STILL_SHARED[entry.crate])
+        throw new Error(`missing further split for broad crate ${entry.crate}`);
+      const readers = STEPS.filter((command) => closures[command].has(entry.crate));
+      const shared = `${STILL_SHARED[entry.crate]}${readers.length ? `; and the kept ${readers.join(", ")} journeys, which link the whole command` : ""}`;
+      return `| ${entry.crate} | ${entry.suites}/${final.suites} | ${pct(entry.linuxShare)} | ${entry.prs} | ${cell(FURTHER_SPLITS[entry.crate])} | ${cell(shared)} |`;
+    }),
     "",
     "### PRs still selecting more than half the Linux seconds",
     "",

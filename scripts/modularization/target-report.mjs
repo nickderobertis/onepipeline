@@ -15,6 +15,7 @@ import { functions } from "./rust-syntax.mjs";
 import { compareGlobInputs } from "./glob-impact.mjs";
 import { testFakes } from "./test-fakes.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
+import { FURTHER_SPLITS, STILL_SHARED } from "./further-splits.mjs";
 
 export const TARGET_MARKER = "<!-- BEGIN TARGET LAYOUT -->";
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -522,105 +523,17 @@ export function targetAppendix({ layout, moves, catalog, result }) {
     "",
     "### Remaining crate fan-out and the next boundary",
     "",
-    "Counts include explicit cross-command, public-API and shipped-dispatch integration suites. These edges have not been erased from the replay. The next split narrows implementation changes; a change to a common wire grammar or atomic primitive still must test all its real consumers. No claim below treats moving a runtime dependency behind a callback as permission to omit the real callback implementation from a driving command's suite.",
+    "Counts include explicit cross-command, public-API and shipped-dispatch integration suites. These edges have not been erased from the replay. The next split narrows implementation changes; a change to a common wire grammar or atomic primitive still must test all its real consumers, and the last column names that part and who reads it. The replay credits none of these splits with a saving. No claim below treats moving a runtime dependency behind a callback as permission to omit the real callback implementation from a driving command's suite.",
     "",
-    "| Crate reaching more than half the suites | Suites | Further split |",
-    "| --- | ---: | --- |",
+    "| Crate reaching more than half the suites | Suites | Further split | Still a shared input after it, and who reads it |",
+    "| --- | ---: | --- | --- |",
   ];
-  const furtherSplits = {
-    "run-views":
-      "Separate snapshot assembly, activity/history queries, liveness refresh and upstream/publication refresh; each command runner retains only the refreshes it actually invokes. Full snapshot integrations retain all facets.",
-    "edit-reconciler":
-      "Separate envelope validation, staged operation application and orphan queue recovery; inline submitters still compose their actual apply/recovery effects.",
-    "readjust-state":
-      "Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read.",
-    readjustment:
-      "Separate host detection from retarget/restack execution and post-edit refresh; only operations invoking each effect retain it.",
-    "review-replies":
-      "Separate review idempotence keys, decline validation, drafting and host posting; the editor needs validation and actual triggered effects.",
-    "review-discovery":
-      "Separate review discovery/query from scheduled pass effects and reply triggering.",
-    "event-emission":
-      "Separate payload encoding, bounded formatting and channel delivery; each emitter retains its actual writer implementation.",
-    "channel-admission":
-      "Separate ownership handover, queue admission and reply wait policy; preserve takeover recovery ordering.",
-    "run-control":
-      "Separate lifecycle start/adoption from stop/shutdown and continuation; retain real ownership and process operations for each entrypoint.",
-    publication:
-      "Separate landing validation, publish execution, restack and retarget operations; preserve atomic publication boundaries.",
-    "release-watch":
-      "Separate stated-release evidence/acknowledgement from upstream polling and scheduler wakeup.",
-    "task-store":
-      "Separate graph edits, dispatch facts and publication state commits while retaining transactional consistency.",
-    "plan-edits":
-      "Separate operation schema and validation from operation-specific application; retain full envelope validation integrations.",
-    "agent-session":
-      "Separate session identity/lookup from author graph creation and process attachment.",
-    "planner-notes": "Separate note envelope validation, delivery and reply receipt handling.",
-    "run-state":
-      "Separate node status and frontier records from activity, refusal and driver-claim records; status readers and activity views then link only their facet. The derived-status cache stays with the status facet.",
-    "plan-validation":
-      "Separate the graph value types run state records (NodeStatus, NodeRef, Landing, Settled) from graph and destination validation; run-state would then link the value types only, and validation reach the suites that validate.",
-    "plan-criteria":
-      "Already the task-document grammar alone; plan-model renders tasks through it, so a grammar change legitimately reaches every plan reader. Splitting it further returns nothing until rendering moves out of plan-model.",
-    "plan-compat":
-      "Reaches the plan-validation suites because validation gates on schema versions; separating the read-side version gate from the write-side retired-field refusal would leave writers alone linking the refusal.",
-    "plan-preservation":
-      "Reaches exactly plan-validation's suites, its only consumer; it narrows further only when plan-validation's own reach does (see that row).",
-    "render-cost":
-      "Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it.",
-    processes:
-      "Separate host identity, process liveness, subprocess launch and handle detachment; replace generic sys imports with those capability crates.",
-    "event-vocabulary":
-      "Separate scheduler, channel, publication and agent kind registries; assemble complete validation only in the journal registry integration.",
-    diagnostics:
-      "Move domain-specific refusal constructors/formatters to the owning subsystem; retain only the stable error envelope shared by all commands.",
-    "plan-model":
-      "Separate node/edge schema, executor configuration, publication criteria and plan-loading IO; field-specific readers use the corresponding schema facet. Common strict schema validation remains shared.",
-    "event-payloads":
-      "Separate scheduler, edit, publication and channel payload schemas from the generic bus envelope. Full history validators still compose all registries; a registry grammar change legitimately reaches them.",
-    "run-record":
-      "Separate launch identity, agent configuration and invocation provenance; retain a facade LaunchRecord with identical serialization. Whole-record strict decoding remains a shared grammar input.",
-    "run-projection":
-      "Separate scheduler frontier, branch/publication, channel debt and activity folds; views request their required facets. Full-state checkpoint compatibility retains a full-fold integration.",
-    "planner-channel":
-      "Separate envelope schema/allowlist, transport queue, delivery acknowledgements and document-layout validation. Reply transport does not compile scheduler-op validation.",
-    "run-files":
-      "Separate atomic replacement/durability, append-tail healing, JSON codec and range reads; read-only facets cease importing append/lock implementations. Atomic replacement fixes still run all writers.",
-    "branch-template":
-      "Separate branch-template parsing from expansion; commands validating plans need parsing, launch composition needs expansion.",
-    "yaml-codec":
-      "Keep generic strict codec stable; move plan, channel-layout and executor document adapters into their owning crates. A generic strict-decoder fix remains a real shared input.",
-    "run-paths":
-      "Separate run-id validation/root selection from checkpoint/channel/report/dispatch path builders, colocating each builder with its subsystem. Common root semantics remain shared.",
-    "run-labels":
-      "Separate label record codec/query from update/atomic commit; display commands depend only on the query and schema.",
-    "journal-reader":
-      "Separate envelope decoding/version checks, merge ordering, loss accounting and byte-range iteration. Full-history readers still compose the same strict checks.",
-    "publication-query":
-      "Separate landing evidence reread, branch status and debt classification; status needs landing evidence, debt commands need the corresponding debt facet.",
-    "run-result":
-      "Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement.",
-    checkpoint:
-      "Separate coverage/seal validation, bounded replay and derived-cache publication. Cache-writing readers still test the real cache writer.",
-    "run-summary":
-      "Separate summary record/query from append-driven Maintainer; host/runs listing need query, writers compose maintenance.",
-    "append-stamp":
-      "Separate stamp reading/comparison from publication; a changed shared stamp protocol remains an actual input of every stamp consumer.",
-    "run-report":
-      "Separate terminal result record reading from report atomic publication and report presentation; preserve the existing result wire shape.",
-    "cross-run-query":
-      "Separate reference parsing, upstream status snapshot IO and resolution-cache tracking; only the views consuming upstream state retain those facets.",
-    "member-liveness":
-      "Separate heartbeat wire decoding, freshness classification and heartbeat publication; observer views do not import publisher implementation.",
-    "event-filter":
-      "Separate selector AST, matcher and YAML document adapter; inline selectors need no file parser.",
-  };
   for (const name of Object.keys(layout.crates)) {
     const count = Object.values(reach.suites).filter((suite) => suite.crates.has(name)).length;
     if (count <= result.suites / 2) continue;
-    if (!furtherSplits[name]) throw new Error(`missing further split for broad crate ${name}`);
-    subsystemLines.push(`| ${name} | ${count} | ${furtherSplits[name]} |`);
+    if (!FURTHER_SPLITS[name] || !STILL_SHARED[name])
+      throw new Error(`missing further split for broad crate ${name}`);
+    subsystemLines.push(`| ${name} | ${count} | ${FURTHER_SPLITS[name]} | ${STILL_SHARED[name]} |`);
   }
   subsystemLines.push(
     "",

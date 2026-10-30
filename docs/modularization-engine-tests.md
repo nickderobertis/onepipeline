@@ -22,7 +22,7 @@ The user approved splitting start's own tests ("yes split start tests") and, on 
 
 ## What it measures, candidly
 
-Re-homing raises estimated Linux seconds skipped from the test split's 11.32% to the figure in the first generated table. That is small, and the replay says why; the generated "Why a typical PR still selects nearly every second" subsection names what the typical PR changed and the crates nearly every suite reaches. The engine crates that most PRs change (publication, run-control, edit-reconciler, run-projection, and the plan and event crates) sit in the closures of most engine suites as well as of the kept full journeys. The engine suites hold under a third of a full run's seconds (the generated engine-suite table gives the total), and the kept journeys link start's whole closure, so the median PR still selects nearly every second. The generated "Crates whose change still selects more than half the suites" table names each such crate, with how many PRs changed it. Re-homing more tests needs assertions that can be attributed: apart from the live cross-command journeys and those no single engine crate covers, the kept tests either assert a command's own output or name no literal an engine crate names. The 30-minute line is still not reached by selection. As the test-split document says, that needs per-test and per-job cost reduction (the parallel `onepipeline-test-cost` work) or a coverage trade-off only the user can make.
+Re-homing raises estimated Linux seconds skipped from the test split's 11.32% to the figure in the first generated table. That is small, and the replay says why; the generated "Why a typical PR still selects nearly every second" subsection names what the typical PR changed and the crates nearly every suite reaches. The engine crates that most PRs change (publication, run-control, edit-reconciler, run-projection, and the plan and event crates) sit in the closures of most engine suites as well as of the kept full journeys. The engine suites hold under a third of a full run's seconds (the generated engine-suite table gives the total), and the kept journeys link start's whole closure, so the median PR still selects nearly every second. The generated "Crates whose change still selects more than half the suites" table names each such crate, with how many PRs changed it, the further split that narrows its reach, and the part that stays a real shared input after that split together with who reads it; the replay credits none of those splits with a saving. Re-homing more tests needs assertions that can be attributed: apart from the live cross-command journeys and those no single engine crate covers, the kept tests either assert a command's own output or name no literal an engine crate names. The 30-minute line is still not reached by selection. As the test-split document says, that needs per-test and per-job cost reduction (the parallel `onepipeline-test-cost` work) or a coverage trade-off only the user can make.
 
 ## Migration
 
@@ -159,67 +159,67 @@ Across all 144 PRs, how often each kind of input changes and what its own inputs
 
 ### Crates whose change still selects more than half the suites
 
-**Projected**: what a change to the crate alone selects, and how many of the 144 PRs changed its source, its resolved dependencies or its manifest requirement. Every production crate here is in the closure of `cmd-start`, `cmd-reply` or `cmd-adopt`, whose kept full journeys link the whole command, and every test-fake crate here is one those journeys start or link; no further crate split removes that. Only moving more of those journeys onto engine crates, which needs attributable assertions (see the kept reasons below), frees it.
+**Projected**: what a change to the crate alone selects, and how many of the 144 PRs changed its source, its resolved dependencies or its manifest requirement, with the further split that narrows its reach and what stays a real shared input after that split. Every production crate here is in the closure of cmd-start, cmd-reply, cmd-adopt, whose kept full journeys (cmd-start 727, cmd-reply 144, cmd-adopt 114 tests) link the whole command, so they read every part of it after any split; every test-fake crate here is one those journeys start or link. The replay credits none of these further splits with a saving: the figures below are for the layout as designed, without them. Only moving more of those journeys onto engine crates, which needs attributable assertions (see the kept reasons below), frees them.
 
-| Crate | Suites selected | Linux seconds selected | PRs changing it |
-| --- | ---: | ---: | ---: |
-| publication | 287/468 | 65.04% | 82 |
-| edit-reconciler | 280/468 | 62.38% | 71 |
-| run-control | 285/468 | 66.46% | 71 |
-| run-projection | 443/468 | 93.23% | 70 |
-| channel-admission | 285/468 | 66.46% | 67 |
-| run-result | 439/468 | 92.20% | 63 |
-| run-views | 421/468 | 85.24% | 61 |
-| run-state | 444/468 | 94.15% | 60 |
-| event-emission | 283/468 | 63.93% | 59 |
-| plan-edits | 293/468 | 68.46% | 56 |
-| plan-model | 458/468 | 96.79% | 56 |
-| plan-compat | 449/468 | 94.96% | 52 |
-| plan-criteria | 458/468 | 96.79% | 52 |
-| plan-preservation | 449/468 | 94.96% | 52 |
-| publication-boundary | 296/468 | 69.06% | 50 |
-| event-payloads | 447/468 | 95.54% | 49 |
-| review-replies | 282/468 | 63.20% | 47 |
-| agent-execution | 287/468 | 65.55% | 46 |
-| fake-oneagentgraph | 299/468 | 72.13% | 46 |
-| plan-validation | 449/468 | 94.96% | 45 |
-| event-vocabulary | 448/468 | 95.59% | 43 |
-| fake-gh | 438/468 | 92.33% | 38 |
-| readjust-state | 444/468 | 94.15% | 38 |
-| readjustment | 282/468 | 63.13% | 38 |
-| review-discovery | 281/468 | 62.41% | 38 |
-| planner-channel | 313/468 | 77.75% | 37 |
-| publication-host | 289/468 | 66.35% | 37 |
-| release-watch | 251/468 | 58.90% | 37 |
-| publication-query | 430/468 | 87.66% | 34 |
-| test-fake-member | 324/468 | 79.65% | 29 |
-| run-files | 453/468 | 96.08% | 26 |
-| run-report | 439/468 | 92.20% | 26 |
-| task-store | 290/468 | 67.55% | 26 |
-| agent-session | 298/468 | 70.64% | 25 |
-| member-liveness | 421/468 | 85.24% | 25 |
-| planner-notes | 281/468 | 62.82% | 25 |
-| processes | 444/468 | 93.15% | 25 |
-| run-paths | 455/468 | 96.15% | 24 |
-| diagnostics | 460/468 | 96.88% | 23 |
-| run-locks | 289/468 | 68.26% | 16 |
-| run-record | 445/468 | 94.94% | 13 |
-| journal-reader | 444/468 | 94.20% | 11 |
-| branch-template | 458/468 | 96.79% | 7 |
-| test-fake-codec | 468/468 | 100.00% | 6 |
-| test-containment | 468/468 | 100.00% | 5 |
-| test-profile | 468/468 | 100.00% | 5 |
-| append-stamp | 438/468 | 92.13% | 2 |
-| checkpoint | 438/468 | 92.13% | 2 |
-| cross-run-query | 423/468 | 86.50% | 2 |
-| event-filter | 432/468 | 88.98% | 2 |
-| journal | 303/468 | 74.34% | 2 |
-| render-cost | 445/468 | 93.16% | 2 |
-| run-labels | 439/468 | 92.16% | 2 |
-| run-summary | 438/468 | 92.13% | 2 |
-| yaml-codec | 458/468 | 96.79% | 2 |
-| branch-stack | 288/468 | 65.77% | 1 |
-| dispatch-controls | 288/468 | 65.59% | 1 |
+| Crate | Suites selected | Linux seconds selected | PRs changing it | Further split | Still a shared input after it, and who reads it |
+| --- | ---: | ---: | ---: | --- | --- |
+| publication | 287/468 | 65.04% | 82 | Separate landing validation, publish execution, restack and retarget operations; preserve atomic publication boundaries. | the landing record every publish, restack and retarget writes; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| edit-reconciler | 280/468 | 62.38% | 71 | Separate envelope validation, staged operation application and orphan queue recovery; inline submitters still compose their actual apply/recovery effects. | the edit envelope grammar every submitter and the reconciler validate; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-control | 285/468 | 66.46% | 71 | Separate lifecycle start/adoption from stop/shutdown and continuation; retain real ownership and process operations for each entrypoint. | the run-ownership protocol every entrypoint takes; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-projection | 443/468 | 93.23% | 70 | Separate scheduler frontier, branch/publication, channel debt and activity folds; views request their required facets. Full-state checkpoint compatibility retains a full-fold integration. | the full-state checkpoint shape the full-fold integration reads; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| channel-admission | 285/468 | 66.46% | 67 | Separate ownership handover, queue admission and reply wait policy; preserve takeover recovery ordering. | the ownership handover record both outgoing and incoming owners read; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-result | 439/468 | 92.20% | 63 | Separate terminal settlement wire facts from per-node publication details and presentation; full results retains all facts, liveness readers need only settlement. | the terminal settlement facts results and every liveness reader read; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-views | 421/468 | 85.24% | 61 | Separate snapshot assembly, activity/history queries, liveness refresh and upstream/publication refresh; each command runner retains only the refreshes it actually invokes. Full snapshot integrations retain all facets. | the snapshot shape the full snapshot integrations assemble; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-state | 444/468 | 94.15% | 60 | Separate node status and frontier records from activity, refusal and driver-claim records; status readers and activity views then link only their facet. The derived-status cache stays with the status facet. | the node status record and derived-status cache every status reader reads; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| event-emission | 283/468 | 63.93% | 59 | Separate payload encoding, bounded formatting and channel delivery; each emitter retains its actual writer implementation. | the bounded payload encoding every emitter writes; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| plan-edits | 293/468 | 68.46% | 56 | Separate operation schema and validation from operation-specific application; retain full envelope validation integrations. | the operation envelope schema every edit submitter validates against; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| plan-model | 458/468 | 96.79% | 56 | Separate node/edge schema, executor configuration, publication criteria and plan-loading IO; field-specific readers use the corresponding schema facet. Common strict schema validation remains shared. | the common strict schema validation every plan loader runs; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| plan-compat | 449/468 | 94.96% | 52 | Reaches the plan-validation suites because validation gates on schema versions; separating the read-side version gate from the write-side retired-field refusal would leave writers alone linking the refusal. | the schema-version gate every plan reader passes; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| plan-criteria | 458/468 | 96.79% | 52 | Already the task-document grammar alone; plan-model renders tasks through it, so a grammar change legitimately reaches every plan reader. Splitting it further returns nothing until rendering moves out of plan-model. | the task-document grammar, which every plan reader renders through plan-model; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| plan-preservation | 449/468 | 94.96% | 52 | Reaches exactly plan-validation's suites, its only consumer; it narrows further only when plan-validation's own reach does (see that row). | nothing of its own: it reaches only plan-validation's consumers; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| publication-boundary | 296/468 | 69.06% | 50 | Separate boundary classification (which edits cross a published boundary) from its enforcement at publish time; edit validation links classification only. | the classification rules edit validation and publication both apply; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| event-payloads | 447/468 | 95.54% | 49 | Separate scheduler, edit, publication and channel payload schemas from the generic bus envelope. Full history validators still compose all registries; a registry grammar change legitimately reaches them. | the generic bus envelope, and every registry for the full-history validators; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| review-replies | 282/468 | 63.20% | 47 | Separate review idempotence keys, decline validation, drafting and host posting; the editor needs validation and actual triggered effects. | the review idempotence key that drafting and posting share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| agent-execution | 287/468 | 65.55% | 46 | Separate dispatch request composition, the oneagentgraph invocation and outcome classification; observers link outcome classification only. | the oneagentgraph invocation protocol every dispatching command speaks; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| fake-oneagentgraph | 299/468 | 72.13% | 46 | Separate graph sessions from member scripting and from each typed sibling protocol, one binary each, so a test starting only sessions links no member scripting. | the oneagentgraph CLI protocol it doubles, read by every test that dispatches an agent |
+| plan-validation | 449/468 | 94.96% | 45 | Separate the graph value types run state records (NodeStatus, NodeRef, Landing, Settled) from graph and destination validation; run-state would then link the value types only, and validation reach the suites that validate. | graph and destination validation every command validating a plan runs; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| event-vocabulary | 448/468 | 95.59% | 43 | Separate scheduler, channel, publication and agent kind registries; assemble complete validation only in the journal registry integration. | the complete kind registry the journal registry integration assembles; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| fake-gh | 438/468 | 92.33% | 38 | Separate issue and change-request state, review threads and branch pushes into one fake per surface behind onevcs's ONEVCS_GH seam. | onevcs's remote-double protocol it serves, read by every publishing test |
+| readjust-state | 444/468 | 94.15% | 38 | Separate detection evidence, lineage placement and readjust progress records; consumers retain only the state facets they read. | the readjust progress record detection and placement both read; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| readjustment | 282/468 | 63.13% | 38 | Separate host detection from retarget/restack execution and post-edit refresh; only operations invoking each effect retain it. | host detection, which every retarget and restack runs first; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| review-discovery | 281/468 | 62.41% | 38 | Separate review discovery/query from scheduled pass effects and reply triggering. | the host review query scheduled passes and reply triggering share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| planner-channel | 313/468 | 77.75% | 37 | Separate envelope schema/allowlist, transport queue, delivery acknowledgements and document-layout validation. Reply transport does not compile scheduler-op validation. | the envelope schema and allowlist every channel writer and reader checks; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| publication-host | 289/468 | 66.35% | 37 | Separate host capability probing from host writes (push, change-request open and update); readers link probing only. | the onevcs host contract every publishing command is written against; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| release-watch | 251/468 | 58.90% | 37 | Separate stated-release evidence/acknowledgement from upstream polling and scheduler wakeup. | the stated-release evidence record acknowledgement and polling share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| publication-query | 430/468 | 87.66% | 34 | Separate landing evidence reread, branch status and debt classification; status needs landing evidence, debt commands need the corresponding debt facet. | landing evidence reread, which status and the debt commands share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| test-fake-member | 324/468 | 79.65% | 29 | Separate scheduled-member scripting, observe and supervise helpers and ask-manager replies, one module per member behaviour. | the member environment (run id, CLI binary, member name) every scripted member reads |
+| run-files | 453/468 | 96.08% | 26 | Separate atomic replacement/durability, append-tail healing, JSON codec and range reads; read-only facets cease importing append/lock implementations. Atomic replacement fixes still run all writers. | atomic replacement, which every writer uses; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-report | 439/468 | 92.20% | 26 | Separate terminal result record reading from report atomic publication and report presentation; preserve the existing result wire shape. | the result wire shape; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| task-store | 290/468 | 67.55% | 26 | Separate graph edits, dispatch facts and publication state commits while retaining transactional consistency. | the transaction spanning graph, dispatch and publication commits; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| agent-session | 298/468 | 70.64% | 25 | Separate session identity/lookup from author graph creation and process attachment. | session identity, which attachment and graph creation share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| member-liveness | 421/468 | 85.24% | 25 | Separate heartbeat wire decoding, freshness classification and heartbeat publication; observer views do not import publisher implementation. | the heartbeat wire format publisher and observers share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| planner-notes | 281/468 | 62.82% | 25 | Separate note envelope validation, delivery and reply receipt handling. | the note envelope delivery and receipt share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| processes | 444/468 | 93.15% | 25 | Separate host identity, process liveness, subprocess launch and handle detachment; replace generic sys imports with those capability crates. | process liveness, which every command checking a run's owner reads; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-paths | 455/468 | 96.15% | 24 | Separate run-id validation/root selection from checkpoint/channel/report/dispatch path builders, colocating each builder with its subsystem. Common root semantics remain shared. | run-id validation and common root semantics; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| diagnostics | 460/468 | 96.88% | 23 | Move domain-specific refusal constructors/formatters to the owning subsystem; retain only the stable error envelope shared by all commands. | the stable error envelope every command prints; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-locks | 289/468 | 68.26% | 16 | Separate the lock-file record from acquisition policy (wait, stale takeover, refusal); views inspecting a holder link the record only. | the lock-file record every writer and holder inspection reads; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-record | 445/468 | 94.94% | 13 | Separate launch identity, agent configuration and invocation provenance; retain a facade LaunchRecord with identical serialization. Whole-record strict decoding remains a shared grammar input. | whole-record strict decoding of LaunchRecord; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| journal-reader | 444/468 | 94.20% | 11 | Separate envelope decoding/version checks, merge ordering, loss accounting and byte-range iteration. Full-history readers still compose the same strict checks. | envelope decoding and version checks every history reader runs; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| branch-template | 458/468 | 96.79% | 7 | Separate branch-template parsing from expansion; commands validating plans need parsing, launch composition needs expansion. | the branch-template grammar parsing and expansion share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| test-fake-codec | 468/468 | 100.00% | 6 | None left to make: the per-fake split already reduced it to the stable primitive codec. | the codec itself (script directory, recorded invocations, argv flags, rendezvous, YAML helper), read by every fake and through the harness by every suite |
+| test-containment | 468/468 | 100.00% | 5 | None left to make: it is one concept, ending a test's whole process tree. | the containment the harness places every test in, so every suite |
+| test-profile | 468/468 | 100.00% | 5 | Separate the profile::process wrapper from the profile::fs wrapper and from cost reporting. | the process and filesystem wrappers every e2e test runs through, so every suite |
+| append-stamp | 438/468 | 92.13% | 2 | Separate stamp reading/comparison from publication; a changed shared stamp protocol remains an actual input of every stamp consumer. | the stamp protocol every stamp consumer compares; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| checkpoint | 438/468 | 92.13% | 2 | Separate coverage/seal validation, bounded replay and derived-cache publication. Cache-writing readers still test the real cache writer. | coverage and seal validation every bounded replay runs; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| cross-run-query | 423/468 | 86.50% | 2 | Separate reference parsing, upstream status snapshot IO and resolution-cache tracking; only the views consuming upstream state retain those facets. | reference parsing every upstream view runs; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| event-filter | 432/468 | 88.98% | 2 | Separate selector AST, matcher and YAML document adapter; inline selectors need no file parser. | the selector AST matcher and document adapter share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| journal | 303/468 | 74.34% | 2 | Separate the append writer from the on-disk segment layout; readers reach the layout through journal-reader alone. | the segment layout writer and journal-reader share; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| render-cost | 445/468 | 93.16% | 2 | Separate read-byte accounting, elapsed timers and display formatting; only consumers of the changed counter or formatter depend on it. | the counter record each consumer of a changed counter reads; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-labels | 439/468 | 92.16% | 2 | Separate label record codec/query from update/atomic commit; display commands depend only on the query and schema. | the label record schema; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| run-summary | 438/468 | 92.13% | 2 | Separate summary record/query from append-driven Maintainer; host/runs listing need query, writers compose maintenance. | the summary record; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| yaml-codec | 458/468 | 96.79% | 2 | Keep generic strict codec stable; move plan, channel-layout and executor document adapters into their owning crates. A generic strict-decoder fix remains a real shared input. | the generic strict decoder; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| branch-stack | 288/468 | 65.77% | 1 | Separate stack lineage (parent order) from restack execution; views showing a stack link lineage only. | the lineage record restack and retarget read; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
+| dispatch-controls | 288/468 | 65.59% | 1 | Separate control-record parsing from its enforcement at dispatch; views showing controls link parsing only. | the control record; and the kept cmd-start, cmd-reply, cmd-adopt journeys, which link the whole command |
 
 ### PRs still selecting more than half the Linux seconds
 

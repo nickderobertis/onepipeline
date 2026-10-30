@@ -4888,6 +4888,10 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
     refusedEvidence((copy) => {
       copy.steps[2].crateReach[0].suites = 1;
     }, /step 3 lists a crate whose change does not select more than half the suites/);
+    // A broad crate the design names no further split for is refused rather than rendered blank.
+    refusedEvidence((copy) => {
+      copy.steps[2].crateReach[0].crate = "unsplit-engine";
+    }, /missing further split for broad crate unsplit-engine/);
     writeFileSync(evidencePath, committedEvidence);
     assert.equal(report("--check").status, 0);
   } finally {
