@@ -2110,8 +2110,6 @@ test("resolution CLI refuses malformed maps, lock identities and compiler pins, 
   }
 });
 
-// The CLI enumerates known test IDs itself, so it cannot receive an arbitrary intentFor ID.
-// Direct API refusal checks cover that caller boundary; target-report CLI tests prove rendered source intent.
 test("pinned runs a command over the reviewed source with the working tree's design files, and refuses a snapshot it cannot pin", () => {
   const root = scratch();
   const clones = scratch();
@@ -2261,6 +2259,8 @@ test("pinned runs a command over the reviewed source with the working tree's des
   }
 });
 
+// The CLI enumerates known test IDs itself, so it cannot receive an arbitrary intentFor ID.
+// Direct API refusal checks cover that caller boundary; target-report CLI tests prove rendered source intent.
 test("test intent comes from the existing journey and refuses path-like ids", async () => {
   const { intentFor } = await import("./target-report.mjs");
   assert.match(
