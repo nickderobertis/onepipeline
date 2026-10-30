@@ -11940,6 +11940,60 @@ fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_s
     );
 }
 
+/// The four priority definitions and the authoring guidance are stated once, in the
+/// engine, and the contract, the README and every shipped human node carry them.
+#[test]
+fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
+    use onepipeline::human_items::{
+        priority_label, Priority, AUTHORING_GUIDANCE, PRIORITY_DEFINITIONS,
+    };
+    let readme = include_str!("../README.md");
+    let labels: Vec<&str> = PRIORITY_DEFINITIONS
+        .iter()
+        .map(|(label, _)| *label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            Priority::Urgent,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low
+        ]
+        .map(priority_label)
+    );
+    for (label, meaning) in PRIORITY_DEFINITIONS {
+        let sentence = if label == "Low" {
+            format!("Low means {meaning}.")
+        } else if label == "Medium" {
+            format!("Medium means {meaning};")
+        } else {
+            format!("{label} means {meaning}.")
+        };
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat(CONTRACT).contains(&sentence),
+            "the contract lacks {sentence:?}"
+        );
+        assert!(
+            flat(readme).contains(&sentence),
+            "the README lacks {sentence:?}"
+        );
+    }
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat(CONTRACT).contains(AUTHORING_GUIDANCE));
+    assert!(flat(readme).contains(AUTHORING_GUIDANCE));
+    // The shipped example plan states every human node's item, priority included.
+    let tasks = repo_root().join("examples/plan-store/tasks/tracked-release");
+    for entry in std::fs::read_dir(tasks).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        if text.contains("\"onepipeline.kind\": \"human\"") {
+            assert!(text.contains("\"onepipeline.human_item\""), "{text}");
+            assert!(text.contains("\"priority\":"), "{text}");
+        }
+    }
+}
+
 #[test]
 fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
     let exported = onepipeline::human_items::schemas();

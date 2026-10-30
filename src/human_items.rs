@@ -624,6 +624,23 @@ fn parse_priority(value: &str) -> Result<Priority, String> {
     }
 }
 
+/// What each display priority means, as the contract and the README state it.
+pub const PRIORITY_DEFINITIONS: [(&str, &str); 4] = [
+    (
+        "Critical",
+        "drop everything for complete development disruption or critical production journeys down with only a human able to fix",
+    ),
+    (
+        "High",
+        "substantial development outage, less significant journeys impaired or partial critical-journey outage needing a human",
+    ),
+    ("Medium", "significant lifecycle or experience decisions"),
+    ("Low", "everything else"),
+];
+
+/// How an item's title and body are written, as the contract and the README state it.
+pub const AUTHORING_GUIDANCE: &str = "Bodies are pithy and contain only needed input; question titles ask at high level, task titles say what to do.";
+
 /// Human-facing priority label; wire values continue to use the imported vocabulary.
 pub fn priority_label(priority: Priority) -> &'static str {
     match priority {

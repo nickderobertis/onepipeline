@@ -755,7 +755,7 @@ and lists a node held for its release, in a run that has not ended, as:
 Shipped content: example personas — an observer (at `personas/orchestrator.yaml`, the shipped file the orchestrator persona was rewritten into), `check-in`, `pr-author`; the example dag-scope agent-graph config, `graphs/dag-scope.yaml`; a default node-scope config (worker+judge); an example plan store, `examples/plan-store/`, holding one project per example plan. The files under `graphs/` and `personas/` are **examples a host may copy**: the engine reads none of them at runtime and names no member or author they declare — a launch names its own observer graph by REF, and that graph's own `schedule` and the launch's bus configuration are what the engine acts on. The shipped observer persona reads the detailed stream, compares activity against the run's goal, each node's task prose, and the graph definition, surfaces issues, opportunities, and anomalies non-blocking, self-applies clearly intent-preserving fixes as attributed live edits within the grants its bus configuration gives it, escalates ambiguity rather than acting on it, and never authors target-project content. pr-author composition: the drafting dispatch runs under the shipped `pr-author` persona, and a plan node or step may not claim that name — the persona is what tells that dispatch from a node's own, which are composed differently, and a node claiming it would silently lose the overrides its dispatch carries. Where a lifecycle node carries no `body` and the launch named a `--pr-author-graph`, one post-verification dispatch runs that graph once — after the branch is verified and before the change request is published, in the node's **own** worktree, which is where the diff is, and carrying none of the node's own turn budget. Its task is the opening sentence, the node's rendered task, the change request the session already holds where it holds one — a draft the worker opened, or one an earlier attempt of the node opened — and how to read the worker's transcript. The body it drafted is `results[].structured.body` of the result that ran, read out of the copy **this run retained** and never by following the `report_path` a producer named. Where the session holds no change request, the change request opens with that body; where it holds one, the body is written onto it as its description under the node's `title`, and the same publication lifts the draft and lands under the resolved policy. A drafting dispatch that does not start, fails, is cancelled, or answers with nothing the schema accepted leaves the publication untouched: the change request opens with no body and the node settles on its publication as before — and a change request the session already held keeps the description the worker left, said on the settlement. Drafting is never on the publication path. **It is never silent either.** Where a drafting dispatch was configured and attempted and produced no body, the run records `body-not-drafted` against the node, carrying `ending` — `dispatch-failed` for one that could not be run or ran without succeeding (a failed turn and a cancelled one both land there, because they differ in nothing a publication carrying no body either way can act on), `schema-refused` for one whose every answer the schema it was validated against rejected, and `no-body` for one that answered inside that schema and put nothing in it — and `detail`, which the node's own settlement carries too — after the publication's own reason where that failed as well, because the publication is what settled the node — so `results` shows the ending without a reader opening the store. Nothing is emitted for the two endings that are not failures: a launch that named no pr-author graph, and a node that carried its own `body`, both spend no dispatch. The three are kept apart because they take three different fixes, and a run that had just wired a drafter could tell none of them from a launch that had wired none.
 
 
-## Human items (additive contract; runtime integration unavailable)
+## Human items
 
 `src/human_items.rs` declares the domain once. Its exported `schemas()` drives
 `schemas/human-items.schema.json`, CLI fixtures and browser schema consumers;
@@ -763,24 +763,61 @@ Shipped content: example personas — an observer (at `personas/orchestrator.yam
 `cargo run --example human_items_schema`. HumanItem writes schema_version **1**.
 The optional `onepipeline.human_item` metadata stays additive on plan schema 3:
 `{kind, priority, title, body}`, all required; title and body must be nonempty.
-Legacy human nodes load with human_item absent, unchanged. The future adapter's
+Legacy human nodes load with human_item absent, unchanged.
 `derive_legacy(node_id,stored_title,action_body,store_priority)` derives one task:
 stored title when nonblank, otherwise the first nonempty action-body line, otherwise
 the node id; the body is preserved. Priority is the store's, Low only when absent
 or none. This total helper does not impose explicit-metadata validation on legacy
-plan loading. No scheduler, journal writer,
-old path, or existing run behavior changes in this contract node.
+plan loading. A human node's store priority rides its `task_record.priority`,
+recorded only for a `kind: human` node that has one.
+
+**Configuration.** `human_items::config::effective(dir)` is the one effective loader
+the human-items verbs, an embedding SDK and every launch read, and `onepipeline
+human-items config [--json]` prints what it answers and the files it read. Two
+layers, the second overriding the first key by key: the repository-tracked shared
+default `.onepipeline/config.yaml` (the nearest ancestor of the working directory
+holding one, not past the repository root; a launch reads its launch directory's)
+and the host-local override the file `ONEPIPELINE_CONFIG` names, else
+`onepipeline/config.yaml` under `XDG_CONFIG_HOME` or `~/.config`. Each holds one
+`human_items` mapping: `enabled: boolean` (default false), `task_source: string`
+(optional), `hooks: [{phase, kind: task|question, title, body, priority, block:
+{scope: nothing|work|plan|host}, approval: {adapter} | null, aggregate?:
+ticket_review}]` and `approval_adapters: {NAME: {command: [program, args...]}}`.
+Hooks are validated once, at load; a malformed file refuses every consumer by its
+file. Disabled, every live verb refuses nonzero with typed `{kind:"unavailable"}`
+and no run raises anything. `HumanItems::open(root, dir)` is the SDK's entry: it
+loads `dir`'s effective configuration and refuses as unavailable when disabled.
+
+**Store.** Every item event is one existing journal envelope on the host stream
+`human-items`, in `human-items/events.ndjson` beneath the runs root, whose `seq`
+is allocated under the journal's append lock; a mutation is acknowledged only
+after its record is synced. The item id is a stable function of the dedup key,
+so a raise retried after a crash finds its own item. A private, versioned,
+checksummed read index beside it records the byte position it folded and digests
+of the first and last records it folded, and caches each run's DAG under that
+run journal's length and final bytes. An index that is absent, of another
+version, failing its checksum, or behind a journal that was truncated or replaced
+is rebuilt from the journals; a trailing record with no terminator waits; a whole
+record that cannot be read is refused out loud, never skipped. Readers serialize
+on the index and replace it atomically, so an unchanged warm read replays nothing
+and a tail is consumed once across readers. On a full disk the store releases a
+preallocated reserve for the write, records one urgent host item for the
+condition in that space, refuses — acknowledging nothing — a write that cannot be
+made durable even then, and resolves the item automatically once a later command
+can allocate the reserve again.
 
 The public support types are HumanItemKind, HumanItemState, HumanItemOwner,
 HumanItemBlock, HumanItemResolution, HumanItemApproval, HumanItemTracker,
 HumanItemMetadata, HumanItemNode, HumanItemBlockedPlan and HumanItemBlocked.
-HumanItemSample exposes query(filter) and apply(action); HumanItemRefusal is
-Unavailable or Conflict{reason}. HumanItemSampleApproval holds fixture authority
-records. HumanItemsArgs, HumanItemsCommand and HumanItemsQuery declare the CLI;
-HumanItemFilter itself declares its selectors, without a second filter schema.
-priority_label maps imported Priority to display labels; HumanItem::is_blocking
-is the single derived predicate. EVENT_KINDS and JOURNAL_PATH name the declared
-events and future journal. `schemas()` exports the complete sample bundle too, with priority_labels mapping
+HumanItems exposes query(filter), show(id), apply(action), raise_phase(phase,
+context) and run_ended(run); HumanItemSample exposes query(filter) and
+apply(action); HumanItemRefusal is Unavailable or Conflict{reason}.
+HumanItemSampleApproval holds fixture authority records. HumanItemsArgs,
+HumanItemsCommand and HumanItemsQuery declare the CLI; HumanItemFilter itself
+declares its selectors, without a second filter schema. priority_label maps
+imported Priority to display labels; HumanItem::is_blocking is the single derived
+predicate. EVENT_KINDS and JOURNAL_PATH name the declared events and the journal.
+`schemas()` exports the complete sample bundle too, with priority_labels mapping
 wire priorities to the same display labels the CLI uses for browser consumers.
 
 The human-item record has a stable host-unique opaque id and required dedup_key;
@@ -793,13 +830,18 @@ The input has immutable fields only: schema_version:1, dedup_key, kind, title, b
 block and approval. Open records have no resolution. Answered questions require
 nonempty answer text; completed tasks and dismissed items carry a resolution.
 Tasks cannot be answered; questions cannot be completed or carry approvals.
+Raising an open item's dedup key again with new title, body or priority updates
+that one item; raising it unchanged, or once resolved, answers the item as it is.
 
 HumanItemAction is the one action vocabulary, tagged by `action`: raise with the
 input fields, answer `{id,text,actor,on_behalf_of}`, complete
 `{id,actor,on_behalf_of}`, dismiss `{id,reason?,actor,on_behalf_of}`. Absent, null
 or blank dismissal reason means no reason. Complete is the only task action;
 there is no approve action or completion-time board-copy/key input. Conflicts
-are typed refusals and never silently overwrite existing resolutions.
+are typed refusals and never silently overwrite existing resolutions; an identical
+repeat of a terminal action answers the recorded receipt. A verb run under
+`ONEPIPELINE_LAUNCHER_SESSION` records actor `session:<id>` on behalf of
+`user:<login>`; run directly it records actor `user:<login>` and no on_behalf_of.
 
 HumanItemFilter has optional kind, blocking:boolean, priority, state, session,
 run, plan, host:boolean. State defaults to open. Blocking is derived from open
@@ -810,7 +852,8 @@ counts are u64 and preview is the first three nodes per plan. HumanItemDetail
 adds nodes containing every affected step. No owner_ended field exists.
 Mutation receipts are `{item:HumanItemView,event_id:string}`.
 
-CLI (sample switch may precede or follow the subcommand):
+CLI (sample switch may precede or follow the subcommand; without it every verb
+acts on the live store):
 
 ```text
 onepipeline human-items --sample FILE raise --input FILE
@@ -835,21 +878,56 @@ node lists or previews; previews contain at most the first three nodes.
 detail.nodes is grouped by blocked.plans in that order: each group has that
 plan's count nodes, and each plan's preview is the first three nodes of its group.
 This deterministic ordering applies to the contract and to sample bundles alike.
-Resolution clears stored current impact.
-Sample mutation receipts and event ids are sample-only. Every command without
-`--sample` refuses nonzero with typed `{kind:"unavailable"}`. Live adapters,
-automatic resolution, durable delivery and runtime approval integration remain
-unavailable until implemented; this node does not claim them.
+Resolution clears stored current impact. Sample mutation receipts and event ids
+are sample-only.
 
-The eventual runtime completes design reviews through the trusted approval
-adapter using stored board_copy/key and writes exactly approve-design's record
-before completing. A manager acts on a user's behalf only after approval in that
-manager's chat, recording actor/on_behalf_of. Changed evidence records no stale
-approval, dismisses the old task and raises one replacement. When a run ends,
-settles or is stopped, its open work/plan holds are dismissed with reason
-“the run ended” and the resolution durably delivered. Independent host holds
-survive. A manager question outside a run remains open until answered/dismissed
-and reaches that session's next watch. Ending a session creates no display state.
+**Phases.** `raise --phase PHASE --context FILE` expands the configured hook for
+PHASE once, at the engine boundary, against a context `{owner, dedup_key, node?,
+vars?, approval?, tickets?}` that is data only: the item's dedup key is
+`phase:PHASE:<dedup_key>`, `{{ name }}` in the title and body expands a context
+variable, and an expansion that is not a valid item is refused before anything is
+written. A plain `raise --input` carrying an approval reference is refused: only a
+configured phase raises a task that completes through an approval authority. A
+`ticket_review` hook raises one task over `tickets: [{id, url, priority}]`,
+deduplicated by id with the final priority, every link grouped under Critical,
+High, Medium, Low or a separate “No priority”; no task when there are none (an
+open one is retired). Its priority is exactly: any urgent ticket, urgent;
+otherwise three or more high, high; otherwise only low tickets plus at most one
+medium, low; otherwise medium — a ticket with no usable priority counting as
+medium, and raising one non-blocking finding to the owner naming every such
+ticket. Running a phase again updates its one task.
+
+**Approval.** Completing a task whose phase names an adapter runs that configured
+command — never one an item or a caller names — with
+`{board_copy,key,actor,on_behalf_of}` from the stored approval on standard input.
+The adapter revalidates and answers `{board_copy,key}`: the stored key means it
+recorded exactly approve-design's record and the task completes; another key
+means the document changed and it recorded nothing, so completion refuses with
+“Re-read the current document”, dismisses the obsolete task and raises one
+replacement for the reported version; any other answer or a nonzero exit leaves
+the task open. A manager completes on a user's behalf only after approval in that
+manager's chat, and the receipt records both.
+
+**Runs.** Every `kind: human` node that becomes eligible gets exactly one item,
+dedup key `run:<run>#<node>`, blocking `work {run,node}`, owned by the launch's
+session, run and plan (the launched project). Only open blocks hold dispatch, and
+only dispatch: nothing holds none; work holds the bound node (unless it is the
+human step itself) and everything downstream, leaving unrelated branches running;
+plan holds every undispatched node of that plan; host holds every undispatched
+node on the host. Running work is never stopped; overlapping holds compose. An
+answer or completion attests the human step once; a dismissal drops it with
+dependents detached, carrying the reason when one was given — never a skip or an
+attestation. When a run settles or is stopped, every open item holding that
+run's work or plan is dismissed with reason “the run ended” by actor `engine`;
+host holds and items holding nothing survive. A run waiting on a person has not
+ended. Ending a session creates no display state.
+
+**Delivery.** Each journal record is carried, as the same envelope, onto one
+`onemessagebus` queue per owning session; `onepipeline human-items watch
+[--session ID] [--timeout SECONDS]` prints what that session has not printed and
+commits its cursor only after printing, exiting 5 when nothing was pending. A
+record not yet carried is carried by the next writer or watch, so a resolution
+made while its owner is disconnected reaches the owner's next watch exactly once.
 
 Event kinds: human-item-raised, human-item-answered, human-item-completed,
 human-item-dismissed, human-item-auto-resolved. Each generic onemessagebus
@@ -858,9 +936,7 @@ Envelope kind/payload transports HumanItemEventPayload
 action is HumanItemEventAction, a closed string enum with those same five event
 kind spellings; unknown action ids are refused. The action matches the item's
 state, and item_id, owner and resolution match their copies in the item;
-no new bus domain types. The future additive storage is
-`human-items/events.ndjson` beneath engine home, using existing journal envelopes.
-No old path is migrated or read differently in this node.
+no new bus domain types. Engine resolutions are human-item-auto-resolved.
 
 Text and browser priorities are Critical, High, Medium, Low; Critical serializes
 as urgent. Wire priorities remain urgent/high/medium/low; none and P1/P2/P3 are
@@ -870,14 +946,16 @@ substantial development outage, less significant journeys impaired or partial
 critical-journey outage needing a human. Medium means significant lifecycle or
 experience decisions; Low means everything else. Bodies are pithy and contain
 only needed input; question titles ask at high level, task titles say what to do.
+Plans state `onepipeline.human_item` with an explicit priority on every human node.
 
 User-facing filters are kind, blocking, priority, state and Source (session/run/
 plan identifiers or host). Scope stays in the engine record and is never a
 filter or column. Source is plan/run, manager session for a question outside a
 run, or host. No owner-ended label/filter/fixture is provided. List and report
-print every full body beneath compact metadata, including questions. Blocking
-items say “blocks N steps in <plan>”, “blocks all of <plan>” or “blocks all work
-on this host”; detail enumerates every blocked step.
+print every full body beneath compact metadata, including questions; report is
+the one printable manager report, counting and grouping blocking items first.
+Blocking items say “blocks N steps in <plan>”, “blocks all of <plan>” or “blocks
+all work on this host”; detail enumerates every blocked step.
 
 ```human-items-json
 {

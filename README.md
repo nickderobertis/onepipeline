@@ -911,6 +911,44 @@ wake budget a watch given no `--timeout` gives up the wake reserve
 has returned by the time the budget is spent.
 <!-- llmlint: ignore-end[no_redundant_instruction_pointers] -->
 
+## Human items
+
+One queue of what people must do or decide, across every manager session on the
+host. Off by default; turn it on in the repository's shared
+`.onepipeline/config.yaml` (a host may override it in the file `ONEPIPELINE_CONFIG`
+names, or `~/.config/onepipeline/config.yaml`):
+
+```yaml
+human_items:
+  enabled: true
+  task_source: plans   # the plan-store source open tasks are projected into
+```
+
+`onepipeline human-items config` prints the effective settings and the files they
+came from. Every `kind: human` node then raises one item when it becomes eligible,
+and the item holds that node's branch; answering or completing it attests the step,
+dismissing it drops the step and detaches its dependents.
+
+```bash
+onepipeline human-items list                 # open items, blocking first, full bodies
+onepipeline human-items report               # the one printable manager report
+onepipeline human-items show ITEM            # one item and every step it blocks
+onepipeline human-items answer ITEM --text "Use the gradual rollout."
+onepipeline human-items complete ITEM
+onepipeline human-items dismiss ITEM [--reason TEXT]
+onepipeline human-items watch                # this session's item events, once each
+```
+
+Priorities read Critical, High, Medium and Low. Critical means drop everything
+for complete development disruption or critical production journeys down with
+only a human able to fix. High means substantial development outage, less
+significant journeys impaired or partial critical-journey outage needing a human.
+Medium means significant lifecycle or experience decisions; Low means everything
+else. Bodies are pithy and contain only needed input; question titles ask at
+high level, task titles say what to do. A plan states every human node's item —
+kind, priority, title and body — in `onepipeline.human_item`, priority always
+explicit.
+
 ## Where a dispatch runs
 
 The [executor seam](docs/contract.md) decides. v1 ships the local executor only;
