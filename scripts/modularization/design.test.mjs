@@ -4502,6 +4502,7 @@ test("engine split attributes assertions to the crates naming their literals in 
 }, async () => {
   const { assertionText, checkEngineSplit, ENGINE_PATH, literalOwners, PARENTS, targetLayout } =
     await import("./engine-tests.mjs");
+  const { ENGINE_MARKER } = await import("./engine-report.mjs");
   // A crate names a literal only in its own production code: not in a comment, not in its unit
   // tests, and not in an item another crate takes from its file.
   const root = scratch();
@@ -4590,6 +4591,55 @@ test("engine split attributes assertions to the crates naming their literals in 
     rmSync(evidencePath, { recursive: true });
     writeFileSync(evidencePath, evidence);
     assert.equal(tool("engine-report.mjs", "--both").status, 2);
+    // The report refuses incomplete evidence, a test-split document without every platform's
+    // figure, and a document whose marker is missing or repeated, and writes neither file for any.
+    const docPath = join(clone, "docs/modularization-engine-tests.md");
+    const splitDocPath = join(clone, "docs/modularization-test-split.md");
+    const doc = readFileSync(docPath, "utf8");
+    const splitDoc = readFileSync(splitDocPath, "utf8");
+    const steps = JSON.parse(evidence).steps;
+    const stepFiles = steps.map((step, index) => {
+      const file = join(clone, `step-${index}.json`);
+      writeFileSync(file, JSON.stringify(step));
+      return file;
+    });
+    const untouched = (result, pattern) => {
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, pattern);
+      assert.equal(readFileSync(evidencePath, "utf8"), evidence);
+      assert.equal(readFileSync(docPath, "utf8"), doc);
+    };
+    untouched(
+      tool("engine-report.mjs", "--collect", ...stepFiles.slice(0, 2)),
+      /must hold one step per re-homed parent/,
+    );
+    writeFileSync(splitDocPath, splitDoc.replace(/^\| windows \| .*$/gm, "| windows | n/a |"));
+    untouched(
+      tool("engine-report.mjs", "--write"),
+      /names no crates-and-test-split figure for every platform/,
+    );
+    writeFileSync(
+      splitDocPath,
+      splitDoc.replace(/^(\| linux \|(?: [\d.]+% \|){5}) [\d.]+% \|$/m, "$1 999.99% |"),
+    );
+    untouched(tool("engine-report.mjs", "--write"), /gives linux a share over 100%/);
+    writeFileSync(splitDocPath, splitDoc);
+    const [prefix, appendix] = doc.split(ENGINE_MARKER);
+    writeFileSync(docPath, prefix);
+    const missing = tool("engine-report.mjs", "--collect", ...stepFiles);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /must hold its marker exactly once/);
+    assert.equal(readFileSync(evidencePath, "utf8"), evidence);
+    writeFileSync(docPath, `${prefix}${ENGINE_MARKER}${ENGINE_MARKER}${appendix}`);
+    const repeated = tool("engine-report.mjs", "--collect", ...stepFiles);
+    assert.equal(repeated.status, 1);
+    assert.match(repeated.stderr, /must hold its marker exactly once/);
+    assert.equal(readFileSync(evidencePath, "utf8"), evidence);
+    writeFileSync(docPath, `${prefix}${ENGINE_MARKER}\n`);
+    const recovered = tool("engine-report.mjs", "--collect", ...stepFiles);
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.equal(readFileSync(docPath, "utf8"), doc);
+    assert.equal(tool("engine-report.mjs", "--check").status, 0);
     rmSync(path);
     mkdirSync(path);
     const replay = tool("engine-replay.mjs", join(clone, "out.json"));

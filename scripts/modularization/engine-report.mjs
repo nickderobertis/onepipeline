@@ -22,12 +22,16 @@ const read = (path) => readFileSync(path, "utf8");
 /** The crates-and-test-split figures, as the test-split document's generated table states them. */
 export function testSplitOnly(splitDoc) {
   const rows = {};
+  const share = "(\\d{1,3}\\.\\d{2})%";
   for (const match of splitDoc.matchAll(
-    /^\| (local|linux|macos|windows) \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \| ([\d.]+)% \|$/gm,
+    new RegExp(`^\\| (local|linux|macos|windows)${` \\| ${share}`.repeat(6)} \\|$`, "gm"),
   ))
     rows[match[1]] ??= { suites: match[6], seconds: match[7] };
   if (PLATFORMS.some((platform) => !rows[platform]))
     throw new Error(`${SPLIT_DOC} names no crates-and-test-split figure for every platform`);
+  for (const [platform, row] of Object.entries(rows))
+    if ([row.suites, row.seconds].some((value) => Number(value) > 100))
+      throw new Error(`${SPLIT_DOC} gives ${platform} a share over 100%`);
   return rows;
 }
 
