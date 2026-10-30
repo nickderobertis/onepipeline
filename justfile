@@ -83,6 +83,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-strace
+    @just _ensure-userns
     @just _ensure-onetaskgraph
     @just _ensure-onebudgetspec
     @cargo fetch --locked --quiet
@@ -101,6 +102,24 @@ _ensure-strace:
           || { echo "strace could not be installed through apt-get, and the Linux-only e2e journeys refuse without it" >&2; exit 1; }; \
       else \
         just _strace-preflight; \
+      fi
+
+# The unprivileged user and mount namespace the Linux-only full-disk journeys
+# (`tests/human_items_live.rs`, `tests/e2e/human_items.rs`) mount a size-capped
+# tmpfs in, so that `ENOSPC` is the kernel's rather than an injected one. Ubuntu
+# 24.04 — the CI runner's image — denies those namespaces to unconfined
+# processes through AppArmor, so a runner, which `CI` marks, lifts that one
+# restriction; elsewhere it is named with its command, for the same reason as
+# `_ensure-strace`. Nothing on other platforms, where those journeys are
+# compiled out.
+_ensure-userns:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      unshare -rm true 2>/dev/null && exit 0; \
+      if [ -n "${CI:-}" ]; then \
+        sudo -n sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null && unshare -rm true \
+          || { echo "an unprivileged user namespace could not be enabled, and the Linux-only full-disk journeys refuse without one" >&2; exit 1; }; \
+      else \
+        echo "unprivileged user namespaces are unavailable — the Linux-only full-disk journeys in tests/human_items_live.rs and tests/e2e/human_items.rs refuse without them: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (or your distribution's equivalent), then re-run" >&2; exit 1; \
       fi
 
 # The locked Node packages `host-view-budget` reads — the onebudgetspec SDK and

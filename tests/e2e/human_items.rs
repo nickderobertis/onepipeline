@@ -700,7 +700,13 @@ fn in_namespace(world: &World, script: &str) -> i32 {
         };
     }
     command.env("ONEPIPELINE", template.get_program());
-    command.status().unwrap().code().unwrap_or(-1)
+    let output = command.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unshare:"),
+        "the namespace could not be set up (`just bootstrap` provisions it): {stderr}"
+    );
+    output.status.code().unwrap_or(-1)
 }
 
 /// A dispatch refused for want of space, for real: the run's scratch directory is
