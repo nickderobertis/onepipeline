@@ -1695,14 +1695,13 @@ fn delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not yet delivered"));
     // A print that fails commits nothing: the next watch prints the same events.
+    // Its stdout is a pipe nobody reads, closed before the watch starts, so every
+    // write fails on each Unix (macOS has no `/dev/full`).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
     let full = world
         .cmd(Some("owner"), &["watch"])
-        .stdout(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open("/dev/full")
-                .unwrap(),
-        )
+        .stdout(writer)
         .output()
         .unwrap();
     assert!(!full.status.success());
