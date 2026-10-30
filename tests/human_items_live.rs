@@ -1200,6 +1200,9 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
         .unwrap()
         .contains("t-2"));
 
+    // What raised the review and its finding reaches the owner's watch and is read now.
+    assert!(!world.watch("mgr").is_empty());
+
     // Rerunning the phase with changed tickets updates the one task in place.
     let spec = vec![("t-1", Some("low")), ("t-3", Some("low"))];
     let rerun = context(
@@ -1216,6 +1219,26 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
         1,
         "the finding retired once every ticket had a priority"
     );
+    // The engine retired the finding, by its own name and reason, to the owner alone.
+    let finding = findings[0]["item"]["id"].as_str().unwrap();
+    let retired = |events: &[Value], id: &str, reason: &str| {
+        let matching: Vec<&Value> = events
+            .iter()
+            .filter(|e| e["kind"] == "human-item-dismissed" && e["payload"]["item_id"] == id)
+            .collect();
+        assert_eq!(matching.len(), 1, "{id}: {events:?}");
+        let resolution = &matching[0]["payload"]["resolution"];
+        assert_eq!(resolution["actor"], "engine", "{resolution}");
+        assert_eq!(resolution["on_behalf_of"], Value::Null, "{resolution}");
+        assert_eq!(resolution["reason"], reason, "{resolution}");
+    };
+    retired(
+        &world.watch("mgr"),
+        finding,
+        "every review ticket has a priority",
+    );
+    let shown = world.json(None, &["show", finding, "--json"]);
+    assert_eq!(shown["item"]["state"], "dismissed");
     // Rerun unchanged: no new record.
     let records = world.journal().len();
     phase(&world, None, "ticket-review", &rerun);
@@ -1232,6 +1255,48 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
         .as_array()
         .unwrap()
         .is_empty());
+    retired(&world.watch("mgr"), &id, "no tickets remain to review");
+    let shown = world.json(None, &["show", &id, "--json"]);
+    assert_eq!(
+        shown["item"]["resolution"]["reason"],
+        "no tickets remain to review"
+    );
+    // No other session's watch hears of either retirement.
+    assert_eq!(world.run(Some("other"), &["watch"]).status.code(), Some(5));
+}
+
+/// A template that renders without error to a blank title or body is still an
+/// invalid item: the raise refuses it and writes nothing.
+#[test]
+fn a_hook_rendering_to_a_blank_title_or_body_is_refused_without_writing() {
+    let world = Live::new(Some(
+        "human_items:\n  enabled: true\n  hooks:\n    - phase: titled\n      kind: task\n      \
+         title: '{{ text }}'\n      body: Body.\n      priority: low\n      block: {scope: nothing}\n    \
+         - phase: bodied\n      kind: question\n      title: Title\n      body: '{{ text }}'\n      \
+         priority: low\n      block: {scope: nothing}\n",
+    ));
+    let owner = json!({"session": "mgr", "run": null, "plan": null});
+    let blank = world.input(
+        "blank",
+        &json!({"owner": owner, "dedup_key": "a", "vars": {"text": "   "}}),
+    );
+    for (phase, field) in [("titled", "title"), ("bodied", "body")] {
+        let stderr = world.refused(
+            None,
+            &["raise", "--phase", phase, "--context", &blank],
+            &format!("phase {phase} expands to an invalid item"),
+        );
+        assert!(stderr.contains(field), "{field}: {stderr}");
+    }
+    assert!(world.journal().is_empty());
+    assert_eq!(world.run(Some("mgr"), &["watch"]).status.code(), Some(5));
+    // The same hook with text renders a valid item, so the refusal was the blank.
+    let text = world.input(
+        "text",
+        &json!({"owner": owner, "dedup_key": "a", "vars": {"text": "Ready"}}),
+    );
+    let raised = world.json(None, &["raise", "--phase", "titled", "--context", &text]);
+    assert_eq!(raised["item"]["item"]["title"], "Ready");
 }
 
 #[test]
