@@ -1447,3 +1447,51 @@ fn a_running_driver_releases_a_resolution_its_resolver_could_not() {
     );
     world.release("side.go");
 }
+
+/// The report previews the first three steps an item holds in each plan and
+/// counts the rest; a run removed from the runs root takes its steps out of
+/// every summary and detail.
+#[test]
+fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
+    let world = World::new("human-item-report");
+    enabled(&world);
+    let name = "previewed";
+    let mut nodes = vec![human("gate", &[])];
+    for n in 1..=5 {
+        let mut step = agent(&format!("step-{n}"), &["gate"]);
+        step["title"] = json!(format!("Step {n}"));
+        nodes.push(step);
+    }
+    let project = world.plan(name, &plan_of(name, nodes));
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let report = world.run(&["human-items", "report"]);
+    report.exited(0);
+    let text = &report.stdout;
+    assert!(
+        text.contains(&format!("blocks 5 steps in {project}")),
+        "{text}"
+    );
+    for n in 1..=3 {
+        assert!(
+            text.contains(&format!("  - {name} / step-{n}: Step {n}\n")),
+            "{text}"
+        );
+    }
+    assert!(!text.contains("step-4: Step 4"), "{text}");
+    assert!(
+        text.contains(&format!("  - and 2 more in {project}\n")),
+        "{text}"
+    );
+    let gate = id_of(&items(&world, &[])[0]);
+    let shown = world.run(&["human-items", "show", &gate, "--json"]);
+    let shown: Value = serde_json::from_str(&shown.stdout).unwrap();
+    assert_eq!(shown["nodes"].as_array().unwrap().len(), 5);
+
+    // The run is removed from the runs root: nothing it held is reported any more.
+    std::fs::remove_dir_all(world.runs.join(name)).unwrap();
+    let after = items(&world, &[]);
+    assert_eq!(after[0]["blocked"]["total"], 0, "{after:?}");
+    let shown = world.run(&["human-items", "show", &gate, "--json"]);
+    let shown: Value = serde_json::from_str(&shown.stdout).unwrap();
+    assert!(shown["nodes"].as_array().unwrap().is_empty(), "{shown}");
+}
