@@ -1356,7 +1356,17 @@ impl Maintenance {
             let message = if owed {
                 match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                     Ok(message) => message,
-                    Err(_) => break,
+                    // A relay that has gone or stalled past the wait: what the
+                    // pass did is lost to the record, and said so.
+                    Err(why) => {
+                        eprintln!(
+                            "onepipeline: run '{}': the pool-maintenance sweep's retirement \
+                             pass ended, and its report never reached the driver ({why}); \
+                             its branches-retired record is not written",
+                            paths.run
+                        );
+                        break;
+                    }
                 }
             } else {
                 match rx.try_recv() {
@@ -2333,6 +2343,35 @@ mod tests {
             .collect();
         assert_eq!(kinds, ["branches-retired"]);
         drop(rx);
+        relay.join().expect("the relay ends");
+
+        // A relay that goes without handing the report on ends the wait at
+        // once: nothing is recorded, and the close still succeeds.
+        let (to_loop, rx) = mpsc::channel::<Message>();
+        let (tx, relayed) = mpsc::channel::<Message>();
+        let relay = std::thread::spawn(move || {
+            let _ = relayed.recv();
+            drop(to_loop);
+        });
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(Message::Retired(Box::new(Retirements::never_begun(keys))));
+        });
+        let mut maintenance = Maintenance::of_launch(None, &paths);
+        maintenance.sweep = Some(Sweep {
+            handle: Some(handle),
+            paths: paths.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        let started = Instant::now();
+        maintenance
+            .close(&paths, &mut journal, &rx)
+            .expect("a lost report is not a failed close");
+        assert!(
+            started.elapsed() < LAST_REPORT_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(crate::journal::read(&paths.journal()).len(), 1);
         relay.join().expect("the relay ends");
         let _ = std::fs::remove_dir_all(&root);
     }
