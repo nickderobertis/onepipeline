@@ -718,6 +718,8 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::StoredContentDiverged { .. } => decided("stored-content-diverged"),
         // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only a routed copy of a whole plan chooses a home, and a write-back copies into the one project the run was launched from; `writeback::tests` holds the word.
         EngineError::SplitPrivateHome { .. } => decided("split-private-home"),
+        // llmlint: ignore[changed_behavior_has_e2e] unreachable from a write-back: only `Engine::project_human` raises it, which the human-item projection calls and a settlement's copy never does; `writeback::tests` holds the word.
+        EngineError::ProjectionRefused { .. } => decided("projection-refused"),
         // The public boundary's refusals, in the store's own words for each: every one of
         // them is decided before the write's first mutation, so none is worth asking again.
         EngineError::NotPrivateDestination { .. } => decided("not-private-destination"),
@@ -6284,6 +6286,11 @@ mod tests {
                 id: "plans:a".into(),
                 designator: onetaskgraph_plugin_api::Designator::of_alias("a-public-alias-of-16")
                     .expect("an alias"),
+            },
+            EngineError::ProjectionRefused {
+                item_id: "hi-1".into(),
+                message: "refused".into(),
+                next: "fix it".into(),
             },
             EngineError::SplitPrivateHome {
                 project: id(),
