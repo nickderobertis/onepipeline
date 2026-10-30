@@ -180,3 +180,172 @@ fn dismissing_a_human_items_step_detaches_its_dependents_with_or_without_a_reaso
         );
     }
 }
+
+/// Raise one item through the CLI as `session`; answers its id.
+fn raise(world: &World, file: &str, item: &Value) -> String {
+    let path = world.root.join(format!("{file}.json"));
+    std::fs::write(&path, item.to_string()).unwrap();
+    let run = world.run(&["human-items", "raise", "--input", path.to_str().unwrap()]);
+    run.exited(0);
+    serde_json::from_str::<Value>(&run.stdout).unwrap()["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn input(
+    dedup: &str,
+    kind: &str,
+    session: &str,
+    run: Option<&str>,
+    plan: Option<&str>,
+    block: Value,
+) -> Value {
+    json!({
+        "schema_version": 1,
+        "dedup_key": dedup,
+        "kind": kind,
+        "title": format!("Decide {dedup}"),
+        "body": format!("What {dedup} needs from a person."),
+        "priority": "high",
+        "owner": {"session": session, "run": run, "plan": plan},
+        "block": block,
+        "approval": null
+    })
+}
+
+fn stays_undispatched(world: &World, run: &str, for_: std::time::Duration) {
+    let until = std::time::Instant::now() + for_;
+    while std::time::Instant::now() < until {
+        assert!(
+            dispatched(world, run).is_empty(),
+            "{:?}",
+            dispatched(world, run)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn host_and_plan_holds_compose_and_each_releases_only_its_own_hold() {
+    let world = World::new("human-item-holds");
+    enabled(&world);
+    let name = "held";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("a", &[]), agent("b", &["a"])]),
+    );
+    let host = raise(
+        &world,
+        "host",
+        &input(
+            "outage",
+            "task",
+            "ops",
+            None,
+            None,
+            json!({"scope": "host"}),
+        ),
+    );
+    let plan = raise(
+        &world,
+        "plan",
+        &input(
+            "freeze",
+            "question",
+            "ops",
+            None,
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    let unrelated = raise(
+        &world,
+        "other",
+        &input(
+            "other-plan",
+            "task",
+            "ops",
+            None,
+            Some("plans:elsewhere"),
+            json!({"scope": "plan", "plan": "plans:elsewhere"}),
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    stays_undispatched(&world, name, std::time::Duration::from_secs(3));
+    // Both holds name every step of the plan, and blocking is derived per item.
+    let blocking = items(&world, &["--blocking", "yes"]);
+    assert_eq!(blocking.len(), 3);
+    for view in &blocking {
+        if view["item"]["id"] == unrelated.as_str() {
+            assert_eq!(view["blocked"]["total"], 0);
+        } else {
+            assert_eq!(view["blocked"]["total"], 2, "{view}");
+        }
+    }
+    world
+        .run(&["human-items", "report"])
+        .exited(0)
+        .out_has("blocks all work on this host")
+        .out_has(&format!("blocks all of {project}"));
+    // Resolving the host hold leaves the plan hold standing.
+    world.run(&["human-items", "complete", &host]).exited(0);
+    stays_undispatched(&world, name, std::time::Duration::from_secs(2));
+    // The plan hold's answer releases it; another plan's hold never held this one.
+    world
+        .run(&["human-items", "answer", &plan, "--text", "Unfreeze it."])
+        .exited(0);
+    world.until("the run to settle", |w| {
+        w.run_file(name, "result.json").is_file()
+            && settled(w, name, "b").as_deref() == Some("done")
+    });
+    assert_eq!(dispatched(&world, name), ["a", "b"]);
+    assert_eq!(items(&world, &[])[0]["item"]["id"], unrelated.as_str());
+}
+
+#[test]
+fn a_work_hold_keeps_its_branch_from_starting_and_lets_the_rest_run() {
+    let world = World::new("human-item-work-hold");
+    enabled(&world);
+    let name = "branches";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("seed", &[]),
+                agent("left", &["seed"]),
+                agent("right", &["seed"]),
+                agent("tail", &["left"]),
+            ],
+        ),
+    );
+    let hold = raise(
+        &world,
+        "hold",
+        &input(
+            "left-hold",
+            "task",
+            "mgr",
+            Some(name),
+            Some(&project),
+            json!({"scope": "work", "run": name, "node": "left"}),
+        ),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the unrelated branch to settle", |w| {
+        settled(w, name, "right").as_deref() == Some("done")
+    });
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let started = dispatched(&world, name);
+    assert!(
+        !started.contains(&"left".to_owned()) && !started.contains(&"tail".to_owned()),
+        "{started:?}"
+    );
+    let view = &items(&world, &[])[0];
+    assert_eq!(view["blocked"]["total"], 2);
+    world.run(&["human-items", "complete", &hold]).exited(0);
+    world.until("the held branch to run", |w| {
+        settled(w, name, "tail").as_deref() == Some("done")
+    });
+}

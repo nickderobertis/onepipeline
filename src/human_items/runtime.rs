@@ -51,6 +51,8 @@ pub(crate) struct Gate {
     released: BTreeSet<String>,
     held: BTreeSet<String>,
     looked: Option<Instant>,
+    /// The host journal's length when the last pass read it.
+    seen: u64,
 }
 
 impl Gate {
@@ -66,6 +68,7 @@ impl Gate {
             released: BTreeSet::new(),
             held: BTreeSet::new(),
             looked: None,
+            seen: 0,
         })
     }
 
@@ -77,10 +80,11 @@ impl Gate {
         state: &RunState,
         statuses: &BTreeMap<String, NodeStatus>,
     ) -> BTreeSet<String> {
-        if self.looked.is_some_and(|at| at.elapsed() < EVERY) {
+        if self.looked.is_some_and(|at| at.elapsed() < EVERY) && !self.moved() {
             return self.held.clone();
         }
         self.looked = Some(std::time::Instant::now());
+        self.seen = self.length();
         for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
             if statuses.get(&node.id) != Some(&NodeStatus::Waiting)
                 || self.raised.contains(&node.id)
@@ -190,6 +194,16 @@ impl Gate {
                 _ => {}
             }
         }
+    }
+
+    fn length(&self) -> u64 {
+        std::fs::metadata(self.store.journal()).map_or(0, |m| m.len())
+    }
+
+    /// Whether the host journal moved since the last pass read it: one `stat`,
+    /// which is what the loop's idle wait can afford to ask.
+    pub(crate) fn moved(&self) -> bool {
+        self.length() != self.seen
     }
 
     /// Retire every open item holding this run's work, because the run ended.

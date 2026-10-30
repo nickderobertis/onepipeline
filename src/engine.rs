@@ -2327,6 +2327,14 @@ fn converge(
                 if releases.take_up_answers() {
                     return true;
                 }
+                // A human item recorded since the last pass may hold or release
+                // what this run may start.
+                if human
+                    .as_ref()
+                    .is_some_and(crate::human_items::runtime::Gate::moved)
+                {
+                    return true;
+                }
                 if writeback
                     .as_ref()
                     .is_some_and(|writeback| writeback.has_unprojected() || writeback.has_closed())
