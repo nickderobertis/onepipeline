@@ -1083,6 +1083,15 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     assert.deepEqual(Object.keys(warm.spans), [], JSON.stringify(warm.spans));
   });
 
+  it("keys the build on exactly the timed run's inputs, so the two replay or run together", () => {
+    // `test`'s inputs are held to the record fingerprint elsewhere; these are
+    // held to `test`'s, so a cached build can never stand beside a run that
+    // misses, nor a stale one beside a run that replays.
+    const tier = project("onepipeline-stop-verdict");
+    assert.equal(tier.targets["test-build"].cache, true);
+    assert.deepEqual(tier.targets["test-build"].inputs, tier.targets.test.inputs);
+  });
+
   it("builds only the release tree, leaving the debug tree's lock to the rest of the gate", () => {
     // It starts in the gate's first minute. A debug build there held
     // `target/debug`'s lock until the npm publish journey, waiting on it, ran out
