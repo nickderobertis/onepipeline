@@ -3981,6 +3981,15 @@ test("the test split assigns every phase to one suite, under the threshold, and 
   const { unmeasuredModules } = await import("./test-split.mjs");
   assert.deepEqual(JSON.parse(text).unmeasured, unmeasuredModules(catalog));
   assert.ok(JSON.parse(text).unmeasured.includes("closures"));
+  // A catalog the profile timed none of cannot be weighed at all, so it is refused.
+  const untimed = Object.fromEntries(
+    Object.entries(catalog.tests).filter(([, test]) => test.original.startsWith("closures::")),
+  );
+  assert.ok(Object.keys(untimed).length);
+  assert.throws(
+    () => linuxSeconds({ ...catalog, tests: untimed }),
+    /the profile measured no Linux seconds for any catalog module/,
+  );
   assert.deepEqual([...suiteOf.keys()].sort(), Object.keys(catalog.tests).sort());
   const seconds = linuxSeconds(catalog);
   const total = Object.values(seconds).reduce((sum, value) => sum + value, 0);
