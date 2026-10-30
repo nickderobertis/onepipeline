@@ -907,6 +907,14 @@ fn run(args: &[String], dir: &std::path::Path) -> ExitCode {
         catch_up_with_base(args, base.trim());
     }
 
+    // A worker that merges a base that moved under it, in a merge commit of its own
+    // even where a fast-forward would do: the shape that brings whatever the base
+    // removed since the session was cut into the branch as the merge's own removal.
+    // Scripted `<key>.merges-base` holding the base branch's name.
+    if let Some(base) = fake::node_script(dir, &key, "merges-base") {
+        merge_base(args, base.trim());
+    }
+
     // The same, except that every dispatch writes something the one before it
     // did not. A journey about *re-dispatching* needs that: `<key>.work` writing
     // one fixed body leaves a continued branch with nothing to commit, which is a
@@ -1713,6 +1721,39 @@ fn catch_up_with_base(args: &[String], base: &str) {
     let worktree = session_worktree(args, "catching a dispatch's branch up with its base");
     let onto = format!("origin/{base}");
     for argv in [vec!["fetch", "origin"], vec!["merge", "--ff-only", &onto]] {
+        let ran = std::process::Command::new("git")
+            .args(&argv)
+            .current_dir(&worktree)
+            .stdin(std::process::Stdio::null())
+            .output();
+        let ran = match ran {
+            Ok(ran) => ran,
+            Err(error) => fake::fail(&format!("cannot run `git {}`: {error}", argv.join(" "))),
+        };
+        if !ran.status.success() {
+            fake::fail(&format!(
+                "`git {}` exited {}: {}",
+                argv.join(" "),
+                ran.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&ran.stderr).trim()
+            ));
+        }
+    }
+}
+
+/// Merge the session's base, as the origin now has it, into its branch.
+///
+/// Real git in the real worktree, on [`commit_on_a_branch_of_its_own`]'s terms:
+/// the fetch brings the base's new commits into the clone, and `--no-ff` records
+/// the merge as a commit whose first parent is the branch, whatever the branch
+/// carries of its own.
+fn merge_base(args: &[String], base: &str) {
+    let worktree = session_worktree(args, "merging a dispatch's base into its branch");
+    let onto = format!("origin/{base}");
+    for argv in [
+        vec!["fetch", "origin"],
+        vec!["merge", "--no-ff", "--no-edit", &onto],
+    ] {
         let ran = std::process::Command::new("git")
             .args(&argv)
             .current_dir(&worktree)
