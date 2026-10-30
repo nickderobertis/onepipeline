@@ -126,31 +126,67 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     let cold = sample(&world, &["list", "--json"], &telemetry);
     let authoritative: Value = serde_json::from_str(&cold.stdout).unwrap();
     let views = authoritative.as_array().unwrap();
+    // The totals as the binary discovered them: runs off the runs root, steps off
+    // each run's own DAG through the host hold's blocked set — which is every
+    // undispatched step on the host — and owners and plans off the items.
+    let discovered = cold.reads[0]["runs_discovered"].as_u64().unwrap();
+    assert_eq!(discovered, 100, "retained runs discovered");
+    assert_eq!(views.len(), 100, "open items");
+    let owners: std::collections::BTreeSet<&str> = views
+        .iter()
+        .map(|v| v["item"]["owner"]["session"].as_str().unwrap())
+        .collect();
+    assert_eq!(owners.len(), 10, "managers");
+    let host: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["item"]["block"]["scope"] == "host")
+        .collect();
+    assert_eq!(host.len(), 1);
+    let blocked = &host[0]["blocked"];
+    let steps = blocked["total"].as_u64().unwrap();
+    assert_eq!(steps, 275, "steps across every discovered run");
+    let plans = blocked["plans"].as_array().unwrap();
+    assert_eq!(plans.len(), 10, "plans holding steps");
+    let mut sizes: Vec<u64> = plans.iter().map(|p| p["count"].as_u64().unwrap()).collect();
+    sizes.sort_unstable();
     assert_eq!(
-        views.len(),
-        generate::RUNS,
-        "one open item per launched gate"
+        sizes,
+        (1..=10).map(|n| n * 5).collect::<Vec<u64>>(),
+        "5 to 50 steps a plan"
+    );
+    let detail = sample(
+        &world,
+        &["show", host[0]["item"]["id"].as_str().unwrap(), "--json"],
+        &telemetry,
+    );
+    let detail: Value = serde_json::from_str(&detail.stdout).unwrap();
+    assert_eq!(
+        detail["nodes"].as_array().unwrap().len() as u64,
+        steps,
+        "the full blocked set"
     );
     for view in views {
-        let plan: usize = view["item"]["owner"]["plan"]
-            .as_str()
-            .unwrap()
-            .rsplit('-')
-            .nth(1)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let steps = generate::steps(plan) as u64 - 1;
-        assert_eq!(view["blocked"]["total"], steps, "{view}");
-        assert_eq!(
-            view["blocked"]["plans"][0]["preview"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
         assert!(view["item"]["body"].as_str().unwrap().len() > 200);
+        for plan in view["blocked"]["plans"].as_array().unwrap() {
+            let preview = plan["preview"].as_array().unwrap().len() as u64;
+            assert_eq!(preview, plan["count"].as_u64().unwrap().min(3));
+        }
     }
+    // Each live gate holds its plan's steps behind it; each plan hold, its whole plan.
+    let gates: Vec<&Value> = views
+        .iter()
+        .filter(|v| v["item"]["dedup_key"].as_str().unwrap().ends_with("#gate"))
+        .collect();
+    assert_eq!(gates.len(), 10, "one live gate per plan");
+    let behind: u64 = gates
+        .iter()
+        .map(|v| v["blocked"]["total"].as_u64().unwrap())
+        .sum();
+    assert_eq!(
+        behind,
+        steps - 10,
+        "every step but the gates waits behind them"
+    );
     let mut phases = vec![record("cold", &cold)];
     std::fs::remove_file(&index).unwrap();
     let deleted = sample(&world, &["list", "--json"], &telemetry);
@@ -238,10 +274,11 @@ fn the_host_wide_list_is_warm_within_its_budget_and_every_recovery_is_disclosed(
     let recording = json!({
         "host": std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default().trim(),
         "workload": {
-            "runs": generate::RUNS,
+            "runs": discovered,
             "events_per_run": generate::EVENTS,
-            "plans": generate::PLANS,
-            "steps": (0..generate::PLANS).map(generate::steps).sum::<usize>(),
+            "plans": plans.len(),
+            "managers": owners.len(),
+            "steps": steps,
             "open_items": views.len(),
             "generate_s": generate_s,
         },
