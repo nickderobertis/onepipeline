@@ -806,6 +806,27 @@ condition in that space, refuses — acknowledging nothing — a write that cann
 made durable even then, and resolves the item automatically once a later command
 can allocate the reserve again.
 
+**Host incidents.** Explicit host holds are raised like any item. The engine raises
+an urgent host item, one per condition and owned by the session whose work met it,
+only for a definitive outage: the journal or a dispatch finding no space
+(`ENOSPC`, quota, file-size), or every candidate of an exhausted identity chain
+refused as quota, auth or an unavailable provider. A low-disk reading, one
+refused identity, a transient or unclassified refusal and unrelated telemetry
+raise nothing. Each is probed by the capability that failed and nothing else —
+the journal's reserve allocated again, a file written in the directory a dispatch
+could not write, the harness's zero-turn usage read of the refused identities —
+never a dispatch, and a probe that finds it working resolves the item as
+human-item-auto-resolved.
+
+**Projection.** With `task_source` set, every task — never a question — is
+projected through the linked store's `Engine::project_human` into that source
+after its event is durable and outside the journal's lock: open, then completed or
+dismissed with its reason, the open item recording its tracker `{task,url}`. What
+was last projected is kept beside the journal; a task whose projection is owed is
+projected by the next write, and the store's intent, keyed by the item's id,
+answers a replay without a second ticket. A refused projection is said on
+standard error and leaves the item and its hold as they are.
+
 The public support types are HumanItemKind, HumanItemState, HumanItemOwner,
 HumanItemBlock, HumanItemResolution, HumanItemApproval, HumanItemTracker,
 HumanItemMetadata, HumanItemNode, HumanItemBlockedPlan and HumanItemBlocked.
@@ -917,10 +938,12 @@ plan holds every undispatched node of that plan; host holds every undispatched
 node on the host. Running work is never stopped; overlapping holds compose. An
 answer or completion attests the human step once; a dismissal drops it with
 dependents detached, carrying the reason when one was given — never a skip or an
-attestation. When a run settles or is stopped, every open item holding that
-run's work or plan is dismissed with reason “the run ended” by actor `engine`;
+attestation. When a run settles, is ended by its planner dropping its remaining
+work, or is stopped, every open item holding that run's work or plan is dismissed
+with reason “the run ended” by actor `engine`;
 host holds and items holding nothing survive. A run waiting on a person has not
-ended. Ending a session creates no display state.
+ended. Ending a session creates no display state. No run takes the id
+`human-items`, the store's own directory beside the runs.
 
 **Delivery.** Each journal record is carried, as the same envelope, onto one
 `onemessagebus` queue per owning session; `onepipeline human-items watch

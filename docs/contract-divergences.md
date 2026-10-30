@@ -13028,3 +13028,6 @@ each is a proposal until ruled.
 9. **A human-item hold is not a `node-held` reason.** A held node is paused like a release
    hold, but `node-held` names no `human-item` kind: adding one changes that record's
    registered payload, which is not this task's to version.
+10. **Beside the journal the store keeps `probes.json`** — how each open host condition is
+    probed — and **`projected.json`**, each task's last projected state; both are rebuilt
+    or re-derived by the next write if lost.

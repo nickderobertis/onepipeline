@@ -1015,3 +1015,97 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         .iter()
         .all(|i| i["title"] != "Decide asked"));
 }
+
+/// A planner ends a run by dropping its remaining work: applied with nothing
+/// driving the run, that ending retires the run's own holds exactly as a
+/// settlement does.
+#[test]
+fn a_run_its_planner_ends_retires_its_holds_with_the_run_ended() {
+    let world = World::new("human-item-ended");
+    enabled(&world);
+    let name = "ended";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let owner = "session-human-item-ended";
+    let gate = id_of(&items(&world, &[])[0]);
+    let plan = raise(
+        &world,
+        "plan",
+        &input(
+            "freeze",
+            "task",
+            owner,
+            Some(name),
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    let question = raise(
+        &world,
+        "question",
+        &input(
+            "unrelated",
+            "question",
+            owner,
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    world
+        .run_with_stdin(
+            &["reply", name],
+            &json!({"version": 3, "commands": [{"op": "drop", "id": "gate", "dependents": "drop", "reason": "Superseded by another plan"}]}).to_string(),
+        )
+        .exited(0);
+    for id in [&gate, &plan] {
+        let item = state_of(&world, id);
+        assert_eq!(item["state"], "dismissed", "{item}");
+        assert_eq!(item["resolution"]["reason"], "the run ended");
+    }
+    assert_eq!(state_of(&world, &question)["state"], "open");
+}
+
+/// A plan whose name is the store's own directory launches under another run id,
+/// so a run and the host's human-item store can never share a directory, and the
+/// run's DAG is read under its own key.
+#[test]
+fn a_run_never_takes_the_human_item_stores_name() {
+    let world = World::new("human-item-namespace");
+    enabled(&world);
+    raise(
+        &world,
+        "first",
+        &input(
+            "first",
+            "question",
+            "s",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let project = world.plan(
+        "human-items",
+        &plan_of(
+            "human-items",
+            vec![human("gate", &[]), agent("b", &["gate"])],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    assert!(!world.runs.join("human-items/launch.json").exists());
+    let views = items(&world, &[]);
+    let gate = views
+        .iter()
+        .find(|v| v["item"]["kind"] == "task")
+        .expect("the gate's item");
+    assert_eq!(gate["item"]["owner"]["run"], "human-items-2");
+    assert_eq!(gate["blocked"]["total"], 1);
+    world
+        .run(&["runs", "--flat"])
+        .exited(0)
+        .out_has("human-items-2");
+}
