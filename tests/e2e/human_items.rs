@@ -1731,7 +1731,8 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
         &adapter,
         format!(
             "request=$(cat)\ncopy=$(printf '%s' \"$request\" | sed 's/.*\"board_copy\":\"\\([^\"]*\\)\".*/\\1/')\n\
-             printf '{{\"board_copy\":\"%s\",\"key\":\"%s\"}}' \"$copy\" \"$(cat {})\"\n",
+             printf '{{\"board_copy\":\"%s\",\"key\":\"%s\"}}' \"$copy\" \"$(cat '{}')\"\n",
+            // Single-quoted, so a Windows path's backslashes reach `cat` as written.
             key.display()
         ),
     )
@@ -1740,10 +1741,11 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
         &world,
         Some(&format!(
             "human_items:\n  enabled: true\n  task_source: board\n  approval_adapters:\n    \
-             approve-design:\n      command: [\"sh\", \"{}\"]\n  hooks:\n    - phase: design-review\n      \
+             approve-design:\n      command: [\"sh\", {}]\n  hooks:\n    - phase: design-review\n      \
              kind: task\n      title: Approve the design\n      body: Read the design and approve it.\n      \
              priority: high\n      block: {{scope: nothing}}\n      approval: {{adapter: approve-design}}\n",
-            adapter.display()
+            // A YAML double-quoted scalar, so a Windows path's backslashes are not escapes.
+            serde_json::to_string(&adapter.to_string_lossy()).unwrap()
         )),
     );
     let intents = world.root.join("intents");

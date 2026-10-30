@@ -779,7 +779,7 @@ const HOOKS: &str = r#"human_items:
   task_source: plans
   approval_adapters:
     approve-design:
-      command: ["sh", "ADAPTER"]
+      command: ["sh", ADAPTER]
   hooks:
     - phase: design-review
       kind: task
@@ -809,7 +809,7 @@ const HOOKS: &str = r#"human_items:
 /// stored key is current.
 fn hooked() -> Live {
     let world = Live::new(None);
-    let adapter = world.root.join("adapter.sh");
+    let adapter = adapter(&world);
     std::fs::write(
         &adapter,
         format!(
@@ -823,17 +823,58 @@ if [ -f "$dir/refuse" ]; then echo "the board is locked" >&2; exit 3; fi
 if [ "$key" = "$current" ]; then echo "$request" >> "$dir/approvals.ndjson"; fi
 printf '{{"board_copy":"%s","key":"%s"}}' "$copy" "$current"
 "#,
-            dir = world.root.display()
+            dir = sh_quoted(&world.root)
         ),
     )
     .unwrap();
     std::fs::write(world.root.join("current-key"), "v1").unwrap();
-    world.configure(&HOOKS.replace("ADAPTER", &adapter.to_string_lossy()));
+    world.configure(&HOOKS.replace("ADAPTER", &yaml_quoted(&adapter)));
     world
 }
 
+/// The approval command [`hooked`] configures.
+fn adapter(world: &Live) -> PathBuf {
+    windows_shaped(&world.root).join("adapter.sh")
+}
+
+/// A directory shaped like a Windows temporary path — drive letter, backslashes
+/// and an 8.3 short-name component — on every platform. On Windows it is a real
+/// `RUNNER~1\AppData` under a root that is already a drive-letter path; elsewhere
+/// the same spelling is one component, whose backslashes are ordinary filename
+/// bytes, so nothing between the configuration and the command may reinterpret
+/// them either.
+fn windows_shaped(root: &Path) -> PathBuf {
+    let dir = if cfg!(windows) {
+        root.join("RUNNER~1").join("AppData")
+    } else {
+        root.join(r"C:\Users\RUNNER~1\AppData")
+    };
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `path` as one single-quoted `sh` word: nothing in it is an escape.
+fn sh_quoted(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// `path` as a YAML double-quoted scalar, every backslash escaped.
+fn yaml_quoted(path: &Path) -> String {
+    serde_json::to_string(&path.to_string_lossy()).unwrap()
+}
+
+/// A phase context file, written under [`windows_shaped`] so every phase raise
+/// reads its context from a drive-letter, backslashed, short-name path.
 fn context(world: &Live, name: &str, value: &Value) -> String {
-    world.input(name, value)
+    let path = windows_shaped(&world.root).join(format!("{name}.json"));
+    std::fs::write(&path, serde_json::to_vec(value).unwrap()).unwrap();
+    let path = path.to_string_lossy().into_owned();
+    if cfg!(windows) {
+        assert!(path.as_bytes()[1] == b':' && path.contains('\\'), "{path}");
+    } else {
+        assert!(path.contains(r"C:\Users\RUNNER~1\AppData"), "{path}");
+    }
+    path
 }
 
 fn phase(world: &Live, session: Option<&str>, phase: &str, context: &str) -> Value {
@@ -1374,7 +1415,7 @@ cp "{runs}/human-items/events.ndjson" "{out}/journal-after"
 fn an_authority_that_cannot_answer_properly_leaves_the_task_open() {
     let world = hooked();
     let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
-    let adapter = world.root.join("adapter.sh");
+    let adapter = adapter(&world);
     let raise = |name: &str| {
         let ctx = context(
             &world,
