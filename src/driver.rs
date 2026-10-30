@@ -190,6 +190,7 @@ pub fn dispatch(cli: Cli) -> Result<i32> {
     // that already answer for their pipe, because a line-oriented document and a blocking
     // stream are what a closed pipe cuts short.
     match cli.command {
+        Verb::HumanItems(args) => crate::human_items::dispatch(args),
         Verb::Start(args) => start(&args),
         Verb::Label(args) => {
             let labels = crate::labels::parse(&args.labels)?;

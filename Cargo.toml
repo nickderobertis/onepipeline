@@ -1255,6 +1255,10 @@ onevcs-testing = "0.19.22"
 # drives one through a run.
 # It also adds `task locate`, whose two refusals `src/writeback.rs`'s exhaustive match must
 # name, in the store's words.
+# **0.12.11 files a private GitHub Projects home's public-repository task privately**
+# (onetaskgraph #3804): its canonical issue goes to a private repository instead of the copy
+# being refused. `tests/e2e/private_github_home.rs` drives a live add through it, and fails
+# on 0.12.9.
 # **0.12.12 is the floor for re-copying a Linear-homed plan** (`otg-recopy-zero-write`): copying
 # an unchanged plan into Linear again sends no write, where an earlier store rewrote every task
 # whose repositories or status Linear holds in another form, and deleted and re-filed its
