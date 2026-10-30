@@ -2629,6 +2629,9 @@ fn converge(
                 // dispatch goes on to settle as, and changing none of it.
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
+                    if let Some(gate) = human.as_ref() {
+                        gate.chain_exhausted(&launch.dir, &stopped);
+                    }
                 }
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
                 Message::Retired(retirements) => {

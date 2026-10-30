@@ -50,6 +50,10 @@ pub const RUN_ENDED: &str = "the run ended";
 pub const JOURNAL_NO_SPACE: &str = "journal-no-space";
 /// The host condition a dispatch refused for want of space raises.
 pub const DISPATCH_NO_SPACE: &str = "dispatch-no-space";
+/// The host condition every identity of a dispatched side being refused raises.
+pub const IDENTITIES_REFUSED: &str = "identities-refused";
+/// How often an identity outage is probed, at most.
+const IDENTITY_PROBE_EVERY_MS: u64 = 60_000;
 /// The dedup-key prefix of every host condition item, followed by the condition.
 pub const HOST_CONDITION_PREFIX: &str = "host:";
 /// The environment variable naming a file a read appends its telemetry line to.
@@ -463,10 +467,10 @@ impl HumanItems {
         session: &str,
         title: &str,
         body: &str,
-        probe: &Path,
+        probe: serde_json::Value,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let mut known = probes(self);
-        known.insert(condition.to_owned(), probe.to_path_buf());
+        known.insert(condition.to_owned(), probe);
         let _ = crate::ledger::write_atomic(
             &probes_path(self),
             &serde_json::to_vec(&known).unwrap_or_default(),
@@ -755,7 +759,7 @@ fn probes_path(store: &HumanItems) -> PathBuf {
     store.dir().join("probes.json")
 }
 
-fn probes(store: &HumanItems) -> BTreeMap<String, PathBuf> {
+fn probes(store: &HumanItems) -> BTreeMap<String, serde_json::Value> {
     std::fs::read(probes_path(store))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -1075,7 +1079,51 @@ impl<'a> Writer<'a> {
             )?;
         }
         writer.probe_dispatch_space()?;
+        writer.probe_identities()?;
         Ok(writer)
+    }
+
+    /// Probe an open identity outage by the one capability that failed: the
+    /// harness's own zero-turn usage read of exactly the identities that were
+    /// refused — never a dispatch, never a model turn — at most once a minute.
+    /// It clears when every one of them reports headroom.
+    fn probe_identities(&mut self) -> Result<(), HumanItemRefusal> {
+        if self.open_condition(IDENTITIES_REFUSED).is_none() {
+            return Ok(());
+        }
+        let mut known = probes(self.store);
+        let Some(probe) = known.get_mut(IDENTITIES_REFUSED) else {
+            return Ok(());
+        };
+        let now = crate::sys::now_millis();
+        if probe["probed_at"]
+            .as_u64()
+            .is_some_and(|at| now.saturating_sub(at) < IDENTITY_PROBE_EVERY_MS)
+        {
+            return Ok(());
+        }
+        probe["probed_at"] = serde_json::json!(now);
+        let identities: Vec<String> = probe["identities"]
+            .as_array()
+            .map(|all| {
+                all.iter()
+                    .filter_map(|i| i.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = probe["cwd"].as_str().map(PathBuf::from);
+        let _ = crate::ledger::write_atomic(
+            &probes_path(self.store),
+            &serde_json::to_vec(&known).unwrap_or_default(),
+            crate::ledger::Durability::Record,
+        );
+        if super::runtime::identities_have_headroom(&identities, cwd) {
+            self.clear(
+                IDENTITIES_REFUSED,
+                &format!("{} report headroom again", identities.join(", ")),
+            )?;
+        }
+        Ok(())
     }
 
     /// Probe each open dispatch outage by the one capability that failed: a file
@@ -1084,7 +1132,10 @@ impl<'a> Writer<'a> {
         if self.open_condition(DISPATCH_NO_SPACE).is_none() {
             return Ok(());
         }
-        let Some(dir) = probes(self.store).remove(DISPATCH_NO_SPACE) else {
+        let Some(dir) = probes(self.store)
+            .remove(DISPATCH_NO_SPACE)
+            .and_then(|probe| Some(PathBuf::from(probe.get("dir")?.as_str()?)))
+        else {
             return Ok(());
         };
         let probe = dir.join(format!(".onepipeline-space-probe-{}", crate::sys::pid()));

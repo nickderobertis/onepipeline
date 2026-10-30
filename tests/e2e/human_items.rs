@@ -769,3 +769,78 @@ umount "{scratch}" || exit 91
         .iter()
         .any(|e| e["kind"] == "human-item-auto-resolved"));
 }
+
+fn host_items(world: &World) -> Vec<Value> {
+    items(world, &["--host"])
+}
+
+/// Every identity a dispatched side could run as was refused for a reason only
+/// a person can clear: one urgent host item, which then holds every dispatch on
+/// the host. A refusal that is not definitive — one transient or unclassified
+/// candidate among them, or a single classified death — raises nothing.
+#[test]
+fn only_every_identity_refused_definitively_raises_one_host_item() {
+    let exhausted = |candidates: &str| {
+        let world = World::new("human-item-identities");
+        enabled(&world);
+        world.script(
+            "build.died-as",
+            "provider-failure fallback_chain_exhausted every candidate in the chain was \
+             attempted and none ran\n",
+        );
+        world.script("build.exhausted", candidates);
+        let name = "refused";
+        let project = world.plan(
+            name,
+            &plan_of(name, vec![agent("build", &[]), agent("later", &["build"])]),
+        );
+        world.run(&["start", &project, "--attach"]).settled();
+        world
+    };
+    let world = exhausted(
+        "claude-code:work quota out of extra usage until 5pm\n\
+         codex auth 401 Unauthorized: token expired\n",
+    );
+    let hosts = host_items(&world);
+    assert_eq!(hosts.len(), 1, "{hosts:?}");
+    let host = &hosts[0]["item"];
+    assert_eq!(host["priority"], "urgent");
+    assert_eq!(host["owner"]["session"], "session-human-item-identities");
+    let body = host["body"].as_str().unwrap();
+    assert!(
+        body.contains("claude-code:work [quota]") && body.contains("codex [auth]"),
+        "{body}"
+    );
+    // The probe asks the harness's own zero-turn usage read of exactly those
+    // identities; with neither able to report headroom the item stays open, and
+    // nothing was dispatched to find that out.
+    let dispatched_before = dispatched(&world, "refused").len();
+    world.run(&["human-items", "list", "--host"]).exited(0);
+    assert_eq!(host_items(&world).len(), 1);
+    assert_eq!(dispatched(&world, "refused").len(), dispatched_before);
+
+    for not_definitive in [
+        // One candidate the harness could not classify.
+        "claude-code:work quota out of extra usage\ngemini - \n",
+        // A transient rate limit beside a quota refusal.
+        "claude-code:work quota out of extra usage\ncodex rate_limit 429 slow down\n",
+        // One identity alone.
+        "claude-code:work quota out of extra usage\n",
+    ] {
+        let world = exhausted(not_definitive);
+        assert!(
+            host_items(&world).is_empty(),
+            "{not_definitive:?} raised {:?}",
+            host_items(&world)
+        );
+    }
+    let world = World::new("human-item-classified");
+    enabled(&world);
+    world.script(
+        "build.died-as",
+        "provider-failure quota harness failed (quota)\n",
+    );
+    let project = world.plan("one", &plan_of("one", vec![agent("build", &[])]));
+    world.run(&["start", &project, "--attach"]).settled();
+    assert!(host_items(&world).is_empty());
+}

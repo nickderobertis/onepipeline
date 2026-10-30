@@ -58,7 +58,7 @@ pub(crate) fn dispatch_refused(error: &crate::error::Error) {
     let Some((store, session)) = driving else {
         return;
     };
-    let probe = path.parent().unwrap_or(path);
+    let probe = serde_json::json!({"dir": path.parent().unwrap_or(path)});
     if let Err(why) = store.raise_condition(
         super::live::DISPATCH_NO_SPACE,
         &session,
@@ -75,6 +75,94 @@ pub(crate) fn dispatch_refused(error: &crate::error::Error) {
             "onepipeline: a dispatch found no space, and its host item was not raised: {why}"
         );
     }
+}
+
+/// The failure kinds that say an identity cannot serve any turn until a person
+/// acts: out of quota, refused its credentials, or the provider unavailable.
+const DEFINITIVE: [&str; 3] = ["quota", "auth", "server_overloaded"];
+
+/// An exhausted chain whose every candidate was refused for a definitive reason
+/// raises the host's one identity item; one candidate refused, a mix that
+/// includes a transient or unclassified failure, or a chain that stopped at one
+/// candidate raises nothing.
+pub(crate) fn chain_exhausted(
+    store: &HumanItems,
+    session: &str,
+    cwd: &std::path::Path,
+    stopped: &crate::engine::ChainStopped,
+) {
+    let attempted = &stopped.attempted;
+    if attempted.len() < 2
+        || !attempted.iter().all(|c| {
+            c.failure_kind
+                .as_deref()
+                .is_some_and(|kind| DEFINITIVE.contains(&kind))
+        })
+    {
+        return;
+    }
+    let identities: Vec<&str> = attempted.iter().map(|c| c.identity.as_str()).collect();
+    let refusals = attempted
+        .iter()
+        .map(|c| {
+            format!(
+                "- {} [{}]: {}",
+                c.identity,
+                c.failure_kind.as_deref().unwrap_or_default(),
+                c.detail
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Err(why) = store.raise_condition(
+        super::live::IDENTITIES_REFUSED,
+        session,
+        "Restore an identity dispatches can run as",
+        &format!(
+            "Every identity of member '{}' was refused, so no dispatch on this host can run:\n\
+             {refusals}\nRestore one of them; this resolves itself once they report headroom.",
+            stopped.member
+        ),
+        serde_json::json!({"identities": identities, "cwd": cwd}),
+    ) {
+        eprintln!(
+            "onepipeline: every identity was refused, and its host item was not raised: {why}"
+        );
+    }
+}
+
+/// Whether every one of `identities` reports headroom, read by the harness's own
+/// zero-turn usage probe — what `oneharness usage` answers, in process.
+pub(crate) fn identities_have_headroom(
+    identities: &[String],
+    cwd: Option<std::path::PathBuf>,
+) -> bool {
+    if identities.is_empty() {
+        return false;
+    }
+    let request = oneharness_core::io::usage::UsageRequest {
+        harness: identities.to_vec(),
+        cwd,
+        timeout: Some(Duration::from_secs(20)),
+        ..Default::default()
+    };
+    let Ok(report) = oneharness_core::io::usage::report(&request) else {
+        return false;
+    };
+    identities.iter().all(|wanted| {
+        let (harness, variant) = match wanted.split_once(':') {
+            Some((h, v)) => (h, Some(v)),
+            None => (wanted.as_str(), None),
+        };
+        report.identities.iter().any(|seen| {
+            seen.harness == harness
+                && seen.variant.as_ref().map(ToString::to_string).as_deref() == variant
+                && matches!(
+                    seen.availability,
+                    oneharness_core::domain::usage::UsageAvailability::Available { .. }
+                )
+        })
+    })
 }
 
 /// How often a driver looks at the human-item store.
@@ -256,6 +344,15 @@ impl Gate {
     /// which is what the loop's idle wait can afford to ask.
     pub(crate) fn moved(&self) -> bool {
         self.length() != self.seen
+    }
+
+    /// An exhausted identity chain one of this run's dispatches met.
+    pub(crate) fn chain_exhausted(
+        &self,
+        cwd: &std::path::Path,
+        stopped: &crate::engine::ChainStopped,
+    ) {
+        chain_exhausted(&self.store, &self.session, cwd, stopped);
     }
 
     /// Retire every open item holding this run's work, because the run ended.
