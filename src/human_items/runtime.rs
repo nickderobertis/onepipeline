@@ -204,6 +204,9 @@ pub(crate) struct Gate {
     raised: BTreeSet<String>,
     released: BTreeSet<String>,
     held: BTreeSet<String>,
+    /// Whether the store has been read at all. Until it has, nothing is known
+    /// about the holds standing, so every step is held rather than none.
+    read: bool,
     looked: Option<Instant>,
     /// The host journal's length when the last pass read it.
     seen: u64,
@@ -228,6 +231,7 @@ impl Gate {
             raised: BTreeSet::new(),
             released: BTreeSet::new(),
             held: BTreeSet::new(),
+            read: false,
             looked: None,
             seen: 0,
             due: None,
@@ -265,7 +269,7 @@ impl Gate {
         }
         let items = match self.store.items() {
             Ok(items) => items,
-            Err(why) => {
+            Err(why) if self.read => {
                 eprintln!(
                     "onepipeline: run '{}' could not read its human items, so the holds it last \
                      read stand: {why}",
@@ -273,7 +277,19 @@ impl Gate {
                 );
                 return self.held.clone();
             }
+            // A host or plan hold this driver has never read may stand, so it
+            // dispatches nothing until it has read one.
+            Err(why) => {
+                eprintln!(
+                    "onepipeline: run '{}' could not read its human items, so it holds every \
+                     step until it can: {why}",
+                    self.run
+                );
+                self.held = state.graph.ids().cloned().collect();
+                return self.held.clone();
+            }
         };
+        self.read = true;
         if items.values().any(|i| {
             i.state == HumanItemState::Open
                 && i.dedup_key.starts_with(super::live::HOST_CONDITION_PREFIX)

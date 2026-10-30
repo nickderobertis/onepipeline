@@ -1437,6 +1437,41 @@ fn a_driver_keeps_its_holds_while_the_item_store_is_unreadable() {
     });
 }
 
+/// A driver whose very first read of the item store fails holds every step
+/// rather than none, because a host hold it has never read may stand; once the
+/// store reads, the hold it was waiting on is honored and its release arrives.
+#[cfg(unix)]
+#[test]
+fn a_driver_that_has_never_read_the_item_store_holds_every_step() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-unread-first");
+    enabled(&world);
+    let name = "unreadfirst";
+    let project = world.plan(name, &plan_of(name, vec![agent("a", &[])]));
+    let host = raise(
+        &world,
+        "host",
+        &input(
+            "outage",
+            "task",
+            "ops",
+            None,
+            None,
+            json!({"scope": "host"}),
+        ),
+    );
+    let store = world.runs.join("human-items");
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o000)).unwrap();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    stays_undispatched(&world, name, std::time::Duration::from_secs(3));
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+    stays_undispatched(&world, name, std::time::Duration::from_secs(1));
+    world.run(&["human-items", "complete", &host]).exited(0);
+    world.until("the held node to run", |w| {
+        settled(w, name, "a").as_deref() == Some("done")
+    });
+}
+
 /// While a driver is running, a resolution whose resolver could not release its
 /// step — the run's command queue refused the resolver — is released by that same
 /// driver once the resolver has had its chance.
