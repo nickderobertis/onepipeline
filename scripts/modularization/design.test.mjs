@@ -4135,6 +4135,38 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
       assert.ok(wall.residual + wall.e2e === wall.today);
       assert.ok(wall.projected.median <= wall.projected.max && wall.projected.max <= wall.today);
     }
+    // The decision summary's counts come from the same rows, and each upper bound only adds skipping.
+    const { causes } = result;
+    const linuxShare = (row) =>
+      row.affected.reduce((sum, suite) => sum + result.platforms.linux.suiteSeconds[suite], 0) /
+      result.platforms.linux.secondsPerRun;
+    assert.equal(causes.broad, result.rows.filter((row) => linuxShare(row) >= 0.9).length);
+    assert.equal(
+      causes.lock.sibling + causes.lock.thirdParty + causes.lock.both,
+      causes.prs["lockfile resolution"],
+    );
+    const together = causes.freed.at(-1);
+    for (const kind of together.kinds) {
+      const alone = causes.freed.find(
+        (entry) => entry.kinds.length === 1 && entry.kinds[0] === kind,
+      );
+      if (!alone) continue;
+      assert.ok(
+        together.secondsSkip >= alone.secondsSkip &&
+          alone.secondsSkip >= result.platforms.linux.secondsSkip,
+      );
+    }
+    const wall = JSON.parse(readFileSync("scripts/modularization/ci-wall.json", "utf8"));
+    for (const [platform, data] of Object.entries(wall.platforms)) {
+      const legs = data.breakdown.legs ?? [{ segments: data.breakdown.segments }];
+      for (const [index, leg] of legs.entries())
+        assert.ok(
+          Math.abs(
+            leg.segments.reduce((sum, part) => sum + part.seconds, 0) - data.legs[index].jobSeconds,
+          ) < 5,
+          `${platform} leg ${index + 1}`,
+        );
+    }
     // A cross-command part links the commands it drives, not the facade, unless a phase is unattributed.
     const crates = result.mapping.crates;
     const parts = Object.keys(split.suites).filter((name) => name.startsWith("cross-command--"));

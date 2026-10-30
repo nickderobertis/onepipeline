@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { sourceOwners, projectSourceChange, declarations } from "./source-projection.mjs";
 import { targetGraph } from "./target-graph.mjs";
 import { evidence, profileTable } from "./replay.mjs";
-import { commandMapping, run } from "./command-replay.mjs";
+import { commandMapping, lockPackages, run } from "./command-replay.mjs";
 import { SECTIONED_DOCS, scopeChanged } from "./contract-sections.mjs";
 import { SPLIT_PATH, checkSplit, deriveSplit, targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping, mergedChanges } from "../crate-split-replay.mjs";
@@ -196,6 +196,153 @@ export function splitMigration(result, split) {
   return steps;
 }
 
+/** Packages of the sibling engines this repository links, as the lockfile names them. */
+export const SIBLING = /^one[a-z]/;
+
+/**
+ * What kind of input a PR's effective path is, and the design change that would remove it. A test
+ * file's path is a genuine helper or test change unless that file's hunks fell outside every item.
+ */
+export function classify(path, row) {
+  const whole = (file) =>
+    (row?.sourceProjection ?? []).some((entry) => entry.file === file && entry.retainedWholeFile);
+  if (path.startsWith("resolved/") && path.endsWith("/lock.json"))
+    return ["lockfile resolution", "no: a crate's resolved dependencies changed"];
+  if (path.startsWith("resolved/") && path.endsWith("/manifest.json"))
+    return ["manifest requirement", "no: a crate's dependency requirement changed"];
+  if (path.startsWith("resolved/")) return ["toolchain", "no: the compiler changed"];
+  if (path.startsWith("migrated-tests/") && path.includes("/config/"))
+    return ["test configuration section", "no: the section every runner reads changed"];
+  if (path.startsWith("migrated-tests/")) {
+    const file = path.split("/").slice(2).join("/");
+    if (file === "tests/e2e/harness.rs")
+      return whole(file)
+        ? [
+            "harness item outside one helper",
+            "by a further split: harness.rs into per-concern files, so World's core, its Drop and its imports stop sharing a file with the store and hook helpers (helpers move; no assertion changes)",
+          ]
+        : ["harness helper", "no: a helper its users call changed"];
+    return whole(file)
+      ? [
+          "test file outside one test",
+          "by a further split: each part's tests in their own file, so a module's imports and added tests reach only that part (tests move; no assertion changes)",
+        ]
+      : ["test code", "no: the part's own tests changed"];
+  }
+  if (path.startsWith("src/"))
+    return [
+      "engine source outside any attributed item",
+      "by a further split: the file physically divided along the subsystem boundaries, so a hunk outside every item lands in one crate's file",
+    ];
+  if (path.startsWith("moved/")) return ["engine source", "no: shared engine code changed"];
+  if (path.startsWith("crates/testfakes/"))
+    return ["test fake", "no: a fake every reaching suite starts"];
+  if (/^(nx\.json|package(-lock)?\.json)$/.test(path))
+    return ["workspace tooling", "no: Nx and its lockfile are inputs of every target"];
+  if (path.startsWith("docs/"))
+    return [
+      "document read whole",
+      "only by a test edit giving the read a needle that names its section",
+    ];
+  return ["other", "no"];
+}
+
+/** Kinds a further design change could free; each is measured as if it selected nothing. */
+export const REMOVABLE = [
+  "harness item outside one helper",
+  "test file outside one test",
+  "engine source outside any attributed item",
+];
+
+/**
+ * For the PRs still selecting at least 90% of Linux seconds: the input kinds that alone select
+ * that much, how many lockfile changes bump a sibling engine versus a third-party package, and the
+ * skip shares an upper bound on each further split would reach.
+ */
+export function causeAnalysis(result, lockChanges) {
+  const compiled = compileMapping(result.mapping.selection);
+  const linux = result.platforms.linux;
+  const share = (affected) =>
+    affected.reduce((sum, suite) => sum + linux.suiteSeconds[suite], 0) / linux.secondsPerRun;
+  const broad = result.rows.filter((row) => share(row.affected) >= 0.9);
+  const prs = {};
+  const sole = {};
+  const lock = { sibling: 0, thirdParty: 0, both: 0 };
+  for (const row of broad) {
+    const byKind = {};
+    for (const file of row.effectiveFiles) {
+      const kind = classify(file, row)[0];
+      byKind[kind] ??= [];
+      byKind[kind].push(file);
+    }
+    const forcing = Object.keys(byKind).filter(
+      (kind) => share(affectedSuites(compiled, byKind[kind]).affected) >= 0.9,
+    );
+    const named = forcing.length ? forcing : ["several inputs together"];
+    for (const kind of named) prs[kind] = (prs[kind] ?? 0) + 1;
+    if (named.length === 1) sole[named[0]] = (sole[named[0]] ?? 0) + 1;
+    if (forcing.includes("lockfile resolution")) {
+      const changed = lockChanges[row.commit] ?? [];
+      const sibling = changed.some((name) => SIBLING.test(name));
+      const third = changed.some((name) => !SIBLING.test(name));
+      lock[sibling && third ? "both" : sibling ? "sibling" : "thirdParty"]++;
+    }
+  }
+  const counterfactual = (kinds) => {
+    const affected = result.rows.map(
+      (row) =>
+        affectedSuites(
+          compiled,
+          row.effectiveFiles.filter((file) => !kinds.includes(classify(file, row)[0])),
+        ).affected,
+    );
+    return {
+      kinds,
+      suiteSkip:
+        affected.reduce((sum, list) => sum + result.suites - list.length, 0) /
+        (result.suites * affected.length),
+      secondsSkip: 1 - affected.reduce((sum, list) => sum + share(list), 0) / affected.length,
+      broad: affected.filter((list) => share(list) >= 0.9).length,
+    };
+  };
+  return {
+    broad: broad.length,
+    prs,
+    sole,
+    lock,
+    // Every forcing kind as if it selected nothing: an upper bound for the kinds a further split
+    // could free, and only a measure of weight for the kinds no design change removes.
+    freed: [
+      ...Object.keys(prs)
+        .filter((kind) => kind !== "several inputs together")
+        .sort()
+        .map((kind) => counterfactual([kind])),
+      counterfactual(REMOVABLE),
+    ],
+  };
+}
+
+/** The lockfile packages each PR changed, by name. */
+function lockChanges(changes) {
+  const out = {};
+  for (const change of changes.filter((entry) => entry.files.includes("Cargo.lock"))) {
+    const [before, after] = [`${change.commit}^`, change.commit].map(
+      (revision) =>
+        new Map(
+          [...lockPackages(show(revision, "Cargo.lock")).values()].map((pkg) => [
+            pkg.key,
+            pkg.block,
+          ]),
+        ),
+    );
+    const names = new Set();
+    for (const [key, block] of before) if (after.get(key) !== block) names.add(key.split(" ")[0]);
+    for (const key of after.keys()) if (!before.has(key)) names.add(key.split(" ")[0]);
+    out[change.commit] = [...names].sort();
+  }
+  return out;
+}
+
 export function splitEvidence() {
   const { layout: base } = evidence();
   const moves = JSON.parse(read("scripts/modularization/target-moves.json"));
@@ -255,7 +402,11 @@ export function splitEvidence() {
       ...result,
       scopes: phaseMap.scopes,
       wall: wallProjection(selectedShares(result.rows, result.platforms), wall),
+      wallBreakdown: Object.fromEntries(
+        Object.entries(wall.platforms).map(([platform, data]) => [platform, data.breakdown]),
+      ),
       splitMigration: splitMigration(result, split),
+      causes: causeAnalysis(result, lockChanges(changes)),
     },
   };
 }

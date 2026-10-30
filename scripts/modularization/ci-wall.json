@@ -4,20 +4,265 @@
   "limitSeconds": 1800,
   "platforms": {
     "linux": {
-      "legs": [{ "job": 123708232415, "name": "gate", "jobSeconds": 6474, "bootstrapSeconds": 302, "e2eSeconds": 3502.824, "e2eTests": 1918 }],
-      "compileStressSeconds": 1160.3
+      "legs": [
+        {
+          "job": 123708232415,
+          "name": "gate",
+          "jobSeconds": 6474,
+          "bootstrapSeconds": 302,
+          "e2eSeconds": 3502.824,
+          "e2eTests": 1918
+        }
+      ],
+      "compileStressSeconds": 1160.3,
+      "breakdown": {
+        "how": "step seconds from the job's steps; inside the quality-gate step Nx flushes every task's output at the end, so task spans come from the per-test start stamps in the job's test-profile-gate artifact and task durations from each tool's own summary line",
+        "segments": [
+          {
+            "part": "runner setup steps (checkout, caches, toolchains)",
+            "seconds": 27
+          },
+          {
+            "part": "bootstrap",
+            "seconds": 302
+          },
+          {
+            "part": "quality gate before the e2e tier starts: the instrumented test-archive build and the tasks Nx runs beside it",
+            "seconds": 1709
+          },
+          {
+            "part": "e2e tier",
+            "seconds": 3502.824
+          },
+          {
+            "part": "quality gate after the e2e tier",
+            "seconds": 926.176
+          },
+          {
+            "part": "steps after the quality gate (profile records, failed-test re-run, cleanup)",
+            "seconds": 7
+          }
+        ],
+        "overlapping": [
+          {
+            "part": "onepipeline-npm:test",
+            "seconds": 1467
+          },
+          {
+            "part": "onepipeline:test-rest",
+            "seconds": 404.084
+          },
+          {
+            "part": "onepipeline-note-journeys:test",
+            "seconds": 295.521
+          },
+          {
+            "part": "onepipeline-stop-verdict:test",
+            "seconds": 82.698
+          },
+          {
+            "part": "onepipeline-codex-server:test",
+            "seconds": 65.688
+          },
+          {
+            "part": "onepipeline:budgets",
+            "seconds": 65.675
+          }
+        ],
+        "unreported": "the instrumented test-archive build, format-check, lint, and the contract and modularization tests, whose durations the job log does not carry"
+      }
     },
     "macos": {
-      "legs": [{ "job": 123708377377, "name": "Mac PR proofs", "jobSeconds": 7890, "bootstrapSeconds": 440, "e2eSeconds": 6224.416, "e2eTests": 1890 }],
-      "compileStressSeconds": 471.0
+      "legs": [
+        {
+          "job": 123708377377,
+          "name": "Mac PR proofs",
+          "jobSeconds": 7890,
+          "bootstrapSeconds": 440,
+          "e2eSeconds": 6224.416,
+          "e2eTests": 1890
+        }
+      ],
+      "compileStressSeconds": 471.0,
+      "breakdown": {
+        "how": "each Nx task runs alone and streams, so a task's span is the log timestamp of its `> nx run` header to the next header; step spans from the step headers",
+        "legs": [
+          {
+            "segments": [
+              {
+                "part": "setup",
+                "seconds": 35.3
+              },
+              {
+                "part": "bootstrap",
+                "seconds": 440.1
+              },
+              {
+                "part": "fmt-check and lint",
+                "seconds": 238.7
+              },
+              {
+                "part": "onepipeline:test-quick-archive (build)",
+                "seconds": 372.0
+              },
+              {
+                "part": "onepipeline-codex-server:test-quick",
+                "seconds": 130.0
+              },
+              {
+                "part": "onepipeline-pooled-slot:test-quick",
+                "seconds": 57.1
+              },
+              {
+                "part": "onepipeline-contract:test-quick",
+                "seconds": 3.2
+              },
+              {
+                "part": "onepipeline-note-journeys:test-quick",
+                "seconds": 129.3
+              },
+              {
+                "part": "onepipeline-e2e:test-quick",
+                "seconds": 6226.4
+              },
+              {
+                "part": "onepipeline:test-quick",
+                "seconds": 235.1
+              },
+              {
+                "part": "after the quality gate",
+                "seconds": 19.7
+              }
+            ]
+          }
+        ]
+      }
     },
     "windows": {
       "legs": [
-        { "job": 123708377355, "name": "cross proof (windows-latest, shard 1/2)", "jobSeconds": 6429, "bootstrapSeconds": 754, "e2eSeconds": 4647.258, "e2eTests": 817 },
-        { "job": 123708377246, "name": "cross proof (windows-latest, shard 2/2)", "jobSeconds": 6095, "bootstrapSeconds": 765, "e2eSeconds": 4482.407, "e2eTests": 816 }
+        {
+          "job": 123708377355,
+          "name": "cross proof (windows-latest, shard 1/2)",
+          "jobSeconds": 6429,
+          "bootstrapSeconds": 754,
+          "e2eSeconds": 4647.258,
+          "e2eTests": 817
+        },
+        {
+          "job": 123708377246,
+          "name": "cross proof (windows-latest, shard 2/2)",
+          "jobSeconds": 6095,
+          "bootstrapSeconds": 765,
+          "e2eSeconds": 4482.407,
+          "e2eTests": 816
+        }
       ],
-      "compileStressSeconds": 545.8
+      "compileStressSeconds": 545.8,
+      "breakdown": {
+        "how": "each Nx task runs alone and streams, so a task's span is the log timestamp of its `> nx run` header to the next header; step spans from the step headers",
+        "legs": [
+          {
+            "segments": [
+              {
+                "part": "setup",
+                "seconds": 54.1
+              },
+              {
+                "part": "bootstrap",
+                "seconds": 754.0
+              },
+              {
+                "part": "fmt-check and lint",
+                "seconds": 262.1
+              },
+              {
+                "part": "onepipeline:test-quick-archive (build)",
+                "seconds": 303.8
+              },
+              {
+                "part": "onepipeline-codex-server:test-quick",
+                "seconds": 85.2
+              },
+              {
+                "part": "onepipeline-pooled-slot:test-quick",
+                "seconds": 78.6
+              },
+              {
+                "part": "onepipeline-contract:test-quick",
+                "seconds": 2.9
+              },
+              {
+                "part": "onepipeline-note-journeys:test-quick",
+                "seconds": 60.5
+              },
+              {
+                "part": "onepipeline-e2e:test-quick",
+                "seconds": 4650.1
+              },
+              {
+                "part": "onepipeline:test-quick",
+                "seconds": 156.6
+              },
+              {
+                "part": "after the quality gate",
+                "seconds": 19.0
+              }
+            ]
+          },
+          {
+            "segments": [
+              {
+                "part": "setup",
+                "seconds": 54.0
+              },
+              {
+                "part": "bootstrap",
+                "seconds": 765.0
+              },
+              {
+                "part": "fmt-check and lint",
+                "seconds": 1.8
+              },
+              {
+                "part": "onepipeline:test-quick-archive (build)",
+                "seconds": 377.0
+              },
+              {
+                "part": "onepipeline-codex-server:test-quick",
+                "seconds": 90.0
+              },
+              {
+                "part": "onepipeline-pooled-slot:test-quick",
+                "seconds": 2.4
+              },
+              {
+                "part": "onepipeline-contract:test-quick",
+                "seconds": 3.3
+              },
+              {
+                "part": "onepipeline-note-journeys:test-quick",
+                "seconds": 113.0
+              },
+              {
+                "part": "onepipeline-e2e:test-quick",
+                "seconds": 4485.3
+              },
+              {
+                "part": "onepipeline:test-quick",
+                "seconds": 111.7
+              },
+              {
+                "part": "after the quality gate",
+                "seconds": 89.2
+              }
+            ]
+          }
+        ]
+      }
     }
   },
-  "local": { "source": "the profile's local run F, its test phase under shared-host load", "testPhaseSeconds": 10293.5 }
+  "local": {
+    "source": "the profile's local run F, its test phase under shared-host load",
+    "testPhaseSeconds": 10293.5
+  }
 }

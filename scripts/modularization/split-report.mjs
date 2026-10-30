@@ -3,6 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
+import { classify } from "./split-replay.mjs";
 
 export const SPLIT_MARKER = "<!-- BEGIN TEST SPLIT -->";
 const DOC = "docs/modularization-test-split.md";
@@ -29,39 +30,6 @@ export function crateOnly(targetDoc) {
   return rows;
 }
 
-/** What kind of input a forcing path is, and whether a design change removes it. */
-export function classify(path) {
-  if (path.startsWith("resolved/") && path.endsWith("/lock.json"))
-    return ["lockfile resolution", "no: a crate's resolved dependencies changed"];
-  if (path.startsWith("resolved/") && path.endsWith("/manifest.json"))
-    return ["manifest requirement", "no: a crate's dependency requirement changed"];
-  if (path.startsWith("resolved/")) return ["toolchain", "no: the compiler changed"];
-  if (path.startsWith("migrated-tests/") && path.endsWith("tests/e2e/harness.rs"))
-    return [
-      "harness item outside one helper",
-      "by a further split: harness.rs into per-concern files, so World's core, its Drop and its imports stop sharing a file with the store and hook helpers (helpers move; no assertion changes)",
-    ];
-  if (path.startsWith("migrated-tests/") && path.includes("/config/"))
-    return ["test configuration section", "no: the section every runner reads changed"];
-  if (path.startsWith("migrated-tests/"))
-    return [
-      "test file outside one test",
-      "by a further split: each part's tests in their own file, so a module's imports and added tests reach only that part (tests move; no assertion changes)",
-    ];
-  if (path.startsWith("moved/") || path.startsWith("src/"))
-    return ["engine source", "no: shared engine code changed (see the target layout)"];
-  if (path.startsWith("crates/testfakes/"))
-    return ["test fake", "no: a fake every reaching suite starts"];
-  if (/^(nx\.json|package(-lock)?\.json)$/.test(path))
-    return ["workspace tooling", "no: Nx and its lockfile are inputs of every target"];
-  if (path.startsWith("docs/"))
-    return [
-      "document read whole",
-      "only by a test edit giving the read a needle that names its section",
-    ];
-  return ["other", "no"];
-}
-
 export function splitAppendix({ split, result }, targetDoc) {
   const before = crateOnly(targetDoc);
   const compiled = compileMapping(result.mapping.selection);
@@ -72,7 +40,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Replay of crates and test split together",
     "",
-    `${result.rows.length} PRs, ${result.tests} test phases of ${result.originalTests} existing e2e tests, ${result.suites} suites. Seconds are the profile's module measurements divided evenly among each module's tests, as in the target layout.`,
+    `**Projected** (replay model): ${result.rows.length} PRs, ${result.tests} test phases of ${result.originalTests} existing e2e tests, ${result.suites} suites. Seconds are the profile's measured module seconds divided evenly among each module's tests, as in the target layout. The baseline and crate-only columns are the target layout's projections.`,
     "",
     "| Platform | Baseline suite runs skipped | Baseline seconds skipped | Crates only: suite runs | Crates only: seconds | Crates and test split: suite runs | Crates and test split: seconds |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -83,7 +51,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Test-split migration steps",
     "",
-    "Each row is the skip share once that step has landed on top of the complete crate layout. Suite-run shares use that step's own suite count as their denominator.",
+    "**Projected** (replay model): each row is the skip share once that step has landed on top of the complete crate layout. Suite-run shares use that step's own suite count as their denominator.",
     "",
     "| Step | Suites | Suite runs skipped | Linux seconds | macOS seconds | Windows seconds | Local seconds |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -94,7 +62,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Projected job wall clock against the 30-minute line",
     "",
-    "Typical is the median PR, worst is the PR selecting the most estimated seconds. A projection holds the measured job less its e2e tier fixed and scales the e2e tier by the PR's selected share; the stress columns add the target layout's all-runner compile stress. Windows is one job whose e2e tier is both of today's legs added: a second leg would be sharding, which does not count toward the line.",
+    "The first three columns are **measured** on run 40947970908; the rest are **projected**. Typical is the median PR, worst is the PR selecting the most estimated seconds. A projection holds the measured job less its e2e tier fixed and scales the e2e tier by the PR's selected share; the stress columns add the target layout's all-runner compile stress. Windows is one job whose e2e tier is both of today's legs added: a second leg would be sharding, which does not count toward the line.",
     "",
     "| Job | Today, full sweep | Fixed residual | e2e tier | Typical selected share | Typical projected | Worst projected | PRs over 30 min | Typical with compile stress | Worst with compile stress |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
@@ -103,9 +71,69 @@ export function splitAppendix({ split, result }, targetDoc) {
       return `| ${platform} | ${secs(wall.today)} | ${secs(wall.residual)} | ${secs(wall.e2e)} | ${pct(wall.typicalShare)} | ${secs(wall.projected.median)} | ${secs(wall.projected.max)} | ${wall.projected.over}/${result.rows.length} | ${secs(wall.withCompileStress.median)} | ${secs(wall.withCompileStress.max)} |`;
     }),
     "",
-    `Local gate test phase: ${secs(result.wall.local.testPhase)} measured; typical projected ${secs(result.wall.local.projected.median)}, worst ${secs(result.wall.local.projected.max)}. This scales only the test phase; the gate's compilation and other tiers are not modelled.`,
+    `Local gate test phase: ${secs(result.wall.local.testPhase)} **measured** (the profile's run F); **projected** typical ${secs(result.wall.local.projected.median)}, worst ${secs(result.wall.local.projected.max)}. This scales only the test phase; the gate's compilation and other tiers are not modelled.`,
     "",
   ];
+  const { causes } = result;
+  const freedBy = new Map(causes.freed.map((entry) => [entry.kinds.join(" + "), entry]));
+  const anyRow = (kind) =>
+    result.rows.find((row) => row.effectiveFiles.some((file) => classify(file, row)[0] === kind));
+  const removal = (kind) => {
+    const row = anyRow(kind);
+    const file = row?.effectiveFiles.find((path) => classify(path, row)[0] === kind);
+    return file ? classify(file, row)[1] : "no";
+  };
+  lines.push(
+    "## Decision summary",
+    "",
+    `**Projected** (replay model): ${causes.broad} of ${result.rows.length} PRs still select at least 90% of a full run's estimated Linux seconds. A PR counts under every input kind whose own inputs alone select at least 90%; one with no such kind counts under "several inputs together". The skip shares treat that kind as selecting nothing: an upper bound where a further split could free it, and only a measure of its weight where no design change removes it.`,
+    "",
+    "| Forcing input kind | PRs it forces (of the broad PRs) | PRs it alone forces | Further design change that would free it | Suite runs skipped if freed | Linux seconds skipped if freed | PRs still at 90% or more |",
+    "| --- | ---: | ---: | --- | ---: | ---: | ---: |",
+    ...Object.entries(causes.prs)
+      .sort((a, b) => b[1] - a[1])
+      .map(([kind, count]) => {
+        const freed = freedBy.get(kind);
+        return `| ${kind} | ${count} | ${causes.sole[kind] ?? 0} | ${cell(kind === "several inputs together" ? "none: no single kind forces these" : removal(kind))} | ${freed ? pct(freed.suiteSkip) : "n/a"} | ${freed ? pct(freed.secondsSkip) : "n/a"} | ${freed ? freed.broad : "n/a"} |`;
+      }),
+    (() => {
+      const all = causes.freed.at(-1);
+      return `| every kind a further split could free (${all.kinds.join("; ")}) | | | all three splits together | ${pct(all.suiteSkip)} | ${pct(all.secondsSkip)} | ${all.broad} |`;
+    })(),
+    "",
+    `**Measured** (each PR's own parent and merge lockfiles) for the ${causes.lock.sibling + causes.lock.thirdParty + causes.lock.both} broad PRs a lockfile resolution forces; sibling engines are the \`one*\` packages this repository links:`,
+    "",
+    "| Lockfile change | PRs |",
+    "| --- | ---: |",
+    `| sibling-engine packages only | ${causes.lock.sibling} |`,
+    `| third-party packages only | ${causes.lock.thirdParty} |`,
+    `| both | ${causes.lock.both} |`,
+    "",
+    "## Where each job's residual goes",
+    "",
+    "**Measured** on run 40947970908. Segments add up to the job; Linux's quality-gate tasks run concurrently, so its task durations overlap and are listed apart.",
+    "",
+  );
+  for (const [platform, breakdown] of Object.entries(result.wallBreakdown)) {
+    const legs = breakdown.legs ?? [{ segments: breakdown.segments }];
+    for (const [index, leg] of legs.entries()) {
+      lines.push(
+        `**${platform}${legs.length > 1 ? `, leg ${index + 1}` : ""}** (${breakdown.how}):`,
+        "",
+        "| Segment | Seconds |",
+        "| --- | ---: |",
+        ...leg.segments.map(
+          (segment) => `| ${cell(segment.part)} | ${segment.seconds.toFixed(1)} |`,
+        ),
+        "",
+      );
+    }
+    if (breakdown.overlapping)
+      lines.push(
+        `Task durations the Linux job log reports, overlapping the segments above: ${breakdown.overlapping.map((task) => `${task.part} ${Math.round(task.seconds)} s`).join(", ")}. Not reported in the job log: ${breakdown.unreported}.`,
+        "",
+      );
+  }
   // Every selected suite-second charged evenly to the inputs that selected that suite.
   const charged = {};
   const removals = new Map([["unattributed", "no"]]);
@@ -114,9 +142,9 @@ export function splitAppendix({ split, result }, targetDoc) {
     for (const file of row.effectiveFiles)
       for (const suite of affectedSuites(compiled, [file]).affected) {
         causes[suite] ??= new Set();
-        causes[suite].add(classify(file)[0]);
+        causes[suite].add(classify(file, row)[0]);
       }
-    for (const file of row.effectiveFiles) removals.set(...classify(file));
+    for (const file of row.effectiveFiles) removals.set(...classify(file, row));
     for (const suite of row.affected) {
       const kinds = [...(causes[suite] ?? ["unattributed"])];
       for (const kind of kinds) {
@@ -129,7 +157,7 @@ export function splitAppendix({ split, result }, targetDoc) {
   lines.push(
     "## What still selects the seconds",
     "",
-    "Each selected suite-second is charged evenly to the kinds of input that selected that suite in that PR.",
+    "**Projected** (replay model): each selected suite-second is charged evenly to the kinds of input that selected that suite in that PR.",
     "",
     "| Input kind | Share of all Linux suite-seconds the 144 PRs would run | PRs | Removed by a design change |",
     "| --- | ---: | ---: | --- |",
@@ -142,7 +170,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Every PR still running more than half the suites",
     "",
-    "The forcing inputs are the PR's inputs that each select more than half the suites.",
+    "**Projected** (replay model): the forcing inputs are the PR's inputs that each select more than half the suites.",
     "",
     "| PR / commit | Suites selected | Linux seconds selected | Forcing inputs | Input kinds | Removed by a design change |",
     "| --- | ---: | ---: | --- | --- | --- |",
@@ -153,8 +181,8 @@ export function splitAppendix({ split, result }, targetDoc) {
     );
     const share =
       row.affected.reduce((sum, suite) => sum + linux.suiteSeconds[suite], 0) / linux.secondsPerRun;
-    const kinds = [...new Set(forcing.map((file) => classify(file)[0]))];
-    const removable = [...new Set(forcing.map((file) => classify(file)[1]))];
+    const kinds = [...new Set(forcing.map((file) => classify(file, row)[0]))];
+    const removable = [...new Set(forcing.map((file) => classify(file, row)[1]))];
     // A raw src/ path is a hunk outside every attributed item, so its whole file stays an input.
     const named = [...new Set(forcing.map((file) => file.replace(/^moved\/[^/]+\//, "")))].map(
       (file) => (forcing.includes(file) && file.startsWith("src/") ? `${file} (whole file)` : file),
@@ -175,7 +203,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Contract-document reads scoped to sections",
     "",
-    "A scoped read is selected only when the heading-bounded section its needles name changes, or when its needles stop naming exactly one section.",
+    "Derived from the reviewed source's reading code: a scoped read is selected only when the heading-bounded section its needles name changes, or when its needles stop naming exactly one section.",
     "",
     "| Scoped input | Needles | Suites reading it |",
     "| --- | --- | --- |",
@@ -197,7 +225,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     "## Every split suite and the tests it runs",
     "",
-    "Each part runs as a nextest filter over its parent's runner binary, so no runner is added. Runner crates are the crates the part's tests reach; a cross-command part links only the commands its journeys drive, and keeps the dispatcher and facade where a phase uses the public API or has unresolved argv.",
+    "Linux seconds per run are **projected** (the profile's module seconds divided evenly). Each part runs as a nextest filter over its parent's runner binary, so no runner is added. Runner crates are the crates the part's tests reach; a cross-command part links only the commands its journeys drive, and keeps the dispatcher and facade where a phase uses the public API or has unresolved argv.",
     "",
     "| Suite | Parent | Tests | Linux s per run | Runner crates | Tests it runs |",
     "| --- | --- | ---: | ---: | ---: | --- |",
