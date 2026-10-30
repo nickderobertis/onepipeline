@@ -296,8 +296,8 @@ impl Gate {
                 record.and_then(|r| r.priority),
             )
         });
-        // A human node states its action prose (plan loading refuses one that does not),
-        // and that prose is the item's body.
+        // Explicit metadata states a nonblank body; a legacy node's is its action
+        // prose, which plan loading refuses to be absent.
         let body = metadata.body;
         self.store
             .raise_engine(HumanItemInput {

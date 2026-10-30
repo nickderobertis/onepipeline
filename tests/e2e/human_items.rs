@@ -1572,3 +1572,53 @@ fn stays_undispatched_after(world: &World, run: &str, node: &str, for_: std::tim
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
+
+/// An outage whose probe could not be recorded — the host refuses the probe
+/// record — is still raised and durable, says so, stays open until a person
+/// dismisses it, and is probed again once it is raised again.
+#[test]
+fn an_outage_whose_probe_cannot_be_recorded_stays_open_until_raised_again() {
+    let world = World::new("human-item-probe-record");
+    enabled(&world);
+    world.script(
+        "build.died-as",
+        "provider-failure fallback_chain_exhausted every candidate in the chain was attempted and none ran\n",
+    );
+    world.script(
+        "build.exhausted",
+        "claude-code:work quota out of extra usage\ncodex auth 401 Unauthorized\n",
+    );
+    let record = world.runs.join("human-items/probes.json");
+    std::fs::create_dir_all(&record).unwrap();
+    let project = world.plan("first", &plan_of("first", vec![agent("build", &[])]));
+    world
+        .run(&["start", &project, "--attach"])
+        .settled()
+        .err_has("probe record could not be written");
+    let host = host_items(&world);
+    assert_eq!(host.len(), 1, "{host:?}");
+    let id = id_of(&host[0]);
+    world
+        .run(&["human-items", "list", "--host"])
+        .exited(0)
+        .err_has("cannot be read");
+    assert_eq!(state_of(&world, &id)["state"], "open");
+    world
+        .run(&[
+            "human-items",
+            "dismiss",
+            &id,
+            "--reason",
+            "Restored by hand",
+        ])
+        .exited(0);
+    // The record can be written again; the next outage records its probe.
+    std::fs::remove_dir(&record).unwrap();
+    let project = world.plan("second", &plan_of("second", vec![agent("build", &[])]));
+    world.run(&["start", &project, "--attach"]).settled();
+    let again = host_items(&world);
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_ne!(id_of(&again[0]), id);
+    let probes: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+    assert_eq!(probes["identities-refused"]["probe"], "identities");
+}

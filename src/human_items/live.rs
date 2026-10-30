@@ -934,8 +934,17 @@ pub(crate) enum Probe {
 /// read as none, so each outage it held is probed again once it is raised again.
 fn probes(store: &HumanItems) -> BTreeMap<String, Probe> {
     let path = probes_path(store);
-    let Ok(bytes) = std::fs::read(&path) else {
-        return BTreeMap::new();
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => return BTreeMap::new(),
+        Err(why) => {
+            eprintln!(
+                "onepipeline: the probe record {} cannot be read ({why}); its outages are not \
+                 probed until they are raised again",
+                path.display()
+            );
+            return BTreeMap::new();
+        }
     };
     // llmlint: ignore[changed_behavior_has_e2e] `keep_probes` replaces this record whole through `write_atomic`, so an unreadable one is a hand edit; reading it as none, said, leaves the outage's item open for a person to dismiss, and the next occurrence of the condition records its probe again through the path `a_dispatch_refused_for_space_raises_one_host_item_that_its_probe_resolves` drives.
     serde_json::from_slice(&bytes).unwrap_or_else(|why| {

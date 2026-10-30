@@ -591,9 +591,7 @@ _journal-workload-run:
 # `human-items list` over 100 launched runs of 10,000 events, written to
 # `target/budget-records/human-items.json` and then checked against
 # `tests/human_items/budgets.yaml` from that saved recording — never a second timed run.
-# It is that project's `test` target, not a `workload`, because the plan that owns it
-# names it `human-items-e2e:test`; it takes about ten minutes, most of it launching the
-# hundred runs it measures.
+# It takes about ten minutes, most of it launching the hundred runs it measures.
 human-items-budget:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
