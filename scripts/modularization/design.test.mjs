@@ -4399,6 +4399,16 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
       copy.result.originalTests = 0;
     }, /positive phase and original-test counts/);
     refusedRender((copy) => {
+      copy.result.wall.linux.projected.over = -1;
+    }, /invalid wall projection: linux/);
+    refusedRender((copy) => {
+      copy.result.causes.lock.sibling = -1;
+      copy.result.causes.lock.both += 1;
+    }, /decision summary differs from its rows/);
+    refusedRender((copy) => {
+      copy.result.siblings.adapters.stillBroad = copy.result.siblings.prs.length + 1;
+    }, /sibling-engine paths differ from their rows/);
+    refusedRender((copy) => {
       copy.result.causes.broad += 1;
     }, /decision summary differs from its rows/);
     refusedRender((copy) => {

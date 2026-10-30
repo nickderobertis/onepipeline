@@ -34,6 +34,8 @@ const fraction = (value) =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const close = (a, b) => Math.abs(a - b) < 1e-9;
+/** A count the document publishes: a whole number from zero up to what it counts out of. */
+const upTo = (value, most) => Number.isInteger(value) && value >= 0 && value <= most;
 
 /**
  * Refuses evidence whose figures do not follow from its own rows and selection: every row's suites
@@ -115,7 +117,7 @@ export function validateEvidence(evidence) {
   for (const step of result.splitMigration)
     if (
       !fraction(step.suiteSkip) ||
-      !Number.isInteger(step.suites) ||
+      !upTo(step.suites, result.suites) ||
       PLATFORMS.some((platform) => !fraction(step.secondsSkip?.[platform]))
     )
       throw new Error("invalid split migration step");
@@ -126,7 +128,7 @@ export function validateEvidence(evidence) {
       [summary.median, summary.p90, summary.max].every(finite) &&
       summary.median <= summary.p90 &&
       summary.p90 <= summary.max &&
-      Number.isInteger(summary.over);
+      upTo(summary.over, result.rows.length);
     if (
       !wall ||
       ![wall.residual, wall.e2e, wall.today].every(finite) ||
@@ -179,7 +181,7 @@ export function validateEvidence(evidence) {
     Object.values(causes.prs ?? {}).some(
       (count) => !Number.isInteger(count) || count < 0 || count > broad,
     ) ||
-    ["sibling", "thirdParty", "both"].some((key) => !Number.isInteger(causes.lock?.[key])) ||
+    ["sibling", "thirdParty", "both"].some((key) => !upTo(causes.lock?.[key], broad)) ||
     causes.lock.sibling + causes.lock.thirdParty + causes.lock.both !==
       (causes.prs["lockfile resolution"] ?? 0) ||
     Object.entries(causes.sole ?? {}).some(
@@ -190,7 +192,7 @@ export function validateEvidence(evidence) {
       (entry) =>
         !fraction(entry.suiteSkip) ||
         !fraction(entry.secondsSkip) ||
-        !Number.isInteger(entry.broad),
+        !upTo(entry.broad, result.rows.length),
     )
   )
     throw new Error("split decision summary differs from its rows");
@@ -204,9 +206,11 @@ export function validateEvidence(evidence) {
     !fraction(sib.adapters?.suiteSkip) ||
     !fraction(sib.adapters?.secondsSkip) ||
     sib.adapters.secondsSkip + 1e-9 < result.platforms.linux.secondsSkip ||
+    !upTo(sib.adapters.broad, result.rows.length) ||
+    !upTo(sib.adapters.stillBroad, sib.prs.length) ||
     Object.values(sib.roles ?? {}).some(
       (entry) =>
-        !Number.isInteger(entry.prs) ||
+        !upTo(entry.prs, sib.prs.length) ||
         !finite(entry.seconds) ||
         !finite(entry.only) ||
         entry.only > entry.seconds + 1e-9,
@@ -214,14 +218,13 @@ export function validateEvidence(evidence) {
     sib.prs.some(
       (entry) =>
         !named(entry.commit) ||
-        !Number.isInteger(entry.crates) ||
-        Object.values(entry.byRole ?? {}).some((value) => !Number.isInteger(value) || value < 0),
+        !upTo(entry.crates, Object.keys(result.mapping.crates).length) ||
+        Object.values(entry.byRole ?? {}).some((value) => !upTo(value, entry.crates)),
     ) ||
     Object.values(sib.crates ?? {}).some(
       (entry) =>
         !named(entry.role) ||
-        !Number.isInteger(entry.prs) ||
-        entry.prs > sib.prs.length ||
+        !upTo(entry.prs, sib.prs.length) ||
         !Array.isArray(entry.reach) ||
         !entry.reach.every(named) ||
         !Array.isArray(entry.roots) ||
