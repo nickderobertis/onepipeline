@@ -56,7 +56,7 @@ function designFiles(root, design) {
     .filter((path) => path && existsSync(join(root, path)));
 }
 
-/** Builds the pinned clone in `into` and returns it; the caller removes it. */
+/** Builds the pinned clone in `into`, returning the snapshot it pinned and the design files it copied; the caller removes the clone. */
 export function pin(root, into) {
   const { commit, design } = readSnapshot(root);
   const git = (cwd, ...args) =>
@@ -129,11 +129,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     stage = "command";
     const run = spawnSync(command[0], command.slice(1), { cwd: into, stdio: "inherit" });
     if (run.error) throw run.error;
-    status = run.status ?? 1;
+    if (run.signal) {
+      console.error(
+        `pinned: ${command.join(" ")} ended on signal ${run.signal} before it exited\nnext: rerun it if the signal was an interruption; otherwise check what stopped it (memory, a timeout or a kill) before rerunning the same pinned.mjs invocation`,
+      );
+      status = 1;
+    } else status = run.status;
     stage = "write-back";
     if (back && status === 0) writeBack(root, into, readSnapshot(root).design);
   } catch (error) {
-    // Each stage fails for its own reason, so each names its own repair.
     const next = {
       scratch: `make ${parent} an existing, writable directory (or point ONEPIPELINE_NODE_SCRATCH_DIR at one)`,
       pin:

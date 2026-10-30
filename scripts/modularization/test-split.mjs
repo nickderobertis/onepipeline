@@ -15,7 +15,19 @@ import { profileTable } from "./replay.mjs";
 export const THRESHOLD = 0.03;
 export const SPLIT_PATH = "scripts/modularization/test-split.json";
 
-/** Estimated Linux seconds per catalog test: its module's measured seconds, split evenly. */
+/** The catalog's modules the profile measured no Linux seconds for, sorted. */
+export function unmeasuredModules(catalog) {
+  const linux = profileTable(readFileSync("docs/test-profile-report.md", "utf8")).linux;
+  return [...new Set(Object.values(catalog.tests).map((test) => test.original.split("::")[0]))]
+    .filter((module) => !linux.has(module))
+    .sort();
+}
+
+/**
+ * Estimated Linux seconds per catalog test: its module's measured seconds, split evenly. A module
+ * the profile did not time carries no weight, as in the replay, and `unmeasuredModules` names it;
+ * a catalog with no measured module at all is refused.
+ */
 export function linuxSeconds(catalog) {
   const linux = profileTable(readFileSync("docs/test-profile-report.md", "utf8")).linux;
   const counts = {};
@@ -23,10 +35,12 @@ export function linuxSeconds(catalog) {
     const module = original.split("::")[0];
     counts[module] = (counts[module] ?? 0) + 1;
   }
+  if (!Object.keys(counts).some((module) => linux.has(module)))
+    throw new Error("the profile measured no Linux seconds for any catalog module");
   return Object.fromEntries(
     Object.entries(catalog.tests).map(([id, test]) => {
       const module = test.original.split("::")[0];
-      return [id, ((linux.get(module) ?? 0) / counts[module]) * test.share];
+      return [id, linux.has(module) ? (linux.get(module) / counts[module]) * test.share : 0];
     }),
   );
 }
@@ -87,6 +101,7 @@ export function deriveSplit(catalog, threshold = THRESHOLD) {
   return {
     schema: 1,
     threshold,
+    unmeasured: unmeasuredModules(catalog),
     suites: Object.fromEntries(
       Object.keys(suites)
         .sort()
@@ -137,7 +152,13 @@ export function checkSplit(text, catalog) {
     !split ||
     typeof split !== "object" ||
     Array.isArray(split) ||
-    Object.keys(split).some((key) => !["schema", "threshold", "suites"].includes(key)) ||
+    Object.keys(split).some(
+      (key) => !["schema", "threshold", "unmeasured", "suites"].includes(key),
+    ) ||
+    !Array.isArray(split.unmeasured) ||
+    split.unmeasured.some(
+      (module) => typeof module !== "string" || !/^[a-z][a-z0-9_]*$/.test(module),
+    ) ||
     split.schema !== 1 ||
     typeof split.threshold !== "number" ||
     !(split.threshold > 0 && split.threshold < 1) ||

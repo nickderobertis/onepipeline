@@ -2234,6 +2234,13 @@ test("pinned runs a command over the reviewed source with the working tree's des
       /next: check that git is installed and .* is a readable git repository/,
     );
     assert.doesNotMatch(unreadable.stderr, /is not in this repository/);
+    // A command ended by a signal is reported as that, with what to check.
+    const signalled = pinned("--", process.execPath, "-e", "process.kill(process.pid, 'SIGTERM')");
+    assert.equal(signalled.status, 1);
+    assert.match(
+      signalled.stderr,
+      /ended on signal SIGTERM before it exited\nnext: rerun it if the signal was an interruption/,
+    );
     // A missing command and an unusable scratch parent each name their own repair.
     const absent = pinned("--", "no-such-command-for-pinned");
     assert.equal(absent.status, 1);
@@ -3970,6 +3977,10 @@ test("the test split assigns every phase to one suite, under the threshold, and 
   );
   assert.equal(checked.status, 0, checked.stderr);
   const suiteOf = checkSplit(text, catalog);
+  // Modules the profile never timed are named, not silently weighed as free.
+  const { unmeasuredModules } = await import("./test-split.mjs");
+  assert.deepEqual(JSON.parse(text).unmeasured, unmeasuredModules(catalog));
+  assert.ok(JSON.parse(text).unmeasured.includes("closures"));
   assert.deepEqual([...suiteOf.keys()].sort(), Object.keys(catalog.tests).sort());
   const seconds = linuxSeconds(catalog);
   const total = Object.values(seconds).reduce((sum, value) => sum + value, 0);
@@ -3998,6 +4009,9 @@ test("the test split assigns every phase to one suite, under the threshold, and 
   }, /invalid split suite|takes .* from/);
   refused((copy) => {
     copy.typo = 1;
+  }, /invalid test split/);
+  refused((copy) => {
+    copy.unmeasured = [1];
   }, /invalid test split/);
   // Duplicates are found whatever the layout: JSON.parse would keep only the last.
   const minified = JSON.stringify(split).replace(
