@@ -1529,6 +1529,70 @@ fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
     assert!(shown["nodes"].as_array().unwrap().is_empty(), "{shown}");
 }
 
+/// A run whose journal or launch record cannot be read is said to be uncounted
+/// on stderr, never answered from the counts an earlier read cached; its item
+/// stays listed, and once the run reads again its blocked steps are counted.
+#[test]
+fn a_run_that_cannot_be_read_is_reported_uncounted_and_counted_once_it_reads() {
+    let world = World::new("human-item-unreadable-run");
+    enabled(&world);
+    let name = "unread";
+    let mut nodes = vec![human("gate", &[])];
+    for n in 1..=2 {
+        nodes.push(agent(&format!("step-{n}"), &["gate"]));
+    }
+    let project = world.plan(name, &plan_of(name, nodes));
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let counted = |world: &World| {
+        let listed = world.run(&["human-items", "list", "--json"]);
+        listed.exited(0);
+        let views: Value = serde_json::from_str(&listed.stdout).unwrap();
+        assert_eq!(views.as_array().unwrap().len(), 1, "{views}");
+        (
+            views[0]["blocked"]["total"].as_u64().unwrap(),
+            listed.stderr,
+        )
+    };
+    // Read once, so the index caches the run's blocked steps.
+    let (total, stderr) = counted(&world);
+    assert_eq!(total, 2);
+    assert!(!stderr.contains("are not counted"), "{stderr}");
+
+    let run = world.runs.join(name);
+    // The journal is what the cached counts are keyed to, so it is broken behind
+    // a warm index. A launch record is written once and a count cached from it
+    // stays true, so it is broken where the run must be derived afresh: with the
+    // private index gone, as after a rebuild.
+    for file in ["events.jsonl", "launch.json"] {
+        let path = run.join(file);
+        let kept = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        if file == "events.jsonl" {
+            std::fs::create_dir(&path).unwrap();
+        } else {
+            std::fs::write(&path, "not a launch").unwrap();
+            std::fs::remove_file(world.runs.join("human-items/index.json")).unwrap();
+        }
+        let (total, stderr) = counted(&world);
+        assert_eq!(total, 0, "a stale count served for an unreadable {file}");
+        assert!(
+            stderr.contains(&format!("the steps run {name} blocks are not counted"))
+                && stderr.contains(file),
+            "{file}: {stderr}"
+        );
+        // Every read says so while it lasts, not only the one that dropped it.
+        assert!(counted(&world).1.contains("are not counted"));
+
+        if path.is_dir() {
+            std::fs::remove_dir(&path).unwrap();
+        }
+        std::fs::write(&path, kept).unwrap();
+        let (total, stderr) = counted(&world);
+        assert_eq!(total, 2, "{file} restored: {stderr}");
+        assert!(!stderr.contains("are not counted"), "{stderr}");
+    }
+}
+
 /// A hold raised while work is running stops nothing already running: that work
 /// settles, and only what would start after it is held.
 #[test]

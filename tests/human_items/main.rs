@@ -3,8 +3,9 @@
 //! [`generate`] launches, with every phase of what it cost recorded beside it.
 //!
 //! Its own binary and its own Nx project (`tests/human_items/project.json`,
-//! `human-items-e2e`), run only by that project's `test` target, so no
-//! per-change selection pays for a million-record workload. The recording is
+//! `human-items-e2e`, a budget tier), run only by that project's `test` target,
+//! so only a change that selects that project pays for a million-record
+//! workload: none of the crate's own test tiers runs this binary. The recording is
 //! `target/budget-records/human-items.json`; `report.mjs` reads it and nothing
 //! re-measures.
 //!

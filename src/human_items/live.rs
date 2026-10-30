@@ -237,6 +237,9 @@ pub struct ReadTelemetry {
     pub run_events_replayed: u64,
     /// Runs discovered under the root.
     pub runs_discovered: u64,
+    /// Discovered runs whose blocked steps could not be derived, each reported
+    /// on stderr and left uncounted rather than served from a stale cache.
+    pub runs_unreadable: u64,
     /// Milliseconds spent discovering runs and checking their cache keys, the
     /// rederivation of any run excluded (it is replay).
     pub discovery_ms: f64,
@@ -260,6 +263,7 @@ impl ReadTelemetry {
             runs_rederived: 0,
             run_events_replayed: 0,
             runs_discovered: 0,
+            runs_unreadable: 0,
             discovery_ms: 0.0,
             replay_ms: 0.0,
             index_io_ms: 0.0,
@@ -874,8 +878,12 @@ impl HumanItems {
         for paths in &runs.runs {
             seen.insert(paths.run.clone());
             let journal = paths.journal();
-            let Ok((length, tail)) = run_key(&journal) else {
-                continue;
+            let (length, tail) = match run_key(&journal) {
+                Ok(key) => key,
+                Err(why) => {
+                    moved |= unreadable(index, telemetry, &paths.run, &journal, &why);
+                    continue;
+                }
             };
             if index
                 .runs
@@ -886,9 +894,14 @@ impl HumanItems {
             }
             let replay = Instant::now();
             let before = crate::loopstats::records_folded_total();
-            if let Some(dag) = derive_dag(paths, length, tail) {
-                index.runs.insert(paths.run.clone(), dag);
-                moved = true;
+            match derive_dag(paths, length, tail) {
+                Ok(dag) => {
+                    index.runs.insert(paths.run.clone(), dag);
+                    moved = true;
+                }
+                Err(why) => {
+                    moved |= unreadable(index, telemetry, &paths.run, &paths.launch(), &why);
+                }
             }
             telemetry.run_events_replayed +=
                 crate::loopstats::records_folded_total().saturating_sub(before);
@@ -1066,9 +1079,33 @@ fn run_key(journal: &Path) -> std::io::Result<(u64, String)> {
     Ok((length, hex(&tail)))
 }
 
+/// A run whose blocked steps cannot be derived: its cached DAG is dropped, never
+/// served stale, and the read says which run it could not count and why. Its
+/// items stay listed; what they block in it is counted again once it reads.
+/// Answers whether the index lost an entry.
+fn unreadable(
+    index: &mut Index,
+    telemetry: &mut ReadTelemetry,
+    run: &str,
+    path: &Path,
+    why: &dyn std::fmt::Display,
+) -> bool {
+    eprintln!(
+        "onepipeline: the steps run {run} blocks are not counted: {} cannot be read: {why}",
+        path.display()
+    );
+    telemetry.runs_unreadable += 1;
+    index.runs.remove(run).is_some()
+}
+
 /// A run's DAG off its checkpoint and what was appended past it.
-fn derive_dag(paths: &crate::ledger::RunPaths, journal_len: u64, tail: String) -> Option<RunDag> {
-    let launch: crate::ledger::LaunchRecord = crate::ledger::read_json(&paths.launch()).ok()?;
+fn derive_dag(
+    paths: &crate::ledger::RunPaths,
+    journal_len: u64,
+    tail: String,
+) -> Result<RunDag, String> {
+    let launch: crate::ledger::LaunchRecord =
+        crate::ledger::read_json(&paths.launch()).map_err(|e| e.to_string())?;
     let state = crate::checkpoint::current(paths);
     let statuses = state.statuses();
     let nodes = state
@@ -1099,7 +1136,7 @@ fn derive_dag(paths: &crate::ledger::RunPaths, journal_len: u64, tail: String) -
             }
         })
         .collect();
-    Some(RunDag {
+    Ok(RunDag {
         journal_len,
         tail,
         plan: launch.project,
