@@ -13,6 +13,16 @@ import {
 import { UsageError, exitStatus } from "./cli.mjs";
 
 export const SPLIT_MARKER = "<!-- BEGIN TEST SPLIT -->";
+/** The columns of the generated crates-and-test-split share table, which engine-report.mjs reads by name. */
+export const SPLIT_SHARE_COLUMNS = [
+  "Platform",
+  "Baseline suite runs skipped",
+  "Baseline seconds skipped",
+  "Crates only: suite runs",
+  "Crates only: seconds",
+  "Crates and test split: suite runs",
+  "Crates and test split: seconds",
+];
 const DOC = "docs/modularization-test-split.md";
 const PLATFORMS = ["linux", "macos", "windows", "local"];
 const pct = (value) => `${(value * 100).toFixed(2)}%`;
@@ -448,8 +458,8 @@ export function splitAppendix({ split, result }, targetDoc) {
     "",
     `**Projected** (replay model): ${result.rows.length} PRs, ${result.tests} test phases of ${result.originalTests} existing e2e tests, ${result.suites} suites. Seconds are the profile's measured module seconds divided evenly among each module's tests, as in the target layout. The baseline and crate-only columns are the target layout's projections.`,
     "",
-    "| Platform | Baseline suite runs skipped | Baseline seconds skipped | Crates only: suite runs | Crates only: seconds | Crates and test split: suite runs | Crates and test split: seconds |",
-    "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    `| ${SPLIT_SHARE_COLUMNS.join(" | ")} |`,
+    `| --- |${" ---: |".repeat(SPLIT_SHARE_COLUMNS.length - 1)}`,
     ...PLATFORMS.map(
       (platform) =>
         `| ${platform} | ${before[platform].baselineSuites}% | ${before[platform].baselineSeconds}% | ${before[platform].suites}% | ${before[platform].seconds}% | ${pct(result.platforms[platform].suiteSkip)} | ${pct(result.platforms[platform].secondsSkip)} |`,

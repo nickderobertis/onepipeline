@@ -4619,10 +4619,30 @@ test("engine split attributes assertions to the crates naming their literals in 
       tool("engine-report.mjs", "--collect", ...stepFiles.slice(0, 2)),
       /must hold one step per re-homed parent/,
     );
-    writeFileSync(splitDocPath, splitDoc.replace(/^\| windows \| .*$/gm, "| windows | n/a |"));
+    writeFileSync(splitDocPath, splitDoc.replace(/^\| windows \|(?: [\d.]+% \|){6}\n/m, ""));
     untouched(
       tool("engine-report.mjs", "--write"),
       /names no crates-and-test-split figure for every platform/,
+    );
+    writeFileSync(
+      splitDocPath,
+      splitDoc.replace(/^\| windows \|(?: [\d.]+% \|){6}$/m, "| windows | n/a |"),
+    );
+    untouched(
+      tool("engine-report.mjs", "--write"),
+      /has a row it does not head: \| windows \| n\/a \|/,
+    );
+    // A table whose columns were reordered is refused rather than read by position.
+    writeFileSync(
+      splitDocPath,
+      splitDoc.replace(
+        "| Crates and test split: suite runs | Crates and test split: seconds |",
+        "| Crates and test split: seconds | Crates and test split: suite runs |",
+      ),
+    );
+    untouched(
+      tool("engine-report.mjs", "--write"),
+      /must hold its crates-and-test-split table, headed as split-report.mjs renders it, exactly once/,
     );
     writeFileSync(
       splitDocPath,

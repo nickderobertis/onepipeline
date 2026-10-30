@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, KEEP, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
-import { typicalLines } from "./split-report.mjs";
+import { SPLIT_SHARE_COLUMNS, typicalLines } from "./split-report.mjs";
 import { FURTHER_SPLITS, STILL_SHARED } from "./further-splits.mjs";
 
 export const ENGINE_MARKER = "<!-- BEGIN ENGINE TESTS -->";
@@ -21,14 +21,38 @@ const mins = (value) => `${Math.round(value)} s (${(value / 60).toFixed(1)} min)
 const cell = (value) => String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 const read = (path) => readFileSync(path, "utf8");
 
-/** The crates-and-test-split figures, as the test-split document's generated table states them. */
+/** The crates-and-test-split figures, read by column name from the test-split document's generated table. */
 export function testSplitOnly(splitDoc) {
+  const lines = splitDoc.split("\n");
+  const header = `| ${SPLIT_SHARE_COLUMNS.join(" | ")} |`;
+  const at = lines.indexOf(header);
+  if (at < 0 || lines.indexOf(header, at + 1) >= 0)
+    throw new Error(
+      `${SPLIT_DOC} must hold its crates-and-test-split table, headed as split-report.mjs renders it, exactly once`,
+    );
+  const column = (name) => SPLIT_SHARE_COLUMNS.indexOf(name);
+  const suites = column("Crates and test split: suite runs");
+  const seconds = column("Crates and test split: seconds");
   const rows = {};
-  const share = "(\\d{1,3}\\.\\d{2})%";
-  for (const match of splitDoc.matchAll(
-    new RegExp(`^\\| (local|linux|macos|windows)${` \\| ${share}`.repeat(6)} \\|$`, "gm"),
-  ))
-    rows[match[1]] ??= { suites: match[6], seconds: match[7] };
+  for (const line of lines.slice(at + 2)) {
+    if (!line.startsWith("|")) break;
+    const cells = line
+      .slice(1, -1)
+      .split("|")
+      .map((value) => value.trim());
+    if (cells.length !== SPLIT_SHARE_COLUMNS.length || !PLATFORMS.includes(cells[0]))
+      throw new Error(
+        `${SPLIT_DOC}'s crates-and-test-split table has a row it does not head: ${line}`,
+      );
+    const shares = [cells[suites], cells[seconds]].map(
+      (value) => /^(\d{1,3}\.\d{2})%$/.exec(value)?.[1],
+    );
+    if (shares.includes(undefined))
+      throw new Error(
+        `${SPLIT_DOC} gives ${cells[0]} a crates-and-test-split figure that is not a share`,
+      );
+    rows[cells[0]] = { suites: shares[0], seconds: shares[1] };
+  }
   if (PLATFORMS.some((platform) => !rows[platform]))
     throw new Error(`${SPLIT_DOC} names no crates-and-test-split figure for every platform`);
   for (const [platform, row] of Object.entries(rows))
