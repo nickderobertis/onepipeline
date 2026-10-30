@@ -4694,6 +4694,16 @@ test("engine split attributes assertions to the crates naming their literals in 
   refused((copy) => {
     copy.moved["views::no_such_test"] = copy.moved[movedId];
   }, /unknown test views::no_such_test/);
+  // Every cross-command test is live today; one that were not is still never re-homed.
+  const settled = structuredClone(catalog);
+  settled.dispositions[catalog.tests[liveId].original].reason = "command-phases";
+  const crossMoved = structuredClone(split);
+  crossMoved.moved[liveId] = { ...crossMoved.moved[movedId], parent: "cross-command" };
+  delete crossMoved.kept[liveId];
+  assert.throws(
+    () => checkEngineSplit(JSON.stringify(crossMoved, null, 2), settled, layout),
+    /from cross-command, which no migration step re-homes/,
+  );
   refused((copy) => {
     copy.kept[liveId].reason = "slow";
   }, /for no known reason/);
@@ -4732,7 +4742,12 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
             const output = join(root, `step-${index}.json`);
             const child = spawn(
               process.execPath,
-              ["scripts/modularization/engine-replay.mjs", output, "--parents", parents.join(",")],
+              // The last step is the default invocation, which re-homes every step's parent.
+              [
+                "scripts/modularization/engine-replay.mjs",
+                output,
+                ...(index < steps.length - 1 ? ["--parents", parents.join(",")] : []),
+              ],
               { stdio: ["ignore", "ignore", "pipe"] },
             );
             let stderr = "";
@@ -4749,7 +4764,6 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
       steps: runs.map((run) => JSON.parse(readFileSync(run.output, "utf8"))),
     };
     validateEngineEvidence(replayed);
-    // The committed evidence is exactly what the replay produces now.
     assert.deepEqual(replayed, JSON.parse(readFileSync(EVIDENCE_PATH, "utf8")));
     for (const [index, step] of replayed.steps.entries()) {
       assert.equal(step.prs, 144);
@@ -4758,7 +4772,6 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
           step.platforms.linux.secondsSkip >= replayed.steps[index - 1].platforms.linux.secondsSkip,
         );
     }
-    // The document is what its evidence renders.
     const doc = readFileSync("docs/modularization-engine-tests.md", "utf8");
     const [prefix] = doc.split(ENGINE_MARKER);
     assert.equal(

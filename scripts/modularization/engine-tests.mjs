@@ -23,6 +23,11 @@ import { UsageError, exitStatus } from "./cli.mjs";
 
 export const ENGINE_PATH = "scripts/modularization/engine-tests.json";
 export const PARENTS = ["cmd-start", "cross-command", "cmd-reply", "cmd-adopt"];
+/**
+ * The parents whose tests re-home, one migration step each, in order. A cross-command journey
+ * proves an integration between processes, so its tests are attributed but always kept.
+ */
+export const STEPS = ["cmd-start", "cmd-reply", "cmd-adopt"];
 export const DISCRIMINATING = 2;
 export const KEEP = {
   live: "asserts live ordering, which no recorded fixture can replace",
@@ -296,6 +301,10 @@ export function checkEngineSplit(text, catalog, layout) {
       }
       if (catalog.dispositions[test.original].reason.startsWith("live-"))
         throw new Error(`engine split moves live-ordering test ${id}`);
+      if (!STEPS.includes(entry.parent))
+        throw new Error(
+          `engine split moves ${id} from ${entry.parent}, which no migration step re-homes`,
+        );
       if (
         typeof entry.crate !== "string" ||
         !Object.hasOwn(layout.crates, entry.crate) ||

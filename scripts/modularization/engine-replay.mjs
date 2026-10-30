@@ -5,7 +5,7 @@
 // steps have landed. Exit statuses follow cli.mjs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { ENGINE_PATH, PARENTS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
+import { ENGINE_PATH, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { classify, splitEvidence } from "./split-replay.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
@@ -119,7 +119,7 @@ export function engineSummary(result, parents) {
 }
 
 /** Replays the layout with the named parents' tests re-homed. */
-export function engineEvidence(parents = PARENTS) {
+export function engineEvidence(parents = STEPS) {
   const engineOf = checkEngineSplit(
     readFileSync(ENGINE_PATH, "utf8"),
     targetCatalog(),
@@ -135,16 +135,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const args = process.argv.slice(2);
     const at = args.indexOf("--parents");
-    const parents = at >= 0 ? (args[at + 1] ?? "").split(",") : PARENTS;
+    const parents = at >= 0 ? (args[at + 1] ?? "").split(",") : STEPS;
     if (at >= 0) args.splice(at, 2);
     if (
       args.length !== 1 ||
       !parents.length ||
-      parents.some((parent) => !PARENTS.includes(parent)) ||
+      parents.some((parent) => !STEPS.includes(parent)) ||
       new Set(parents).size !== parents.length
     )
       throw new UsageError(
-        `usage: engine-replay.mjs OUTPUT.json [--parents ${PARENTS.join(",")}] (a subset, each once)`,
+        `usage: engine-replay.mjs OUTPUT.json [--parents ${STEPS.join(",")}] (a subset, each once; all by default)`,
       );
     const summary = engineEvidence(parents);
     writeFileSync(args[0], `${JSON.stringify(summary, null, 2)}\n`);

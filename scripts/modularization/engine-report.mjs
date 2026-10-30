@@ -5,7 +5,7 @@
 // Exit statuses follow cli.mjs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { ENGINE_PATH, KEEP, PARENTS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
+import { ENGINE_PATH, KEEP, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
 
@@ -59,7 +59,7 @@ export function validateEngineEvidence(evidence) {
     !Array.isArray(evidence.steps)
   )
     throw new Error(`invalid ${EVIDENCE_PATH}`);
-  const moving = PARENTS.filter((parent) => parent !== "cross-command");
+  const moving = STEPS;
   if (evidence.steps.length !== moving.length)
     throw new Error(`${EVIDENCE_PATH} must hold one step per re-homed parent`);
   for (const [index, step] of evidence.steps.entries()) {
