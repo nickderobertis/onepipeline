@@ -4024,6 +4024,10 @@ test("the test split assigns every phase to one suite, under the threshold, and 
   );
   refused((copy) => copy.suites[first].tests.push(copy.suites[first].tests[0]), /is in both/);
   refused((copy) => copy.suites[first].tests.push("views::no_such_test"), /unknown test/);
+  // An array key-coerces to its one string in `Object.hasOwn`, but a Map keeps it distinct.
+  refused((copy) => {
+    copy.suites[first].tests[0] = [copy.suites[first].tests[0]];
+  }, /invalid test id/);
   refused((copy) => {
     copy.suites[first].parent = "cmd-label";
   }, /invalid split suite|takes .* from/);

@@ -183,6 +183,8 @@ export function checkSplit(text, catalog) {
     )
       throw new Error(`invalid split suite ${name}`);
     for (const id of suite.tests) {
+      if (typeof id !== "string")
+        throw new Error(`split suite ${name} names invalid test id ${JSON.stringify(id)}`);
       if (!Object.hasOwn(catalog.tests, id))
         throw new Error(`split suite ${name} names unknown test ${id}`);
       if (catalog.tests[id].suite !== suite.parent)
