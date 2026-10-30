@@ -1767,3 +1767,35 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
     );
     assert_eq!(filed(&state).len(), 2);
 }
+
+/// A human step whose item could not be raised — the host refused the store —
+/// still waits, says why, and gets exactly one item from the next driver once the
+/// store takes writes again.
+#[cfg(unix)]
+#[test]
+fn a_human_steps_item_the_store_refused_is_raised_once_by_the_next_driver() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-raise-retry");
+    enabled(&world);
+    let store = world.runs.join("human-items");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let name = "retried";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    let started = world.run(&["start", &project, "--attach"]);
+    std::fs::set_permissions(&store, std::fs::Permissions::from_mode(0o755)).unwrap();
+    started
+        .exited(0)
+        .err_has("could not raise the human item for 'gate'");
+    assert!(items(&world, &[]).is_empty());
+    assert!(!dispatched(&world, name).contains(&"b".to_owned()));
+    world.run(&["adopt", name]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    let open = items(&world, &[]);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["item"]["dedup_key"], format!("run:{name}#gate"));
+    assert!(!dispatched(&world, name).contains(&"b".to_owned()));
+}
