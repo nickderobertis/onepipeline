@@ -369,9 +369,14 @@ describe("the offline tier split", () => {
         const lines = body.split("\n");
         const journey = lines.findIndex((line) => /cargo test /.test(line));
         const check = lines.findIndex((line) =>
-          new RegExp(`cd ${declared.sourceRoot} && .*onebudgetspec check budgets\\.yaml`).test(line),
+          new RegExp(`cd ${declared.sourceRoot} && .*onebudgetspec check budgets\\.yaml`).test(
+            line,
+          ),
         );
-        assert.ok(journey >= 0 && check > journey, `${recipe} does not check its budgets after its journey:\n${body}`);
+        assert.ok(
+          journey >= 0 && check > journey,
+          `${recipe} does not check its budgets after its journey:\n${body}`,
+        );
       }
       const outputs = declared.targets.test.outputs ?? [];
       assert.ok(
