@@ -28,6 +28,7 @@ pub(crate) enum Appended {
 
 /// Whether an error is the filesystem having no room for the write.
 pub(crate) fn is_no_space(error: &std::io::Error) -> bool {
+    // llmlint: ignore[changed_behavior_has_e2e] a full filesystem (ENOSPC) and a file past its size limit (EFBIG) are each driven for real by `tests/human_items_live.rs`; a disk quota (EDQUOT) needs quotas enabled on a mounted filesystem, which no unprivileged journey can arrange, and it is the same refusal of the same write.
     if error.kind() == std::io::ErrorKind::StorageFull
         || error.kind() == std::io::ErrorKind::QuotaExceeded
         || error.kind() == std::io::ErrorKind::FileTooLarge

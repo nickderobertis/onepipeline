@@ -2139,3 +2139,90 @@ fn a_phase_context_with_blank_identities_is_refused_without_raising() {
     assert!(world.journal().is_empty());
     assert!(lines(&world.root.join("requests.ndjson")).is_empty());
 }
+
+/// A journal past the size the host allows its files (`EFBIG`, set here by the
+/// kernel's own `RLIMIT_FSIZE`) is a full disk to the store: the write is taken
+/// back, the reserve released, and — the limit being per file — the refusal
+/// says nothing was acknowledged.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_journal_past_its_file_size_limit_refuses_and_acknowledges_nothing() {
+    use std::os::unix::process::CommandExt;
+    let world = Live::enabled();
+    world.raise(&item(
+        "first",
+        "task",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let before = std::fs::metadata(world.store().join("events.ndjson"))
+        .unwrap()
+        .len();
+    let mut big = item("big", "task", "low", "s", json!({"scope": "nothing"}));
+    big["body"] = json!("x".repeat(64 * 1024));
+    let path = world.input("big", &big);
+    let mut command = world.cmd(None, &["raise", "--input", &path]);
+    let ceiling = before + 4096;
+    command.env("LLVM_PROFILE_FILE", world.root.join("ceiling-%p.profraw"));
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: ceiling,
+                rlim_max: ceiling,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("even into its emergency reserve"),
+        "{stderr}"
+    );
+    assert!(output.stdout.is_empty());
+    assert_eq!(world.journal().len(), 1);
+    assert_eq!(
+        std::fs::metadata(world.store().join("events.ndjson"))
+            .unwrap()
+            .len(),
+        before
+    );
+}
+
+/// Raising an open design task's phase again with a newer document version
+/// updates its stored reference, and completion submits that version.
+#[test]
+fn a_design_task_raised_again_completes_against_its_newest_version() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let raise = |key: &str| {
+        let ctx = context(
+            &world,
+            &format!("design-{key}"),
+            &json!({
+                "owner": owner, "dedup_key": "alpha", "approval": {"board_copy": "plans:doc-1", "key": key}
+            }),
+        );
+        phase(&world, None, "design-review", &ctx)
+    };
+    let first = raise("v1");
+    let again = raise("v2");
+    assert_eq!(again["item"]["item"]["id"], first["item"]["item"]["id"]);
+    assert_eq!(again["item"]["item"]["approval"]["key"], "v2");
+    std::fs::write(world.root.join("current-key"), "v2").unwrap();
+    let id = first["item"]["item"]["id"].as_str().unwrap().to_owned();
+    world.json(None, &["complete", &id]);
+    let requests = lines(&world.root.join("requests.ndjson"));
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["key"], "v2");
+    assert_eq!(lines(&world.root.join("approvals.ndjson"))[0]["key"], "v2");
+}

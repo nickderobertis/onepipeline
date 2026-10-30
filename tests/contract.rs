@@ -11994,6 +11994,43 @@ fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
     }
 }
 
+/// The configuration shape the contract documents is the public types' own: every
+/// key of `HumanItemsConfig` and of a hook is named where the contract states the
+/// `human_items` mapping, and nothing else is.
+#[test]
+fn the_documented_human_items_configuration_is_the_public_shape() {
+    use onepipeline::human_items::config::{HumanItemHook, HumanItemsConfig};
+    let flat = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat
+        .find("Each holds one `human_items` mapping:")
+        .expect("the mapping is stated");
+    let stated = &flat[start..start + flat[start..].find("Hooks are validated").expect("its end")];
+    let keys = |schema: schemars::Schema| -> Vec<String> {
+        schema.as_value()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let config = keys(schemars::schema_for!(HumanItemsConfig));
+    assert_eq!(
+        config,
+        ["enabled", "task_source", "hooks", "approval_adapters"]
+    );
+    for key in &config {
+        assert!(
+            stated.contains(&format!("`{key}:")) || stated.contains(&format!(" {key}:")),
+            "{key}: {stated}"
+        );
+    }
+    let hook_start = stated.find("`hooks: [{").expect("the hook shape");
+    let hook = &stated[hook_start..hook_start + stated[hook_start..].find("}]`").unwrap()];
+    for key in keys(schemars::schema_for!(HumanItemHook)) {
+        assert!(hook.contains(&key), "the hook shape lacks {key}: {hook}");
+    }
+}
+
 #[test]
 fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
     let exported = onepipeline::human_items::schemas();
