@@ -349,3 +349,173 @@ fn a_work_hold_keeps_its_branch_from_starting_and_lets_the_rest_run() {
         settled(w, name, "tail").as_deref() == Some("done")
     });
 }
+
+/// What `session`'s watch has been delivered and not yet printed.
+fn watch(world: &World, session: &str) -> Vec<Value> {
+    let mut command = world.cmd(&["human-items", "watch", "--session", session]);
+    let output = command.output().unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn state_of(world: &World, id: &str) -> Value {
+    let run = world.run(&["human-items", "show", id, "--json"]);
+    run.exited(0);
+    serde_json::from_str::<Value>(&run.stdout).unwrap()["item"].clone()
+}
+
+#[test]
+fn a_settled_run_dismisses_only_its_open_holds_and_tells_only_its_owner() {
+    let world = World::new("human-item-settle");
+    enabled(&world);
+    let name = "settles";
+    let project = world.plan(
+        name,
+        &plan_of(
+            name,
+            vec![
+                agent("side", &[]),
+                agent("a", &[]),
+                human("gate", &["a"]),
+                agent("b", &["gate"]),
+            ],
+        ),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let owner = "session-human-item-settle";
+    let gate = id_of(&items(&world, &[])[0]);
+    // An open hold this run owns, on a step of its own that already ran; a
+    // question of the same manager's outside any run; another manager's item.
+    let hold = raise(
+        &world,
+        "hold",
+        &input(
+            "side-hold",
+            "task",
+            owner,
+            Some(name),
+            Some(&project),
+            json!({"scope": "work", "run": name, "node": "side"}),
+        ),
+    );
+    let question = raise(
+        &world,
+        "question",
+        &input(
+            "outside",
+            "question",
+            owner,
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    let other = raise(
+        &world,
+        "other",
+        &input(
+            "theirs",
+            "task",
+            "someone-else",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    );
+    watch(&world, owner);
+    watch(&world, "someone-else");
+    world.run(&["human-items", "complete", &gate]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "b").as_deref(), Some("done"));
+    let retired = state_of(&world, &hold);
+    assert_eq!(retired["state"], "dismissed");
+    assert_eq!(retired["resolution"]["reason"], "the run ended");
+    assert_eq!(
+        state_of(&world, &gate)["state"],
+        "completed",
+        "a resolved item is left as it was"
+    );
+    assert_eq!(state_of(&world, &question)["state"], "open");
+    assert_eq!(state_of(&world, &other)["state"], "open");
+    let delivered: Vec<(String, String)> = watch(&world, owner)
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap().to_owned(),
+                e["payload"]["item_id"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        delivered,
+        [
+            ("human-item-completed".to_owned(), gate.clone()),
+            ("human-item-auto-resolved".to_owned(), hold.clone())
+        ]
+    );
+    assert!(watch(&world, "someone-else").is_empty());
+}
+
+#[test]
+fn a_stopped_run_dismisses_its_work_and_plan_holds_and_host_holds_survive() {
+    let world = World::new("human-item-stop");
+    enabled(&world);
+    let name = "stops";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let owner = "session-human-item-stop";
+    let gate = id_of(&items(&world, &[])[0]);
+    let plan = raise(
+        &world,
+        "plan",
+        &input(
+            "freeze",
+            "task",
+            owner,
+            Some(name),
+            Some(&project),
+            json!({"scope": "plan", "plan": project}),
+        ),
+    );
+    let host = raise(
+        &world,
+        "host",
+        &input(
+            "outage",
+            "task",
+            "ops",
+            None,
+            None,
+            json!({"scope": "host"}),
+        ),
+    );
+    world.run(&["stop", name]).exited(0);
+    for id in [&gate, &plan] {
+        let item = state_of(&world, id);
+        assert_eq!(item["state"], "dismissed", "{item}");
+        assert_eq!(item["resolution"]["reason"], "the run ended");
+        assert_eq!(item["resolution"]["actor"], "engine");
+    }
+    assert_eq!(state_of(&world, &host)["state"], "open");
+    let kinds: Vec<String> = watch(&world, owner)
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|k| *k == "human-item-auto-resolved")
+            .count(),
+        2,
+        "{kinds:?}"
+    );
+    assert!(watch(&world, "ops")
+        .iter()
+        .all(|e| e["kind"] == "human-item-raised"));
+}
