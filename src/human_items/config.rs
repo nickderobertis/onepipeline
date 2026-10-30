@@ -46,6 +46,7 @@ pub enum HookBlock {
 #[serde(deny_unknown_fields)]
 pub struct HookApproval {
     /// The adapter in `approval_adapters` a completion invokes.
+    // llmlint: ignore[invalid_states_unrepresentable] a key of the configured `approval_adapters` map, which `validate` requires every hook's adapter to name before any consumer sees the configuration; a name type would restate that map's own key.
     pub adapter: String,
 }
 
@@ -86,6 +87,7 @@ pub enum HookAggregate {
 #[serde(deny_unknown_fields)]
 pub struct HumanItemHook {
     /// The phase name a raise selects it by.
+    // llmlint: ignore[invalid_states_unrepresentable] the task's configuration shape is `phase: string`; `validate` refuses a blank or `:`-bearing phase, and a duplicate, before any consumer sees the loaded configuration.
     pub phase: String,
     /// Task or question.
     pub kind: HumanItemKind,
@@ -125,6 +127,7 @@ pub struct HumanItemsConfig {
     pub enabled: bool,
     /// The plan-store source open tasks are projected into, if any.
     #[serde(default)]
+    // llmlint: ignore[invalid_states_unrepresentable] the task's configuration shape is `task_source: string`; `validate` refuses a blank one at load, and the projection converts it into the store's own SourceName before any write, refusing a name the store does not accept.
     pub task_source: Option<String>,
     /// The configured phases.
     #[serde(default)]

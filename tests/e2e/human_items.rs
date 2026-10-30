@@ -949,8 +949,12 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         "the hold stands while the projection is owed"
     );
 
-    // The tracker returns: the next write projects what was owed, once, and binds it.
+    // The tracker returns: the next write projects what was owed, once, and binds it
+    // — though the record that it did cannot be written, because the host refuses it
+    // (a directory stands where the record goes). That is said, and costs a replay.
     std::fs::write(repo.join("onetaskgraph.yaml"), store(&github.board(1))).unwrap();
+    let record = world.runs.join("human-items/projected.json");
+    std::fs::create_dir(&record).unwrap();
     let resumed = raise_in_repo(
         "question",
         &input(
@@ -981,9 +985,10 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         "{shown}"
     );
 
-    // Replayed as though the record of it were lost: the store's intent answers
-    // the same task, and no second one is created.
-    std::fs::remove_file(world.runs.join("human-items/projected.json")).unwrap();
+    resumed.err_has("could not be recorded");
+    // The host takes records again: the next write replays the projection, and the
+    // store's intent answers the same task — no second one is created.
+    std::fs::remove_dir(&record).unwrap();
     raise_in_repo(
         "again",
         &input("first", "task", "mgr", None, None, json!({"scope": "host"})),

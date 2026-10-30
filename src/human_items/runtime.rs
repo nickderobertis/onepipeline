@@ -17,8 +17,7 @@ use std::time::{Duration, Instant};
 
 use super::live::{item_id_for, HumanItems};
 use super::{
-    derive_legacy, HumanItem, HumanItemAction, HumanItemBlock, HumanItemInput, HumanItemOwner,
-    HumanItemState,
+    derive_legacy, HumanItem, HumanItemBlock, HumanItemInput, HumanItemOwner, HumanItemState,
 };
 use crate::graph::NodeStatus;
 use crate::ledger::{LaunchRecord, RunPaths};
@@ -30,9 +29,15 @@ pub(crate) fn node_key(run: &str, node: &str) -> String {
     format!("run:{run}#{node}")
 }
 
-/// The run and node a human node's item stands for.
+/// The run and node a human node's item stands for: an item under the engine's
+/// `run:` key whose work block names that same run and node, the run a valid id.
+/// Anything else — a key no engine minted — stands for no step.
 pub(crate) fn node_of(item: &HumanItem) -> Option<(&str, &str)> {
-    item.dedup_key.strip_prefix("run:")?.split_once('#')
+    let (run, node) = item.dedup_key.strip_prefix("run:")?.split_once('#')?;
+    let bound =
+        matches!(&item.block, HumanItemBlock::Work { run: r, node: n } if r == run && n == node);
+    (bound && crate::ledger::is_valid_run_id(run) && item.owner.run.as_deref() == Some(run))
+        .then_some((run, node))
 }
 
 /// The store and session of the run this process drives, for the dispatch
@@ -81,7 +86,21 @@ pub(crate) fn dispatch_refused(error: &crate::error::Error) {
 
 /// The failure kinds that say an identity cannot serve any turn until a person
 /// acts: out of quota, refused its credentials, or the provider unavailable.
-const DEFINITIVE: [&str; 3] = ["quota", "auth", "server_overloaded"];
+const DEFINITIVE: [oneharness_core::domain::signals::FailureKind; 3] = [
+    oneharness_core::domain::signals::FailureKind::Quota,
+    oneharness_core::domain::signals::FailureKind::Auth,
+    oneharness_core::domain::signals::FailureKind::ServerOverloaded,
+];
+
+/// Whether a candidate's failure kind, in the producer's wire word, is one of
+/// [`DEFINITIVE`]: read through the harness's own vocabulary, so a word it does
+/// not define is never definitive.
+fn definitive(kind: &str) -> bool {
+    serde_json::from_value::<oneharness_core::domain::signals::FailureKind>(
+        serde_json::Value::String(kind.to_owned()),
+    )
+    .is_ok_and(|kind| DEFINITIVE.contains(&kind))
+}
 
 /// An exhausted chain whose every candidate was refused for a definitive reason
 /// raises the host's one identity item; one candidate refused, a mix that
@@ -95,11 +114,9 @@ pub(crate) fn chain_exhausted(
 ) {
     let attempted = &stopped.attempted;
     if attempted.len() < 2
-        || !attempted.iter().all(|c| {
-            c.failure_kind
-                .as_deref()
-                .is_some_and(|kind| DEFINITIVE.contains(&kind))
-        })
+        || !attempted
+            .iter()
+            .all(|c| c.failure_kind.as_deref().is_some_and(definitive))
     {
         return;
     }
@@ -279,7 +296,7 @@ impl Gate {
             metadata.body
         };
         self.store
-            .apply(HumanItemAction::Raise(HumanItemInput {
+            .raise_engine(HumanItemInput {
                 schema_version: 1,
                 dedup_key: node_key(&self.run, &node.id),
                 kind: metadata.kind,
@@ -296,7 +313,7 @@ impl Gate {
                     node: node.id.clone(),
                 },
                 approval: None,
-            }))
+            })
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
@@ -329,18 +346,56 @@ impl Gate {
                     let recorded = crate::sys::now_millis();
                     let at = parse_millis(&item.updated_at).unwrap_or(recorded);
                     if recorded.saturating_sub(at) >= GRACE.as_millis() as u64 {
-                        self.released.insert(node.id.clone());
-                        let item = item.clone();
-                        let paths = paths.clone();
-                        std::thread::spawn(move || {
-                            if let Err(why) = release_at(&paths, &item) {
-                                eprintln!("onepipeline: {why}");
-                            }
-                        });
+                        self.queue(&crate::channel::ChannelState::new(paths), item);
                     }
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Queue the release of every human step whose item was resolved and whose
+    /// step still waits, onto the run's own command queue, which this driver's
+    /// first pass applies: a resolver that could not release it — or died first —
+    /// leaves it here. Called with the run held, before the loop starts.
+    pub(crate) fn queue_owed(
+        &mut self,
+        channel: &crate::channel::ChannelState,
+        state: &RunState,
+        statuses: &BTreeMap<String, NodeStatus>,
+    ) {
+        let Ok(items) = self.store.items() else {
+            return;
+        };
+        for node in state.graph.iter().filter(|n| n.kind == NodeKind::Human) {
+            if statuses.get(&node.id) != Some(&NodeStatus::Waiting) {
+                continue;
+            }
+            let Some(item) = items.get(&item_id_for(&node_key(&self.run, &node.id))) else {
+                continue;
+            };
+            self.queue(channel, item);
+        }
+    }
+
+    fn queue(&mut self, channel: &crate::channel::ChannelState, item: &HumanItem) {
+        let Some(command) = release_command(item) else {
+            return;
+        };
+        let Some((_, node)) = node_of(item) else {
+            return;
+        };
+        if !self.released.insert(node.to_owned()) {
+            return;
+        }
+        if let Err(why) = channel.submit(crate::channel::Author::planner(), &[command]) {
+            // llmlint: ignore[changed_behavior_has_e2e] the run's own queue refusing an append is the store refusing a write under a driver that holds the run, which no portable journey arranges; it is said, and the next driver queues it again because its `released` set starts empty.
+            self.released.remove(node);
+            eprintln!(
+                "onepipeline: run '{}' could not queue the release of '{node}' its item {} \
+                 records: {why}; its next driver queues it again",
+                self.run, item.id
+            );
         }
     }
 
@@ -499,41 +554,48 @@ pub(crate) fn release(root: &std::path::Path, item: &HumanItem) -> Result<(), St
     release_at(&RunPaths::under(root, run), item)
 }
 
+/// The run command that releases a resolved item's step, if it releases one: an
+/// `attest` for an answer or completion, a `drop` detaching its dependents for a
+/// person's dismissal. A dismissal the engine made — the run ended, or the step
+/// settled without its item — releases nothing.
+fn release_command(item: &HumanItem) -> Option<crate::channel::Command> {
+    let (_, node) = node_of(item)?;
+    let resolution = item.resolution.as_ref();
+    match item.state {
+        HumanItemState::Answered | HumanItemState::Completed => {
+            Some(crate::channel::Command::Attest {
+                reference: node.to_owned(),
+            })
+        }
+        HumanItemState::Dismissed if resolution.is_some_and(|r| r.actor != "engine") => {
+            Some(crate::channel::Command::Drop {
+                id: node.to_owned(),
+                dependents: crate::channel::Dependents::Detach,
+                reason: resolution.and_then(|r| r.reason.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn release_at(paths: &RunPaths, item: &HumanItem) -> Result<(), String> {
-    let Some((run, node)) = node_of(item) else {
+    let (Some((run, node)), Some(command)) = (node_of(item), release_command(item)) else {
         return Ok(());
     };
-    let resolution = item.resolution.as_ref();
-    let receipt = match item.state {
-        HumanItemState::Answered | HumanItemState::Completed => crate::verbs::attest(paths, node),
-        HumanItemState::Dismissed => {
-            let reason = resolution.and_then(|r| r.reason.clone());
-            // A run that ended retired its own holds; there is nothing left to drop.
-            if reason.as_deref() == Some(super::RUN_ENDED)
-                || resolution.is_some_and(|r| r.actor == "engine")
-            {
-                return Ok(());
-            }
-            let envelope = crate::channel::Reply {
-                version: Some(crate::channel::REPLY_ENVELOPE_VERSION),
-                commands: vec![crate::channel::Command::Drop {
-                    id: node.to_owned(),
-                    dependents: crate::channel::Dependents::Detach,
-                    reason,
-                }],
-                ..crate::channel::Reply::default()
-            };
-            let text = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
-            crate::verbs::reply(paths, None, &text)
-        }
-        HumanItemState::Open => return Ok(()),
+    let envelope = crate::channel::Reply {
+        version: Some(crate::channel::REPLY_ENVELOPE_VERSION),
+        commands: vec![command],
+        ..crate::channel::Reply::default()
     };
-    receipt.map(|_| ()).map_err(|why| {
-        format!(
+    let text = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+    crate::verbs::reply(paths, None, &text)
+        .map(|_| ())
+        .map_err(|why| {
+            format!(
             "the human item {} is {}, and run '{run}''s step '{node}' was not released: {why}; \
              the run's driver releases it when it next runs",
             item.id,
             super::live::state_word(item.state)
         )
-    })
+        })
 }

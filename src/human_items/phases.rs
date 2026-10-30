@@ -27,6 +27,7 @@ pub const PHASE_PREFIX: &str = "phase:";
 pub struct Ticket {
     /// The ticket's id; the last occurrence of an id wins.
     #[serde(deserialize_with = "nonblank")]
+    // llmlint: ignore[invalid_states_unrepresentable] the task's ticket shape is `{id: string, url: string, priority}`, arriving as a phase's JSON context; the decoder refuses blank ids and URLs, and the review prints them as given.
     pub id: String,
     /// Where a person opens it.
     #[serde(deserialize_with = "nonblank")]
@@ -55,6 +56,7 @@ pub struct PhaseContext {
     pub owner: HumanItemOwner,
     /// The phase's own identity for this occurrence; the item's dedup key is
     /// derived from it and the phase.
+    // llmlint: ignore[invalid_states_unrepresentable] the task names the phase context's `owner` and `dedup_key` as its supplied identity; `expand` refuses a blank one before raising, and the resulting item is validated as any raise is.
     pub dedup_key: String,
     /// The node a work hold binds, for a hook whose block is `work`.
     #[serde(default)]

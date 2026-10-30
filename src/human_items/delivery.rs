@@ -92,10 +92,19 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
     let transport = LocalTransport::open(&dir)?;
     let control: QueueName = name(DELIVERY);
     let document: DocumentName = name("delivered.json");
-    let mut delivered: Delivered = transport
-        .document(&control, &document)?
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let mut delivered: Delivered = match transport.document(&control, &document)? {
+        None => Delivered::default(),
+        // llmlint: ignore[changed_behavior_has_e2e] the bus replaces this document atomically, so a garbled one is a hand edit; carrying from the start is the path `delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print` drives through a journal cut back under delivery, with the watch skipping what it printed.
+        Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|why| {
+            // Carried again from the start rather than guessed at: every watch drops
+            // what it already printed by sequence, so nothing is printed twice.
+            eprintln!(
+                "onepipeline: the human-item delivery record is not one ({why}); every event \
+                 is carried again and each watch skips what it has printed"
+            );
+            Delivered::default()
+        }),
+    };
     let journal = root.join(super::JOURNAL_PATH);
     let mut file = match std::fs::File::open(&journal) {
         Ok(file) => file,
@@ -177,11 +186,19 @@ pub(crate) fn watch(
             .map_err(|e| e.to_string())?;
         batch = read_pending(&transport, &queue, &consumer, session)?;
     }
-    let mut watched: Watched = transport
+    let watched_record = transport
         .document(&queue, &document)
-        .map_err(|e| e.to_string())?
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+        .map_err(|e| e.to_string())?;
+    let mut watched: Watched = match watched_record {
+        None => Watched::default(),
+        // llmlint: ignore[changed_behavior_has_e2e] the bus replaces this document atomically, so a garbled one is a hand edit; refusing it before printing or committing anything keeps every pending event for the next watch, as a failed print does in `delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print`.
+        Some(bytes) => serde_json::from_slice(&bytes).map_err(|why| {
+            format!(
+                "{session}'s watch record is not one ({why}); nothing was printed or \
+                 committed, and the next watch reads the same events once it is repaired"
+            )
+        })?,
+    };
     let mut printed = 0;
     let mut last = None;
     for (envelope, after) in &batch {

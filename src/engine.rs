@@ -1212,6 +1212,12 @@ fn driving(
         None => state.readjust.due = Some(crate::payload::ReadjustTrigger::Continuation),
     }
 
+    // A human step its item resolved and nothing released is queued for this
+    // driver's first pass, before the loop starts.
+    if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
+        let statuses = state.statuses();
+        gate.queue_owed(&ChannelState::of_run(paths, &launch), &state, &statuses);
+    }
     let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
     // A human action the last pass readied is raised before the driver lets go,

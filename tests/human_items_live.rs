@@ -1438,3 +1438,141 @@ fn a_waiting_watch_receives_an_arriving_event_or_runs_out() {
     assert_eq!(event["kind"], "human-item-raised");
     assert_eq!(event["payload"]["owner"]["session"], "waiter");
 }
+
+#[test]
+fn every_malformed_hook_configuration_is_refused_at_load_by_its_file() {
+    let hook = |extra: &str| {
+        format!(
+            "human_items:\n  enabled: true\n{extra}  hooks:\n    - phase: review\n      kind: task\n      \
+             title: t\n      body: b\n      priority: low\n      block: {{scope: nothing}}\n"
+        )
+    };
+    for (config, refusal) in [
+        ("human_items:\n  enabled: true\n  task_source: '  '\n".to_owned(), "task_source must not be blank"),
+        (hook("").replace("hooks:\n", "hooks:\n    - phase: review\n      kind: task\n      title: t\n      body: b\n      priority: low\n      block: {scope: nothing}\n"), "configured twice"),
+        (hook("").replace("phase: review", "phase: 're:view'"), "without ':'"),
+        (hook("").replace("title: t", "title: '{{ unclosed'"), "hooks[review]"),
+        (hook("").replace("kind: task", "kind: question").replace("block: {scope: nothing}", "block: {scope: nothing}\n      aggregate: ticket_review"), "a question carries no approval"),
+        (hook("").replace("block: {scope: nothing}", "block: {scope: nothing}\n      approval: {adapter: missing}"), "is not configured under human_items.approval_adapters"),
+        (hook("  approval_adapters:\n    empty: {command: []}\n"), "command names a program"),
+        (hook("").replace("priority: low", "priority: none"), "states its priority"),
+    ] {
+        let world = Live::new(Some(&config));
+        world.refused(None, &["config"], refusal);
+        world.refused(None, &["list"], refusal);
+    }
+}
+
+#[test]
+fn a_phase_context_supplies_what_its_hook_holds_and_no_engine_key_is_raised_directly() {
+    let world = Live::new(Some(
+        "human_items:\n  enabled: true\n  hooks:\n    - phase: gate\n      kind: task\n      title: Gate {{ node }}\n      \
+         body: Hold {{ node }}.\n      priority: high\n      block: {scope: work}\n    - phase: freeze\n      kind: task\n      \
+         title: Freeze\n      body: Hold the plan.\n      priority: high\n      block: {scope: plan}\n",
+    ));
+    let session = json!({"session": "mgr", "run": null, "plan": null});
+    let no_run = world.input(
+        "no-run",
+        &json!({"owner": session, "dedup_key": "a", "node": "build"}),
+    );
+    world.refused(
+        None,
+        &["raise", "--phase", "gate", "--context", &no_run],
+        "needs the owner's run",
+    );
+    let no_node = world.input(
+        "no-node",
+        &json!({"owner": {"session": "mgr", "run": "r", "plan": null}, "dedup_key": "a"}),
+    );
+    world.refused(
+        None,
+        &["raise", "--phase", "gate", "--context", &no_node],
+        "needs the context's node",
+    );
+    let no_plan = world.input("no-plan", &json!({"owner": session, "dedup_key": "a"}));
+    world.refused(
+        None,
+        &["raise", "--phase", "freeze", "--context", &no_plan],
+        "needs the owner's plan",
+    );
+    let stray = world.input("stray", &json!({"owner": {"session": "mgr", "run": null, "plan": "p"}, "dedup_key": "a", "approval": {"board_copy": "b", "key": "k"}}));
+    world.refused(
+        None,
+        &["raise", "--phase", "freeze", "--context", &stray],
+        "configures no approval adapter",
+    );
+    let held = world.input("held", &json!({"owner": {"session": "mgr", "run": "r", "plan": "p"}, "dedup_key": "a", "node": "build"}));
+    let raised = world.json(None, &["raise", "--phase", "gate", "--context", &held]);
+    assert_eq!(
+        raised["item"]["item"]["block"],
+        json!({"scope": "work", "run": "r", "node": "build"})
+    );
+    assert_eq!(raised["item"]["item"]["title"], "Gate build");
+    // The engine's own keys are not a caller's to mint.
+    for key in ["run:r#build", "phase:gate:a", "host:journal-no-space:0"] {
+        let path = world.input(
+            "engine-key",
+            &item(key, "task", "low", "mgr", json!({"scope": "nothing"})),
+        );
+        world.refused(None, &["raise", "--input", &path], "are the engine's own");
+    }
+    assert_eq!(world.journal().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = Live::enabled();
+    world.raise(&item(
+        "one",
+        "task",
+        "low",
+        "owner",
+        json!({"scope": "nothing"}),
+    ));
+    let bus = world.store().join("bus");
+    // The bus refuses the write: the event is recorded, said to be undelivered,
+    // and carried by the next command.
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let path = world.input(
+        "two",
+        &item("two", "task", "low", "owner", json!({"scope": "nothing"})),
+    );
+    let output = world.run(None, &["raise", "--input", &path]);
+    std::fs::set_permissions(&bus, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not yet delivered"));
+    // A print that fails commits nothing: the next watch prints the same events.
+    let full = world
+        .cmd(Some("owner"), &["watch"])
+        .stdout(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .unwrap(),
+        )
+        .output()
+        .unwrap();
+    assert!(!full.status.success());
+    let events = world.watch("owner");
+    assert_eq!(events.len(), 2, "{events:?}");
+    // A journal cut back under delivery is carried again from its start, and the
+    // watch prints nothing it already printed.
+    let journal = world.store().join("events.ndjson");
+    let bytes = std::fs::read(&journal).unwrap();
+    let first = bytes.iter().position(|b| *b == b'\n').unwrap() + 1;
+    std::fs::write(&journal, &bytes[..first]).unwrap();
+    assert!(world.watch("owner").is_empty());
+    std::fs::write(&journal, &bytes).unwrap();
+    world.raise(&item(
+        "three",
+        "task",
+        "low",
+        "owner",
+        json!({"scope": "nothing"}),
+    ));
+    let after = world.watch("owner");
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(after[0]["payload"]["item"]["dedup_key"], "three");
+}

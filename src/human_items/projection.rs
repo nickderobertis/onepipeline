@@ -48,6 +48,7 @@ fn projected(journal: &Path) -> BTreeMap<String, Projected> {
     let Ok(bytes) = std::fs::read(&path) else {
         return BTreeMap::new();
     };
+    // llmlint: ignore[changed_behavior_has_e2e] no build writes a partial record: `record` replaces the file whole through `write_atomic`, so a garbled one is a hand edit; reading it as empty replays every task, the path `tasks_project_once_into_the_task_source_and_questions_never_do` drives after a record the host refused.
     serde_json::from_slice(&bytes).unwrap_or_else(|why| {
         eprintln!(
             "onepipeline: {} is not a projection record ({why}); every task is projected again",
@@ -78,25 +79,54 @@ pub(crate) fn project(
     item: &HumanItem,
 ) -> Result<HumanItemTracker, String> {
     let resolution = item.resolution.as_ref();
-    let request: onetaskgraph_core::task_projection::HumanTaskProjection =
-        serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "item_id": item.id,
-            "owner": item.owner,
-            "title": item.title,
-            "body": item.body,
-            "priority": item.priority,
-            "repositories": [],
-            "project": item.owner.plan,
-            "source": source,
-            "state": Projected::of(item.state),
-            "reason": if item.state == HumanItemState::Dismissed {
-                resolution.and_then(|r| r.reason.clone())
-            } else {
-                None
-            },
-        }))
-        .map_err(|e| format!("the projection request is not one the store accepts: {e}"))?;
+    use onetaskgraph_core::task_projection as wire;
+    let refused =
+        |what: &str, why: String| format!("the task's {what} is not one the store accepts: {why}");
+    let request = wire::HumanTaskProjection {
+        schema_version: wire::ProjectionVersion,
+        item_id: wire::ExternalItemId::new(item.id.clone()).map_err(|e| refused("id", e))?,
+        owner: wire::ProjectionOwner {
+            session: wire::SessionId::new(item.owner.session.clone())
+                .map_err(|e| refused("owner session", e))?,
+            run: item
+                .owner
+                .run
+                .clone()
+                .map(wire::RunId::new)
+                .transpose()
+                .map_err(|e| refused("owner run", e))?,
+            plan: item
+                .owner
+                .plan
+                .clone()
+                .map(wire::PlanId::new)
+                .transpose()
+                .map_err(|e| refused("owner plan", e))?,
+        },
+        title: wire::ProjectionTitle::new(item.title.clone()).map_err(|e| refused("title", e))?,
+        body: item.body.clone(),
+        priority: item.priority,
+        repositories: Vec::new(),
+        project: item
+            .owner
+            .plan
+            .clone()
+            .map(wire::ProjectionProjectId::new)
+            .transpose()
+            .map_err(|e| refused("plan", e))?,
+        source: onetaskgraph_plugin_api::SourceName::new(source)
+            .map_err(|e| refused("task_source", e.to_string()))?,
+        state: match Projected::of(item.state) {
+            Projected::Open => wire::ProjectionState::Open,
+            Projected::Completed => wire::ProjectionState::Completed,
+            Projected::Dismissed => wire::ProjectionState::Dismissed,
+        },
+        reason: if item.state == HumanItemState::Dismissed {
+            resolution.and_then(|r| r.reason.clone())
+        } else {
+            None
+        },
+    };
     let built = crate::taskgraph::Store::at(dir)
         .engine(&Default::default())
         .map_err(|e| e.to_string())?;

@@ -54,6 +54,9 @@ pub const DISPATCH_NO_SPACE: &str = "dispatch-no-space";
 pub const IDENTITIES_REFUSED: &str = "identities-refused";
 /// How often an identity outage is probed, at most.
 const IDENTITY_PROBE_EVERY_MS: u64 = 10_000;
+/// The dedup-key prefixes only the engine raises under: a run's human step, a
+/// configured phase, and a host condition.
+const ENGINE_KEYS: [&str; 3] = ["run:", super::phases::PHASE_PREFIX, HOST_CONDITION_PREFIX];
 /// The dedup-key prefix of every host condition item, followed by the condition.
 pub const HOST_CONDITION_PREFIX: &str = "host:";
 /// The environment variable naming a file a read appends its telemetry line to.
@@ -407,6 +410,16 @@ impl HumanItems {
     /// that completes through an approval authority.
     pub fn apply(&self, action: HumanItemAction) -> Result<HumanItemReceipt, HumanItemRefusal> {
         if let HumanItemAction::Raise(input) = &action {
+            // The engine's own namespaces: a run's human step, a configured phase and
+            // a host condition each act on what their key names, so no caller mints one.
+            if let Some(reserved) = ENGINE_KEYS
+                .iter()
+                .find(|prefix| input.dedup_key.starts_with(*prefix))
+            {
+                return Err(conflict(format!(
+                    "dedup keys beginning {reserved:?} are the engine's own; raise under another key"
+                )));
+            }
             if input.approval.is_some() {
                 return Err(conflict(
                     "an approval reference is accepted only from a configured phase: raise it \
@@ -588,6 +601,17 @@ impl HumanItems {
     /// run's driver asks on its passes.
     pub(crate) fn items(&self) -> Result<BTreeMap<String, HumanItem>, HumanItemRefusal> {
         Ok(self.read_with(false)?.0.items)
+    }
+
+    /// Raise an item under one of the engine's own keys: a run's human step.
+    pub(crate) fn raise_engine(
+        &self,
+        input: HumanItemInput,
+    ) -> Result<HumanItemReceipt, HumanItemRefusal> {
+        let mut writer = Writer::open(self)?;
+        let receipt = writer.raise(input)?;
+        writer.finish();
+        Ok(receipt)
     }
 
     /// Resolve one open item automatically with `reason`. Answers whether it was open.
