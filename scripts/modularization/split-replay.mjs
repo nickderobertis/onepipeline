@@ -13,6 +13,7 @@ import { SECTIONED_DOCS, scopeChanged } from "./contract-sections.mjs";
 import { SPLIT_PATH, checkSplit, deriveSplit, targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping, mergedChanges } from "../crate-split-replay.mjs";
 import { testFakes } from "./test-fakes.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 const read = (path) => readFileSync(path, "utf8");
 const show = (revision, file) => {
@@ -626,7 +627,7 @@ export function splitEvidence(engine = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 3) throw new Error("usage: split-replay.mjs OUTPUT.json");
+    if (process.argv.length !== 3) throw new UsageError("usage: split-replay.mjs OUTPUT.json");
     const output = splitEvidence();
     writeFileSync(process.argv[2], `${JSON.stringify(output, null, 2)}\n`);
     console.log(
@@ -638,6 +639,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same split-replay.mjs invocation"
         : "reconcile test-split.json, the target graph and the 144-PR history; rerun split-replay.mjs OUTPUT.json";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

@@ -20,6 +20,7 @@ import { suiteInputs } from "./suite-inputs.mjs";
 import { COMMAND_MARKER, commandAppendix } from "./command-report.mjs";
 import { evidence } from "./replay.mjs";
 import { affectedSuites, compileMapping, mergedChanges } from "../crate-split-replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 const read = (path) => readFileSync(path, "utf8");
 const sorted = (items) => [...new Set(items)].sort();
@@ -900,7 +901,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (["--resolve", "--resolve-history"].includes(process.argv[2])) {
       const history = process.argv[2] === "--resolve-history";
       if (process.argv.length !== (history ? 12 : 9))
-        throw new Error(
+        throw new UsageError(
           "usage: command-replay.mjs --resolve CRATES.json BEFORE.lock AFTER.lock BEFORE-tool AFTER-tool OUTPUT.json [CURRENT.toml BEFORE.toml AFTER.toml for --resolve-history]",
         );
       const crates = JSON.parse(read(process.argv[3]));
@@ -941,7 +942,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           process.argv.length > 4 ||
           (process.argv[3] && process.argv[3] !== "--write-doc")
     )
-      throw new Error("usage: command-replay.mjs OUTPUT.json [--write-doc] | --inventory");
+      throw new UsageError("usage: command-replay.mjs OUTPUT.json [--write-doc] | --inventory");
     const doc = "docs/modularization-command-replay.md";
     const prefix = process.argv[3] === "--write-doc" ? read(doc).split(COMMAND_MARKER) : undefined;
     if (prefix && prefix.length !== 2) throw new Error("expected one command replay marker");
@@ -967,7 +968,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         changes,
       );
       if (!process.argv[2])
-        throw new Error(
+        throw new UsageError(
           "usage: node scripts/modularization/command-replay.mjs OUTPUT.json | --inventory",
         );
       writeFileSync(process.argv[2], `${JSON.stringify(result, null, 2)}\n`);
@@ -991,6 +992,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           ? `correct the named resolution configuration, lockfile, manifest or toolchain input; rerun the same ${mode} invocation with all input and output paths`
           : `review the named catalog/inventory input and 144-PR history; rerun the same ${mode} invocation with its output path`;
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

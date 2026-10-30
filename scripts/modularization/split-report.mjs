@@ -10,6 +10,7 @@ import {
   selectedShares,
   wallProjection,
 } from "./split-replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const SPLIT_MARKER = "<!-- BEGIN TEST SPLIT -->";
 const DOC = "docs/modularization-test-split.md";
@@ -546,7 +547,8 @@ export function splitAppendix({ split, result }, targetDoc) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 3) throw new Error("usage: split-report.mjs SPLIT-REPLAY.json");
+    if (process.argv.length !== 3)
+      throw new UsageError("usage: split-report.mjs SPLIT-REPLAY.json");
     const parts = readFileSync(DOC, "utf8").split(SPLIT_MARKER);
     if (parts.length !== 2) throw new Error("expected one test split marker");
     const evidence = validateEvidence(JSON.parse(readFileSync(process.argv[2], "utf8")));
@@ -561,6 +563,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space; rerun the same split-report.mjs invocation"
         : "generate a split replay and restore exactly one test split marker";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { components, validate } from "./graph.mjs";
 import { evidence } from "./replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const MARKER = "<!-- BEGIN GENERATED MODULARIZATION -->";
 const pct = (fraction) => `${(100 * fraction).toFixed(2)}%`;
@@ -98,7 +99,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     "correct the named input or command arguments, then rerun node scripts/modularization/render.mjs";
   try {
     if (process.argv.length > 3 || (process.argv[2] && process.argv[2] !== "--write"))
-      throw new Error("usage: node scripts/modularization/render.mjs [--write]");
+      throw new UsageError("usage: node scripts/modularization/render.mjs [--write]");
     const file = "docs/modularization-design.md";
     const current = readFileSync(file, "utf8");
     if (current.split(MARKER).length !== 2) {
@@ -121,6 +122,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same render.mjs invocation"
         : recovery;
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

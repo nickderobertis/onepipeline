@@ -2,14 +2,14 @@
 // Replays the 144 PRs against the crate layout and the test split with the start, reply and adopt
 // tests re-homed onto the engine crates engine-tests.json names, and writes that variant's figures.
 // `--parents` re-homes only the named parents' tests, which is the layout once those migration
-// steps have landed. Exit status: 0 when the figures are written; 1 when an input is refused or a
-// path cannot be read or written, with the cause and the next step on stderr; 2 on a usage error.
+// steps have landed. Exit statuses follow cli.mjs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, PARENTS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { classify, splitEvidence } from "./split-replay.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 /** The figures the engine-tests document quotes for one replayed variant. */
 export function engineSummary(result, parents) {
@@ -143,11 +143,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       parents.some((parent) => !PARENTS.includes(parent)) ||
       new Set(parents).size !== parents.length
     )
-      throw Object.assign(
-        new Error(
-          `usage: engine-replay.mjs OUTPUT.json [--parents ${PARENTS.join(",")}] (a subset, each once)`,
-        ),
-        { usage: true },
+      throw new UsageError(
+        `usage: engine-replay.mjs OUTPUT.json [--parents ${PARENTS.join(",")}] (a subset, each once)`,
       );
     const summary = engineEvidence(parents);
     writeFileSync(args[0], `${JSON.stringify(summary, null, 2)}\n`);
@@ -160,8 +157,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same engine-replay.mjs invocation"
         : "reconcile engine-tests.json, test-split.json, the target graph and the 144-PR history; rerun engine-replay.mjs OUTPUT.json";
     console.error(
-      `${error.message}\nnext: ${error.usage ? "rerun with the arguments the usage names" : next}`,
+      `${error.message}\nnext: ${error instanceof UsageError ? "rerun with the arguments the usage names" : next}`,
     );
-    process.exitCode = error.usage ? 2 : 1;
+    process.exitCode = exitStatus(error);
   }
 }

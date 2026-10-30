@@ -4,6 +4,7 @@ import { join, dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { mergedChanges, replay, todaysMapping } from "../crate-split-replay.mjs";
 import { moduleGraph, validate } from "./graph.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 /** Use existing source paths as a conservative attribution of historical edits. */
 export function replayMapping(layout, extracted = new Set(Object.keys(layout.crates)), root = ".") {
@@ -169,7 +170,7 @@ export function evidence(
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv.length !== 4)
-      throw new Error("usage: node scripts/modularization/replay.mjs LAYOUT.json REPORT.json");
+      throw new UsageError("usage: node scripts/modularization/replay.mjs LAYOUT.json REPORT.json");
     const { report } = evidence(".", process.argv[2]);
     mkdirSync(dirname(process.argv[3]), { recursive: true });
     writeFileSync(process.argv[3], `${JSON.stringify(report, null, 2)}\n`);
@@ -182,6 +183,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same replay.mjs invocation"
         : "correct the named layout/timing input or restore the 144-PR origin/main history; rerun with LAYOUT.json REPORT.json";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

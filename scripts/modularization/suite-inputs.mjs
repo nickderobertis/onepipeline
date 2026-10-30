@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { moduleGraph, validate } from "./graph.mjs";
 import { compileMapping, globToRegExp } from "../crate-split-replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 /** Files compiled or read through static paths by a suite's transitive helpers. */
 export function suiteInputs(modules, root = ".") {
@@ -101,7 +102,7 @@ export function commandCrates(modules, available, root = ".") {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv.length !== 3)
-      throw new Error("usage: node scripts/modularization/suite-inputs.mjs MAPPING.json");
+      throw new UsageError("usage: node scripts/modularization/suite-inputs.mjs MAPPING.json");
     const file = process.argv[2];
     const mapping = JSON.parse(readFileSync(file, "utf8"));
     if (Object.hasOwn(mapping, "schema")) validate(mapping, moduleGraph());
@@ -129,6 +130,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same suite-inputs.mjs invocation"
         : "correct the named mapping/module, then rerun node scripts/modularization/suite-inputs.mjs MAPPING.json";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

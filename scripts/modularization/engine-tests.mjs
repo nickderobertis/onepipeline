@@ -19,6 +19,7 @@ import { functions } from "./rust-syntax.mjs";
 import { declarations } from "./source-projection.mjs";
 import { targetGraph } from "./target-graph.mjs";
 import { THRESHOLD, duplicateKey, linuxSeconds, targetCatalog } from "./test-split.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const ENGINE_PATH = "scripts/modularization/engine-tests.json";
 export const PARENTS = ["cmd-start", "cross-command", "cmd-reply", "cmd-adopt"];
@@ -321,7 +322,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const mode = process.argv[2];
     if (process.argv.length !== 3 || !["--write", "--check"].includes(mode))
-      throw new Error("usage: engine-tests.mjs --write | --check");
+      throw new UsageError("usage: engine-tests.mjs --write | --check");
     const catalog = targetCatalog();
     const layout = targetLayout();
     const derived = `${JSON.stringify(deriveEngineSplit(catalog, layout), null, 2)}\n`;
@@ -339,6 +340,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space; rerun the same engine-tests.mjs invocation"
         : "regenerate with engine-tests.mjs --write and review the split, or restore the named test to exactly one of moved or kept";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

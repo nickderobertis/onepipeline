@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { sourceAssets, auxiliaryInputs } from "./inventory.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 /** All Rust source files, including nested modules and test-only modules. */
 export function rustFiles(root = "src") {
@@ -479,7 +480,9 @@ export function validate(mapping, graph, root = ".") {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     if (process.argv.length > 4)
-      throw new Error("usage: node scripts/modularization/graph.mjs [MAPPING.json [REPORT.json]]");
+      throw new UsageError(
+        "usage: node scripts/modularization/graph.mjs [MAPPING.json [REPORT.json]]",
+      );
     const mapping = JSON.parse(
       readFileSync(process.argv[2] ?? "scripts/modularization/layout.json", "utf8"),
     );
@@ -494,6 +497,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same node scripts/modularization/graph.mjs MAPPING.json [REPORT.json] invocation"
         : "correct the named layout entry and rerun node scripts/modularization/graph.mjs MAPPING.json [REPORT.json]";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

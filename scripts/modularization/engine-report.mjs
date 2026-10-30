@@ -2,13 +2,12 @@
 // Renders the engine re-homing's evidence into docs/modularization-engine-tests.md, after its marker.
 // `--collect A.json B.json C.json` gathers engine-replay.mjs outputs, one per migration step in
 // order, into engine-evidence.json; `--write` and `--check` render that file into the document.
-// Exit status: 0 when the document is written or current; 1 when an input is refused, the document
-// differs from its evidence, or a path cannot be read or written, with the cause and the next step
-// on stderr; 2 on a usage error.
+// Exit statuses follow cli.mjs.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, KEEP, PARENTS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { targetCatalog } from "./test-split.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const ENGINE_MARKER = "<!-- BEGIN ENGINE TESTS -->";
 export const EVIDENCE_PATH = "scripts/modularization/engine-evidence.json";
@@ -342,10 +341,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? process.argv.length < 4
         : process.argv.length !== 3 || !["--write", "--check"].includes(mode)
     )
-      throw Object.assign(
-        new Error("usage: engine-report.mjs --collect STEP.json... | --write | --check"),
-        { usage: true },
-      );
+      throw new UsageError("usage: engine-report.mjs --collect STEP.json... | --write | --check");
     // Everything is read and validated before anything is written.
     const evidence = validateEngineEvidence(
       mode === "--collect"
@@ -372,8 +368,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space; rerun the same engine-report.mjs invocation"
         : "regenerate the evidence with engine-replay.mjs and engine-report.mjs --collect, then engine-report.mjs --write";
     console.error(
-      `${error.message}\nnext: ${error.usage ? "rerun with the arguments the usage names" : next}`,
+      `${error.message}\nnext: ${error instanceof UsageError ? "rerun with the arguments the usage names" : next}`,
     );
-    process.exitCode = error.usage ? 2 : 1;
+    process.exitCode = exitStatus(error);
   }
 }

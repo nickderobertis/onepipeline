@@ -5,6 +5,7 @@ import { codeOnly, moduleGraph, validate } from "./graph.mjs";
 import { engineGraph } from "./engine-graph.mjs";
 import { compileMapping } from "../crate-split-replay.mjs";
 import { commandPaths, cliPaths, cliArgumentOwners } from "./source-projection.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 /** Apply symbol extractions to the source-derived graph; retain surplus edges conservatively. */
 export function targetGraph(base, moves, root = ".") {
@@ -373,7 +374,7 @@ export function targetGraph(base, moves, root = ".") {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length > 3) throw new Error("usage: target-graph.mjs [OUTPUT.json]");
+    if (process.argv.length > 3) throw new UsageError("usage: target-graph.mjs [OUTPUT.json]");
     const base = JSON.parse(readFileSync("scripts/modularization/layout.json", "utf8"));
     const moves = JSON.parse(readFileSync("scripts/modularization/target-moves.json", "utf8"));
     const result = targetGraph(base, moves);
@@ -387,6 +388,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-graph.mjs invocation"
         : "correct target-moves.json's named symbol or dependency; rerun target-graph.mjs [OUTPUT.json]";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

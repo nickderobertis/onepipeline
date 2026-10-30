@@ -89,7 +89,7 @@ test("graph CLI accepts a mapped dependency and names a deliberately introduced 
       cwd: root,
       encoding: "utf8",
     });
-    assert.equal(surplus.status, 1);
+    assert.equal(surplus.status, 2);
     assert.match(surplus.stderr, /usage: node scripts\/modularization\/graph.mjs/);
 
     layout.crates.record.deps.push("command");
@@ -1364,7 +1364,7 @@ test("command replay CLI retains every individual test and renders a fresh evide
       ["scripts/modularization/command-replay.mjs", "--bogus"],
       { encoding: "utf8" },
     );
-    assert.equal(badArguments.status, 1);
+    assert.equal(badArguments.status, 2);
     assert.match(badArguments.stderr, /usage: command-replay/);
     broken.typo = true;
     assert.throws(() => commandMapping(layout, broken), /unknown command catalog field/);
@@ -1419,7 +1419,7 @@ test("target graph applies named source moves and refuses a broken extraction th
       [resolve("scripts/modularization/target-graph.mjs"), "out.json", "extra"],
       { cwd: root, encoding: "utf8" },
     );
-    assert.equal(refused.status, 1);
+    assert.equal(refused.status, 2);
     assert.match(refused.stderr, /usage: target-graph.mjs/);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1560,7 +1560,7 @@ test("decomposition CLI separates setup, preserves live ownership, derives argv 
       spawnSync(process.execPath, [cli, ...args], { cwd: root, encoding: "utf8" });
     const expectFailure = (pattern, ...args) => {
       const result = run(...args);
-      assert.equal(result.status, 1);
+      assert.equal(result.status, /usage:/.test(pattern.source) ? 2 : 1);
       assert.match(result.stderr, pattern);
     };
     const good = run();
@@ -3078,7 +3078,7 @@ function projectionWorkspace() {
     assert.match(result.stderr, message);
     assert.match(result.stderr, /next: correct the named configuration/);
   };
-  return { root, runner, selected, refused };
+  return { root, runner, selected, refused, project };
 }
 
 test("configuration projection refuses an unresolved just recipe reference", () => {
@@ -3315,7 +3315,7 @@ test("nextest's own parser accepts every script field and section the projection
 });
 
 test("configuration projection refuses an unresolved configuration section", () => {
-  const { root, selected, refused } = projectionWorkspace();
+  const { root, selected, refused, project } = projectionWorkspace();
   try {
     assert.equal(
       selected(".cargo/config.toml", "[term]\nverbose=false", "[term]\nverbose=true"),
@@ -3414,7 +3414,30 @@ test("configuration projection refuses an unresolved configuration section", () 
     const valued =
       '[scripts.setup]\ndb=42\n[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nsetup="db"\n';
     refused(".config/nextest.toml", valued, valued, /unresolved nextest script "db"/);
-    refused("unknown.toml", "", "", /usage: config-projection/);
+    // An unknown configuration file is a usage error, with its own exit status.
+    const usage = project("unknown.toml", "", "");
+    assert.equal(usage.status, 2);
+    assert.match(usage.stderr, /usage: config-projection/);
+    // A script entry's filter must be a filterset and its platform a target or { host, target }.
+    const platformTable =
+      '[scripts.setup.db]\ncommand="true"\n[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nplatform={ host = "cfg(unix)" }\nsetup="db"\n';
+    assert.equal(selected(".config/nextest.toml", platformTable, platformTable), 0);
+    const numberedFilter =
+      '[scripts.setup.db]\ncommand="true"\n[profile.ci]\n[[profile.default.scripts]]\nfilter=42\nsetup="db"\n';
+    refused(
+      ".config/nextest.toml",
+      numberedFilter,
+      numberedFilter,
+      /invalid nextest script entry filter: expected a filterset expression/,
+    );
+    const listPlatform =
+      '[scripts.setup.db]\ncommand="true"\n[profile.ci]\n[[profile.default.scripts]]\nfilter="all()"\nplatform=[]\nsetup="db"\n';
+    refused(
+      ".config/nextest.toml",
+      listPlatform,
+      listPlatform,
+      /invalid nextest script entry platform: expected a target or a \{ host, target \} table/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -4093,7 +4116,7 @@ test("test-split CLI writes the derived split, refuses a stale or invalid one wi
     assert.equal(cli("--write").status, 0);
     assert.equal(cli("--check").status, 0);
     const usage = cli("--both");
-    assert.equal(usage.status, 1);
+    assert.equal(usage.status, 2);
     assert.match(usage.stderr, /usage: test-split.mjs --write \| --check/);
     rmSync(path);
     mkdirSync(path);

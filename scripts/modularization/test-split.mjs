@@ -11,6 +11,7 @@ import { expandCatalog } from "./catalog.mjs";
 import { phaseInputs } from "./phase-inputs.mjs";
 import { commandPaths } from "./source-projection.mjs";
 import { profileTable } from "./replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const THRESHOLD = 0.03;
 export const SPLIT_PATH = "scripts/modularization/test-split.json";
@@ -213,7 +214,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     const mode = process.argv[2];
     if (process.argv.length !== 3 || !["--write", "--check"].includes(mode))
-      throw new Error("usage: test-split.mjs --write | --check");
+      throw new UsageError("usage: test-split.mjs --write | --check");
     const catalog = targetCatalog();
     const derived = `${JSON.stringify(deriveSplit(catalog), null, 2)}\n`;
     if (mode === "--write") writeFileSync(SPLIT_PATH, derived);
@@ -230,6 +231,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space; rerun the same test-split.mjs invocation"
         : "regenerate with test-split.mjs --write and review the split, or restore the named test to exactly one suite";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

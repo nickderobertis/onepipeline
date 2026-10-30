@@ -7,6 +7,7 @@ import { phaseInputs, commandCalls } from "./phase-inputs.mjs";
 import { commandPaths, cliPaths } from "./source-projection.mjs";
 import { moduleGraph, validate } from "./graph.mjs";
 import { functions } from "./rust-syntax.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 export { REASONS, expandCatalog } from "./catalog.mjs";
 
 /** Reviewable dispositions, retaining live ordering rather than replacing it with fixture state. */
@@ -148,7 +149,7 @@ export function decompose(baseline) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 2) throw new Error("usage: decompose.mjs");
+    if (process.argv.length !== 2) throw new UsageError("usage: decompose.mjs");
     const result = decompose(
       JSON.parse(readFileSync("scripts/modularization/command-tests.json", "utf8")),
     );
@@ -165,6 +166,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same decompose.mjs invocation"
         : "reconcile the baseline catalog with the current e2e source, then rerun decompose.mjs";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

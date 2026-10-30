@@ -7,6 +7,7 @@ import { targetGraph } from "./target-graph.mjs";
 import { evidence, profileTable } from "./replay.mjs";
 import { commandMapping, run } from "./command-replay.mjs";
 import { mergedChanges } from "../crate-split-replay.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export function targetEvidence() {
   const { layout: base } = evidence();
@@ -46,7 +47,7 @@ export function targetEvidence() {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 3) throw new Error("usage: target-replay.mjs OUTPUT.json");
+    if (process.argv.length !== 3) throw new UsageError("usage: target-replay.mjs OUTPUT.json");
     const output = targetEvidence();
     writeFileSync(process.argv[2], `${JSON.stringify(output, null, 2)}\n`);
     console.log(
@@ -58,6 +59,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-replay.mjs invocation"
         : "reconcile the target graph/test catalog with the source and 144-PR history; rerun target-replay.mjs OUTPUT.json";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

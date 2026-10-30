@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { cargoManifest } from "./manifest-projection.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 const justCache = new Map();
 const record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -334,6 +335,30 @@ function nextestScripts(configs, profiles) {
         for (const field of Object.keys(entry))
           if (!scriptEntryFields.includes(field))
             throw unresolved("nextest script field", field, from);
+        // nextest's `filter` is a filterset expression and `platform` a target or `{ host, target }`
+        // table; either written as anything else is no selector at all.
+        if (
+          Object.hasOwn(entry, "filter") &&
+          (typeof entry.filter !== "string" || !entry.filter.trim())
+        )
+          throw new Error(
+            `invalid nextest script entry filter: expected a filterset expression (read from ${from})`,
+          );
+        if (
+          Object.hasOwn(entry, "platform") &&
+          !(typeof entry.platform === "string" && entry.platform.trim()) &&
+          !(
+            record(entry.platform) &&
+            Object.keys(entry.platform).length &&
+            Object.entries(entry.platform).every(
+              ([key, value]) =>
+                ["host", "target"].includes(key) && typeof value === "string" && value.trim(),
+            )
+          )
+        )
+          throw new Error(
+            `invalid nextest script entry platform: expected a target or a { host, target } table (read from ${from})`,
+          );
         for (const [field, kind] of Object.entries(scriptKinds)) {
           if (!Object.hasOwn(entry, field)) continue;
           const names = [entry[field]].flat();
@@ -426,7 +451,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       process.argv.length !== 7 ||
       !["justfile", ".cargo/config.toml", ".config/nextest.toml"].includes(process.argv[2])
     )
-      throw new Error("usage: config-projection.mjs FILE BEFORE AFTER SUITES.json OUTPUT.json");
+      throw new UsageError(
+        "usage: config-projection.mjs FILE BEFORE AFTER SUITES.json OUTPUT.json",
+      );
     const suites = JSON.parse(readFileSync(process.argv[5], "utf8"));
     if (
       !Array.isArray(suites) ||
@@ -447,6 +474,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same config-projection.mjs invocation"
         : "correct the named configuration or suite-list input; rerun the same config-projection.mjs invocation with all paths";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }

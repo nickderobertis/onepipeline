@@ -14,6 +14,7 @@ import { loadAttributions } from "./attribution.mjs";
 import { functions } from "./rust-syntax.mjs";
 import { compareGlobInputs } from "./glob-impact.mjs";
 import { testFakes } from "./test-fakes.mjs";
+import { UsageError, exitStatus } from "./cli.mjs";
 
 export const TARGET_MARKER = "<!-- BEGIN TARGET LAYOUT -->";
 const projectRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -865,7 +866,7 @@ export function targetAppendix({ layout, moves, catalog, result }) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv.length !== 3) throw new Error("usage: target-report.mjs REPLAY.json");
+    if (process.argv.length !== 3) throw new UsageError("usage: target-report.mjs REPLAY.json");
     const doc = "docs/modularization-target-layout.md";
     const prefix = readFileSync(doc, "utf8").split(TARGET_MARKER);
     if (prefix.length !== 2) throw new Error("expected one target layout marker");
@@ -885,6 +886,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         ? "check the named path's type, existence, permissions and disk space, and that the output parent is writable; rerun the same target-report.mjs invocation"
         : "generate a target replay and restore exactly one target layout marker";
     console.error(`${error.message}\nnext: ${next}`);
-    process.exitCode = 1;
+    process.exitCode = exitStatus(error);
   }
 }
