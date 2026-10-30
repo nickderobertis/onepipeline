@@ -62,7 +62,7 @@ export function typeOwners(owners) {
   return owners;
 }
 
-const WALL_PATH = "scripts/modularization/ci-wall.json";
+export const WALL_PATH = "scripts/modularization/ci-wall.json";
 const duration = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const record = (value, keys, where) => {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -150,7 +150,7 @@ const median = (values) => {
 const quantile = (values, q) => [...values].sort((a, b) => a - b)[Math.ceil(q * values.length) - 1];
 
 /** Each PR's share of a full run's estimated seconds that the selection still runs, per platform. */
-function selectedShares(rows, platforms) {
+export function selectedShares(rows, platforms) {
   return Object.fromEntries(
     Object.entries(platforms).map(([platform, data]) => [
       platform,

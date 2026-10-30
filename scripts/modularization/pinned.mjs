@@ -157,7 +157,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     console.error(`${error.message}\nnext: ${next}; rerun the same pinned.mjs invocation`);
     status = 1;
   } finally {
-    if (into) rmSync(into, { recursive: true, force: true });
+    try {
+      if (into) rmSync(into, { recursive: true, force: true });
+    } catch (error) {
+      console.error(
+        `pinned: could not remove the clone ${into}: ${error.message}\nnext: remove ${into} by hand once nothing holds it open; the command itself finished above, and only removing its clone failed`,
+      );
+      status ||= 1;
+    }
   }
   process.exit(status);
 }

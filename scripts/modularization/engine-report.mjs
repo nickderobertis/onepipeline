@@ -39,6 +39,8 @@ export function validateEngineEvidence(evidence) {
     typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
   const duration = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
   const count = (value, most) => Number.isInteger(value) && value >= 0 && value <= most;
+  const crateName = (value) =>
+    typeof value === "string" && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(value);
   const shaped = (value, keys) =>
     value &&
     typeof value === "object" &&
@@ -136,7 +138,8 @@ export function validateEngineEvidence(evidence) {
       step.overHalf.some(
         (row) =>
           !shaped(row, ["pr", "commit", "share", "forcing"]) ||
-          !(row.pr === null || /^\d+$/.test(row.pr)) ||
+          !(row.pr === null || (typeof row.pr === "string" && /^\d+$/.test(row.pr))) ||
+          typeof row.commit !== "string" ||
           !/^[0-9a-f]{8}$/.test(row.commit) ||
           !(fraction(row.share) && row.share > 0.5) ||
           !Array.isArray(row.forcing) ||
@@ -150,7 +153,7 @@ export function validateEngineEvidence(evidence) {
       step.crateReach.some(
         (row) =>
           !shaped(row, ["crate", "suites", "linuxShare", "prs"]) ||
-          !/^[a-z][a-z0-9-]*$/.test(row.crate) ||
+          !crateName(row.crate) ||
           !count(row.suites, step.suites) ||
           row.suites <= step.suites / 2 ||
           !fraction(row.linuxShare) ||
@@ -164,7 +167,9 @@ export function validateEngineEvidence(evidence) {
       step.engineSuites.some(
         (row) =>
           !shaped(row, ["suite", "crate", "tests", "closure", "linuxShare", "skipped"]) ||
-          !row.suite.startsWith(`engine--${row.crate}`) ||
+          !crateName(row.crate) ||
+          typeof row.suite !== "string" ||
+          !new RegExp(`^engine--${row.crate}(?:--[a-z][a-z0-9_]*)?$`).test(row.suite) ||
           !Number.isInteger(row.tests) ||
           row.tests < 1 ||
           !Number.isInteger(row.closure) ||

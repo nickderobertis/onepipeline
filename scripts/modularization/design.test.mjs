@@ -4452,6 +4452,19 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
     refusedRender((copy) => {
       copy.result.siblings.adapters.secondsSkip = 0;
     }, /sibling-engine paths differ from their rows/);
+    // Figures that are ordered and in range but do not follow from the rows are refused too.
+    refusedRender((copy) => {
+      copy.result.wall.linux.projected.median -= 1;
+    }, /invalid wall projection: linux/);
+    refusedRender((copy) => {
+      const [kind] = Object.keys(copy.result.causes.prs).filter(
+        (name) => name !== "lockfile resolution" && copy.result.causes.prs[name] > 0,
+      );
+      copy.result.causes.prs[kind] -= 1;
+    }, /decision summary differs from its rows/);
+    refusedRender((copy) => {
+      copy.result.siblings.prs[0].lockShare = 0.95;
+    }, /sibling-engine paths differ from their rows/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -4509,6 +4522,34 @@ test("engine split attributes assertions to the crates naming their literals in 
     },
   );
   assert.equal(checked.status, 0, checked.stderr);
+  // --write derives the committed file; --check refuses a stale one and --write repairs it.
+  const clone = scratch();
+  try {
+    execFileSync("git", ["clone", "--quiet", "--shared", ".", clone], { stdio: "pipe" });
+    const cli = (...args) =>
+      spawnSync(process.execPath, ["scripts/modularization/engine-tests.mjs", ...args], {
+        cwd: clone,
+        encoding: "utf8",
+      });
+    const path = join(clone, ENGINE_PATH);
+    const expected = readFileSync(path, "utf8");
+    rmSync(path);
+    const written = cli("--write");
+    assert.equal(written.status, 0, written.stderr);
+    assert.match(written.stdout, /engine split: \d+ tests move to \d+ engine crates/);
+    assert.equal(readFileSync(path, "utf8"), expected);
+    const stale = JSON.parse(expected);
+    const [first] = Object.keys(stale.moved);
+    stale.moved[first].fixture = "tests/recorded/engine/elsewhere/";
+    writeFileSync(path, `${JSON.stringify(stale, null, 2)}\n`);
+    const refused = cli("--check");
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /differs from the split its rule derives\nnext: regenerate/);
+    assert.equal(cli("--write").status, 0);
+    assert.equal(cli("--check").status, 0);
+  } finally {
+    rmSync(clone, { recursive: true, force: true });
+  }
   const catalog = targetCatalog();
   const layout = targetLayout();
   const committed = readFileSync(ENGINE_PATH, "utf8");
@@ -4685,6 +4726,37 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
     const rewritten = report("--write");
     assert.equal(rewritten.status, 0, rewritten.stderr);
     assert.equal(readFileSync(docPath, "utf8"), doc);
+    // The CLI refuses evidence the replay could not have written, and writes nothing for it.
+    const committedEvidence = readFileSync(evidencePath, "utf8");
+    const refusedEvidence = (mutate, pattern) => {
+      const copy = JSON.parse(committedEvidence);
+      mutate(copy);
+      writeFileSync(evidencePath, JSON.stringify(copy));
+      const refused = report("--write");
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, pattern);
+      assert.equal(readFileSync(docPath, "utf8"), doc);
+    };
+    refusedEvidence((copy) => {
+      copy.steps[2].engineSuites[0].suite = `engine--${copy.steps[2].engineSuites[0].crate}x`;
+    }, /step 3 lists an engine suite that is not one/);
+    refusedEvidence((copy) => {
+      copy.steps[0].overHalf[0].pr = 1299;
+    }, /step 1 lists a PR that is not one selecting more than half the seconds/);
+    refusedEvidence((copy) => {
+      copy.steps[1].lock.both += 1;
+    }, /step 2 does not split its lockfile-forced PRs by what moved/);
+    refusedEvidence((copy) => {
+      copy.steps[2].platforms.linux.secondsSkip = 1.2;
+    }, /step 3 has no skip shares for linux/);
+    refusedEvidence((copy) => {
+      copy.steps[0].sole["engine source"] = copy.steps[0].causes["engine source"] + 1;
+    }, /step 1 (counts sole out of its broad PRs|has an input kind forcing alone more PRs)/);
+    refusedEvidence((copy) => {
+      copy.steps[2].crateReach[0].suites = 1;
+    }, /step 3 lists a crate whose change does not select more than half the suites/);
+    writeFileSync(evidencePath, committedEvidence);
+    assert.equal(report("--check").status, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

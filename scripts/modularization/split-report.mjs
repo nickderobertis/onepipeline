@@ -3,7 +3,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
-import { classify } from "./split-replay.mjs";
+import {
+  causeAnalysis,
+  classify,
+  readWall,
+  selectedShares,
+  wallProjection,
+} from "./split-replay.mjs";
 
 export const SPLIT_MARKER = "<!-- BEGIN TEST SPLIT -->";
 const DOC = "docs/modularization-test-split.md";
@@ -151,6 +157,14 @@ export function validateEvidence(evidence) {
     local.projected.max > local.testPhase + 1e-9
   )
     throw new Error("invalid wall projection: local");
+  // The projection must be the one the rows' selected shares and the measured jobs give.
+  const projected = wallProjection(
+    selectedShares(result.rows, result.platforms),
+    readWall(readFileSync(new URL("./ci-wall.json", import.meta.url), "utf8")),
+  );
+  for (const platform of ["linux", "macos", "windows", "local"])
+    if (JSON.stringify(projected[platform]) !== JSON.stringify(result.wall[platform]))
+      throw new Error(`invalid wall projection: ${platform}`);
   if (["linux", "macos", "windows"].some((platform) => !result.wallBreakdown?.[platform]))
     throw new Error("split evidence needs a residual breakdown for every job");
   for (const [platform, breakdown] of Object.entries(result.wallBreakdown)) {
@@ -196,6 +210,15 @@ export function validateEvidence(evidence) {
     )
   )
     throw new Error("split decision summary differs from its rows");
+  // Every count and counterfactual but the lockfile split, which needs the lockfiles, follows
+  // from the rows themselves.
+  const derived = causeAnalysis(result, {});
+  if (
+    ["broad", "prs", "sole", "freed"].some(
+      (key) => JSON.stringify(derived[key]) !== JSON.stringify(causes[key]),
+    )
+  )
+    throw new Error("split decision summary differs from its rows");
   const sib = result.siblings;
   if (
     !sib ||
@@ -232,6 +255,25 @@ export function validateEvidence(evidence) {
     )
   )
     throw new Error("split sibling-engine paths differ from their rows");
+  // Each listed PR is a replayed row, with the resolved lock inputs and lock-only share it has.
+  for (const entry of sib.prs) {
+    const row = result.rows.find((candidate) => candidate.commit === entry.commit);
+    const lockFiles = (row?.effectiveFiles ?? []).filter(
+      (file) => file.startsWith("resolved/") && file.endsWith("/lock.json"),
+    );
+    const lockShare =
+      affectedSuites(compiled, lockFiles).affected.reduce(
+        (sum, suite) => sum + linux.suiteSeconds[suite],
+        0,
+      ) / linux.secondsPerRun;
+    if (
+      !row ||
+      entry.crates !== lockFiles.length ||
+      entry.lockShare !== lockShare ||
+      Object.values(entry.byRole).reduce((sum, value) => sum + value, 0) !== entry.crates
+    )
+      throw new Error("split sibling-engine paths differ from their rows");
+  }
   for (const [key, entry] of Object.entries(result.scopes ?? {}))
     if (!key.startsWith(`${entry?.path}#`) || !Array.isArray(entry.needles))
       throw new Error(`invalid scoped input ${key}`);
