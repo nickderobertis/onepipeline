@@ -2006,3 +2006,25 @@ fn a_watch_refuses_a_corrupt_or_misrouted_queue_without_advancing() {
         );
     }
 }
+
+/// Raising a resolved item's key again, even with new content, answers the item
+/// as it was resolved: nothing is reopened, changed or written.
+#[test]
+fn raising_a_resolved_key_again_changes_nothing() {
+    let world = Live::enabled();
+    let id = world.raise(&item(
+        "done",
+        "task",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let completed = world.json(None, &["complete", &id]);
+    let mut changed = item("done", "task", "urgent", "s", json!({"scope": "nothing"}));
+    changed["title"] = json!("A different title");
+    changed["body"] = json!("A different body.");
+    let path = world.input("changed", &changed);
+    let receipt = world.json(None, &["raise", "--input", &path]);
+    assert_eq!(receipt, completed);
+    assert_eq!(world.journal().len(), 2);
+}

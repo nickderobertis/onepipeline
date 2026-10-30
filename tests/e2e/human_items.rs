@@ -1074,6 +1074,11 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         .as_str()
         .unwrap()
         .to_owned();
+    // The projection record cannot be read now — a directory stands where it goes —
+    // so the dismissal recovers the content the task was first projected with from
+    // the journal's own tracker binding, not from the renamed item.
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
     in_repo(&[
         "human-items",
         "dismiss",
@@ -1081,7 +1086,8 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         "--reason",
         "Handled in another plan",
     ])
-    .exited(0);
+    .exited(0)
+    .err_has("could not be recorded");
     let state = github.state();
     let item = state["items"]
         .as_object()
@@ -1094,6 +1100,27 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
         .as_str()
         .unwrap();
     assert!(body.contains("Handled in another plan"), "{body}");
+    assert_eq!(
+        state["issues"][third["id"].as_str().unwrap()]["title"],
+        "Decide third",
+        "the task keeps the content it was first projected with"
+    );
+    // The record reads again: the next write replays what it owed, and the store
+    // answers it with the same task.
+    std::fs::remove_dir(&record).unwrap();
+    raise_in_repo(
+        "after",
+        &input(
+            "after",
+            "question",
+            "mgr",
+            None,
+            None,
+            json!({"scope": "nothing"}),
+        ),
+    )
+    .exited(0);
+    let state = github.state();
     assert_eq!(
         projected(&state).len(),
         2,
