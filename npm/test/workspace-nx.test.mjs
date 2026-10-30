@@ -1051,6 +1051,12 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     const journeys = spans["stop-verdict-journeys"];
     assert.ok(build?.end && journeys?.end, JSON.stringify(spans));
     assert.ok(build.end <= journeys.start, "the journeys started before their build ended");
+    const debug = spans["_crate-build"];
+    assert.ok(
+      debug?.end,
+      `the debug test binaries were left to the timed run: ${JSON.stringify(spans)}`,
+    );
+    assert.ok(debug.end <= journeys.start, "the journeys started before the debug build ended");
     const others = Object.entries(spans).filter(
       ([recipe]) => !["_stop-verdict-build", "stop-verdict-journeys"].includes(recipe),
     );
@@ -1106,6 +1112,65 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     assert.equal(
       existsSync(join(repo.path, "target", "budget-records", "stop-guard-unpublished.json")),
       false,
+    );
+  });
+});
+
+describe("the npm suite's debug build", () => {
+  // The publish journey packs the crate's debug build and workspace-nx drives
+  // `just _crate-build`; built inside the suite, that held the tree's lock past
+  // the publish journey's 900-second setup. So `onepipeline:build` runs first, as
+  // its own task. Asked of the real Nx and the committed graph in a scratch
+  // repository, where `just` is a double that can refuse the build.
+  const DOUBLE = `#!/usr/bin/env bash
+echo "$1" >> "$JUST_CALLS"
+[ "$1" != _crate-build ] || [ -z "\${BREAK_BUILD:-}" ] || { echo "build: broken input" >&2; exit 1; }
+`;
+
+  it("builds the crate's debug tree as a task ahead of the suite", (t) => {
+    const repo = scratchRepository(t);
+    const graphPath = join(repo.path, "task-graph.json");
+    const graph = spawnSync(
+      ...spawnable(
+        join(repo.path, "node_modules", ".bin", "nx"),
+        ["run", "onepipeline-npm:test", `--graph=${graphPath}`],
+        {
+          cwd: repo.path,
+          env: { ...process.env, NX_DAEMON: "false", NX_CACHE_PROJECT_GRAPH: "false" },
+          encoding: "utf8",
+        },
+      ),
+    );
+    assert.equal(graph.status, 0, `${graph.stdout}\n${graph.stderr}`);
+    const { dependencies } = JSON.parse(readFileSync(graphPath, "utf8")).tasks;
+    assert.ok(
+      dependencies["onepipeline-npm:test"].includes("onepipeline:build"),
+      JSON.stringify(dependencies["onepipeline-npm:test"]),
+    );
+  });
+
+  it("fails the gate before the suite starts when that build does", (t) => {
+    const repo = scratchRepository(t);
+    mkdirSync(join(repo.path, "bin"));
+    writeFileSync(join(repo.path, "bin", "just"), DOUBLE, { mode: 0o755 });
+    const calls = join(repo.path, "just.calls");
+    writeFileSync(calls, "");
+    const result = run(
+      ["scripts/nx.sh", "run", "onepipeline-npm:test"],
+      {
+        PATH: `${join(repo.path, "bin")}:${process.env.PATH}`,
+        JUST_CALLS: calls,
+        BREAK_BUILD: "1",
+      },
+      repo.path,
+    );
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /build: broken input/);
+    assert.deepEqual(readFileSync(calls, "utf8").split("\n").filter(Boolean), ["_crate-build"]);
+    assert.doesNotMatch(
+      result.stderr,
+      /node --test npm\/test/,
+      "the suite ran after a failed build",
     );
   });
 });

@@ -50,7 +50,7 @@
     },
     "test-build": {
       "command": "just _stop-verdict-build",
-      "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly `test`'s inputs, so the two replay or run together: a warm cache builds nothing, and a `test` that runs finds the binary fresh.",
+      "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly `test`'s inputs, so the two replay or run together: a warm cache builds nothing, and a `test` that runs finds the binary fresh. The debug test binaries `test` runs come from `onepipeline:build`, the other edge `test` declares.",
       "cache": true,
       "inputs": [
         "rustBuild",
@@ -83,7 +83,13 @@
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished-onepipeline"
       ],
       "dependsOn": [
-        "test-build"
+        "test-build",
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "build"
+        }
       ],
       "parallelism": false
     },
