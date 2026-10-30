@@ -1678,9 +1678,10 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
     );
     let intents = world.root.join("intents");
     std::fs::create_dir_all(&intents).unwrap();
-    std::fs::write(
-        repo.join("onetaskgraph.yaml"),
-        format!(
+    let store_at = |endpoint: &str| {
+        std::fs::write(
+            repo.join("onetaskgraph.yaml"),
+            format!(
             "sources:\n  board:\n    plugin: github-projects\n    visibility: public\n    \
              task_projection:\n      host: projection-host\n      directory: {}\n      project: human\n    \
              config:\n      owner: owner\n      project_number: 1\n      repository: owner/service\n      \
@@ -1689,10 +1690,12 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
              done: Done\n        cancelled: Canceled\n      priority_mapping:\n        urgent: Urgent\n        \
              high: High\n        medium: Medium\n        low: Low\n",
             intents.display(),
-            github.board(1)
+            endpoint
         ),
-    )
-    .unwrap();
+        )
+        .unwrap();
+    };
+    store_at(&github.board(1));
     let in_repo = |args: &[&str]| {
         let mut command = world.cmd(args);
         command.current_dir(&repo);
@@ -1766,6 +1769,45 @@ fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
         "{statuses:?}"
     );
     assert_eq!(filed(&state).len(), 2);
+
+    // A task resolved while its tracker is unreachable is projected once the
+    // tracker answers again — created and settled in that one projection — and a
+    // replay of it creates nothing more.
+    store_at("http://127.0.0.1:9/graphql");
+    let plain = world.root.join("plain.json");
+    std::fs::write(
+        &plain,
+        json!({"schema_version": 1, "dedup_key": "offline", "kind": "task",
+               "title": "Rotate the offline key", "body": "Rotate it.", "priority": "low",
+               "owner": {"session": "mgr", "run": null, "plan": null},
+               "block": {"scope": "nothing"}, "approval": null})
+        .to_string(),
+    )
+    .unwrap();
+    let raised = in_repo(&["human-items", "raise", "--input", plain.to_str().unwrap()]);
+    raised.exited(0).err_has("its projection into board failed");
+    let offline: String = serde_json::from_str::<Value>(&raised.stdout).unwrap()["item"]["item"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    in_repo(&["human-items", "complete", &offline])
+        .exited(0)
+        .err_has("its projection into board failed");
+    store_at(&github.board(1));
+    for _ in 0..2 {
+        in_repo(&["human-items", "raise", "--input", plain.to_str().unwrap()]).exited(0);
+    }
+    let state = github.state();
+    let resolved: Vec<Value> = state["issues"]
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|i| i["title"] == "Rotate the offline key")
+        .cloned()
+        .collect();
+    assert_eq!(resolved.len(), 1, "{resolved:#?}");
+    assert_eq!(status_of(&state, &resolved[0]), "Done");
 }
 
 /// A human step whose item could not be raised — the host refused the store —

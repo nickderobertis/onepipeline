@@ -2226,3 +2226,78 @@ fn a_design_task_raised_again_completes_against_its_newest_version() {
     assert_eq!(requests[0]["key"], "v2");
     assert_eq!(lines(&world.root.join("approvals.ndjson"))[0]["key"], "v2");
 }
+
+/// A stale completion stopped after its replacement is durable and before the
+/// obsolete task's dismissal — the host lets the journal grow by one record and
+/// no more — leaves both open; completing the obsolete task again finds the same
+/// replacement, dismisses the obsolete one, and still files only one replacement.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_stale_completion_stopped_between_its_records_converges_on_retry() {
+    use std::os::unix::process::CommandExt;
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ctx = context(
+        &world,
+        "design",
+        &json!({
+            "owner": owner, "dedup_key": "alpha", "approval": {"board_copy": "plans:doc-1", "key": "v1"}
+        }),
+    );
+    let id = phase(&world, None, "design-review", &ctx)["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    std::fs::write(world.root.join("current-key"), "v2").unwrap();
+    let journal = world.store().join("events.ndjson");
+    let before = std::fs::metadata(&journal).unwrap().len();
+    let raised = std::fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .len() as u64;
+    // Room for the replacement's record, which is the raised record with a longer
+    // key, and not for the dismissal's, which adds a resolution to the same item.
+    let ceiling = before + raised + 120;
+    let mut command = world.cmd(Some("mgr"), &["complete", &id]);
+    command.env("LLVM_PROFILE_FILE", world.root.join("ceiling-%p.profraw"));
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: ceiling,
+                rlim_max: ceiling,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let stopped = command.output().unwrap();
+    assert!(!stopped.status.success());
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("could not record this durably"));
+    let open = world.json(None, &["list", "--json"]);
+    assert_eq!(
+        open.as_array().unwrap().len(),
+        2,
+        "the replacement is durable beside the obsolete task: {open}"
+    );
+    world.refused(
+        Some("mgr"),
+        &["complete", &id],
+        "Re-read the current document",
+    );
+    let open = world.json(None, &["list", "--json"]);
+    assert_eq!(open.as_array().unwrap().len(), 1);
+    assert_eq!(open[0]["item"]["approval"]["key"], "v2");
+    assert_eq!(
+        world.json(None, &["show", &id, "--json"])["item"]["state"],
+        "dismissed"
+    );
+    assert!(lines(&world.root.join("approvals.ndjson")).is_empty());
+}
