@@ -34,6 +34,7 @@ The test-split steps follow the crate steps of the target layout and land one at
 
 1. **Project test inputs per item and section.** Add the fingerprint materializer for harness items, test-file items and scoped contract sections, and give each existing suite the fingerprints its tests read in place of the whole files. No test moves.
 2. **Split each heavy suite, heaviest first:** cmd-start, cross-command, cmd-reply, cmd-results, cmd-status, then cmd-adopt. Each step adds one Nx test target per part, running that part's filterset over the unchanged runner binary, and removes the parent's single target in the same change.
+3. **Re-home start's, reply's and adopt's engine assertions** (steps 8 to 10), as [the engine re-homing](modularization-engine-tests.md) designs and replays them.
 
 For every step, the binary is untouched, so its behaviour and the published crate's public API are what the crate steps left them. Every test keeps its assertions and runs in exactly one part, because `test-split.mjs --check` runs over the new targets' filters before the parent target is removed, and nextest's own listing of each part, unioned, must equal the parent's. No test is removed, sampled or sharded across jobs: a part runs in the same job its parent did.
 

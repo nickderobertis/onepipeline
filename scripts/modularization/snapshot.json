@@ -3,6 +3,7 @@
   "design": [
     "docs/modularization-command-replay.md",
     "docs/modularization-design.md",
+    "docs/modularization-engine-tests.md",
     "docs/modularization-target-layout.md",
     "docs/modularization-test-split.md",
     "scripts/crate-split",

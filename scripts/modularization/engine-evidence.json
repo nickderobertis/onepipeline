@@ -1,0 +1,7220 @@
+{
+  "schema": 1,
+  "steps": [
+    {
+      "schema": 1,
+      "parents": [
+        "cmd-start"
+      ],
+      "prs": 144,
+      "suites": 447,
+      "platforms": {
+        "linux": {
+          "suiteSkip": 0.130841,
+          "secondsSkip": 0.124837
+        },
+        "macos": {
+          "suiteSkip": 0.130841,
+          "secondsSkip": 0.123307
+        },
+        "windows": {
+          "suiteSkip": 0.130841,
+          "secondsSkip": 0.121392
+        },
+        "local": {
+          "suiteSkip": 0.130841,
+          "secondsSkip": 0.122898
+        }
+      },
+      "broad": 121,
+      "causes": {
+        "engine source outside any attributed item": 60,
+        "engine source": 71,
+        "harness helper": 11,
+        "harness item outside one helper": 14,
+        "workspace tooling": 12,
+        "lockfile resolution": 56,
+        "manifest requirement": 53,
+        "test configuration section": 16,
+        "several inputs together": 3,
+        "test file outside one test": 2,
+        "test fake": 1
+      },
+      "sole": {
+        "engine source outside any attributed item": 3,
+        "engine source": 10,
+        "test configuration section": 4,
+        "manifest requirement": 1,
+        "lockfile resolution": 2,
+        "workspace tooling": 3,
+        "several inputs together": 3,
+        "test file outside one test": 1
+      },
+      "lock": {
+        "sibling": 40,
+        "thirdParty": 2,
+        "both": 14
+      },
+      "wall": {
+        "linux": {
+          "today": 6474,
+          "residual": 2971.176,
+          "median": 6452.864916,
+          "max": 6474,
+          "over": 144,
+          "typicalShare": 0.993966
+        },
+        "macos": {
+          "today": 7890,
+          "residual": 1665.584,
+          "median": 7857.779402,
+          "max": 7890,
+          "over": 136,
+          "typicalShare": 0.994824
+        },
+        "windows": {
+          "today": 11759,
+          "residual": 2629.335,
+          "median": 11738.576571,
+          "max": 11759,
+          "over": 144,
+          "typicalShare": 0.997763
+        },
+        "local": {
+          "testPhase": 10293.5,
+          "median": 10248.216048,
+          "max": 10293.5
+        }
+      },
+      "overHalf": [
+        {
+          "pr": "293",
+          "commit": "65797ad7",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "301",
+          "commit": "d5524506",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "310",
+          "commit": "1b542977",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "311",
+          "commit": "727a2bad",
+          "share": 0.966238,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "314",
+          "commit": "56c8f58f",
+          "share": 0.993966,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "318",
+          "commit": "693a9110",
+          "share": 0.953472,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "340",
+          "commit": "45207427",
+          "share": 0.645178,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "346",
+          "commit": "11a53b1d",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "353",
+          "commit": "79a6b9e4",
+          "share": 0.99979,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "336",
+          "commit": "1d2fe75b",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "358",
+          "commit": "60a92f7e",
+          "share": 0.984611,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "350",
+          "commit": "57fb8a3b",
+          "share": 0.999853,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "385",
+          "commit": "1835e1aa",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "386",
+          "commit": "a5373032",
+          "share": 0.910853,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "390",
+          "commit": "dcdede84",
+          "share": 0.941639,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "389",
+          "commit": "f956bd31",
+          "share": 0.761315,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "394",
+          "commit": "03253f06",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "402",
+          "commit": "52e1427b",
+          "share": 0.999488,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "401",
+          "commit": "28fb9884",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "405",
+          "commit": "759ed787",
+          "share": 0.994636,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "414",
+          "commit": "0d7b7f2a",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "422",
+          "commit": "def056bb",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "433",
+          "commit": "17248bea",
+          "share": 0.714414,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "434",
+          "commit": "6e46fa8d",
+          "share": 0.973293,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "435",
+          "commit": "993123fa",
+          "share": 0.999448,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "439",
+          "commit": "f4f4f6f2",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "437",
+          "commit": "b1bbb4f2",
+          "share": 0.957497,
+          "forcing": [
+            "engine source outside any attributed item",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "445",
+          "commit": "a265bfeb",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "448",
+          "commit": "b117e452",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "469",
+          "commit": "a57c77d8",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "477",
+          "commit": "88caf5fd",
+          "share": 0.993758,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "482",
+          "commit": "a8116795",
+          "share": 0.973604,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "472",
+          "commit": "74b66de1",
+          "share": 0.976837,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "490",
+          "commit": "05926f01",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "473",
+          "commit": "f79ade4d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "494",
+          "commit": "5ff22800",
+          "share": 0.993477,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "479",
+          "commit": "e641584d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "486",
+          "commit": "dcdafdf5",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "492",
+          "commit": "e3845dc3",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "502",
+          "commit": "b9cf2fc6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "497",
+          "commit": "44272119",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "511",
+          "commit": "e63701e7",
+          "share": 0.989392,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "517",
+          "commit": "b70285e2",
+          "share": 0.925659,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "495",
+          "commit": "8239288e",
+          "share": 0.993813,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "532",
+          "commit": "fb52f930",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "537",
+          "commit": "820665dd",
+          "share": 0.970507,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "541",
+          "commit": "8238cea0",
+          "share": 0.993477,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "542",
+          "commit": "561799dd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "546",
+          "commit": "211fda1c",
+          "share": 0.996684,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "543",
+          "commit": "cb8228d2",
+          "share": 0.993758,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "550",
+          "commit": "fa01bf63",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "553",
+          "commit": "a6bfb170",
+          "share": 0.938256,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "556",
+          "commit": "55df74af",
+          "share": 0.908244,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "554",
+          "commit": "0b2a00af",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "559",
+          "commit": "736a50e3",
+          "share": 0.999664,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "569",
+          "commit": "f4bfd253",
+          "share": 0.770498,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "575",
+          "commit": "97b3e519",
+          "share": 0.981596,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "573",
+          "commit": "a72e88e2",
+          "share": 0.910853,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "574",
+          "commit": "2c22506d",
+          "share": 0.973293,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "580",
+          "commit": "cb2777e7",
+          "share": 0.996537,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "591",
+          "commit": "a36a02f6",
+          "share": 0.796891,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "595",
+          "commit": "cdedc561",
+          "share": 0.962068,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "598",
+          "commit": "999dd893",
+          "share": 0.981596,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "592",
+          "commit": "88c1e9db",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "600",
+          "commit": "bae70c28",
+          "share": 0.993758,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "599",
+          "commit": "7d54c355",
+          "share": 0.988575,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "605",
+          "commit": "b75bd6ba",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "608",
+          "commit": "1bc492a3",
+          "share": 0.997026,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "604",
+          "commit": "69a02699",
+          "share": 0.976415,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "613",
+          "commit": "7da30ee0",
+          "share": 0.993966,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "614",
+          "commit": "8c82674c",
+          "share": 0.933863,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "612",
+          "commit": "7cf175e6",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "634",
+          "commit": "47f26ded",
+          "share": 0.948087,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "651",
+          "commit": "03d93fe4",
+          "share": 0.981596,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "653",
+          "commit": "f3bd3791",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "673",
+          "commit": "3047c012",
+          "share": 0.947012,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "685",
+          "commit": "aeb6acb5",
+          "share": 0.95844,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "670",
+          "commit": "c186d703",
+          "share": 1,
+          "forcing": [
+            "harness helper",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "683",
+          "commit": "533da9cd",
+          "share": 0.895667,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "691",
+          "commit": "1474a2f8",
+          "share": 0.966238,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "694",
+          "commit": "bd3c851f",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "699",
+          "commit": "36740cc8",
+          "share": 0.961913,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "702",
+          "commit": "ae9c83ca",
+          "share": 0.939509,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "703",
+          "commit": "2226cb61",
+          "share": 0.996537,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "701",
+          "commit": "d83bf636",
+          "share": 0.996241,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "709",
+          "commit": "23a65912",
+          "share": 0.96206,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "717",
+          "commit": "bffe2c72",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "725",
+          "commit": "09ea3f8f",
+          "share": 0.934876,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "724",
+          "commit": "082af15c",
+          "share": 0.996684,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "731",
+          "commit": "4473bd35",
+          "share": 0.997026,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "726",
+          "commit": "a794deed",
+          "share": 0.949681,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "755",
+          "commit": "e8b21d5c",
+          "share": 0.993477,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "757",
+          "commit": "4ce9bb82",
+          "share": 0.999448,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "777",
+          "commit": "941958c6",
+          "share": 0.954253,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "778",
+          "commit": "f8af9bb5",
+          "share": 0.996537,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "776",
+          "commit": "1a47dc37",
+          "share": 0.993477,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "781",
+          "commit": "c15cafc2",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "775",
+          "commit": "1d4f3843",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test file outside one test"
+          ]
+        },
+        {
+          "pr": "783",
+          "commit": "cc6b6f32",
+          "share": 1,
+          "forcing": [
+            "test configuration section",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "793",
+          "commit": "b4ed9c3c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "806",
+          "commit": "3ae975d2",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "810",
+          "commit": "342a59e5",
+          "share": 0.696333,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "813",
+          "commit": "b5eb5154",
+          "share": 0.993758,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "819",
+          "commit": "edb2dfbe",
+          "share": 0.910853,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "827",
+          "commit": "cedaa817",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "833",
+          "commit": "b9b3186c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "840",
+          "commit": "48334396",
+          "share": 0.993624,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "848",
+          "commit": "70bb2260",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "849",
+          "commit": "fa52f9f4",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "853",
+          "commit": "72cc83c9",
+          "share": 0.997026,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "852",
+          "commit": "a43e3e49",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "866",
+          "commit": "cce8e7f8",
+          "share": 0.996684,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "861",
+          "commit": "61194ef6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test file outside one test",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "862",
+          "commit": "92969a32",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "878",
+          "commit": "13fa3122",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "828",
+          "commit": "f98a6316",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "875",
+          "commit": "7681b6ed",
+          "share": 0.943831,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "884",
+          "commit": "aec76676",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "865",
+          "commit": "4c236086",
+          "share": 0.975087,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "887",
+          "commit": "bdd2b295",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "886",
+          "commit": "c1f8e4cf",
+          "share": 0.993758,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "891",
+          "commit": "080bf199",
+          "share": 0.996388,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "892",
+          "commit": "c8ff4a50",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "909",
+          "commit": "ce8595d6",
+          "share": 0.993758,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "914",
+          "commit": "5091d998",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "916",
+          "commit": "dfde02c3",
+          "share": 0.99979,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "942",
+          "commit": "60d317d3",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "922",
+          "commit": "e6d813cd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section",
+            "test fake"
+          ]
+        }
+      ],
+      "crateReach": [
+        {
+          "crate": "publication",
+          "suites": 294,
+          "linuxShare": 0.614155,
+          "prs": 82
+        },
+        {
+          "crate": "edit-reconciler",
+          "suites": 287,
+          "linuxShare": 0.591151,
+          "prs": 71
+        },
+        {
+          "crate": "run-control",
+          "suites": 292,
+          "linuxShare": 0.627147,
+          "prs": 71
+        },
+        {
+          "crate": "run-projection",
+          "suites": 419,
+          "linuxShare": 0.910853,
+          "prs": 70
+        },
+        {
+          "crate": "channel-admission",
+          "suites": 292,
+          "linuxShare": 0.627147,
+          "prs": 67
+        },
+        {
+          "crate": "run-result",
+          "suites": 414,
+          "linuxShare": 0.895667,
+          "prs": 63
+        },
+        {
+          "crate": "run-views",
+          "suites": 394,
+          "linuxShare": 0.793497,
+          "prs": 61
+        },
+        {
+          "crate": "run-state",
+          "suites": 421,
+          "linuxShare": 0.925659,
+          "prs": 60
+        },
+        {
+          "crate": "event-emission",
+          "suites": 291,
+          "linuxShare": 0.60491,
+          "prs": 59
+        },
+        {
+          "crate": "plan-edits",
+          "suites": 300,
+          "linuxShare": 0.654922,
+          "prs": 56
+        },
+        {
+          "crate": "plan-model",
+          "suites": 436,
+          "linuxShare": 0.967602,
+          "prs": 56
+        },
+        {
+          "crate": "plan-compat",
+          "suites": 426,
+          "linuxShare": 0.940833,
+          "prs": 52
+        },
+        {
+          "crate": "plan-criteria",
+          "suites": 436,
+          "linuxShare": 0.967602,
+          "prs": 52
+        },
+        {
+          "crate": "plan-preservation",
+          "suites": 426,
+          "linuxShare": 0.940833,
+          "prs": 52
+        },
+        {
+          "crate": "publication-boundary",
+          "suites": 302,
+          "linuxShare": 0.660153,
+          "prs": 50
+        },
+        {
+          "crate": "event-payloads",
+          "suites": 426,
+          "linuxShare": 0.938101,
+          "prs": 49
+        },
+        {
+          "crate": "review-replies",
+          "suites": 289,
+          "linuxShare": 0.595633,
+          "prs": 47
+        },
+        {
+          "crate": "agent-execution",
+          "suites": 294,
+          "linuxShare": 0.621444,
+          "prs": 46
+        },
+        {
+          "crate": "fake-oneagentgraph",
+          "suites": 249,
+          "linuxShare": 0.57793,
+          "prs": 46
+        },
+        {
+          "crate": "plan-validation",
+          "suites": 426,
+          "linuxShare": 0.940833,
+          "prs": 45
+        },
+        {
+          "crate": "event-vocabulary",
+          "suites": 427,
+          "linuxShare": 0.938249,
+          "prs": 43
+        },
+        {
+          "crate": "fake-gh",
+          "suites": 350,
+          "linuxShare": 0.725575,
+          "prs": 38
+        },
+        {
+          "crate": "readjust-state",
+          "suites": 421,
+          "linuxShare": 0.925659,
+          "prs": 38
+        },
+        {
+          "crate": "readjustment",
+          "suites": 289,
+          "linuxShare": 0.604645,
+          "prs": 38
+        },
+        {
+          "crate": "review-discovery",
+          "suites": 288,
+          "linuxShare": 0.595447,
+          "prs": 38
+        },
+        {
+          "crate": "planner-channel",
+          "suites": 322,
+          "linuxShare": 0.749593,
+          "prs": 37
+        },
+        {
+          "crate": "publication-host",
+          "suites": 296,
+          "linuxShare": 0.638329,
+          "prs": 37
+        },
+        {
+          "crate": "release-watch",
+          "suites": 261,
+          "linuxShare": 0.560628,
+          "prs": 37
+        },
+        {
+          "crate": "publication-query",
+          "suites": 403,
+          "linuxShare": 0.814804,
+          "prs": 34
+        },
+        {
+          "crate": "test-fake-member",
+          "suites": 262,
+          "linuxShare": 0.624507,
+          "prs": 29
+        },
+        {
+          "crate": "run-files",
+          "suites": 431,
+          "linuxShare": 0.955737,
+          "prs": 26
+        },
+        {
+          "crate": "run-report",
+          "suites": 414,
+          "linuxShare": 0.895667,
+          "prs": 26
+        },
+        {
+          "crate": "task-store",
+          "suites": 297,
+          "linuxShare": 0.645178,
+          "prs": 26
+        },
+        {
+          "crate": "agent-session",
+          "suites": 305,
+          "linuxShare": 0.673494,
+          "prs": 25
+        },
+        {
+          "crate": "member-liveness",
+          "suites": 395,
+          "linuxShare": 0.793497,
+          "prs": 25
+        },
+        {
+          "crate": "planner-notes",
+          "suites": 288,
+          "linuxShare": 0.592759,
+          "prs": 25
+        },
+        {
+          "crate": "processes",
+          "suites": 419,
+          "linuxShare": 0.905267,
+          "prs": 25
+        },
+        {
+          "crate": "run-paths",
+          "suites": 432,
+          "linuxShare": 0.958663,
+          "prs": 24
+        },
+        {
+          "crate": "diagnostics",
+          "suites": 440,
+          "linuxShare": 0.973293,
+          "prs": 23
+        },
+        {
+          "crate": "run-locks",
+          "suites": 296,
+          "linuxShare": 0.644406,
+          "prs": 16
+        },
+        {
+          "crate": "run-record",
+          "suites": 421,
+          "linuxShare": 0.936473,
+          "prs": 13
+        },
+        {
+          "crate": "journal-reader",
+          "suites": 422,
+          "linuxShare": 0.927918,
+          "prs": 11
+        },
+        {
+          "crate": "branch-template",
+          "suites": 436,
+          "linuxShare": 0.967602,
+          "prs": 7
+        },
+        {
+          "crate": "test-fake-codec",
+          "suites": 447,
+          "linuxShare": 1,
+          "prs": 6
+        },
+        {
+          "crate": "test-containment",
+          "suites": 447,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "test-profile",
+          "suites": 447,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "append-stamp",
+          "suites": 415,
+          "linuxShare": 0.899991,
+          "prs": 2
+        },
+        {
+          "crate": "checkpoint",
+          "suites": 415,
+          "linuxShare": 0.899991,
+          "prs": 2
+        },
+        {
+          "crate": "cross-run-query",
+          "suites": 396,
+          "linuxShare": 0.811622,
+          "prs": 2
+        },
+        {
+          "crate": "event-filter",
+          "suites": 407,
+          "linuxShare": 0.841616,
+          "prs": 2
+        },
+        {
+          "crate": "journal",
+          "suites": 311,
+          "linuxShare": 0.733237,
+          "prs": 2
+        },
+        {
+          "crate": "render-cost",
+          "suites": 420,
+          "linuxShare": 0.905609,
+          "prs": 2
+        },
+        {
+          "crate": "run-labels",
+          "suites": 415,
+          "linuxShare": 0.896003,
+          "prs": 2
+        },
+        {
+          "crate": "run-summary",
+          "suites": 414,
+          "linuxShare": 0.895667,
+          "prs": 2
+        },
+        {
+          "crate": "yaml-codec",
+          "suites": 437,
+          "linuxShare": 0.967812,
+          "prs": 2
+        },
+        {
+          "crate": "branch-stack",
+          "suites": 295,
+          "linuxShare": 0.623353,
+          "prs": 1
+        },
+        {
+          "crate": "dispatch-controls",
+          "suites": 295,
+          "linuxShare": 0.622706,
+          "prs": 1
+        }
+      ],
+      "engineSuites": [
+        {
+          "suite": "engine--agent-execution",
+          "crate": "agent-execution",
+          "tests": 33,
+          "closure": 30,
+          "linuxShare": 0.008551,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--agent-session",
+          "crate": "agent-session",
+          "tests": 12,
+          "closure": 5,
+          "linuxShare": 0.002926,
+          "skipped": 0.291667
+        },
+        {
+          "suite": "engine--branch-publication",
+          "crate": "branch-publication",
+          "tests": 3,
+          "closure": 40,
+          "linuxShare": 0.000609,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--checkpoint",
+          "crate": "checkpoint",
+          "tests": 9,
+          "closure": 18,
+          "linuxShare": 0.004324,
+          "skipped": 0.166667
+        },
+        {
+          "suite": "engine--cross-run-query",
+          "crate": "cross-run-query",
+          "tests": 31,
+          "closure": 17,
+          "linuxShare": 0.014315,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--dispatch-cancellation",
+          "crate": "dispatch-cancellation",
+          "tests": 5,
+          "closure": 28,
+          "linuxShare": 0.002232,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--edit-reconciler--adoption",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.003508,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--boundary",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000493,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--bus_config",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000046,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--continuation",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.00945,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--dispatch",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000315,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--draft_lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000712,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000327,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver_exit",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00077,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 20,
+          "closure": 50,
+          "linuxShare": 0.008269,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--linear_launch",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--live_edit",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000284,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--malformed_envelopes",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00057,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--plan",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000349,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publication_boundary",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publish_preserve",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.001625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--readjust",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.001341,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--real_vcs",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000312,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--retirement",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000413,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--review_reply",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--rework",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000345,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_end_hooks",
+          "crate": "edit-reconciler",
+          "tests": 9,
+          "closure": 50,
+          "linuxShare": 0.002214,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_ending",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000106,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--scratch",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000074,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--session_reuse",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--shutdown",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.000411,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--stacked_drafts",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--store",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--envelope-submission",
+          "crate": "envelope-submission",
+          "tests": 9,
+          "closure": 52,
+          "linuxShare": 0.005707,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--event-emission",
+          "crate": "event-emission",
+          "tests": 1,
+          "closure": 28,
+          "linuxShare": 0.000079,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--event-filter",
+          "crate": "event-filter",
+          "tests": 5,
+          "closure": 8,
+          "linuxShare": 0.001052,
+          "skipped": 0.284722
+        },
+        {
+          "suite": "engine--event-payloads",
+          "crate": "event-payloads",
+          "tests": 40,
+          "closure": 2,
+          "linuxShare": 0.008008,
+          "skipped": 0.270833
+        },
+        {
+          "suite": "engine--event-vocabulary",
+          "crate": "event-vocabulary",
+          "tests": 1,
+          "closure": 1,
+          "linuxShare": 0.000147,
+          "skipped": 0.479167
+        },
+        {
+          "suite": "engine--flow-session",
+          "crate": "flow-session",
+          "tests": 2,
+          "closure": 12,
+          "linuxShare": 0.000211,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--home",
+          "crate": "home",
+          "tests": 2,
+          "closure": 1,
+          "linuxShare": 0.000155,
+          "skipped": 0.451389
+        },
+        {
+          "suite": "engine--journal",
+          "crate": "journal",
+          "tests": 22,
+          "closure": 26,
+          "linuxShare": 0.01159,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--loop-statistics",
+          "crate": "loop-statistics",
+          "tests": 1,
+          "closure": 4,
+          "linuxShare": 0.002428,
+          "skipped": 0.555556
+        },
+        {
+          "suite": "engine--member-liveness",
+          "crate": "member-liveness",
+          "tests": 2,
+          "closure": 4,
+          "linuxShare": 0,
+          "skipped": 0.506944
+        },
+        {
+          "suite": "engine--observation-debt",
+          "crate": "observation-debt",
+          "tests": 3,
+          "closure": 30,
+          "linuxShare": 0.000926,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--plan-edits",
+          "crate": "plan-edits",
+          "tests": 9,
+          "closure": 13,
+          "linuxShare": 0.004325,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--plan-model",
+          "crate": "plan-model",
+          "tests": 4,
+          "closure": 5,
+          "linuxShare": 0.001605,
+          "skipped": 0.326389
+        },
+        {
+          "suite": "engine--plan-validation",
+          "crate": "plan-validation",
+          "tests": 7,
+          "closure": 8,
+          "linuxShare": 0.004384,
+          "skipped": 0.3125
+        },
+        {
+          "suite": "engine--planner-channel",
+          "crate": "planner-channel",
+          "tests": 6,
+          "closure": 8,
+          "linuxShare": 0.000714,
+          "skipped": 0.201389
+        },
+        {
+          "suite": "engine--planner-notes",
+          "crate": "planner-notes",
+          "tests": 5,
+          "closure": 39,
+          "linuxShare": 0.001608,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--pool-maintenance",
+          "crate": "pool-maintenance",
+          "tests": 12,
+          "closure": 29,
+          "linuxShare": 0.003704,
+          "skipped": 0.152778
+        },
+        {
+          "suite": "engine--processes",
+          "crate": "processes",
+          "tests": 3,
+          "closure": 2,
+          "linuxShare": 0.002905,
+          "skipped": 0.4375
+        },
+        {
+          "suite": "engine--publication",
+          "crate": "publication",
+          "tests": 8,
+          "closure": 36,
+          "linuxShare": 0.001262,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--publication-debt",
+          "crate": "publication-debt",
+          "tests": 10,
+          "closure": 21,
+          "linuxShare": 0.001034,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--publication-host",
+          "crate": "publication-host",
+          "tests": 20,
+          "closure": 28,
+          "linuxShare": 0.014976,
+          "skipped": 0.138889
+        },
+        {
+          "suite": "engine--readjustment",
+          "crate": "readjustment",
+          "tests": 17,
+          "closure": 35,
+          "linuxShare": 0.009198,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--release-watch",
+          "crate": "release-watch",
+          "tests": 9,
+          "closure": 31,
+          "linuxShare": 0.00381,
+          "skipped": 0.131944
+        },
+        {
+          "suite": "engine--render-cost",
+          "crate": "render-cost",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000342,
+          "skipped": 0.569444
+        },
+        {
+          "suite": "engine--review-discovery",
+          "crate": "review-discovery",
+          "tests": 19,
+          "closure": 42,
+          "linuxShare": 0.004296,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--review-replies",
+          "crate": "review-replies",
+          "tests": 1,
+          "closure": 40,
+          "linuxShare": 0.000186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--run-control",
+          "crate": "run-control",
+          "tests": 32,
+          "closure": 36,
+          "linuxShare": 0.011559,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--run-projection",
+          "crate": "run-projection",
+          "tests": 3,
+          "closure": 13,
+          "linuxShare": 0.000633,
+          "skipped": 0.208333
+        },
+        {
+          "suite": "engine--run-record",
+          "crate": "run-record",
+          "tests": 43,
+          "closure": 8,
+          "linuxShare": 0.01416,
+          "skipped": 0.229167
+        },
+        {
+          "suite": "engine--run-state",
+          "crate": "run-state",
+          "tests": 2,
+          "closure": 12,
+          "linuxShare": 0.000491,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--run-summary",
+          "crate": "run-summary",
+          "tests": 8,
+          "closure": 23,
+          "linuxShare": 0.005141,
+          "skipped": 0.173611
+        },
+        {
+          "suite": "engine--run-views",
+          "crate": "run-views",
+          "tests": 54,
+          "closure": 30,
+          "linuxShare": 0.014014,
+          "skipped": 0.125
+        },
+        {
+          "suite": "engine--scheduler--adoption",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001002,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--amend",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.00012,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--branch_template",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000666,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--continuation",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.002625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--dispatch",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.000757,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--draft_lifecycle",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.001186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--holds",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000352,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--lifecycle",
+          "crate": "scheduler",
+          "tests": 30,
+          "closure": 55,
+          "linuxShare": 0.016353,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--maintenance",
+          "crate": "scheduler",
+          "tests": 9,
+          "closure": 55,
+          "linuxShare": 0.002361,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--publication_boundary",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.000316,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--readjust",
+          "crate": "scheduler",
+          "tests": 7,
+          "closure": 55,
+          "linuxShare": 0.004357,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--retirement",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.000929,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--rework",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.001006,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--run_end_hooks",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000266,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--scratch",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000093,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--session_reuse",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--stacked_drafts",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--store",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--views",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000137,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--writeback_projections",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.00008,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--task-store",
+          "crate": "task-store",
+          "tests": 39,
+          "closure": 30,
+          "linuxShare": 0.011791,
+          "skipped": 0.090278
+        },
+        {
+          "suite": "engine--watch-lease",
+          "crate": "watch-lease",
+          "tests": 9,
+          "closure": 15,
+          "linuxShare": 0.001694,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--yaml-codec",
+          "crate": "yaml-codec",
+          "tests": 2,
+          "closure": 1,
+          "linuxShare": 0.00021,
+          "skipped": 0.652778
+        }
+      ]
+    },
+    {
+      "schema": 1,
+      "parents": [
+        "cmd-start",
+        "cmd-reply"
+      ],
+      "prs": 144,
+      "suites": 434,
+      "platforms": {
+        "linux": {
+          "suiteSkip": 0.131736,
+          "secondsSkip": 0.126028
+        },
+        "macos": {
+          "suiteSkip": 0.131736,
+          "secondsSkip": 0.12448
+        },
+        "windows": {
+          "suiteSkip": 0.131736,
+          "secondsSkip": 0.122629
+        },
+        "local": {
+          "suiteSkip": 0.131736,
+          "secondsSkip": 0.124314
+        }
+      },
+      "broad": 121,
+      "causes": {
+        "engine source outside any attributed item": 58,
+        "engine source": 71,
+        "harness helper": 11,
+        "harness item outside one helper": 14,
+        "workspace tooling": 12,
+        "lockfile resolution": 56,
+        "manifest requirement": 53,
+        "test configuration section": 16,
+        "several inputs together": 3,
+        "test file outside one test": 2,
+        "test fake": 1
+      },
+      "sole": {
+        "engine source outside any attributed item": 3,
+        "harness item outside one helper": 1,
+        "engine source": 10,
+        "test configuration section": 4,
+        "manifest requirement": 1,
+        "lockfile resolution": 2,
+        "workspace tooling": 3,
+        "several inputs together": 3,
+        "test file outside one test": 1
+      },
+      "lock": {
+        "sibling": 40,
+        "thirdParty": 2,
+        "both": 14
+      },
+      "wall": {
+        "linux": {
+          "today": 6474,
+          "residual": 2971.176,
+          "median": 6451.588278,
+          "max": 6474,
+          "over": 144,
+          "typicalShare": 0.993602
+        },
+        "macos": {
+          "today": 7890,
+          "residual": 1665.584,
+          "median": 7855.271518,
+          "max": 7890,
+          "over": 136,
+          "typicalShare": 0.994421
+        },
+        "windows": {
+          "today": 11759,
+          "residual": 2629.335,
+          "median": 11737.005755,
+          "max": 11759,
+          "over": 144,
+          "typicalShare": 0.997591
+        },
+        "local": {
+          "testPhase": 10293.5,
+          "median": 10243.180644,
+          "max": 10293.5
+        }
+      },
+      "overHalf": [
+        {
+          "pr": "293",
+          "commit": "65797ad7",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "301",
+          "commit": "d5524506",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "310",
+          "commit": "1b542977",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "311",
+          "commit": "727a2bad",
+          "share": 0.964149,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "314",
+          "commit": "56c8f58f",
+          "share": 0.993602,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "318",
+          "commit": "693a9110",
+          "share": 0.950376,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "340",
+          "commit": "45207427",
+          "share": 0.633128,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "346",
+          "commit": "11a53b1d",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "353",
+          "commit": "79a6b9e4",
+          "share": 0.999581,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "336",
+          "commit": "1d2fe75b",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "358",
+          "commit": "60a92f7e",
+          "share": 0.984247,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "350",
+          "commit": "57fb8a3b",
+          "share": 0.999853,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "385",
+          "commit": "1835e1aa",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "386",
+          "commit": "a5373032",
+          "share": 0.904579,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "390",
+          "commit": "dcdede84",
+          "share": 0.937261,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "389",
+          "commit": "f956bd31",
+          "share": 0.757268,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "394",
+          "commit": "03253f06",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "402",
+          "commit": "52e1427b",
+          "share": 0.999124,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "401",
+          "commit": "28fb9884",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "405",
+          "commit": "759ed787",
+          "share": 0.994271,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "414",
+          "commit": "0d7b7f2a",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "422",
+          "commit": "def056bb",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "433",
+          "commit": "17248bea",
+          "share": 0.705378,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "434",
+          "commit": "6e46fa8d",
+          "share": 0.970406,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "435",
+          "commit": "993123fa",
+          "share": 0.999239,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "439",
+          "commit": "f4f4f6f2",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "437",
+          "commit": "b1bbb4f2",
+          "share": 0.9544,
+          "forcing": [
+            "engine source outside any attributed item",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "445",
+          "commit": "a265bfeb",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "448",
+          "commit": "b117e452",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "469",
+          "commit": "a57c77d8",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "477",
+          "commit": "88caf5fd",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "482",
+          "commit": "a8116795",
+          "share": 0.970613,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "472",
+          "commit": "74b66de1",
+          "share": 0.973846,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "490",
+          "commit": "05926f01",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "473",
+          "commit": "f79ade4d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "494",
+          "commit": "5ff22800",
+          "share": 0.993112,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "479",
+          "commit": "e641584d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "486",
+          "commit": "dcdafdf5",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "492",
+          "commit": "e3845dc3",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "502",
+          "commit": "b9cf2fc6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "497",
+          "commit": "44272119",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "511",
+          "commit": "e63701e7",
+          "share": 0.988922,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "517",
+          "commit": "b70285e2",
+          "share": 0.919556,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "495",
+          "commit": "8239288e",
+          "share": 0.993449,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "532",
+          "commit": "fb52f930",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "537",
+          "commit": "820665dd",
+          "share": 0.967515,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "541",
+          "commit": "8238cea0",
+          "share": 0.993112,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "542",
+          "commit": "561799dd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "546",
+          "commit": "211fda1c",
+          "share": 0.996474,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "543",
+          "commit": "cb8228d2",
+          "share": 0.993443,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "550",
+          "commit": "fa01bf63",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "553",
+          "commit": "a6bfb170",
+          "share": 0.935692,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "556",
+          "commit": "55df74af",
+          "share": 0.902791,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "554",
+          "commit": "0b2a00af",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "559",
+          "commit": "736a50e3",
+          "share": 0.999664,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "569",
+          "commit": "f4bfd253",
+          "share": 0.76486,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "575",
+          "commit": "97b3e519",
+          "share": 0.981386,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "573",
+          "commit": "a72e88e2",
+          "share": 0.904579,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "574",
+          "commit": "2c22506d",
+          "share": 0.970406,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "580",
+          "commit": "cb2777e7",
+          "share": 0.996327,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "591",
+          "commit": "a36a02f6",
+          "share": 0.793143,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "595",
+          "commit": "cdedc561",
+          "share": 0.959903,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "598",
+          "commit": "999dd893",
+          "share": 0.981386,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "592",
+          "commit": "88c1e9db",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "600",
+          "commit": "bae70c28",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "599",
+          "commit": "7d54c355",
+          "share": 0.985689,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "605",
+          "commit": "b75bd6ba",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "608",
+          "commit": "1bc492a3",
+          "share": 0.996817,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "604",
+          "commit": "69a02699",
+          "share": 0.97582,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "613",
+          "commit": "7da30ee0",
+          "share": 0.993602,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "614",
+          "commit": "8c82674c",
+          "share": 0.928745,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "612",
+          "commit": "7cf175e6",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "634",
+          "commit": "47f26ded",
+          "share": 0.943709,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "651",
+          "commit": "03d93fe4",
+          "share": 0.981386,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "653",
+          "commit": "f3bd3791",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "673",
+          "commit": "3047c012",
+          "share": 0.943179,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "685",
+          "commit": "aeb6acb5",
+          "share": 0.954039,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "670",
+          "commit": "c186d703",
+          "share": 1,
+          "forcing": [
+            "harness helper",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "683",
+          "commit": "533da9cd",
+          "share": 0.888271,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "691",
+          "commit": "1474a2f8",
+          "share": 0.964149,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "694",
+          "commit": "bd3c851f",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "699",
+          "commit": "36740cc8",
+          "share": 0.959593,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "702",
+          "commit": "ae9c83ca",
+          "share": 0.93743,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "703",
+          "commit": "2226cb61",
+          "share": 0.996327,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "701",
+          "commit": "d83bf636",
+          "share": 0.995877,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "709",
+          "commit": "23a65912",
+          "share": 0.959741,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "717",
+          "commit": "bffe2c72",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "725",
+          "commit": "09ea3f8f",
+          "share": 0.929212,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "724",
+          "commit": "082af15c",
+          "share": 0.996474,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "731",
+          "commit": "4473bd35",
+          "share": 0.996817,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "726",
+          "commit": "a794deed",
+          "share": 0.94419,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "755",
+          "commit": "e8b21d5c",
+          "share": 0.993112,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "757",
+          "commit": "4ce9bb82",
+          "share": 0.999239,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "777",
+          "commit": "941958c6",
+          "share": 0.949432,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "778",
+          "commit": "f8af9bb5",
+          "share": 0.996327,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "776",
+          "commit": "1a47dc37",
+          "share": 0.993112,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "781",
+          "commit": "c15cafc2",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "775",
+          "commit": "1d4f3843",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test file outside one test"
+          ]
+        },
+        {
+          "pr": "783",
+          "commit": "cc6b6f32",
+          "share": 1,
+          "forcing": [
+            "test configuration section",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "793",
+          "commit": "b4ed9c3c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "806",
+          "commit": "3ae975d2",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "810",
+          "commit": "342a59e5",
+          "share": 0.680934,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "813",
+          "commit": "b5eb5154",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "819",
+          "commit": "edb2dfbe",
+          "share": 0.904579,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "827",
+          "commit": "cedaa817",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "833",
+          "commit": "b9b3186c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "840",
+          "commit": "48334396",
+          "share": 0.99326,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "848",
+          "commit": "70bb2260",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "849",
+          "commit": "fa52f9f4",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "853",
+          "commit": "72cc83c9",
+          "share": 0.996817,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "852",
+          "commit": "a43e3e49",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "866",
+          "commit": "cce8e7f8",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "861",
+          "commit": "61194ef6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test file outside one test",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "862",
+          "commit": "92969a32",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "878",
+          "commit": "13fa3122",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "828",
+          "commit": "f98a6316",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "875",
+          "commit": "7681b6ed",
+          "share": 0.940586,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "884",
+          "commit": "aec76676",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "865",
+          "commit": "4c236086",
+          "share": 0.973048,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "887",
+          "commit": "bdd2b295",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "886",
+          "commit": "c1f8e4cf",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "891",
+          "commit": "080bf199",
+          "share": 0.996024,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "892",
+          "commit": "c8ff4a50",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "909",
+          "commit": "ce8595d6",
+          "share": 0.993443,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "914",
+          "commit": "5091d998",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "916",
+          "commit": "dfde02c3",
+          "share": 0.999581,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "942",
+          "commit": "60d317d3",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "922",
+          "commit": "e6d813cd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section",
+            "test fake"
+          ]
+        }
+      ],
+      "crateReach": [
+        {
+          "crate": "publication",
+          "suites": 281,
+          "linuxShare": 0.595966,
+          "prs": 82
+        },
+        {
+          "crate": "edit-reconciler",
+          "suites": 274,
+          "linuxShare": 0.571633,
+          "prs": 71
+        },
+        {
+          "crate": "run-control",
+          "suites": 279,
+          "linuxShare": 0.609963,
+          "prs": 71
+        },
+        {
+          "crate": "run-projection",
+          "suites": 406,
+          "linuxShare": 0.904579,
+          "prs": 70
+        },
+        {
+          "crate": "channel-admission",
+          "suites": 279,
+          "linuxShare": 0.609963,
+          "prs": 67
+        },
+        {
+          "crate": "run-result",
+          "suites": 401,
+          "linuxShare": 0.888271,
+          "prs": 63
+        },
+        {
+          "crate": "run-views",
+          "suites": 381,
+          "linuxShare": 0.777454,
+          "prs": 61
+        },
+        {
+          "crate": "run-state",
+          "suites": 408,
+          "linuxShare": 0.919556,
+          "prs": 60
+        },
+        {
+          "crate": "event-emission",
+          "suites": 278,
+          "linuxShare": 0.587843,
+          "prs": 59
+        },
+        {
+          "crate": "plan-edits",
+          "suites": 287,
+          "linuxShare": 0.643447,
+          "prs": 56
+        },
+        {
+          "crate": "plan-model",
+          "suites": 423,
+          "linuxShare": 0.96461,
+          "prs": 56
+        },
+        {
+          "crate": "plan-compat",
+          "suites": 413,
+          "linuxShare": 0.934961,
+          "prs": 52
+        },
+        {
+          "crate": "plan-criteria",
+          "suites": 423,
+          "linuxShare": 0.96461,
+          "prs": 52
+        },
+        {
+          "crate": "plan-preservation",
+          "suites": 413,
+          "linuxShare": 0.934961,
+          "prs": 52
+        },
+        {
+          "crate": "publication-boundary",
+          "suites": 289,
+          "linuxShare": 0.648679,
+          "prs": 50
+        },
+        {
+          "crate": "event-payloads",
+          "suites": 413,
+          "linuxShare": 0.935382,
+          "prs": 49
+        },
+        {
+          "crate": "review-replies",
+          "suites": 276,
+          "linuxShare": 0.576724,
+          "prs": 47
+        },
+        {
+          "crate": "agent-execution",
+          "suites": 281,
+          "linuxShare": 0.603605,
+          "prs": 46
+        },
+        {
+          "crate": "fake-oneagentgraph",
+          "suites": 236,
+          "linuxShare": 0.553111,
+          "prs": 46
+        },
+        {
+          "crate": "plan-validation",
+          "suites": 413,
+          "linuxShare": 0.934961,
+          "prs": 45
+        },
+        {
+          "crate": "event-vocabulary",
+          "suites": 414,
+          "linuxShare": 0.935529,
+          "prs": 43
+        },
+        {
+          "crate": "fake-gh",
+          "suites": 337,
+          "linuxShare": 0.700755,
+          "prs": 38
+        },
+        {
+          "crate": "readjust-state",
+          "suites": 408,
+          "linuxShare": 0.919556,
+          "prs": 38
+        },
+        {
+          "crate": "readjustment",
+          "suites": 276,
+          "linuxShare": 0.587577,
+          "prs": 38
+        },
+        {
+          "crate": "review-discovery",
+          "suites": 275,
+          "linuxShare": 0.576538,
+          "prs": 38
+        },
+        {
+          "crate": "planner-channel",
+          "suites": 309,
+          "linuxShare": 0.743217,
+          "prs": 37
+        },
+        {
+          "crate": "publication-host",
+          "suites": 283,
+          "linuxShare": 0.622086,
+          "prs": 37
+        },
+        {
+          "crate": "release-watch",
+          "suites": 248,
+          "linuxShare": 0.538934,
+          "prs": 37
+        },
+        {
+          "crate": "publication-query",
+          "suites": 390,
+          "linuxShare": 0.801211,
+          "prs": 34
+        },
+        {
+          "crate": "test-fake-member",
+          "suites": 249,
+          "linuxShare": 0.599688,
+          "prs": 29
+        },
+        {
+          "crate": "run-files",
+          "suites": 418,
+          "linuxShare": 0.952641,
+          "prs": 26
+        },
+        {
+          "crate": "run-report",
+          "suites": 401,
+          "linuxShare": 0.888271,
+          "prs": 26
+        },
+        {
+          "crate": "task-store",
+          "suites": 284,
+          "linuxShare": 0.633128,
+          "prs": 26
+        },
+        {
+          "crate": "agent-session",
+          "suites": 292,
+          "linuxShare": 0.658095,
+          "prs": 25
+        },
+        {
+          "crate": "member-liveness",
+          "suites": 382,
+          "linuxShare": 0.777454,
+          "prs": 25
+        },
+        {
+          "crate": "planner-notes",
+          "suites": 275,
+          "linuxShare": 0.573586,
+          "prs": 25
+        },
+        {
+          "crate": "processes",
+          "suites": 406,
+          "linuxShare": 0.898523,
+          "prs": 25
+        },
+        {
+          "crate": "run-paths",
+          "suites": 419,
+          "linuxShare": 0.955672,
+          "prs": 24
+        },
+        {
+          "crate": "diagnostics",
+          "suites": 427,
+          "linuxShare": 0.970406,
+          "prs": 23
+        },
+        {
+          "crate": "run-locks",
+          "suites": 283,
+          "linuxShare": 0.627356,
+          "prs": 16
+        },
+        {
+          "crate": "run-record",
+          "suites": 408,
+          "linuxShare": 0.932095,
+          "prs": 13
+        },
+        {
+          "crate": "journal-reader",
+          "suites": 409,
+          "linuxShare": 0.922572,
+          "prs": 11
+        },
+        {
+          "crate": "branch-template",
+          "suites": 423,
+          "linuxShare": 0.96461,
+          "prs": 7
+        },
+        {
+          "crate": "test-fake-codec",
+          "suites": 434,
+          "linuxShare": 1,
+          "prs": 6
+        },
+        {
+          "crate": "test-containment",
+          "suites": 434,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "test-profile",
+          "suites": 434,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "append-stamp",
+          "suites": 402,
+          "linuxShare": 0.892596,
+          "prs": 2
+        },
+        {
+          "crate": "checkpoint",
+          "suites": 402,
+          "linuxShare": 0.892596,
+          "prs": 2
+        },
+        {
+          "crate": "cross-run-query",
+          "suites": 383,
+          "linuxShare": 0.79575,
+          "prs": 2
+        },
+        {
+          "crate": "event-filter",
+          "suites": 394,
+          "linuxShare": 0.829498,
+          "prs": 2
+        },
+        {
+          "crate": "journal",
+          "suites": 298,
+          "linuxShare": 0.724702,
+          "prs": 2
+        },
+        {
+          "crate": "render-cost",
+          "suites": 407,
+          "linuxShare": 0.898865,
+          "prs": 2
+        },
+        {
+          "crate": "run-labels",
+          "suites": 402,
+          "linuxShare": 0.888608,
+          "prs": 2
+        },
+        {
+          "crate": "run-summary",
+          "suites": 401,
+          "linuxShare": 0.888271,
+          "prs": 2
+        },
+        {
+          "crate": "yaml-codec",
+          "suites": 424,
+          "linuxShare": 0.96503,
+          "prs": 2
+        },
+        {
+          "crate": "branch-stack",
+          "suites": 282,
+          "linuxShare": 0.607005,
+          "prs": 1
+        },
+        {
+          "crate": "dispatch-controls",
+          "suites": 282,
+          "linuxShare": 0.605454,
+          "prs": 1
+        }
+      ],
+      "engineSuites": [
+        {
+          "suite": "engine--agent-execution",
+          "crate": "agent-execution",
+          "tests": 42,
+          "closure": 30,
+          "linuxShare": 0.009488,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--agent-session",
+          "crate": "agent-session",
+          "tests": 13,
+          "closure": 5,
+          "linuxShare": 0.003032,
+          "skipped": 0.291667
+        },
+        {
+          "suite": "engine--branch-publication",
+          "crate": "branch-publication",
+          "tests": 4,
+          "closure": 40,
+          "linuxShare": 0.000742,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--checkpoint",
+          "crate": "checkpoint",
+          "tests": 9,
+          "closure": 18,
+          "linuxShare": 0.004324,
+          "skipped": 0.166667
+        },
+        {
+          "suite": "engine--cross-run-query",
+          "crate": "cross-run-query",
+          "tests": 33,
+          "closure": 17,
+          "linuxShare": 0.014486,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--dispatch-cancellation",
+          "crate": "dispatch-cancellation",
+          "tests": 5,
+          "closure": 28,
+          "linuxShare": 0.002232,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--edit-reconciler--adoption",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.003508,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--boundary",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000493,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--bus_config",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000092,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--continuation",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.00945,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--dispatch",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000315,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--draft_lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000712,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000436,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver_exit",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00077,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 20,
+          "closure": 50,
+          "linuxShare": 0.008269,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--linear_launch",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--live_edit",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00034,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--malformed_envelopes",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.000895,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--plan",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000349,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publication_boundary",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publish_preserve",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.001625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--readjust",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.001341,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--real_vcs",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000312,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--retirement",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.000826,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--review_reply",
+          "crate": "edit-reconciler",
+          "tests": 8,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--rework",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.00069,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_end_hooks",
+          "crate": "edit-reconciler",
+          "tests": 14,
+          "closure": 50,
+          "linuxShare": 0.002967,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_ending",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00016,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--scratch",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000149,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--session_reuse",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--shutdown",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.000411,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--stacked_drafts",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--store",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--envelope-submission",
+          "crate": "envelope-submission",
+          "tests": 9,
+          "closure": 52,
+          "linuxShare": 0.005707,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--event-emission",
+          "crate": "event-emission",
+          "tests": 1,
+          "closure": 28,
+          "linuxShare": 0.000079,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--event-filter",
+          "crate": "event-filter",
+          "tests": 7,
+          "closure": 8,
+          "linuxShare": 0.001156,
+          "skipped": 0.284722
+        },
+        {
+          "suite": "engine--event-payloads",
+          "crate": "event-payloads",
+          "tests": 53,
+          "closure": 2,
+          "linuxShare": 0.01053,
+          "skipped": 0.270833
+        },
+        {
+          "suite": "engine--event-vocabulary",
+          "crate": "event-vocabulary",
+          "tests": 1,
+          "closure": 1,
+          "linuxShare": 0.000147,
+          "skipped": 0.479167
+        },
+        {
+          "suite": "engine--flow-session",
+          "crate": "flow-session",
+          "tests": 4,
+          "closure": 12,
+          "linuxShare": 0.000422,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--home",
+          "crate": "home",
+          "tests": 3,
+          "closure": 1,
+          "linuxShare": 0.00031,
+          "skipped": 0.451389
+        },
+        {
+          "suite": "engine--journal",
+          "crate": "journal",
+          "tests": 23,
+          "closure": 26,
+          "linuxShare": 0.011728,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--loop-statistics",
+          "crate": "loop-statistics",
+          "tests": 1,
+          "closure": 4,
+          "linuxShare": 0.002428,
+          "skipped": 0.555556
+        },
+        {
+          "suite": "engine--member-liveness",
+          "crate": "member-liveness",
+          "tests": 2,
+          "closure": 4,
+          "linuxShare": 0,
+          "skipped": 0.506944
+        },
+        {
+          "suite": "engine--observation-debt",
+          "crate": "observation-debt",
+          "tests": 3,
+          "closure": 30,
+          "linuxShare": 0.000926,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--plan-edits",
+          "crate": "plan-edits",
+          "tests": 12,
+          "closure": 13,
+          "linuxShare": 0.004556,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--plan-model",
+          "crate": "plan-model",
+          "tests": 4,
+          "closure": 5,
+          "linuxShare": 0.001605,
+          "skipped": 0.326389
+        },
+        {
+          "suite": "engine--plan-validation",
+          "crate": "plan-validation",
+          "tests": 7,
+          "closure": 8,
+          "linuxShare": 0.004384,
+          "skipped": 0.3125
+        },
+        {
+          "suite": "engine--planner-channel",
+          "crate": "planner-channel",
+          "tests": 9,
+          "closure": 8,
+          "linuxShare": 0.001008,
+          "skipped": 0.201389
+        },
+        {
+          "suite": "engine--planner-notes",
+          "crate": "planner-notes",
+          "tests": 6,
+          "closure": 39,
+          "linuxShare": 0.001953,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--pool-maintenance",
+          "crate": "pool-maintenance",
+          "tests": 12,
+          "closure": 29,
+          "linuxShare": 0.003704,
+          "skipped": 0.152778
+        },
+        {
+          "suite": "engine--processes",
+          "crate": "processes",
+          "tests": 3,
+          "closure": 2,
+          "linuxShare": 0.002905,
+          "skipped": 0.4375
+        },
+        {
+          "suite": "engine--publication",
+          "crate": "publication",
+          "tests": 13,
+          "closure": 36,
+          "linuxShare": 0.001849,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--publication-debt",
+          "crate": "publication-debt",
+          "tests": 21,
+          "closure": 21,
+          "linuxShare": 0.002156,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--publication-host",
+          "crate": "publication-host",
+          "tests": 21,
+          "closure": 28,
+          "linuxShare": 0.015081,
+          "skipped": 0.138889
+        },
+        {
+          "suite": "engine--readjustment",
+          "crate": "readjustment",
+          "tests": 23,
+          "closure": 35,
+          "linuxShare": 0.01104,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--release-watch",
+          "crate": "release-watch",
+          "tests": 9,
+          "closure": 31,
+          "linuxShare": 0.00381,
+          "skipped": 0.131944
+        },
+        {
+          "suite": "engine--render-cost",
+          "crate": "render-cost",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000342,
+          "skipped": 0.569444
+        },
+        {
+          "suite": "engine--review-discovery",
+          "crate": "review-discovery",
+          "tests": 27,
+          "closure": 42,
+          "linuxShare": 0.004905,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--review-replies",
+          "crate": "review-replies",
+          "tests": 1,
+          "closure": 40,
+          "linuxShare": 0.000186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--run-control",
+          "crate": "run-control",
+          "tests": 42,
+          "closure": 36,
+          "linuxShare": 0.013548,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--run-projection",
+          "crate": "run-projection",
+          "tests": 3,
+          "closure": 13,
+          "linuxShare": 0.000633,
+          "skipped": 0.208333
+        },
+        {
+          "suite": "engine--run-record",
+          "crate": "run-record",
+          "tests": 53,
+          "closure": 8,
+          "linuxShare": 0.015885,
+          "skipped": 0.229167
+        },
+        {
+          "suite": "engine--run-state",
+          "crate": "run-state",
+          "tests": 2,
+          "closure": 12,
+          "linuxShare": 0.000491,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--run-summary",
+          "crate": "run-summary",
+          "tests": 8,
+          "closure": 23,
+          "linuxShare": 0.005141,
+          "skipped": 0.173611
+        },
+        {
+          "suite": "engine--run-views",
+          "crate": "run-views",
+          "tests": 63,
+          "closure": 30,
+          "linuxShare": 0.015153,
+          "skipped": 0.125
+        },
+        {
+          "suite": "engine--scheduler--adoption",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001002,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--amend",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.00012,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--branch_template",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000666,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--continuation",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.002625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--dispatch",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.000757,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--draft_lifecycle",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.001186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--holds",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000352,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--lifecycle",
+          "crate": "scheduler",
+          "tests": 33,
+          "closure": 55,
+          "linuxShare": 0.017071,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--maintenance",
+          "crate": "scheduler",
+          "tests": 9,
+          "closure": 55,
+          "linuxShare": 0.002361,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--publication_boundary",
+          "crate": "scheduler",
+          "tests": 4,
+          "closure": 55,
+          "linuxShare": 0.000633,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--readjust",
+          "crate": "scheduler",
+          "tests": 9,
+          "closure": 55,
+          "linuxShare": 0.005363,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--retirement",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.000929,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--rework",
+          "crate": "scheduler",
+          "tests": 4,
+          "closure": 55,
+          "linuxShare": 0.002012,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--run_end_hooks",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000266,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--scratch",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000093,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--session_reuse",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--stacked_drafts",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--store",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--views",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000137,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--writeback_projections",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.00016,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--task-store",
+          "crate": "task-store",
+          "tests": 57,
+          "closure": 30,
+          "linuxShare": 0.016088,
+          "skipped": 0.090278
+        },
+        {
+          "suite": "engine--watch-lease",
+          "crate": "watch-lease",
+          "tests": 13,
+          "closure": 15,
+          "linuxShare": 0.00224,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--yaml-codec",
+          "crate": "yaml-codec",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000419,
+          "skipped": 0.652778
+        }
+      ]
+    },
+    {
+      "schema": 1,
+      "parents": [
+        "cmd-start",
+        "cmd-reply",
+        "cmd-adopt"
+      ],
+      "prs": 144,
+      "suites": 419,
+      "platforms": {
+        "linux": {
+          "suiteSkip": 0.132409,
+          "secondsSkip": 0.12619
+        },
+        "macos": {
+          "suiteSkip": 0.132409,
+          "secondsSkip": 0.124639
+        },
+        "windows": {
+          "suiteSkip": 0.132409,
+          "secondsSkip": 0.122734
+        },
+        "local": {
+          "suiteSkip": 0.132409,
+          "secondsSkip": 0.124439
+        }
+      },
+      "broad": 120,
+      "causes": {
+        "engine source outside any attributed item": 58,
+        "engine source": 71,
+        "harness helper": 11,
+        "harness item outside one helper": 14,
+        "workspace tooling": 12,
+        "lockfile resolution": 56,
+        "manifest requirement": 53,
+        "test configuration section": 16,
+        "several inputs together": 2,
+        "test file outside one test": 2,
+        "test fake": 1
+      },
+      "sole": {
+        "engine source outside any attributed item": 3,
+        "harness item outside one helper": 1,
+        "engine source": 10,
+        "test configuration section": 4,
+        "manifest requirement": 1,
+        "lockfile resolution": 2,
+        "workspace tooling": 3,
+        "several inputs together": 2,
+        "test file outside one test": 1
+      },
+      "lock": {
+        "sibling": 40,
+        "thirdParty": 2,
+        "both": 14
+      },
+      "wall": {
+        "linux": {
+          "today": 6474,
+          "residual": 2971.176,
+          "median": 6452.218267,
+          "max": 6474,
+          "over": 144,
+          "typicalShare": 0.993782
+        },
+        "macos": {
+          "today": 7890,
+          "residual": 1665.584,
+          "median": 7854.21728,
+          "max": 7890,
+          "over": 136,
+          "typicalShare": 0.994251
+        },
+        "windows": {
+          "today": 11759,
+          "residual": 2629.335,
+          "median": 11737.005755,
+          "max": 11759,
+          "over": 144,
+          "typicalShare": 0.997591
+        },
+        "local": {
+          "testPhase": 10293.5,
+          "median": 10241.832261,
+          "max": 10293.5
+        }
+      },
+      "overHalf": [
+        {
+          "pr": "293",
+          "commit": "65797ad7",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "301",
+          "commit": "d5524506",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "310",
+          "commit": "1b542977",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "311",
+          "commit": "727a2bad",
+          "share": 0.962681,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "314",
+          "commit": "56c8f58f",
+          "share": 0.993447,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "318",
+          "commit": "693a9110",
+          "share": 0.947841,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "340",
+          "commit": "45207427",
+          "share": 0.621113,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "346",
+          "commit": "11a53b1d",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "353",
+          "commit": "79a6b9e4",
+          "share": 0.999581,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "336",
+          "commit": "1d2fe75b",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "358",
+          "commit": "60a92f7e",
+          "share": 0.983176,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "350",
+          "commit": "57fb8a3b",
+          "share": 0.999853,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "385",
+          "commit": "1835e1aa",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "386",
+          "commit": "a5373032",
+          "share": 0.900123,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "390",
+          "commit": "dcdede84",
+          "share": 0.933951,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "389",
+          "commit": "f956bd31",
+          "share": 0.752176,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "394",
+          "commit": "03253f06",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "402",
+          "commit": "52e1427b",
+          "share": 0.998969,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "401",
+          "commit": "28fb9884",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "405",
+          "commit": "759ed787",
+          "share": 0.994116,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "414",
+          "commit": "0d7b7f2a",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "422",
+          "commit": "def056bb",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "433",
+          "commit": "17248bea",
+          "share": 0.707394,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "434",
+          "commit": "6e46fa8d",
+          "share": 0.968714,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "435",
+          "commit": "993123fa",
+          "share": 0.999239,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "439",
+          "commit": "f4f4f6f2",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "437",
+          "commit": "b1bbb4f2",
+          "share": 0.951866,
+          "forcing": [
+            "engine source outside any attributed item",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "445",
+          "commit": "a265bfeb",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "448",
+          "commit": "b117e452",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "469",
+          "commit": "a57c77d8",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "477",
+          "commit": "88caf5fd",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "482",
+          "commit": "a8116795",
+          "share": 0.980073,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "472",
+          "commit": "74b66de1",
+          "share": 0.984148,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "490",
+          "commit": "05926f01",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "473",
+          "commit": "f79ade4d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "494",
+          "commit": "5ff22800",
+          "share": 0.992958,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "479",
+          "commit": "e641584d",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "486",
+          "commit": "dcdafdf5",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "492",
+          "commit": "e3845dc3",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "502",
+          "commit": "b9cf2fc6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "497",
+          "commit": "44272119",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "511",
+          "commit": "e63701e7",
+          "share": 0.988768,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "517",
+          "commit": "b70285e2",
+          "share": 0.915775,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "495",
+          "commit": "8239288e",
+          "share": 0.993294,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "532",
+          "commit": "fb52f930",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "537",
+          "commit": "820665dd",
+          "share": 0.965823,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "541",
+          "commit": "8238cea0",
+          "share": 0.992958,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "542",
+          "commit": "561799dd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "546",
+          "commit": "211fda1c",
+          "share": 0.996474,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "543",
+          "commit": "cb8228d2",
+          "share": 0.993443,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "550",
+          "commit": "fa01bf63",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "553",
+          "commit": "a6bfb170",
+          "share": 0.933851,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "556",
+          "commit": "55df74af",
+          "share": 0.897196,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "554",
+          "commit": "0b2a00af",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "559",
+          "commit": "736a50e3",
+          "share": 0.999664,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "569",
+          "commit": "f4bfd253",
+          "share": 0.760934,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "575",
+          "commit": "97b3e519",
+          "share": 0.981386,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "573",
+          "commit": "a72e88e2",
+          "share": 0.900123,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "574",
+          "commit": "2c22506d",
+          "share": 0.968714,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "580",
+          "commit": "cb2777e7",
+          "share": 0.996327,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "591",
+          "commit": "a36a02f6",
+          "share": 0.786649,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "595",
+          "commit": "cdedc561",
+          "share": 0.958172,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "598",
+          "commit": "999dd893",
+          "share": 0.981386,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "592",
+          "commit": "88c1e9db",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper"
+          ]
+        },
+        {
+          "pr": "600",
+          "commit": "bae70c28",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "599",
+          "commit": "7d54c355",
+          "share": 0.996064,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "605",
+          "commit": "b75bd6ba",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "608",
+          "commit": "1bc492a3",
+          "share": 0.996817,
+          "forcing": [
+            "lockfile resolution"
+          ]
+        },
+        {
+          "pr": "604",
+          "commit": "69a02699",
+          "share": 0.974405,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "613",
+          "commit": "7da30ee0",
+          "share": 0.993447,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "614",
+          "commit": "8c82674c",
+          "share": 0.936714,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "612",
+          "commit": "7cf175e6",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "634",
+          "commit": "47f26ded",
+          "share": 0.941169,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "651",
+          "commit": "03d93fe4",
+          "share": 0.981386,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "653",
+          "commit": "f3bd3791",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "673",
+          "commit": "3047c012",
+          "share": 0.940887,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "685",
+          "commit": "aeb6acb5",
+          "share": 0.9631,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "670",
+          "commit": "c186d703",
+          "share": 1,
+          "forcing": [
+            "harness helper",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "683",
+          "commit": "533da9cd",
+          "share": 0.883661,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "691",
+          "commit": "1474a2f8",
+          "share": 0.962681,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "694",
+          "commit": "bd3c851f",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "699",
+          "commit": "36740cc8",
+          "share": 0.957708,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "702",
+          "commit": "ae9c83ca",
+          "share": 0.935604,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "703",
+          "commit": "2226cb61",
+          "share": 0.996327,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "701",
+          "commit": "d83bf636",
+          "share": 0.995722,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "709",
+          "commit": "23a65912",
+          "share": 0.957855,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "717",
+          "commit": "bffe2c72",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "725",
+          "commit": "09ea3f8f",
+          "share": 0.936933,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "724",
+          "commit": "082af15c",
+          "share": 0.996474,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "731",
+          "commit": "4473bd35",
+          "share": 0.996817,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "726",
+          "commit": "a794deed",
+          "share": 0.952585,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "755",
+          "commit": "e8b21d5c",
+          "share": 0.992958,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "757",
+          "commit": "4ce9bb82",
+          "share": 0.999239,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "777",
+          "commit": "941958c6",
+          "share": 0.946426,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "778",
+          "commit": "f8af9bb5",
+          "share": 0.996327,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "776",
+          "commit": "1a47dc37",
+          "share": 0.992958,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "781",
+          "commit": "c15cafc2",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "775",
+          "commit": "1d4f3843",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test file outside one test"
+          ]
+        },
+        {
+          "pr": "783",
+          "commit": "cc6b6f32",
+          "share": 1,
+          "forcing": [
+            "test configuration section",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "793",
+          "commit": "b4ed9c3c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "806",
+          "commit": "3ae975d2",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "810",
+          "commit": "342a59e5",
+          "share": 0.669195,
+          "forcing": [
+            "engine source outside any attributed item"
+          ]
+        },
+        {
+          "pr": "813",
+          "commit": "b5eb5154",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "819",
+          "commit": "edb2dfbe",
+          "share": 0.900123,
+          "forcing": [
+            "engine source"
+          ]
+        },
+        {
+          "pr": "827",
+          "commit": "cedaa817",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "833",
+          "commit": "b9b3186c",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "840",
+          "commit": "48334396",
+          "share": 0.993105,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "848",
+          "commit": "70bb2260",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "849",
+          "commit": "fa52f9f4",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "853",
+          "commit": "72cc83c9",
+          "share": 0.996817,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "852",
+          "commit": "a43e3e49",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "866",
+          "commit": "cce8e7f8",
+          "share": 0.996474,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "861",
+          "commit": "61194ef6",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test file outside one test",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "862",
+          "commit": "92969a32",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness item outside one helper"
+          ]
+        },
+        {
+          "pr": "878",
+          "commit": "13fa3122",
+          "share": 1,
+          "forcing": [
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "828",
+          "commit": "f98a6316",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "harness helper",
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "875",
+          "commit": "7681b6ed",
+          "share": 0.938312,
+          "forcing": [
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "884",
+          "commit": "aec76676",
+          "share": 1,
+          "forcing": [
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "865",
+          "commit": "4c236086",
+          "share": 0.972577,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "887",
+          "commit": "bdd2b295",
+          "share": 1,
+          "forcing": [
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "886",
+          "commit": "c1f8e4cf",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "891",
+          "commit": "080bf199",
+          "share": 0.995869,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "892",
+          "commit": "c8ff4a50",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "test fake",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "909",
+          "commit": "ce8595d6",
+          "share": 0.993443,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement"
+          ]
+        },
+        {
+          "pr": "914",
+          "commit": "5091d998",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "manifest requirement",
+            "workspace tooling"
+          ]
+        },
+        {
+          "pr": "916",
+          "commit": "dfde02c3",
+          "share": 0.999581,
+          "forcing": [
+            "engine source",
+            "engine source outside any attributed item",
+            "lockfile resolution",
+            "test fake"
+          ]
+        },
+        {
+          "pr": "942",
+          "commit": "60d317d3",
+          "share": 1,
+          "forcing": [
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section"
+          ]
+        },
+        {
+          "pr": "922",
+          "commit": "e6d813cd",
+          "share": 1,
+          "forcing": [
+            "engine source",
+            "harness item outside one helper",
+            "lockfile resolution",
+            "manifest requirement",
+            "test configuration section",
+            "test fake"
+          ]
+        }
+      ],
+      "crateReach": [
+        {
+          "crate": "publication",
+          "suites": 266,
+          "linuxShare": 0.581565,
+          "prs": 82
+        },
+        {
+          "crate": "edit-reconciler",
+          "suites": 259,
+          "linuxShare": 0.556422,
+          "prs": 71
+        },
+        {
+          "crate": "run-control",
+          "suites": 264,
+          "linuxShare": 0.596452,
+          "prs": 71
+        },
+        {
+          "crate": "run-projection",
+          "suites": 391,
+          "linuxShare": 0.900123,
+          "prs": 70
+        },
+        {
+          "crate": "channel-admission",
+          "suites": 264,
+          "linuxShare": 0.596452,
+          "prs": 67
+        },
+        {
+          "crate": "run-result",
+          "suites": 386,
+          "linuxShare": 0.883661,
+          "prs": 63
+        },
+        {
+          "crate": "run-views",
+          "suites": 366,
+          "linuxShare": 0.765499,
+          "prs": 61
+        },
+        {
+          "crate": "run-state",
+          "suites": 393,
+          "linuxShare": 0.915775,
+          "prs": 60
+        },
+        {
+          "crate": "event-emission",
+          "suites": 263,
+          "linuxShare": 0.574139,
+          "prs": 59
+        },
+        {
+          "crate": "plan-edits",
+          "suites": 272,
+          "linuxShare": 0.632194,
+          "prs": 56
+        },
+        {
+          "crate": "plan-model",
+          "suites": 408,
+          "linuxShare": 0.962918,
+          "prs": 56
+        },
+        {
+          "crate": "plan-compat",
+          "suites": 398,
+          "linuxShare": 0.93244,
+          "prs": 52
+        },
+        {
+          "crate": "plan-criteria",
+          "suites": 408,
+          "linuxShare": 0.962918,
+          "prs": 52
+        },
+        {
+          "crate": "plan-preservation",
+          "suites": 398,
+          "linuxShare": 0.93244,
+          "prs": 52
+        },
+        {
+          "crate": "publication-boundary",
+          "suites": 274,
+          "linuxShare": 0.637425,
+          "prs": 50
+        },
+        {
+          "crate": "event-payloads",
+          "suites": 398,
+          "linuxShare": 0.933386,
+          "prs": 49
+        },
+        {
+          "crate": "review-replies",
+          "suites": 261,
+          "linuxShare": 0.561782,
+          "prs": 47
+        },
+        {
+          "crate": "agent-execution",
+          "suites": 266,
+          "linuxShare": 0.590042,
+          "prs": 46
+        },
+        {
+          "crate": "fake-oneagentgraph",
+          "suites": 220,
+          "linuxShare": 0.533023,
+          "prs": 46
+        },
+        {
+          "crate": "plan-validation",
+          "suites": 398,
+          "linuxShare": 0.93244,
+          "prs": 45
+        },
+        {
+          "crate": "event-vocabulary",
+          "suites": 399,
+          "linuxShare": 0.933534,
+          "prs": 43
+        },
+        {
+          "crate": "fake-gh",
+          "suites": 321,
+          "linuxShare": 0.680668,
+          "prs": 38
+        },
+        {
+          "crate": "readjust-state",
+          "suites": 393,
+          "linuxShare": 0.915775,
+          "prs": 38
+        },
+        {
+          "crate": "readjustment",
+          "suites": 261,
+          "linuxShare": 0.573874,
+          "prs": 38
+        },
+        {
+          "crate": "review-discovery",
+          "suites": 260,
+          "linuxShare": 0.561595,
+          "prs": 38
+        },
+        {
+          "crate": "planner-channel",
+          "suites": 294,
+          "linuxShare": 0.735187,
+          "prs": 37
+        },
+        {
+          "crate": "publication-host",
+          "suites": 268,
+          "linuxShare": 0.610862,
+          "prs": 37
+        },
+        {
+          "crate": "release-watch",
+          "suites": 233,
+          "linuxShare": 0.520767,
+          "prs": 37
+        },
+        {
+          "crate": "publication-query",
+          "suites": 375,
+          "linuxShare": 0.790221,
+          "prs": 34
+        },
+        {
+          "crate": "test-fake-member",
+          "suites": 233,
+          "linuxShare": 0.579601,
+          "prs": 29
+        },
+        {
+          "crate": "run-files",
+          "suites": 403,
+          "linuxShare": 0.950033,
+          "prs": 26
+        },
+        {
+          "crate": "run-report",
+          "suites": 386,
+          "linuxShare": 0.883661,
+          "prs": 26
+        },
+        {
+          "crate": "task-store",
+          "suites": 269,
+          "linuxShare": 0.621113,
+          "prs": 26
+        },
+        {
+          "crate": "agent-session",
+          "suites": 277,
+          "linuxShare": 0.646355,
+          "prs": 25
+        },
+        {
+          "crate": "member-liveness",
+          "suites": 367,
+          "linuxShare": 0.765499,
+          "prs": 25
+        },
+        {
+          "crate": "planner-notes",
+          "suites": 260,
+          "linuxShare": 0.55872,
+          "prs": 25
+        },
+        {
+          "crate": "processes",
+          "suites": 391,
+          "linuxShare": 0.894161,
+          "prs": 25
+        },
+        {
+          "crate": "run-paths",
+          "suites": 404,
+          "linuxShare": 0.953065,
+          "prs": 24
+        },
+        {
+          "crate": "diagnostics",
+          "suites": 412,
+          "linuxShare": 0.968714,
+          "prs": 23
+        },
+        {
+          "crate": "run-locks",
+          "suites": 268,
+          "linuxShare": 0.614243,
+          "prs": 16
+        },
+        {
+          "crate": "run-record",
+          "suites": 393,
+          "linuxShare": 0.928712,
+          "prs": 13
+        },
+        {
+          "crate": "journal-reader",
+          "suites": 394,
+          "linuxShare": 0.918967,
+          "prs": 11
+        },
+        {
+          "crate": "branch-template",
+          "suites": 408,
+          "linuxShare": 0.962918,
+          "prs": 7
+        },
+        {
+          "crate": "test-fake-codec",
+          "suites": 419,
+          "linuxShare": 1,
+          "prs": 6
+        },
+        {
+          "crate": "test-containment",
+          "suites": 419,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "test-profile",
+          "suites": 419,
+          "linuxShare": 1,
+          "prs": 5
+        },
+        {
+          "crate": "append-stamp",
+          "suites": 387,
+          "linuxShare": 0.887985,
+          "prs": 2
+        },
+        {
+          "crate": "checkpoint",
+          "suites": 387,
+          "linuxShare": 0.887985,
+          "prs": 2
+        },
+        {
+          "crate": "cross-run-query",
+          "suites": 368,
+          "linuxShare": 0.784397,
+          "prs": 2
+        },
+        {
+          "crate": "event-filter",
+          "suites": 379,
+          "linuxShare": 0.822152,
+          "prs": 2
+        },
+        {
+          "crate": "journal",
+          "suites": 283,
+          "linuxShare": 0.71816,
+          "prs": 2
+        },
+        {
+          "crate": "render-cost",
+          "suites": 392,
+          "linuxShare": 0.894503,
+          "prs": 2
+        },
+        {
+          "crate": "run-labels",
+          "suites": 387,
+          "linuxShare": 0.883997,
+          "prs": 2
+        },
+        {
+          "crate": "run-summary",
+          "suites": 386,
+          "linuxShare": 0.883661,
+          "prs": 2
+        },
+        {
+          "crate": "yaml-codec",
+          "suites": 409,
+          "linuxShare": 0.963338,
+          "prs": 2
+        },
+        {
+          "crate": "branch-stack",
+          "suites": 267,
+          "linuxShare": 0.593843,
+          "prs": 1
+        },
+        {
+          "crate": "dispatch-controls",
+          "suites": 267,
+          "linuxShare": 0.592034,
+          "prs": 1
+        }
+      ],
+      "engineSuites": [
+        {
+          "suite": "engine--agent-execution",
+          "crate": "agent-execution",
+          "tests": 51,
+          "closure": 30,
+          "linuxShare": 0.010469,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--agent-session",
+          "crate": "agent-session",
+          "tests": 13,
+          "closure": 5,
+          "linuxShare": 0.003032,
+          "skipped": 0.291667
+        },
+        {
+          "suite": "engine--branch-publication",
+          "crate": "branch-publication",
+          "tests": 6,
+          "closure": 40,
+          "linuxShare": 0.001141,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--checkpoint",
+          "crate": "checkpoint",
+          "tests": 9,
+          "closure": 18,
+          "linuxShare": 0.004324,
+          "skipped": 0.166667
+        },
+        {
+          "suite": "engine--cross-run-query",
+          "crate": "cross-run-query",
+          "tests": 40,
+          "closure": 17,
+          "linuxShare": 0.015088,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--dispatch-cancellation",
+          "crate": "dispatch-cancellation",
+          "tests": 5,
+          "closure": 28,
+          "linuxShare": 0.002232,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--edit-reconciler--adoption",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.003508,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--boundary",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000493,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--bus_config",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000092,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--continuation",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.00945,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--dispatch",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000315,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--draft_lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000712,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000436,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--driver_exit",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.00088,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--lifecycle",
+          "crate": "edit-reconciler",
+          "tests": 21,
+          "closure": 50,
+          "linuxShare": 0.008408,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--linear_launch",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--edit-reconciler--live_edit",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.00034,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--malformed_envelopes",
+          "crate": "edit-reconciler",
+          "tests": 8,
+          "closure": 50,
+          "linuxShare": 0.001465,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--plan",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.000349,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publication_boundary",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--publish_preserve",
+          "crate": "edit-reconciler",
+          "tests": 4,
+          "closure": 50,
+          "linuxShare": 0.001625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--readjust",
+          "crate": "edit-reconciler",
+          "tests": 2,
+          "closure": 50,
+          "linuxShare": 0.001341,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--real_vcs",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000312,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--retirement",
+          "crate": "edit-reconciler",
+          "tests": 6,
+          "closure": 50,
+          "linuxShare": 0.001239,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--review_reply",
+          "crate": "edit-reconciler",
+          "tests": 10,
+          "closure": 50,
+          "linuxShare": 0,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--rework",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.001035,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_end_hooks",
+          "crate": "edit-reconciler",
+          "tests": 21,
+          "closure": 50,
+          "linuxShare": 0.004118,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--run_ending",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.000266,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--scratch",
+          "crate": "edit-reconciler",
+          "tests": 3,
+          "closure": 50,
+          "linuxShare": 0.000223,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--session_reuse",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--shutdown",
+          "crate": "edit-reconciler",
+          "tests": 5,
+          "closure": 50,
+          "linuxShare": 0.000459,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--stacked_drafts",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--edit-reconciler--store",
+          "crate": "edit-reconciler",
+          "tests": 1,
+          "closure": 50,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--envelope-submission",
+          "crate": "envelope-submission",
+          "tests": 9,
+          "closure": 52,
+          "linuxShare": 0.005707,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--event-emission",
+          "crate": "event-emission",
+          "tests": 1,
+          "closure": 28,
+          "linuxShare": 0.000079,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--event-filter",
+          "crate": "event-filter",
+          "tests": 7,
+          "closure": 8,
+          "linuxShare": 0.001156,
+          "skipped": 0.284722
+        },
+        {
+          "suite": "engine--event-payloads",
+          "crate": "event-payloads",
+          "tests": 60,
+          "closure": 2,
+          "linuxShare": 0.012067,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--event-vocabulary",
+          "crate": "event-vocabulary",
+          "tests": 1,
+          "closure": 1,
+          "linuxShare": 0.000147,
+          "skipped": 0.479167
+        },
+        {
+          "suite": "engine--flow-session",
+          "crate": "flow-session",
+          "tests": 4,
+          "closure": 12,
+          "linuxShare": 0.000422,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--home",
+          "crate": "home",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000465,
+          "skipped": 0.451389
+        },
+        {
+          "suite": "engine--journal",
+          "crate": "journal",
+          "tests": 25,
+          "closure": 26,
+          "linuxShare": 0.012461,
+          "skipped": 0.159722
+        },
+        {
+          "suite": "engine--loop-statistics",
+          "crate": "loop-statistics",
+          "tests": 1,
+          "closure": 4,
+          "linuxShare": 0.002428,
+          "skipped": 0.555556
+        },
+        {
+          "suite": "engine--member-liveness",
+          "crate": "member-liveness",
+          "tests": 2,
+          "closure": 4,
+          "linuxShare": 0,
+          "skipped": 0.506944
+        },
+        {
+          "suite": "engine--observation-debt",
+          "crate": "observation-debt",
+          "tests": 4,
+          "closure": 30,
+          "linuxShare": 0.001301,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--plan-edits",
+          "crate": "plan-edits",
+          "tests": 15,
+          "closure": 13,
+          "linuxShare": 0.004973,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--plan-model",
+          "crate": "plan-model",
+          "tests": 4,
+          "closure": 5,
+          "linuxShare": 0.001605,
+          "skipped": 0.326389
+        },
+        {
+          "suite": "engine--plan-validation",
+          "crate": "plan-validation",
+          "tests": 11,
+          "closure": 8,
+          "linuxShare": 0.005226,
+          "skipped": 0.3125
+        },
+        {
+          "suite": "engine--planner-channel",
+          "crate": "planner-channel",
+          "tests": 10,
+          "closure": 8,
+          "linuxShare": 0.001118,
+          "skipped": 0.201389
+        },
+        {
+          "suite": "engine--planner-notes",
+          "crate": "planner-notes",
+          "tests": 7,
+          "closure": 39,
+          "linuxShare": 0.002298,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--pool-maintenance",
+          "crate": "pool-maintenance",
+          "tests": 13,
+          "closure": 29,
+          "linuxShare": 0.003828,
+          "skipped": 0.152778
+        },
+        {
+          "suite": "engine--processes",
+          "crate": "processes",
+          "tests": 3,
+          "closure": 2,
+          "linuxShare": 0.002905,
+          "skipped": 0.4375
+        },
+        {
+          "suite": "engine--publication",
+          "crate": "publication",
+          "tests": 15,
+          "closure": 36,
+          "linuxShare": 0.001992,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--publication-debt",
+          "crate": "publication-debt",
+          "tests": 22,
+          "closure": 21,
+          "linuxShare": 0.00231,
+          "skipped": 0.145833
+        },
+        {
+          "suite": "engine--publication-host",
+          "crate": "publication-host",
+          "tests": 23,
+          "closure": 28,
+          "linuxShare": 0.017019,
+          "skipped": 0.138889
+        },
+        {
+          "suite": "engine--readjustment",
+          "crate": "readjustment",
+          "tests": 27,
+          "closure": 35,
+          "linuxShare": 0.012278,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--release-watch",
+          "crate": "release-watch",
+          "tests": 9,
+          "closure": 31,
+          "linuxShare": 0.00381,
+          "skipped": 0.131944
+        },
+        {
+          "suite": "engine--render-cost",
+          "crate": "render-cost",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000342,
+          "skipped": 0.569444
+        },
+        {
+          "suite": "engine--review-discovery",
+          "crate": "review-discovery",
+          "tests": 31,
+          "closure": 42,
+          "linuxShare": 0.005173,
+          "skipped": 0.083333
+        },
+        {
+          "suite": "engine--review-replies",
+          "crate": "review-replies",
+          "tests": 1,
+          "closure": 40,
+          "linuxShare": 0.000186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--run-control",
+          "crate": "run-control",
+          "tests": 48,
+          "closure": 36,
+          "linuxShare": 0.014903,
+          "skipped": 0.118056
+        },
+        {
+          "suite": "engine--run-projection",
+          "crate": "run-projection",
+          "tests": 3,
+          "closure": 13,
+          "linuxShare": 0.000633,
+          "skipped": 0.208333
+        },
+        {
+          "suite": "engine--run-record",
+          "crate": "run-record",
+          "tests": 57,
+          "closure": 8,
+          "linuxShare": 0.016356,
+          "skipped": 0.229167
+        },
+        {
+          "suite": "engine--run-state",
+          "crate": "run-state",
+          "tests": 3,
+          "closure": 12,
+          "linuxShare": 0.000564,
+          "skipped": 0.25
+        },
+        {
+          "suite": "engine--run-summary",
+          "crate": "run-summary",
+          "tests": 8,
+          "closure": 23,
+          "linuxShare": 0.005141,
+          "skipped": 0.173611
+        },
+        {
+          "suite": "engine--run-views",
+          "crate": "run-views",
+          "tests": 78,
+          "closure": 30,
+          "linuxShare": 0.01671,
+          "skipped": 0.125
+        },
+        {
+          "suite": "engine--scheduler--adoption",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001002,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--amend",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.00012,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--branch_template",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000666,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--continuation",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.002625,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--dispatch",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.000757,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--draft_lifecycle",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.001186,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--holds",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000352,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--lifecycle",
+          "crate": "scheduler",
+          "tests": 35,
+          "closure": 55,
+          "linuxShare": 0.017441,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--maintenance",
+          "crate": "scheduler",
+          "tests": 9,
+          "closure": 55,
+          "linuxShare": 0.002361,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--older_launch_record",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000128,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--publication_boundary",
+          "crate": "scheduler",
+          "tests": 4,
+          "closure": 55,
+          "linuxShare": 0.000633,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--readjust",
+          "crate": "scheduler",
+          "tests": 10,
+          "closure": 55,
+          "linuxShare": 0.005698,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--retirement",
+          "crate": "scheduler",
+          "tests": 2,
+          "closure": 55,
+          "linuxShare": 0.000929,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--rework",
+          "crate": "scheduler",
+          "tests": 6,
+          "closure": 55,
+          "linuxShare": 0.003018,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--run_end_hooks",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000266,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--scratch",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000093,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--session_reuse",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.001081,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--stacked_drafts",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000894,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--store",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000211,
+          "skipped": 0.104167
+        },
+        {
+          "suite": "engine--scheduler--views",
+          "crate": "scheduler",
+          "tests": 1,
+          "closure": 55,
+          "linuxShare": 0.000137,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--scheduler--writeback_projections",
+          "crate": "scheduler",
+          "tests": 3,
+          "closure": 55,
+          "linuxShare": 0.00024,
+          "skipped": 0.111111
+        },
+        {
+          "suite": "engine--task-store",
+          "crate": "task-store",
+          "tests": 63,
+          "closure": 30,
+          "linuxShare": 0.017234,
+          "skipped": 0.090278
+        },
+        {
+          "suite": "engine--watch-lease",
+          "crate": "watch-lease",
+          "tests": 15,
+          "closure": 15,
+          "linuxShare": 0.002488,
+          "skipped": 0.215278
+        },
+        {
+          "suite": "engine--yaml-codec",
+          "crate": "yaml-codec",
+          "tests": 4,
+          "closure": 1,
+          "linuxShare": 0.000419,
+          "skipped": 0.652778
+        }
+      ]
+    }
+  ]
+}

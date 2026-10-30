@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdtempSync,
   mkdirSync,
@@ -4452,6 +4452,174 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
     refusedRender((copy) => {
       copy.result.siblings.adapters.secondsSkip = 0;
     }, /sibling-engine paths differ from their rows/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("engine split attributes assertions to the crate writing their literals, holds every phase in one place, and refuses a misplaced test", {
+  timeout: 300000,
+}, async () => {
+  const { assertionText, checkEngineSplit, ENGINE_PATH, PARENTS, targetLayout } = await import(
+    "./engine-tests.mjs"
+  );
+  const { targetCatalog } = await import("./test-split.mjs");
+  // Only what an assertion compares against counts: its literals and the bindings it names.
+  const text = assertionText(`{
+    let setup = "plan-written";
+    let expected = "node-settled";
+    world.start(&["start", "plan.yaml"]);
+    assert_eq!(events_of(&journal, "kind"), expected);
+    assert!(stdout.contains("queued"), "the run is {}", "running");
+  }`);
+  assert.match(text, /"node-settled"/);
+  assert.match(text, /"queued"/);
+  assert.doesNotMatch(text, /plan-written|plan\.yaml/);
+  const checked = spawnSync(
+    process.execPath,
+    ["scripts/modularization/engine-tests.mjs", "--check"],
+    {
+      encoding: "utf8",
+    },
+  );
+  assert.equal(checked.status, 0, checked.stderr);
+  const catalog = targetCatalog();
+  const layout = targetLayout();
+  const committed = readFileSync(ENGINE_PATH, "utf8");
+  const engineOf = checkEngineSplit(committed, catalog, layout);
+  const split = JSON.parse(committed);
+  // Every phase of the four parents is moved or kept, never both and never neither.
+  const phases = Object.keys(catalog.tests).filter((id) =>
+    PARENTS.includes(catalog.tests[id].suite),
+  );
+  assert.deepEqual([...Object.keys(split.moved), ...Object.keys(split.kept)].sort(), phases.sort());
+  assert.equal(engineOf.size, Object.keys(split.moved).length);
+  for (const [id, { crate, suite }] of engineOf) {
+    assert.ok(suite === `engine--${crate}` || suite === `engine--${crate}--${id.split("::")[0]}`);
+    assert.ok(!catalog.dispositions[catalog.tests[id].original].reason.startsWith("live-"));
+  }
+  const [movedId] = Object.keys(split.moved);
+  const [liveId] = Object.keys(split.kept).filter((id) => split.kept[id].reason === "live");
+  const refused = (mutate, pattern) => {
+    const copy = structuredClone(split);
+    mutate(copy);
+    assert.throws(() => checkEngineSplit(JSON.stringify(copy, null, 2), catalog, layout), pattern);
+  };
+  refused((copy) => {
+    delete copy.moved[movedId];
+  }, /is neither moved nor kept/);
+  refused((copy) => {
+    copy.kept[movedId] = { parent: copy.moved[movedId].parent, reason: "live", evidence: {} };
+  }, /is both moved and kept/);
+  refused((copy) => {
+    copy.moved[movedId].parent = "cmd-label";
+  }, /under cmd-label, not/);
+  refused((copy) => {
+    copy.moved[liveId] = { ...copy.moved[movedId], parent: copy.kept[liveId].parent };
+    delete copy.kept[liveId];
+  }, /moves live-ordering test/);
+  refused((copy) => {
+    copy.moved[movedId].crate = "cmd-start";
+    copy.moved[movedId].suite = "engine--cmd-start";
+  }, /which is no engine crate/);
+  refused((copy) => {
+    copy.moved[movedId].suite = "cmd-start--lifecycle";
+  }, /not its crate's suite/);
+  refused((copy) => {
+    copy.moved["views::no_such_test"] = copy.moved[movedId];
+  }, /unknown test views::no_such_test/);
+  refused((copy) => {
+    copy.kept[liveId].reason = "slow";
+  }, /for no known reason/);
+  const minified = JSON.stringify(split).replace(
+    `"${movedId}":`,
+    `"${movedId}":${JSON.stringify(split.moved[movedId])},"${movedId}":`,
+  );
+  assert.throws(() => checkEngineSplit(minified, catalog, layout), /names .* twice/);
+});
+
+test("engine replay CLI replays each re-homing step on the 144 PRs and renders fresh engine-tests documentation", {
+  timeout: 3000000,
+}, async () => {
+  const root = scratch();
+  try {
+    const { EVIDENCE_PATH, engineAppendix, ENGINE_MARKER, validateEngineEvidence } = await import(
+      "./engine-report.mjs"
+    );
+    const usage = spawnSync(
+      process.execPath,
+      ["scripts/modularization/engine-replay.mjs", join(root, "x.json"), "--parents", "cmd-label"],
+      { encoding: "utf8" },
+    );
+    assert.equal(usage.status, 1);
+    assert.match(usage.stderr, /usage: engine-replay.mjs OUTPUT.json \[--parents/);
+    const steps = [
+      ["cmd-start"],
+      ["cmd-start", "cmd-reply"],
+      ["cmd-start", "cmd-reply", "cmd-adopt"],
+    ];
+    // The three steps replay at once: each is an independent read of the same history.
+    const runs = await Promise.all(
+      steps.map(
+        (parents, index) =>
+          new Promise((done) => {
+            const output = join(root, `step-${index}.json`);
+            const child = spawn(
+              process.execPath,
+              ["scripts/modularization/engine-replay.mjs", output, "--parents", parents.join(",")],
+              { stdio: ["ignore", "ignore", "pipe"] },
+            );
+            let stderr = "";
+            child.stderr.on("data", (chunk) => {
+              stderr += chunk;
+            });
+            child.on("close", (status) => done({ status, stderr, output }));
+          }),
+      ),
+    );
+    for (const run of runs) assert.equal(run.status, 0, run.stderr);
+    const replayed = {
+      schema: 1,
+      steps: runs.map((run) => JSON.parse(readFileSync(run.output, "utf8"))),
+    };
+    validateEngineEvidence(replayed);
+    // The committed evidence is exactly what the replay produces now.
+    assert.deepEqual(replayed, JSON.parse(readFileSync(EVIDENCE_PATH, "utf8")));
+    for (const [index, step] of replayed.steps.entries()) {
+      assert.equal(step.prs, 144);
+      if (index)
+        assert.ok(
+          step.platforms.linux.secondsSkip >= replayed.steps[index - 1].platforms.linux.secondsSkip,
+        );
+    }
+    // The document is what its evidence renders.
+    const doc = readFileSync("docs/modularization-engine-tests.md", "utf8");
+    const [prefix] = doc.split(ENGINE_MARKER);
+    assert.equal(
+      doc,
+      `${prefix}${engineAppendix(
+        replayed,
+        JSON.parse(readFileSync("scripts/modularization/engine-tests.json", "utf8")),
+        readFileSync("docs/modularization-test-split.md", "utf8"),
+      )}`,
+    );
+    const check = spawnSync(
+      process.execPath,
+      ["scripts/modularization/engine-report.mjs", "--check"],
+      {
+        encoding: "utf8",
+      },
+    );
+    assert.equal(check.status, 0, check.stderr);
+    // Evidence that skips a step, or re-homes the steps out of order, is refused.
+    assert.throws(
+      () => validateEngineEvidence({ schema: 1, steps: replayed.steps.slice(1) }),
+      /step 1 must re-home cmd-start/,
+    );
+    assert.throws(
+      () => validateEngineEvidence({ schema: 1, steps: replayed.steps.slice(0, 2) }),
+      /one step per re-homed parent/,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

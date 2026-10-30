@@ -435,8 +435,15 @@ export function commandMapping(layout, catalog, options = {}) {
   const scopes = {};
   const owned = new Map();
   for (const [name, test] of Object.entries(catalog.tests)) {
-    const owner = options.suiteOf?.get(name) ?? test.suite;
+    const engine = options.engineOf?.get(name)?.crate;
+    const owner = options.engineOf?.get(name)?.suite ?? options.suiteOf?.get(name) ?? test.suite;
     owned.set(name, owner);
+    // A test re-homed onto an engine crate runs there over a recorded fixture: it links that
+    // crate, not the command that drove the original journey.
+    if (engine && !suites[owner]) {
+      if (!crates[engine]) throw new Error(`invalid engine crate ${engine}: ${name}`);
+      suites[owner] = { paths: [], crates: [engine], modules: [], tests: [], engine };
+    }
     if (!suites[owner] && suites[test.suite] && owner.startsWith(`${test.suite}--`))
       // A cross-command part routes through the dispatcher's own machinery to the commands its
       // journeys drive, rather than through the facade that registers every command.
@@ -464,7 +471,7 @@ export function commandMapping(layout, catalog, options = {}) {
     const suite = suites[owner];
     suite.tests.push(name);
     suite.modules.push(name.split("::")[0]);
-    suite.crates.push(...test.commands);
+    if (!engine) suite.crates.push(...test.commands);
     if (owner !== test.suite && test.suite === "cross-command") {
       // A library item the journey names links the crate owning it: a submodule's file, else the
       // crates that took that symbol from its file, else the file's own crate. An item resolving to
@@ -501,6 +508,11 @@ export function commandMapping(layout, catalog, options = {}) {
         ? `migrated-tests/${owned.get(id)}/**`
         : path,
     );
+    const engine = options.engineOf?.get(id)?.crate;
+    if (engine) {
+      const [module, test] = id.split("::");
+      paths.push(`tests/recorded/engine/${engine}/${module}/${test}/**`);
+    }
     if (!options.sections) return paths;
     const scoped = new Map();
     for (const doc of phases[id].docReads) {
@@ -550,6 +562,8 @@ export function commandMapping(layout, catalog, options = {}) {
       for (const [fake, entry] of Object.entries(fakes.crates)) {
         const { selection } = entry;
         if (selection.everySuite) used.add(fake);
+        // An engine suite reads recorded fixtures in place of the processes its journey started.
+        if (suite.engine) continue;
         if (
           selection.capabilities?.some((cap) => suite.crates.some((crate) => reaches(crate, cap)))
         )
@@ -567,7 +581,7 @@ export function commandMapping(layout, catalog, options = {}) {
         )
           used.add(fake);
       }
-      for (const id of suite.tests)
+      for (const id of suite.engine ? [] : suite.tests)
         for (const started of phases[id].doubles)
           if (!wiredDoubles.has(started)) used.add(fakes.doubleOwner.get(started.split("=")[1]));
       suite.crates.push(...used);

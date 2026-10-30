@@ -545,7 +545,11 @@ function lockChanges(changes) {
   return out;
 }
 
-export function splitEvidence() {
+/**
+ * `engine.engineOf` re-homes the named tests onto engine crates (see engine-tests.mjs); the replay
+ * then measures that layout, and omits the test-split migration it does not step through.
+ */
+export function splitEvidence(engine = {}) {
   const { layout: base } = evidence();
   const moves = JSON.parse(read("scripts/modularization/target-moves.json"));
   const layout = targetGraph(base, moves);
@@ -555,7 +559,12 @@ export function splitEvidence() {
   if (splitText !== `${JSON.stringify(deriveSplit(catalog), null, 2)}\n`)
     throw new Error(`${SPLIT_PATH} differs from the split its rule derives`);
   const split = JSON.parse(splitText);
-  const options = { suiteOf, sections: true };
+  for (const [id, { suite }] of engine.engineOf ?? []) suiteOf.set(id, suite);
+  const options = {
+    suiteOf,
+    sections: true,
+    ...(engine.engineOf ? { engineOf: engine.engineOf } : {}),
+  };
   const changes = mergedChanges(".", {
     ref: "origin/main",
     since: "2026-09-15T00:00:00Z",
@@ -608,7 +617,7 @@ export function splitEvidence() {
       wallBreakdown: Object.fromEntries(
         Object.entries(wall.platforms).map(([platform, data]) => [platform, data.breakdown]),
       ),
-      splitMigration: splitMigration(result, split),
+      ...(engine.engineOf ? {} : { splitMigration: splitMigration(result, split) }),
       causes: causeAnalysis(result, locks),
       siblings: siblingPaths(result, locks, new Set(Object.keys(testFakes().crates))),
     },
