@@ -1728,6 +1728,74 @@ fn delivery_survives_a_failed_carry_a_truncated_journal_and_a_failed_print() {
     assert_eq!(after[0]["payload"]["item"]["dedup_key"], "three");
 }
 
+/// A watch whose output fails after it has printed some events records those as
+/// watched: the next watch prints only what the failed one did not.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_watch_that_fails_partway_prints_the_rest_and_nothing_twice() {
+    use std::os::unix::process::CommandExt;
+    // Long bodies, so each printed line is larger than anything else the watch
+    // writes and the file-size ceiling below falls between the two lines.
+    let raise_two = |world: &Live| {
+        for dedup in ["first", "second"] {
+            let mut raised = item(dedup, "task", "low", "owner", json!({"scope": "nothing"}));
+            raised["body"] = json!(format!("{dedup} {}", "x".repeat(4000)));
+            world.raise(&raised);
+        }
+    };
+    // A twin world measures the first printed line.
+    let twin = Live::enabled();
+    raise_two(&twin);
+    let output = twin.run(Some("owner"), &["watch"]);
+    let text = String::from_utf8(output.stdout).unwrap();
+    let first = text.lines().next().unwrap().len() as u64 + 1;
+    assert_eq!(text.lines().count(), 2, "{text}");
+
+    let world = Live::enabled();
+    raise_two(&world);
+    let printed = world.root.join("printed.ndjson");
+    let ceiling = first + 64;
+    let mut command = world.cmd(Some("owner"), &["watch"]);
+    command
+        .env("LLVM_PROFILE_FILE", world.root.join("watch-%p.profraw"))
+        .stdout(std::fs::File::create(&printed).unwrap());
+    // SAFETY: only async-signal-safe calls between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            let limit = libc::rlimit {
+                rlim_cur: ceiling,
+                rlim_max: ceiling,
+            };
+            if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::signal(libc::SIGXFSZ, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let failed = command.output().unwrap();
+    assert!(!failed.status.success());
+    let shown: Vec<Value> = std::fs::read_to_string(&printed)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let keys = |events: &[Value]| -> Vec<String> {
+        events
+            .iter()
+            .map(|e| e["payload"]["item"]["dedup_key"].to_string())
+            .collect()
+    };
+    assert_eq!(shown.len(), 1, "{:?}", keys(&shown));
+    assert_eq!(shown[0]["payload"]["item"]["dedup_key"], "first");
+    let rest = world.watch("owner");
+    assert_eq!(rest.len(), 1, "{:?}", keys(&rest));
+    assert_eq!(rest[0]["payload"]["item"]["dedup_key"], "second");
+    assert!(world.watch("owner").is_empty());
+}
+
 /// Watches of one session running at once print every event exactly once
 /// between them.
 #[test]

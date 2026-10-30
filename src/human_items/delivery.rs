@@ -259,22 +259,32 @@ fn print_pending(
     };
     let mut printed = 0;
     let mut last = None;
+    let record = |watched: &Watched| {
+        transport
+            .replace_document(
+                queue,
+                document,
+                &serde_json::to_vec(watched).unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())
+    };
     for (envelope, after) in &batch {
         if watched.seq.is_none_or(|seq| envelope.seq > seq) {
-            print(envelope).map_err(|e| e.to_string())?;
+            if let Err(why) = print(envelope) {
+                // What was printed before the failure is recorded as watched, so
+                // the next watch prints only what this one did not.
+                if printed > 0 {
+                    record(&watched)?;
+                }
+                return Err(why.to_string());
+            }
             watched.seq = Some(envelope.seq);
             printed += 1;
         }
         last = Some(*after);
     }
     if let Some(after) = last {
-        transport
-            .replace_document(
-                queue,
-                document,
-                &serde_json::to_vec(&watched).unwrap_or_default(),
-            )
-            .map_err(|e| e.to_string())?;
+        record(&watched)?;
         transport
             .commit(queue, consumer, &after)
             .map_err(|e| e.to_string())?;
