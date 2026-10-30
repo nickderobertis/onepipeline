@@ -553,6 +553,7 @@ fn telemetry(path: &Path) -> Vec<Value> {
         .unwrap_or_default()
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap()["read"].clone())
+        .filter(|read| !read.is_null())
         .collect()
 }
 

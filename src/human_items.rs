@@ -1159,6 +1159,20 @@ fn report(views: &[HumanItemView]) -> String {
 }
 
 fn live_dispatch(command: HumanItemsCommand) -> crate::error::Result<i32> {
+    let began = std::time::Instant::now();
+    let mut rendered = 0.0;
+    let answered = live_command(command, &mut rendered);
+    live::record_telemetry(&serde_json::json!({
+        "pid": std::process::id(),
+        "process": {
+            "render_ms": rendered,
+            "process_ms": began.elapsed().as_secs_f64() * 1000.0,
+        }
+    }));
+    answered
+}
+
+fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error::Result<i32> {
     use crate::error::Error;
     if let HumanItemsCommand::Config { json } = &command {
         let config = config::here().map_err(Error::Invalid)?;
@@ -1211,19 +1225,24 @@ fn live_dispatch(command: HumanItemsCommand) -> crate::error::Result<i32> {
         }
         HumanItemsCommand::List(query) | HumanItemsCommand::Report(query) if query.json => {
             let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let started = std::time::Instant::now();
             println!("{}", to_json(&views)?);
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
             return Ok(0);
         }
         HumanItemsCommand::List(query) => {
             let views = store.query(&query.filter).map_err(|e| refused(&e))?;
-            for view in &views {
-                print!("{}", render(&view.item, &view.blocked));
-            }
+            let started = std::time::Instant::now();
+            let text: String = views.iter().map(|v| render(&v.item, &v.blocked)).collect();
+            print!("{text}");
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
             return Ok(0);
         }
         HumanItemsCommand::Report(query) => {
             let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let started = std::time::Instant::now();
             print!("{}", report(&views));
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
             return Ok(0);
         }
         HumanItemsCommand::Show { id, json } => {

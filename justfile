@@ -283,7 +283,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
+rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
@@ -586,6 +586,15 @@ _journal-workload-run:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
     @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
+# The `human-items-e2e` project's `test` target: the release-built binary's host-wide
+# `human-items list` over 100 launched runs of 10,000 events, written to
+# `target/budget-records/human-items.json` and then checked against
+# `tests/human_items/budgets.yaml` from that saved recording — never a second timed run.
+human-items-budget:
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
+    @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
+    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

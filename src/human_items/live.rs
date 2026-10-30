@@ -529,21 +529,7 @@ impl HumanItems {
     }
 
     fn report(&self, telemetry: &ReadTelemetry) {
-        let Some(path) = std::env::var_os(TELEMETRY_ENV).filter(|v| !v.is_empty()) else {
-            return;
-        };
-        let line = serde_json::json!({"pid": std::process::id(), "read": telemetry});
-        if let Err(error) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()))
-        {
-            eprintln!(
-                "onepipeline: cannot record human-item telemetry to {}: {error}",
-                Path::new(&path).display()
-            );
-        }
+        record_telemetry(&serde_json::json!({"pid": std::process::id(), "read": telemetry}));
     }
 
     /// The caught-up snapshot, after probing a journal outage it records as
@@ -807,6 +793,24 @@ impl HumanItems {
         moved |= index.runs.len() != before;
         telemetry.discovery_ms += ms(started);
         moved
+    }
+}
+
+/// Append one telemetry line to the file [`TELEMETRY_ENV`] names, if it names one.
+pub(crate) fn record_telemetry(line: &serde_json::Value) {
+    let Some(path) = std::env::var_os(TELEMETRY_ENV).filter(|v| !v.is_empty()) else {
+        return;
+    };
+    if let Err(error) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()))
+    {
+        eprintln!(
+            "onepipeline: cannot record human-item telemetry to {}: {error}",
+            Path::new(&path).display()
+        );
     }
 }
 
