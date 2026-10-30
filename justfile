@@ -550,15 +550,16 @@ _stop-verdict-run: _stop-verdict-build
     @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
-# What the run above compiles, alone: the release binary it times and every test
-# binary `cargo nextest run` builds, under the run's own flags, so the run then
-# finds both fresh. The `onepipeline-stop-verdict:test-build` target its `test`
-# depends on: that `test` admits nothing beside it, because it times the binary,
-# and building needs no such quiet, so the build runs beside the rest of the gate
-# rather than inside the window nothing else may use.
+# The release binary the run above times, built alone: the
+# `onepipeline-stop-verdict:test-build` target its `test` depends on. That `test`
+# admits nothing beside it, because it times the binary, and building needs no
+# such quiet, so this runs beside the rest of the gate rather than inside the
+# window nothing else may use. Only the release build: the run's test binaries
+# are the debug tree `just _crate-build` builds under the same flags, and
+# building them here held that tree's lock from the gate's first minute, until
+# the npm publish journey waiting on it ran out its 900-second setup.
 _stop-verdict-build:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --quiet --bin onepipeline
-    @RUSTFLAGS="-D warnings" cargo nextest list --locked -E 'binary(stop_verdict)' --message-format oneline >/dev/null
 
 # Outside `check` and `gate`: each runs a whole host-shaped workload journey to
 # measure it, which no per-change selection should pay for. Every project's

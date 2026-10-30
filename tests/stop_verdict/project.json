@@ -50,7 +50,7 @@
     },
     "test-build": {
       "command": "just _stop-verdict-build",
-      "//": "The builds `test` runs, ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times the release binary, and compiling that binary needs no such quiet. Keyed on exactly `test`'s inputs, so the two replay or run together: a warm cache builds nothing, and a `test` that runs finds its builds fresh.",
+      "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly `test`'s inputs, so the two replay or run together: a warm cache builds nothing, and a `test` that runs finds the binary fresh.",
       "cache": true,
       "inputs": [
         "rustBuild",

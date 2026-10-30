@@ -1077,6 +1077,21 @@ echo "end $1 $(now)" >> "$JUST_CALLS"
     assert.deepEqual(Object.keys(warm.spans), [], JSON.stringify(warm.spans));
   });
 
+  it("builds only the release tree, leaving the debug tree's lock to the rest of the gate", () => {
+    // It starts in the gate's first minute. A debug build there held
+    // `target/debug`'s lock until the npm publish journey, waiting on it, ran out
+    // its 900-second setup; the run's debug test binaries are the tree
+    // `just _crate-build` builds under the same flags.
+    const dry = spawnSync("just", ["--dry-run", "_stop-verdict-build"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+    assert.equal(dry.status, 0, dry.stderr);
+    const builds = dry.stderr.split("\n").filter((line) => /\bcargo\b/.test(line));
+    assert.ok(builds.length > 0, dry.stderr);
+    for (const line of builds) assert.match(line, /\bcargo build --release\b/, line);
+  });
+
   it("fails the gate, timing nothing, when the build does", (t) => {
     const repo = scratch(t);
     const { result, spans } = check(repo, { BREAK_BUILD: "1" });
