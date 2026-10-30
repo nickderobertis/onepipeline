@@ -3017,8 +3017,11 @@ fn attach(
     // with. It is released the moment nothing will start another, so the drain
     // below still ends on the relay closing rather than on its whole grace.
     let mut relay = Some(tx.clone());
-    if let Some(run) = watched.as_deref_mut() {
-        relay_observer(paths, run, tx)?;
+    match watched.as_deref_mut() {
+        Some(run) => relay_observer(paths, run, tx)?,
+        // No observer to hand it to, so it goes now: held here, it would be a
+        // writing handle the drain waits its whole grace for.
+        None => drop(tx),
     }
     // The run's fold, kept current from what its journal appends, and the byte the
     // stream has printed up to: each record is read once, as it arrives, and the
