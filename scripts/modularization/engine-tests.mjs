@@ -1,17 +1,20 @@
 #!/usr/bin/env node
 // Re-homes the start, reply, adopt and cross-command e2e tests onto the engine part each asserts.
-// The engine part a test asserts is the crate whose source writes the string literals its assertions
-// compare against: the literals inside its `assert!`, `assert_eq!` and `assert_ne!` invocations and
-// in the `let` bindings those invocations name. A literal counts only where at most DISCRIMINATING
-// crates write it, so a common key ("status") is no evidence. The test moves to the engine crate
-// with the smallest closure that contains every crate it asserts, as a crate-level test over a
-// recorded fixture of the run its original journey drove. A test stays a full journey through the
-// real binary when it asserts live ordering, a command's own output, or no engine literal at all,
-// or when no single engine crate's closure contains everything it asserts. As in the test split, an
-// engine crate's tests holding more than THRESHOLD of a full Linux run's estimated seconds run as one
-// suite per source module.
+// The engine part a test asserts is the crate whose production code names the string literals its
+// assertions compare against: the literals inside its `assert!`, `assert_eq!` and `assert_ne!`
+// invocations and in the `let` bindings those invocations name. A crate's production code is its
+// files and the items it takes from other files, less comments, `#[cfg(test)]` modules and the items
+// other crates take from its files. A literal counts only where at most DISCRIMINATING crates name
+// it, so a common key ("status") is no evidence. The test moves to the engine crate with the smallest
+// closure that contains every crate it asserts, as a crate-level test over a recorded fixture of the
+// run its original journey drove. A test stays a full journey through the real binary when it
+// asserts live ordering, a command's own output, or no engine literal at all, or when no single
+// engine crate's closure contains everything it asserts. As in the test split, an engine crate's
+// tests holding more than THRESHOLD of a full Linux run's estimated seconds run as one suite per
+// source module.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { codeOnly } from "./graph.mjs";
 import { functions } from "./rust-syntax.mjs";
 import { declarations } from "./source-projection.mjs";
 import { targetGraph } from "./target-graph.mjs";
@@ -22,15 +25,60 @@ export const PARENTS = ["cmd-start", "cross-command", "cmd-reply", "cmd-adopt"];
 export const DISCRIMINATING = 2;
 export const KEEP = {
   live: "asserts live ordering, which no recorded fixture can replace",
-  "command output": "asserts a literal only a command or the dispatcher writes",
-  "no engine literal": "its assertions compare against no literal an engine crate alone writes",
+  "command output": "asserts a literal only a command or the dispatcher names",
+  "no engine literal": "its assertions compare against no literal an engine crate alone names",
   "no covering crate": "no single engine crate's closure contains every crate it asserts",
 };
 
 const read = (path) => readFileSync(path, "utf8");
+/** The string literals of Rust source, outside comments, with their offsets. */
+export function stringLiterals(text) {
+  const found = [];
+  let at = 0;
+  while (at < text.length) {
+    if (text.startsWith("//", at)) {
+      const end = text.indexOf("\n", at);
+      at = end < 0 ? text.length : end;
+    } else if (text.startsWith("/*", at)) {
+      let depth = 1;
+      at += 2;
+      while (at < text.length && depth) {
+        if (text.startsWith("/*", at)) {
+          depth++;
+          at += 2;
+        } else if (text.startsWith("*/", at)) {
+          depth--;
+          at += 2;
+        } else at++;
+      }
+    } else {
+      const raw =
+        (at === 0 || !/[a-zA-Z0-9_]/.test(text[at - 1])) &&
+        /^(?:b)?r(#{0,255})"/.exec(text.slice(at));
+      if (raw) {
+        const close = `"${raw[1]}`;
+        const end = text.indexOf(close, at + raw[0].length);
+        const stop = end < 0 ? text.length : end;
+        found.push({ start: at, value: text.slice(at + raw[0].length, stop) });
+        at = end < 0 ? text.length : end + close.length;
+      } else if (text[at] === '"') {
+        let end = at + 1;
+        while (end < text.length && text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+        found.push({ start: at, value: text.slice(at + 1, end) });
+        at = end + 1;
+      } else if (text[at] === "'") {
+        const char = /^'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'/u.exec(
+          text.slice(at),
+        );
+        at += char ? char[0].length : 1;
+      } else at++;
+    }
+  }
+  return found;
+}
 const literals = (text) =>
-  [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)]
-    .map((match) => match[1])
+  stringLiterals(text)
+    .map((literal) => literal.value)
     .filter((literal) => literal.length >= 4 && !/[{}]/.test(literal));
 const isEngine = (crate) =>
   !crate.startsWith("cmd-") && !["cli-dispatcher", "onepipeline"].includes(crate);
@@ -42,20 +90,61 @@ export const targetLayout = () =>
     JSON.parse(read("scripts/modularization/target-moves.json")),
   );
 
-/** Every literal the layout's crates write, with the crates writing it. */
-export function literalWriters(layout) {
-  const writers = new Map();
+/** The `#[cfg(test)]` modules of Rust source, as offset ranges. */
+function testModules(text) {
+  const code = codeOnly(text);
+  const ranges = [];
+  for (const found of code.matchAll(
+    /#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{/g,
+  )) {
+    let end = found.index + found[0].length;
+    for (let depth = 1; end < code.length && depth; end++) {
+      if (code[end] === "{") depth++;
+      if (code[end] === "}") depth--;
+    }
+    ranges.push([found.index, end]);
+  }
+  return ranges;
+}
+
+/**
+ * Every literal the layout's crates name in their production code, with the crates naming it: each
+ * crate's files and the items it takes from other files, less comments, `#[cfg(test)]` modules and
+ * the items other crates take from its files.
+ */
+export function literalOwners(layout) {
+  const takenFrom = new Map();
+  for (const sources of Object.values(layout.symbolSources ?? {}))
+    for (const { file, symbols } of sources) {
+      if (!takenFrom.has(file)) takenFrom.set(file, new Set());
+      for (const symbol of symbols) takenFrom.get(file).add(symbol);
+    }
+  const owned = (text, dropped) => {
+    const ranges = [
+      ...testModules(text),
+      ...declarations(text)
+        .filter((decl) => dropped.has(decl.name))
+        .map((decl) => [decl.offset, decl.offset + decl.raw.length]),
+    ];
+    return stringLiterals(text)
+      .filter(({ start }) => !ranges.some(([from, to]) => start >= from && start < to))
+      .map(({ value }) => value)
+      .filter((literal) => literal.length >= 4 && !/[{}]/.test(literal));
+  };
+  const owners = new Map();
   for (const [name, crate] of Object.entries(layout.crates)) {
-    const texts = crate.files.map(read);
+    const found = crate.files.flatMap((file) =>
+      owned(read(file), takenFrom.get(file) ?? new Set()),
+    );
     for (const { file, symbols } of layout.symbolSources?.[name] ?? [])
       for (const decl of declarations(read(file)))
-        if (symbols.includes(decl.name)) texts.push(decl.raw);
-    for (const literal of new Set(texts.flatMap(literals))) {
-      if (!writers.has(literal)) writers.set(literal, new Set());
-      writers.get(literal).add(name);
+        if (symbols.includes(decl.name)) found.push(...owned(decl.raw, new Set()));
+    for (const literal of new Set(found)) {
+      if (!owners.has(literal)) owners.set(literal, new Set());
+      owners.get(literal).add(name);
     }
   }
-  return writers;
+  return owners;
 }
 
 /** The text a test's assertions compare against: its assertion macros and the bindings they name. */
@@ -78,7 +167,7 @@ export function assertionText(body) {
 
 /** Where each test of PARENTS goes, by the rule at the head of this file. */
 export function deriveEngineSplit(catalog, layout) {
-  const writers = literalWriters(layout);
+  const owners = literalOwners(layout);
   const closures = new Map();
   const closure = (crate) => {
     if (!closures.has(crate))
@@ -107,7 +196,7 @@ export function deriveEngineSplit(catalog, layout) {
     if (!PARENTS.includes(test.suite)) continue;
     const evidence = {};
     for (const literal of literals(assertionText(body(test.original)))) {
-      const crates = writers.get(literal);
+      const crates = owners.get(literal);
       if (crates && crates.size <= DISCRIMINATING) evidence[literal] = [...crates].sort();
     }
     const asserted = new Set(Object.values(evidence).flat());

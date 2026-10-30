@@ -4,7 +4,8 @@
 // order, into engine-evidence.json; `--write` and `--check` render that file into the document.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { ENGINE_PATH, KEEP, PARENTS } from "./engine-tests.mjs";
+import { ENGINE_PATH, KEEP, PARENTS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
+import { targetCatalog } from "./test-split.mjs";
 
 export const ENGINE_MARKER = "<!-- BEGIN ENGINE TESTS -->";
 export const EVIDENCE_PATH = "scripts/modularization/engine-evidence.json";
@@ -30,43 +31,150 @@ export function testSplitOnly(splitDoc) {
 
 /**
  * Refuses evidence that is not one replay per migration step, in order, each re-homing one more
- * parent than the last, with every share a fraction and every count within what it counts.
+ * parent than the last, with exactly the fields engine-replay.mjs writes, every share a fraction
+ * and every count within what it counts.
  */
 export function validateEngineEvidence(evidence) {
   const fraction = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+  const duration = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+  const count = (value, most) => Number.isInteger(value) && value >= 0 && value <= most;
+  const shaped = (value, keys) =>
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    keys.every((key) => Object.hasOwn(value, key));
   if (
-    !evidence ||
-    typeof evidence !== "object" ||
-    Array.isArray(evidence) ||
-    Object.keys(evidence).some((key) => !["schema", "steps"].includes(key)) ||
+    !shaped(evidence, ["schema", "steps"]) ||
     evidence.schema !== 1 ||
-    !Array.isArray(evidence.steps) ||
-    !evidence.steps.length
+    !Array.isArray(evidence.steps)
   )
     throw new Error(`invalid ${EVIDENCE_PATH}`);
   const moving = PARENTS.filter((parent) => parent !== "cross-command");
-  for (const [index, step] of evidence.steps.entries()) {
-    const where = `${EVIDENCE_PATH} step ${index + 1}`;
-    if (JSON.stringify(step?.parents) !== JSON.stringify(moving.slice(0, index + 1)))
-      throw new Error(`${where} must re-home ${moving.slice(0, index + 1).join(", ")}`);
-    if (step.schema !== 1 || step.prs !== 144 || !Number.isInteger(step.suites))
-      throw new Error(`${where} is not a 144-PR replay`);
-    for (const platform of PLATFORMS)
-      if (
-        !fraction(step.platforms?.[platform]?.suiteSkip) ||
-        !fraction(step.platforms[platform].secondsSkip)
-      )
-        throw new Error(`${where} has no skip shares for ${platform}`);
-    if (!Number.isInteger(step.broad) || step.broad < 0 || step.broad > step.prs)
-      throw new Error(`${where} counts its broad PRs out of range`);
-    if (!Array.isArray(step.overHalf) || step.overHalf.some((row) => !(row.share > 0.5)))
-      throw new Error(`${where} lists a PR under half the seconds as over it`);
-    if (!Array.isArray(step.crateReach) || !Array.isArray(step.engineSuites))
-      throw new Error(`${where} lacks its crate reach or engine suites`);
-  }
   if (evidence.steps.length !== moving.length)
     throw new Error(`${EVIDENCE_PATH} must hold one step per re-homed parent`);
+  for (const [index, step] of evidence.steps.entries()) {
+    const where = `${EVIDENCE_PATH} step ${index + 1}`;
+    const refuse = (what) => {
+      throw new Error(`${where} ${what}`);
+    };
+    if (JSON.stringify(step?.parents) !== JSON.stringify(moving.slice(0, index + 1)))
+      refuse(`must re-home ${moving.slice(0, index + 1).join(", ")}`);
+    if (
+      !shaped(step, [
+        "schema",
+        "parents",
+        "prs",
+        "suites",
+        "platforms",
+        "broad",
+        "causes",
+        "sole",
+        "lock",
+        "wall",
+        "overHalf",
+        "crateReach",
+        "engineSuites",
+      ]) ||
+      step.schema !== 1 ||
+      step.prs !== 144 ||
+      !Number.isInteger(step.suites) ||
+      step.suites < 1
+    )
+      refuse("is not a 144-PR replay with exactly the replay's fields");
+    if (!shaped(step.platforms, PLATFORMS))
+      refuse("must give skip shares for exactly linux, macos, windows and local");
+    for (const platform of PLATFORMS)
+      if (
+        !shaped(step.platforms[platform], ["suiteSkip", "secondsSkip"]) ||
+        !fraction(step.platforms[platform].suiteSkip) ||
+        !fraction(step.platforms[platform].secondsSkip)
+      )
+        refuse(`has no skip shares for ${platform}`);
+    if (!count(step.broad, step.prs)) refuse("counts its broad PRs out of range");
+    for (const field of ["causes", "sole"])
+      if (
+        !step[field] ||
+        typeof step[field] !== "object" ||
+        Array.isArray(step[field]) ||
+        Object.values(step[field]).some((value) => !count(value, step.broad))
+      )
+        refuse(`counts ${field} out of its broad PRs`);
+    if (Object.entries(step.sole).some(([kind, value]) => value > (step.causes[kind] ?? 0)))
+      refuse("has an input kind forcing alone more PRs than it forces");
+    if (
+      !shaped(step.lock, ["sibling", "thirdParty", "both"]) ||
+      Object.values(step.lock).some((value) => !count(value, step.prs)) ||
+      step.lock.sibling + step.lock.thirdParty + step.lock.both !==
+        (step.causes["lockfile resolution"] ?? 0)
+    )
+      refuse("does not split its lockfile-forced PRs by what moved");
+    if (!shaped(step.wall, ["linux", "macos", "windows", "local"]))
+      refuse("must project the wall clock for every job and the local gate");
+    for (const platform of ["linux", "macos", "windows"]) {
+      const wall = step.wall[platform];
+      if (
+        !shaped(wall, ["today", "residual", "median", "max", "over", "typicalShare"]) ||
+        ![wall.today, wall.residual, wall.median, wall.max].every(duration) ||
+        !(wall.residual <= wall.median && wall.median <= wall.max && wall.max <= wall.today) ||
+        !count(wall.over, step.prs) ||
+        !fraction(wall.typicalShare)
+      )
+        refuse(`projects the ${platform} job inconsistently`);
+    }
+    const local = step.wall.local;
+    if (
+      !shaped(local, ["testPhase", "median", "max"]) ||
+      ![local.testPhase, local.median, local.max].every(duration) ||
+      !(local.median <= local.max && local.max <= local.testPhase)
+    )
+      refuse("projects the local gate inconsistently");
+    if (
+      !Array.isArray(step.overHalf) ||
+      step.overHalf.length > step.prs ||
+      step.overHalf.some(
+        (row) =>
+          !shaped(row, ["pr", "commit", "share", "forcing"]) ||
+          !(row.pr === null || /^\d+$/.test(row.pr)) ||
+          !/^[0-9a-f]{8}$/.test(row.commit) ||
+          !(fraction(row.share) && row.share > 0.5) ||
+          !Array.isArray(row.forcing) ||
+          !row.forcing.length ||
+          row.forcing.some((kind) => typeof kind !== "string" || !kind),
+      )
+    )
+      refuse("lists a PR that is not one selecting more than half the seconds");
+    if (
+      !Array.isArray(step.crateReach) ||
+      step.crateReach.some(
+        (row) =>
+          !shaped(row, ["crate", "suites", "linuxShare", "prs"]) ||
+          !/^[a-z][a-z0-9-]*$/.test(row.crate) ||
+          !count(row.suites, step.suites) ||
+          row.suites <= step.suites / 2 ||
+          !fraction(row.linuxShare) ||
+          !count(row.prs, step.prs),
+      )
+    )
+      refuse("lists a crate whose change does not select more than half the suites");
+    if (
+      !Array.isArray(step.engineSuites) ||
+      step.engineSuites.length > step.suites ||
+      step.engineSuites.some(
+        (row) =>
+          !shaped(row, ["suite", "crate", "tests", "closure", "linuxShare", "skipped"]) ||
+          !row.suite.startsWith(`engine--${row.crate}`) ||
+          !Number.isInteger(row.tests) ||
+          row.tests < 1 ||
+          !Number.isInteger(row.closure) ||
+          row.closure < 1 ||
+          !fraction(row.linuxShare) ||
+          !fraction(row.skipped),
+      )
+    )
+      refuse("lists an engine suite that is not one");
+  }
   return evidence;
 }
 
@@ -181,7 +289,7 @@ export function engineAppendix(evidence, split, splitDoc) {
       assertedBy[crate] = (assertedBy[crate] ?? 0) + 1;
   lines.push(
     "",
-    "Each engine crate that receives tests, with how many of the kept full journeys still assert a literal it alone (or with one other crate) writes, end to end through the binary:",
+    "Each engine crate that receives tests, with how many of the kept full journeys still assert a literal it alone (or with one other crate) names, end to end through the binary:",
     "",
     "| Engine crate | Re-homed tests | Kept full journeys still asserting it |",
     "| --- | ---: | ---: |",
@@ -221,27 +329,31 @@ export function engineAppendix(evidence, split, splitDoc) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const mode = process.argv[2];
-    if (mode === "--collect") {
-      if (process.argv.length < 4)
-        throw new Error("usage: engine-report.mjs --collect STEP.json...");
-      const evidence = validateEngineEvidence({
-        schema: 1,
-        steps: process.argv.slice(3).map((path) => JSON.parse(read(path))),
-      });
-      writeFileSync(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`);
-    } else if (process.argv.length !== 3 || !["--write", "--check"].includes(mode))
+    if (
+      mode === "--collect"
+        ? process.argv.length < 4
+        : process.argv.length !== 3 || !["--write", "--check"].includes(mode)
+    )
       throw new Error("usage: engine-report.mjs --collect STEP.json... | --write | --check");
+    // Everything is read and validated before anything is written.
+    const evidence = validateEngineEvidence(
+      mode === "--collect"
+        ? { schema: 1, steps: process.argv.slice(3).map((path) => JSON.parse(read(path))) }
+        : JSON.parse(read(EVIDENCE_PATH)),
+    );
+    const splitText = read(ENGINE_PATH);
+    checkEngineSplit(splitText, targetCatalog(), targetLayout());
     const parts = read(DOC).split(ENGINE_MARKER);
     if (parts.length !== 2) throw new Error(`${DOC} must hold its marker exactly once`);
-    const expected = `${parts[0]}${engineAppendix(
-      JSON.parse(read(EVIDENCE_PATH)),
-      JSON.parse(read(ENGINE_PATH)),
-      read(SPLIT_DOC),
-    )}`;
+    const expected = `${parts[0]}${engineAppendix(evidence, JSON.parse(splitText), read(SPLIT_DOC))}`;
     if (mode === "--check") {
       if (read(DOC) !== expected)
         throw new Error(`${DOC} differs from what engine-report.mjs renders`);
-    } else writeFileSync(DOC, expected);
+    } else {
+      if (mode === "--collect")
+        writeFileSync(EVIDENCE_PATH, `${JSON.stringify(evidence, null, 2)}\n`);
+      writeFileSync(DOC, expected);
+    }
     console.log(`engine report: ${mode === "--check" ? "checked" : "wrote"} ${DOC}`);
   } catch (error) {
     const next =

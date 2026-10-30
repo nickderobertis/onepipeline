@@ -4457,12 +4457,38 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
   }
 });
 
-test("engine split attributes assertions to the crate writing their literals, holds every phase in one place, and refuses a misplaced test", {
+test("engine split attributes assertions to the crates naming their literals in production code, holds every phase in one place, and refuses a misplaced test", {
   timeout: 300000,
 }, async () => {
-  const { assertionText, checkEngineSplit, ENGINE_PATH, PARENTS, targetLayout } = await import(
-    "./engine-tests.mjs"
-  );
+  const { assertionText, checkEngineSplit, ENGINE_PATH, literalOwners, PARENTS, targetLayout } =
+    await import("./engine-tests.mjs");
+  // A crate names a literal only in its own production code: not in a comment, not in its unit
+  // tests, and not in an item another crate takes from its file.
+  const root = scratch();
+  try {
+    put(
+      root,
+      "src/a.rs",
+      [
+        '// "in-a-comment"',
+        'pub fn emit() -> &\'static str { "node-settled" }',
+        'pub fn taken() -> &\'static str { "taken-away" }',
+        "#[cfg(test)]",
+        'mod tests { fn t() { assert_eq!(super::emit(), "only-in-tests"); } }',
+      ].join("\n"),
+    );
+    put(root, "src/b.rs", 'pub fn read(kind: &str) -> bool { kind == "node-settled" }');
+    const owners = literalOwners({
+      crates: { a: { files: [join(root, "src/a.rs")] }, b: { files: [join(root, "src/b.rs")] } },
+      symbolSources: { b: [{ file: join(root, "src/a.rs"), symbols: ["taken"] }] },
+    });
+    assert.deepEqual([...owners.get("node-settled")].sort(), ["a", "b"]);
+    assert.deepEqual([...owners.get("taken-away")], ["b"]);
+    assert.equal(owners.get("in-a-comment"), undefined);
+    assert.equal(owners.get("only-in-tests"), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
   const { targetCatalog } = await import("./test-split.mjs");
   // Only what an assertion compares against counts: its literals and the bindings it names.
   const text = assertionText(`{
@@ -4614,12 +4640,51 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
     // Evidence that skips a step, or re-homes the steps out of order, is refused.
     assert.throws(
       () => validateEngineEvidence({ schema: 1, steps: replayed.steps.slice(1) }),
-      /step 1 must re-home cmd-start/,
-    );
-    assert.throws(
-      () => validateEngineEvidence({ schema: 1, steps: replayed.steps.slice(0, 2) }),
       /one step per re-homed parent/,
     );
+    assert.throws(
+      () => validateEngineEvidence({ schema: 1, steps: [...replayed.steps].reverse() }),
+      /step 1 must re-home cmd-start/,
+    );
+    // A step with a field the replay does not write, or a share out of range, is refused.
+    const extra = structuredClone(replayed);
+    extra.steps[0].wall.linux.note = "hand-edited";
+    assert.throws(
+      () => validateEngineEvidence(extra),
+      /step 1 projects the linux job inconsistently/,
+    );
+    const share = structuredClone(replayed);
+    share.steps[2].overHalf[0].share = 1.5;
+    assert.throws(() => validateEngineEvidence(share), /step 3 lists a PR that is not one/);
+    // --collect writes the evidence and the document from the step replays, refusing steps out of
+    // order without writing either; --write repairs a document that drifted from its evidence.
+    const clone = join(root, "clone");
+    execFileSync("git", ["clone", "--quiet", "--shared", ".", clone], { stdio: "pipe" });
+    const report = (...args) =>
+      spawnSync(process.execPath, ["scripts/modularization/engine-report.mjs", ...args], {
+        cwd: clone,
+        encoding: "utf8",
+      });
+    const evidencePath = join(clone, EVIDENCE_PATH);
+    const docPath = join(clone, "docs/modularization-engine-tests.md");
+    rmSync(evidencePath);
+    writeFileSync(docPath, `${prefix}${ENGINE_MARKER}\n`);
+    const reversed = report("--collect", ...runs.map((run) => run.output).reverse());
+    assert.equal(reversed.status, 1);
+    assert.match(reversed.stderr, /step 1 must re-home cmd-start\nnext: regenerate the evidence/);
+    assert.throws(() => readFileSync(evidencePath), /ENOENT/);
+    assert.equal(readFileSync(docPath, "utf8"), `${prefix}${ENGINE_MARKER}\n`);
+    const collected = report("--collect", ...runs.map((run) => run.output));
+    assert.equal(collected.status, 0, collected.stderr);
+    assert.equal(readFileSync(evidencePath, "utf8"), readFileSync(EVIDENCE_PATH, "utf8"));
+    assert.equal(readFileSync(docPath, "utf8"), doc);
+    writeFileSync(docPath, doc.replace("| linux | ", "| linux (edited) | "));
+    const drifted = report("--check");
+    assert.equal(drifted.status, 1);
+    assert.match(drifted.stderr, /differs from what engine-report.mjs renders/);
+    const rewritten = report("--write");
+    assert.equal(rewritten.status, 0, rewritten.stderr);
+    assert.equal(readFileSync(docPath, "utf8"), doc);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
