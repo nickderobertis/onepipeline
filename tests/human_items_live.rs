@@ -1896,3 +1896,113 @@ fn a_host_hook_raises_a_host_hold_and_sample_mode_takes_no_live_verb() {
     world.refused(None, &["watch"], "no session to watch");
     world.refused(None, &["watch", "--session", " "], "no session to watch");
 }
+
+/// A whole journal record that is not one this build reads as an item event —
+/// on another stream, at an envelope version it does not read, with a kind its
+/// payload's action contradicts, or numbered past the last a journal can number
+/// — is refused out loud, never folded or skipped.
+#[test]
+fn records_no_writer_made_are_refused_by_what_is_wrong_with_them() {
+    let world = Live::enabled();
+    world.raise(&item(
+        "base",
+        "task",
+        "low",
+        "s",
+        json!({"scope": "nothing"}),
+    ));
+    let journal = world.store().join("events.ndjson");
+    let good = std::fs::read_to_string(&journal).unwrap();
+    let record: Value = serde_json::from_str(good.lines().next().unwrap()).unwrap();
+    for (name, edit, refusal) in [
+        ("stream", json!({"stream": "elsewhere"}), "on stream"),
+        ("version", json!({"v": 99}), "envelope version 99"),
+        (
+            "kind",
+            json!({"kind": "human-item-completed"}),
+            "differs from its payload's action",
+        ),
+        (
+            "exhausted",
+            json!({"seq": u64::MAX}),
+            "past the last a journal can number",
+        ),
+    ] {
+        let mut bad = record.clone();
+        for (key, value) in edit.as_object().unwrap() {
+            bad[key] = value.clone();
+        }
+        if name != "exhausted" {
+            bad["seq"] = json!(1);
+        }
+        std::fs::write(&journal, format!("{good}{bad}\n")).unwrap();
+        world.refused(None, &["list"], refusal);
+    }
+    std::fs::write(&journal, &good).unwrap();
+    assert_eq!(
+        world
+            .json(None, &["list", "--json"])
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// A watch refuses an owner queue holding a record that is not an item event, or
+/// one owned by another session, and commits nothing past it.
+#[test]
+fn a_watch_refuses_a_corrupt_or_misrouted_queue_without_advancing() {
+    use onemessagebus::{LocalTransport, QueueName, Transport};
+    for (name, record) in [
+        ("garbled", b"{\"not\": \"an envelope\"}".to_vec()),
+        ("misrouted", Vec::new()),
+    ] {
+        let world = Live::enabled();
+        world.raise(&item(
+            "mine",
+            "task",
+            "low",
+            "owner",
+            json!({"scope": "nothing"}),
+        ));
+        world.raise(&item(
+            "theirs",
+            "task",
+            "low",
+            "stranger",
+            json!({"scope": "nothing"}),
+        ));
+        let transport = LocalTransport::open(world.store().join("bus")).unwrap();
+        let queue = QueueName::try_from(
+            format!(
+                "owner-{}",
+                &onepipeline::human_items::item_id_for("owner")[3..]
+            )
+            .as_str(),
+        )
+        .unwrap();
+        // Delivered once, so the owner's queue exists.
+        let output = world.run(Some("owner"), &["watch"]);
+        assert!(output.status.success());
+        let bytes = if name == "misrouted" {
+            let journal = std::fs::read_to_string(world.store().join("events.ndjson")).unwrap();
+            journal.lines().nth(1).unwrap().as_bytes().to_vec()
+        } else {
+            record
+        };
+        transport.append(&queue, &bytes).unwrap();
+        let refused = world.run(Some("owner"), &["watch"]);
+        assert!(!refused.status.success(), "{name}");
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            said.contains("not an item event") || said.contains("owned by stranger"),
+            "{name}: {said}"
+        );
+        let again = world.run(Some("owner"), &["watch"]);
+        assert!(
+            !again.status.success(),
+            "{name}: the cursor moved past what was refused"
+        );
+    }
+}

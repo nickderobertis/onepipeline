@@ -1495,3 +1495,53 @@ fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
     let shown: Value = serde_json::from_str(&shown.stdout).unwrap();
     assert!(shown["nodes"].as_array().unwrap().is_empty(), "{shown}");
 }
+
+/// A hold raised while work is running stops nothing already running: that work
+/// settles, and only what would start after it is held.
+#[test]
+fn a_hold_raised_during_running_work_lets_it_finish_and_holds_what_follows() {
+    let world = World::new("human-item-midrun");
+    enabled(&world);
+    world.script("slow.wait", "hold");
+    let name = "midrun";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![agent("slow", &[]), agent("after", &["slow"])]),
+    );
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the slow node to run", |w| {
+        dispatched(w, name).contains(&"slow".to_owned())
+    });
+    let host = raise(
+        &world,
+        "host",
+        &input(
+            "outage",
+            "task",
+            "ops",
+            None,
+            None,
+            json!({"scope": "host"}),
+        ),
+    );
+    world.release("slow.go");
+    world.until("the running node to settle", |w| {
+        settled(w, name, "slow").as_deref() == Some("done")
+    });
+    stays_undispatched_after(&world, name, "after", std::time::Duration::from_secs(2));
+    world.run(&["human-items", "complete", &host]).exited(0);
+    world.until("the held node to run", |w| {
+        settled(w, name, "after").as_deref() == Some("done")
+    });
+}
+
+fn stays_undispatched_after(world: &World, run: &str, node: &str, for_: std::time::Duration) {
+    let until = std::time::Instant::now() + for_;
+    while std::time::Instant::now() < until {
+        assert!(
+            !dispatched(world, run).contains(&node.to_owned()),
+            "{node} was dispatched under a hold"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}

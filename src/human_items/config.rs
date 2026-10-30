@@ -234,9 +234,16 @@ pub fn effective(dir: &Path) -> Result<EffectiveConfig, String> {
         }
         sources.push(path);
     }
+    let named = || {
+        sources
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" over ")
+    };
     let config: HumanItemsConfig = serde_json::from_value(serde_json::Value::Object(merged))
-        .map_err(|e| format!("human_items: {e}"))?;
-    validate(&config)?;
+        .map_err(|e| format!("{}: human_items: {e}", named()))?;
+    validate(&config).map_err(|e| format!("{}: {e}", named()))?;
     Ok(EffectiveConfig {
         human_items: config,
         sources,

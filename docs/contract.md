@@ -783,9 +783,10 @@ and the host-local override the file `ONEPIPELINE_CONFIG` names, else
 (optional), `hooks: [{phase, kind: task|question, title, body, priority, block:
 {scope: nothing|work|plan|host}, approval: {adapter} | null, aggregate?:
 ticket_review}]` and `approval_adapters: {NAME: {command: [program, args...]}}`.
-Hooks are validated once, at load; a malformed file refuses every consumer by its
-file. Disabled, every live verb refuses nonzero with typed `{kind:"unavailable"}`
-and no run raises anything. `HumanItems::open(root, dir)` is the SDK's entry: it
+Hooks are validated once, at load; a malformed configuration is refused by the
+verbs and the SDK, naming the files it was read from, and a launch over one says
+so and runs with human items off. Disabled, every live verb refuses nonzero with
+typed `{kind:"unavailable"}` and no run raises anything. `HumanItems::open(root, dir)` is the SDK's entry: it
 loads `dir`'s effective configuration and refuses as unavailable when disabled.
 
 **Store.** Every item event is one existing journal envelope on the host stream

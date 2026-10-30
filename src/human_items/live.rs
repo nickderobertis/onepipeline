@@ -922,6 +922,7 @@ pub(crate) enum Probe {
         /// Where the harness configuration is discovered from.
         cwd: Option<PathBuf>,
         /// The identities refused, as the chain named them.
+        // llmlint: ignore[invalid_states_unrepresentable] the identity chain's own words as the producer carried them on the exhausted death; the probe hands them to the harness's usage read, whose own selection refuses an id or variant it does not know, which reads as no headroom.
         identities: Vec<String>,
         /// When they were last probed, in epoch milliseconds.
         #[serde(default)]

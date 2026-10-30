@@ -50,6 +50,44 @@ fn name<T: for<'a> TryFrom<&'a str>>(text: &str) -> T {
 struct Delivered {
     /// The journal byte delivery has carried every record before.
     through: u64,
+    /// The SHA-256 of the record that ends there, so a journal cut or replaced
+    /// under delivery is recognised rather than read from the middle of a record.
+    #[serde(default)]
+    last: String,
+}
+
+fn digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Whether the record ending at `delivered.through` is still the one delivery
+/// carried last.
+fn still_there(file: &mut std::fs::File, length: u64, delivered: &Delivered) -> bool {
+    if delivered.through == 0 {
+        return true;
+    }
+    if delivered.through > length {
+        return false;
+    }
+    // The record that ends at the cursor: back from it to the newline before it.
+    let start = delivered.through.saturating_sub(64 * 1024);
+    let mut window = vec![0u8; usize::try_from(delivered.through - start).unwrap_or(0)];
+    if file.seek(SeekFrom::Start(start)).is_err() || file.read_exact(&mut window).is_err() {
+        return false;
+    }
+    let Some((body, b"\n")) = window.split_last_chunk::<1>().map(|(b, nl)| (b, nl)) else {
+        return false;
+    };
+    let line = match body.iter().rposition(|b| *b == b'\n') {
+        Some(at) => &body[at + 1..],
+        None if start == 0 => body,
+        None => return false,
+    };
+    digest(line) == delivered.last
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -114,10 +152,10 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
         .metadata()
         .map_err(|e| journal_error(&journal, e))?
         .len();
-    if delivered.through > length {
-        // The journal was replaced under delivery: carry it again from the start;
-        // each watch drops what it already printed by sequence.
-        delivered.through = 0;
+    if !still_there(&mut file, length, &delivered) {
+        // The journal was cut or replaced under delivery: carry it again from the
+        // start; each watch drops what it already printed by sequence.
+        delivered = Delivered::default();
     }
     file.seek(SeekFrom::Start(delivered.through))
         .map_err(|e| journal_error(&journal, e))?;
@@ -144,6 +182,7 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
         carried += 1;
         offset += end + 1;
         delivered.through += end as u64 + 1;
+        delivered.last = digest(line);
         transport.replace_document(
             &control,
             &document,
