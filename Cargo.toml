@@ -1287,7 +1287,8 @@ onevcs-testing = "0.19.26"
 # dependency links. A host copies its private plans again after every review, finish and
 # approval, and each write spends Linear's quota and notifies the item's followers.
 # `tests/e2e/linear_launch.rs`'s `an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write`
-# drives it and fails on 0.12.11.
+# drives it and fails on 0.12.11 and on 0.12.7, where the second copy sends six issue updates
+# and deletes and re-files the dependency.
 onetaskgraph-core = "=0.12.12"
 onetaskgraph-plugin-api = "=0.12.12"
 onetaskgraph-local-md = "=0.12.12"
