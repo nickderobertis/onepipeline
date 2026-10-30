@@ -46,12 +46,34 @@ const INDEX_VERSION: u32 = 1;
 const RUN_TAIL: u64 = 512;
 /// The reason every item a run's end retires carries.
 pub const RUN_ENDED: &str = "the run ended";
+/// The definitive host outages the engine raises an item for, and nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostCondition {
+    /// The human-item journal's filesystem has no space.
+    JournalNoSpace,
+    /// A dispatch found no space to start in.
+    DispatchNoSpace,
+    /// Every identity of a dispatched side was refused definitively.
+    IdentitiesRefused,
+}
+
+impl HostCondition {
+    /// The word its items' dedup keys and probe records name it by.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::JournalNoSpace => "journal-no-space",
+            Self::DispatchNoSpace => "dispatch-no-space",
+            Self::IdentitiesRefused => "identities-refused",
+        }
+    }
+}
+
 /// The host condition the journal running out of space raises.
-pub const JOURNAL_NO_SPACE: &str = "journal-no-space";
+pub(crate) const JOURNAL_NO_SPACE: HostCondition = HostCondition::JournalNoSpace;
 /// The host condition a dispatch refused for want of space raises.
-pub const DISPATCH_NO_SPACE: &str = "dispatch-no-space";
+pub(crate) const DISPATCH_NO_SPACE: HostCondition = HostCondition::DispatchNoSpace;
 /// The host condition every identity of a dispatched side being refused raises.
-pub const IDENTITIES_REFUSED: &str = "identities-refused";
+pub(crate) const IDENTITIES_REFUSED: HostCondition = HostCondition::IdentitiesRefused;
 /// How often an identity outage is probed, at most.
 const IDENTITY_PROBE_EVERY_MS: u64 = 10_000;
 /// The dedup-key prefixes only the engine raises under: a run's human step, a
@@ -497,14 +519,14 @@ impl HumanItems {
     /// `session`, unless one is already open for that condition.
     pub(crate) fn raise_condition(
         &self,
-        condition: &str,
+        condition: HostCondition,
         session: &str,
         title: &str,
         body: &str,
         probe: Probe,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let mut known = probes(self);
-        known.insert(condition.to_owned(), probe);
+        known.insert(condition.as_str().to_owned(), probe);
         keep_probes(self, &known);
         let mut writer = Writer::open(self)?;
         let receipt = writer.condition(condition, session, title, body)?;
@@ -556,9 +578,11 @@ impl HumanItems {
                     super::projection::record(&journal, &item);
                     if item.state == HumanItemState::Open && item.tracker.as_ref() != Some(&tracker)
                     {
+                        // llmlint: ignore[changed_behavior_has_e2e] a binding the journal refuses is a refusal of the append every write makes, which the full-disk journeys drive; the item is then open with no tracker, which `projection::pending` owes again, and the next write's re-projection is answered by the store's intent with this same task — the replay `tasks_project_once_into_the_task_source_and_questions_never_do` drives.
                         if let Err(why) = self.bind_tracker(&item.id, tracker) {
                             eprintln!(
-                                "onepipeline: {} was projected and its tracker not recorded: {why}",
+                                "onepipeline: {} was projected and its tracker not recorded \
+                                 ({why}); the next write binds it again",
                                 item.id
                             );
                         }
@@ -816,7 +840,14 @@ impl HumanItems {
             index.journal.records += 1;
             index.journal.tail = hex(&rest[offset..offset + end + 1]);
             index.journal.tail_len = end as u64 + 1;
-            index.journal.next_seq = index.journal.next_seq.max(seq + 1);
+            let after = seq.checked_add(1).ok_or_else(|| {
+                conflict(format!(
+                    "the human-item journal {} holds a record at byte {at} numbered {seq}, past \
+                     the last a journal can number; it is never folded",
+                    path.display()
+                ))
+            })?;
+            index.journal.next_seq = index.journal.next_seq.max(after);
             index.events.insert(payload.item_id.clone(), event_id(seq));
             index.items.insert(payload.item_id.clone(), payload.item);
             folded.0 += 1;
@@ -1267,7 +1298,7 @@ impl<'a> Writer<'a> {
             cwd,
             identities,
             probed_at,
-        }) = known.get_mut(IDENTITIES_REFUSED)
+        }) = known.get_mut(IDENTITIES_REFUSED.as_str())
         else {
             return Ok(());
         };
@@ -1293,7 +1324,8 @@ impl<'a> Writer<'a> {
         if self.open_condition(DISPATCH_NO_SPACE).is_none() {
             return Ok(());
         }
-        let Some(Probe::Space { dir }) = probes(self.store).remove(DISPATCH_NO_SPACE) else {
+        let Some(Probe::Space { dir }) = probes(self.store).remove(DISPATCH_NO_SPACE.as_str())
+        else {
             return Ok(());
         };
         let probe = dir.join(format!(".onepipeline-space-probe-{}", crate::sys::pid()));
@@ -1390,8 +1422,8 @@ impl<'a> Writer<'a> {
     }
 
     /// The open item a host condition raised, if one is open.
-    fn open_condition(&self, condition: &str) -> Option<HumanItem> {
-        let prefix = format!("{HOST_CONDITION_PREFIX}{condition}:");
+    fn open_condition(&self, condition: HostCondition) -> Option<HumanItem> {
+        let prefix = format!("{HOST_CONDITION_PREFIX}{}:", condition.as_str());
         self.snapshot
             .items
             .values()
@@ -1402,7 +1434,7 @@ impl<'a> Writer<'a> {
     /// Raise one urgent host item for a condition, unless one is open for it.
     fn condition(
         &mut self,
-        condition: &str,
+        condition: HostCondition,
         session: &str,
         title: &str,
         body: &str,
@@ -1418,7 +1450,11 @@ impl<'a> Writer<'a> {
         }
         self.raise(HumanItemInput {
             schema_version: 1,
-            dedup_key: format!("{HOST_CONDITION_PREFIX}{condition}:{}", self.next_seq),
+            dedup_key: format!(
+                "{HOST_CONDITION_PREFIX}{}:{}",
+                condition.as_str(),
+                self.next_seq
+            ),
             kind: HumanItemKind::Task,
             title: title.to_owned(),
             body: body.to_owned(),
@@ -1434,7 +1470,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Resolve the open item a condition raised, if any, as cleared.
-    fn clear(&mut self, condition: &str, reason: &str) -> Result<bool, HumanItemRefusal> {
+    fn clear(&mut self, condition: HostCondition, reason: &str) -> Result<bool, HumanItemRefusal> {
         let Some(open) = self.open_condition(condition) else {
             return Ok(false);
         };

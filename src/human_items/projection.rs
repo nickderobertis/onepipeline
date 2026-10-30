@@ -70,7 +70,7 @@ fn projected(journal: &Path) -> BTreeMap<String, Record> {
     })
 }
 
-/// The tasks whose state is ahead of what has been projected.
+/// The tasks whose projection is owed.
 pub(crate) fn pending<'a>(
     journal: &Path,
     items: impl Iterator<Item = &'a HumanItem>,
@@ -78,7 +78,12 @@ pub(crate) fn pending<'a>(
     let done = projected(journal);
     items
         .filter(|item| item.kind == HumanItemKind::Task)
-        .filter(|item| done.get(&item.id).map(|r| r.state) != Some(Projected::of(item.state)))
+        // Ahead of what was projected — or projected open with no tracker bound on
+        // the item, whose binding the store answers again rather than filing anew.
+        .filter(|item| {
+            done.get(&item.id).map(|r| r.state) != Some(Projected::of(item.state))
+                || (item.state == HumanItemState::Open && item.tracker.is_none())
+        })
         .cloned()
         .collect()
 }

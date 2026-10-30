@@ -1635,3 +1635,33 @@ fn concurrent_watches_of_one_session_print_each_event_once() {
     seqs.sort_unstable();
     assert_eq!(seqs, (0..10).collect::<Vec<_>>());
 }
+
+/// A design task whose phase, or whose adapter, is no longer configured cannot
+/// be completed through an authority nothing names: it refuses and stays open.
+#[test]
+fn a_design_task_whose_authority_is_no_longer_configured_stays_open() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ctx = context(
+        &world,
+        "design",
+        &json!({
+            "owner": owner, "dedup_key": "alpha", "approval": {"board_copy": "plans:doc-1", "key": "v1"}
+        }),
+    );
+    let id = phase(&world, None, "design-review", &ctx)["item"]["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    world.configure("human_items:\n  enabled: true\n");
+    world.refused(
+        None,
+        &["complete", &id],
+        "no configured phase names an approval adapter",
+    );
+    assert_eq!(
+        world.json(None, &["show", &id, "--json"])["item"]["state"],
+        "open"
+    );
+    assert!(lines(&world.root.join("requests.ndjson")).is_empty());
+}

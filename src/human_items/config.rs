@@ -91,10 +91,12 @@ pub struct HumanItemHook {
     pub phase: String,
     /// Task or question.
     pub kind: HumanItemKind,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the task's hook shape is `title: string, body: string`; the loader refuses a blank or unparseable template, and `phases::expand` renders each strictly and validates the result as any raised item is, so an in-process hook that skipped the loader is refused at expansion rather than raised.
     /// The title template; `{{ name }}` expands a context variable.
     pub title: String,
     /// The body template.
     pub body: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The priority, unless an aggregation derives one.
     #[serde(deserialize_with = "priority")]
     #[schemars(schema_with = "super::priority_schema")]
