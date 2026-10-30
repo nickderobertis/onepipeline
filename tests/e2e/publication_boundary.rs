@@ -4102,6 +4102,194 @@ fn publish_branch_and_repo_recover_forward_a_scope_they_are_given() {
     );
 }
 
+/// A world whose public `library` base carries a line naming the private `owner/beta`,
+/// which the host registers and declares private beside `service`.
+fn scrubbed_world(name: &str) -> (World, Repository) {
+    let (world, _, library) = mixed_world(name);
+    world.extra_repository("beta");
+    declare_visibility(
+        &world,
+        &[
+            ("service", "private"),
+            ("beta", "private"),
+            ("library", "public"),
+        ],
+    );
+    std::fs::write(
+        library.checkout.join("SOURCES.md"),
+        "kept by hand\nsee owner/beta\n",
+    )
+    .expect("the sources file is written");
+    commit_all(&world, &library, "docs: list the sources");
+    crate::harness::git(&world, &library.checkout, &["push", "-q", "origin", "main"]);
+    (world, library)
+}
+
+fn commit_all(world: &World, repository: &Repository, message: &str) {
+    crate::harness::git(world, &repository.checkout, &["add", "-A"]);
+    crate::harness::git(world, &repository.checkout, &["commit", "-qm", message]);
+}
+
+/// The base removes the term-bearing line in its own commit, on the origin.
+fn scrub_the_base(world: &World, library: &Repository) {
+    crate::harness::git(world, &library.checkout, &["checkout", "-q", "main"]);
+    crate::harness::git(world, &library.checkout, &["pull", "-q", "--ff-only"]);
+    std::fs::write(library.checkout.join("SOURCES.md"), "kept by hand\n")
+        .expect("the sources file is rewritten");
+    commit_all(world, library, "docs: drop a source");
+    crate::harness::git(world, &library.checkout, &["push", "-q", "origin", "main"]);
+}
+
+fn on_origin_base(library: &Repository, path: &str) -> Option<String> {
+    let shown = std::process::Command::new("git")
+        .args(["show", &format!("main:{path}")])
+        .current_dir(&library.origin)
+        .output()
+        .expect("git runs");
+    shown
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&shown.stdout).into_owned())
+}
+
+fn origin_base(world: &World, library: &Repository) -> String {
+    crate::harness::git(world, &library.origin, &["rev-parse", "main"])
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn publish_branch_lands_a_merge_of_a_scrubbed_base_and_still_refuses_an_added_term() {
+    let (world, library) = scrubbed_world("scrubbed-publish-branch");
+    // A branch cut while the base still names the term; the base then removes the line,
+    // and the branch merges the updated base in a merge commit of its own.
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["checkout", "-q", "-b", "scrubbed"],
+    );
+    std::fs::write(library.checkout.join("WORK.md"), "the branch's work\n").expect("work");
+    commit_all(&world, &library, "docs: add the work");
+    scrub_the_base(&world, &library);
+    crate::harness::git(&world, &library.checkout, &["checkout", "-q", "scrubbed"]);
+    crate::harness::git(
+        &world,
+        &library.checkout,
+        &["merge", "-q", "--no-ff", "--no-edit", "main"],
+    );
+    crate::harness::git(&world, &library.checkout, &["checkout", "-q", "main"]);
+    let merged = world.run(&[
+        "publish-branch",
+        "scrubbed",
+        "--repo",
+        "library",
+        "--title",
+        "docs: add the work",
+    ]);
+    assert_eq!(merged.code, 0, "{}\n{}", merged.stdout, merged.stderr);
+    assert_eq!(
+        on_origin_base(&library, "WORK.md").as_deref(),
+        Some("the branch's work\n"),
+        "the origin's base does not carry the branch's work"
+    );
+    assert_eq!(
+        on_origin_base(&library, "SOURCES.md").as_deref(),
+        Some("kept by hand\n")
+    );
+
+    // In the same world, a branch adding the term, and one adding it and removing it
+    // again in a later commit, are each refused and leave the origin's base where it is.
+    crate::harness::git(&world, &library.checkout, &["pull", "-q", "--ff-only"]);
+    let adds = |branch: &str, removes_again: bool| {
+        crate::harness::git(&world, &library.checkout, &["checkout", "-q", "-b", branch]);
+        std::fs::write(library.checkout.join("NOTES.md"), "see owner/beta\n").expect("a note");
+        commit_all(&world, &library, "docs: add notes");
+        if removes_again {
+            std::fs::write(library.checkout.join("NOTES.md"), "see the sources\n").expect("a note");
+            commit_all(&world, &library, "docs: reword notes");
+        }
+        crate::harness::git(&world, &library.checkout, &["checkout", "-q", "main"]);
+    };
+    adds("adds-term", false);
+    adds("adds-then-removes-term", true);
+    for branch in ["adds-term", "adds-then-removes-term"] {
+        let before = origin_base(&world, &library);
+        let refused = world.run(&[
+            "publish-branch",
+            branch,
+            "--repo",
+            "library",
+            "--title",
+            "docs: add notes",
+        ]);
+        assert_ne!(
+            refused.code, 0,
+            "{branch} was published: {}",
+            refused.stdout
+        );
+        assert!(
+            format!("{}{}", refused.stdout, refused.stderr)
+                .contains("public output carries a term"),
+            "{branch}:\n{}\n{}",
+            refused.stdout,
+            refused.stderr
+        );
+        assert_eq!(
+            origin_base(&world, &library),
+            before,
+            "{branch} moved the base"
+        );
+    }
+}
+
+#[test]
+fn a_run_publishes_a_public_branch_that_merged_a_base_scrubbed_after_its_session_was_cut() {
+    let (world, _, library) = mixed_world("scrubbed-run");
+    // The run names the private `service`, so `owner/service` is a term of its scope, and
+    // the public base carries a line naming it.
+    std::fs::write(
+        library.checkout.join("SOURCES.md"),
+        "kept by hand\nsee owner/service\n",
+    )
+    .expect("the sources file is written");
+    commit_all(&world, &library, "docs: list the sources");
+    crate::harness::git(&world, &library.checkout, &["push", "-q", "origin", "main"]);
+    world.script("scrub.work", "the node's work\n");
+    world.script("scrub.merges-base", "main");
+    let plan = mixed_plan(
+        "scrubbed",
+        vec![lifecycle("svc", &[]), public("scrub", &[])],
+        Vec::new(),
+    );
+    let project = world.plan("scrubbed", &plan);
+    let session = world.rendezvous("scrub");
+    world.run(&["start", &project, "--detach"]).exited(0);
+    // The node is inside its turn, so its session was cut from the unscrubbed base.
+    let inside = session.arrived();
+    scrub_the_base(&world, &library);
+    inside.release();
+    world.until("the run to settle", |world| {
+        world.run_file("scrubbed", "result.json").is_file()
+    });
+
+    assert_eq!(
+        settled(&world, "scrubbed", "scrub")["status"],
+        "done",
+        "{}\n{}",
+        detail_of(&world, "scrubbed", "scrub"),
+        world.dump()
+    );
+    assert_eq!(
+        on_origin_base(&library, "scrub.md").as_deref(),
+        Some("the node's work"),
+        "the library origin's base does not carry the node's work"
+    );
+    assert_eq!(
+        on_origin_base(&library, "SOURCES.md").as_deref(),
+        Some("kept by hand\n")
+    );
+}
+
 #[test]
 fn the_validator_refuses_to_judge_a_malformed_document_and_reads_commands_as_the_engine_does() {
     let (world, _) = held_mixed_run("shaped", &["zephyrine"]);
