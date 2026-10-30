@@ -104,6 +104,11 @@ pub(crate) fn complete(
              task stays open"
         ))
     })?;
+    if answer.key.trim().is_empty() {
+        return Err(refused(
+            "the approval authority answered a blank document version; the task stays open",
+        ));
+    }
     if answer.board_copy != stored.board_copy {
         return Err(refused(format!(
             "the approval authority answered for board copy {}, not {}; the task stays open",

@@ -26,13 +26,25 @@ pub const PHASE_PREFIX: &str = "phase:";
 #[serde(deny_unknown_fields)]
 pub struct Ticket {
     /// The ticket's id; the last occurrence of an id wins.
+    #[serde(deserialize_with = "nonblank")]
     pub id: String,
     /// Where a person opens it.
+    #[serde(deserialize_with = "nonblank")]
     pub url: String,
     /// Its priority, absent or `none` when it has no usable one.
     #[serde(default)]
     #[schemars(with = "Option<String>")]
     pub priority: Option<Priority>,
+}
+
+fn nonblank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let value = String::deserialize(d)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom(
+            "a ticket names a nonblank id and url",
+        ));
+    }
+    Ok(value)
 }
 
 /// What a phase supplies when it raises.

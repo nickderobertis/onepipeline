@@ -6,6 +6,14 @@
 //! scheduler did off the run's own journal: which nodes it dispatched, which it
 //! held, and what became of the human step an item stood for.
 
+// llmlint: ignore-file[e2e_not_mocked] `World` substitutes the `oneagentgraph` sibling at its
+// subprocess boundary and nothing inside the crate under test, which is driven as the real
+// compiled binary over real run, plan and human-item stores; `harness.rs` carries the full
+// rationale. The identity-recovery journey also stands a script in for the `claude` CLI that
+// the real linked `oneharness` usage probe spawns — a third-party binary an offline check may
+// not run — and the GitHub loopback stands in for the hosted tracker, as `private_github_home.rs`
+// documents.
+
 use crate::harness::{agent, human, plan_of, World};
 use serde_json::{json, Value};
 
@@ -1014,6 +1022,48 @@ fn tasks_project_once_into_the_task_source_and_questions_never_do() {
     assert!(projected(&state)
         .iter()
         .all(|i| i["title"] != "Decide asked"));
+
+    // Dismissing projects the dismissal and its reason onto the same task.
+    let third = projected(&state)
+        .into_iter()
+        .find(|i| i["title"] == "Decide third")
+        .unwrap();
+    let listed: Value =
+        serde_json::from_str(&in_repo(&["human-items", "list", "--json"]).stdout).unwrap();
+    let third_id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["title"] == "Decide third")
+        .unwrap()["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    in_repo(&[
+        "human-items",
+        "dismiss",
+        &third_id,
+        "--reason",
+        "Handled in another plan",
+    ])
+    .exited(0);
+    let state = github.state();
+    let item = state["items"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|it| it["content"] == third["id"])
+        .unwrap();
+    assert_eq!(item["values"]["STATUS_1"], "Canceled", "{item:#}");
+    let body = state["issues"][third["id"].as_str().unwrap()]["body"]
+        .as_str()
+        .unwrap();
+    assert!(body.contains("Handled in another plan"), "{body}");
+    assert_eq!(
+        projected(&state).len(),
+        2,
+        "no task was created for the dismissal"
+    );
 }
 
 /// A planner ends a run by dropping its remaining work: applied with nothing
@@ -1208,5 +1258,64 @@ printf '{{"type":"control_response","response":{{"subtype":"success","request_id
         log.lines()
             .all(|l| l.contains("-p --input-format stream-json")),
         "{log}"
+    );
+}
+
+/// A human step settled without its item — attested directly — leaves no item
+/// open for it: the run's next driver resolves it as settled outside.
+#[test]
+fn a_step_settled_outside_its_item_resolves_the_item() {
+    let world = World::new("human-item-outside");
+    enabled(&world);
+    let name = "outside";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let gate = id_of(&items(&world, &[])[0]);
+    world.run(&["attest", name, "gate"]).exited(0);
+    world.run(&["adopt", name]).exited(0);
+    assert_eq!(settled(&world, name, "b").as_deref(), Some("done"));
+    let item = state_of(&world, &gate);
+    assert_eq!(item["state"], "dismissed", "{item}");
+    assert!(
+        item["resolution"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("settled outside"),
+        "{item}"
+    );
+}
+
+/// A resolution recorded while its step could not be released — the run's store
+/// refused the write — is released by the run's next driver once the resolver has
+/// had its chance.
+#[cfg(unix)]
+#[test]
+fn a_resolution_its_resolver_could_not_release_is_released_by_the_driver() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new("human-item-fallback");
+    enabled(&world);
+    let name = "fallback";
+    let project = world.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("b", &["gate"])]),
+    );
+    world.run(&["start", &project, "--attach"]).exited(0);
+    let gate = id_of(&items(&world, &[])[0]);
+    let run = world.runs.join(name);
+    let mode = std::fs::metadata(&run).unwrap().permissions().mode();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let answered = world.run(&["human-items", "complete", &gate]);
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(mode)).unwrap();
+    answered.exited(0).err_has("was not released");
+    assert_eq!(state_of(&world, &gate)["state"], "completed");
+    assert!(settled(&world, name, "b").is_none());
+    world.run(&["adopt", name, "--detach"]).exited(0);
+    world.until_within(
+        std::time::Duration::from_secs(90),
+        "the driver to release the step",
+        |w| settled(w, name, "b").as_deref() == Some("done"),
     );
 }

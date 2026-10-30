@@ -88,6 +88,7 @@ pub fn item_id_for(dedup_key: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Actor {
     /// Who took the action.
+    // llmlint: ignore[invalid_states_unrepresentable] the approved resolution records `actor` and `on_behalf_of` as strings on the published HumanItemResolution; this carries exactly those two values to it, minted only by `from_environment` and the engine's own `engine` actor.
     pub actor: String,
     /// The human a manager acted for, when one did.
     pub on_behalf_of: Option<String>,
@@ -414,9 +415,16 @@ impl HumanItems {
             }
         }
         let config = self.config.clone();
-        self.apply_with(action, &mut |item, actor| {
+        let receipt = self.apply_with(action, &mut |item, actor| {
             super::approval::complete(&config, item, actor)
-        })
+        })?;
+        // The resolution is durable; the human step it stands for is released
+        // through its run's own commands. One that cannot be released now is
+        // released by the run's driver, so this is said and the receipt stands.
+        if let Err(why) = super::runtime::release(&self.root, &receipt.item.item) {
+            eprintln!("onepipeline: {why}");
+        }
+        Ok(receipt)
     }
 
     /// Apply one action, consulting `complete` for a task carrying an approval
@@ -478,15 +486,11 @@ impl HumanItems {
         session: &str,
         title: &str,
         body: &str,
-        probe: serde_json::Value,
+        probe: Probe,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let mut known = probes(self);
         known.insert(condition.to_owned(), probe);
-        let _ = crate::ledger::write_atomic(
-            &probes_path(self),
-            &serde_json::to_vec(&known).unwrap_or_default(),
-            crate::ledger::Durability::Record,
-        );
+        keep_probes(self, &known);
         let mut writer = Writer::open(self)?;
         let receipt = writer.condition(condition, session, title, body)?;
         writer.finish();
@@ -830,11 +834,52 @@ fn probes_path(store: &HumanItems) -> PathBuf {
     store.dir().join("probes.json")
 }
 
-fn probes(store: &HumanItems) -> BTreeMap<String, serde_json::Value> {
-    std::fs::read(probes_path(store))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+/// How one open host condition is probed: by the capability that failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "probe", rename_all = "kebab-case", deny_unknown_fields)]
+pub(crate) enum Probe {
+    /// A file written in the directory a dispatch could not write.
+    Space {
+        /// The directory.
+        dir: PathBuf,
+    },
+    /// The harness's zero-turn usage read of the refused identities.
+    Identities {
+        /// Where the harness configuration is discovered from.
+        cwd: Option<PathBuf>,
+        /// The identities refused, as the chain named them.
+        identities: Vec<String>,
+        /// When they were last probed, in epoch milliseconds.
+        #[serde(default)]
+        probed_at: Option<u64>,
+    },
+}
+
+/// The probe of each open condition. A document that is not one is said and
+/// read as none, so each outage it held is probed again once it is raised again.
+fn probes(store: &HumanItems) -> BTreeMap<String, Probe> {
+    let path = probes_path(store);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|why| {
+        eprintln!(
+            "onepipeline: {} is not a probe record ({why}); its outages are not probed until \
+             they are raised again",
+            path.display()
+        );
+        BTreeMap::new()
+    })
+}
+
+fn keep_probes(store: &HumanItems, known: &BTreeMap<String, Probe>) {
+    if let Err(why) = crate::ledger::write_atomic(
+        &probes_path(store),
+        &serde_json::to_vec(known).unwrap_or_default(),
+        crate::ledger::Durability::Record,
+    ) {
+        eprintln!("onepipeline: the human-item probe record could not be written: {why}");
+    }
 }
 
 /// Append one telemetry line to the file [`TELEMETRY_ENV`] names, if it names one.
@@ -1163,31 +1208,21 @@ impl<'a> Writer<'a> {
             return Ok(());
         }
         let mut known = probes(self.store);
-        let Some(probe) = known.get_mut(IDENTITIES_REFUSED) else {
+        let Some(Probe::Identities {
+            cwd,
+            identities,
+            probed_at,
+        }) = known.get_mut(IDENTITIES_REFUSED)
+        else {
             return Ok(());
         };
         let now = crate::sys::now_millis();
-        if probe["probed_at"]
-            .as_u64()
-            .is_some_and(|at| now.saturating_sub(at) < IDENTITY_PROBE_EVERY_MS)
-        {
+        if probed_at.is_some_and(|at| now.saturating_sub(at) < IDENTITY_PROBE_EVERY_MS) {
             return Ok(());
         }
-        probe["probed_at"] = serde_json::json!(now);
-        let identities: Vec<String> = probe["identities"]
-            .as_array()
-            .map(|all| {
-                all.iter()
-                    .filter_map(|i| i.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let cwd = probe["cwd"].as_str().map(PathBuf::from);
-        let _ = crate::ledger::write_atomic(
-            &probes_path(self.store),
-            &serde_json::to_vec(&known).unwrap_or_default(),
-            crate::ledger::Durability::Record,
-        );
+        *probed_at = Some(now);
+        let (identities, cwd) = (identities.clone(), cwd.clone());
+        keep_probes(self.store, &known);
         if super::runtime::identities_have_headroom(&identities, cwd) {
             self.clear(
                 IDENTITIES_REFUSED,
@@ -1203,10 +1238,7 @@ impl<'a> Writer<'a> {
         if self.open_condition(DISPATCH_NO_SPACE).is_none() {
             return Ok(());
         }
-        let Some(dir) = probes(self.store)
-            .remove(DISPATCH_NO_SPACE)
-            .and_then(|probe| Some(PathBuf::from(probe.get("dir")?.as_str()?)))
-        else {
+        let Some(Probe::Space { dir }) = probes(self.store).remove(DISPATCH_NO_SPACE) else {
             return Ok(());
         };
         let probe = dir.join(format!(".onepipeline-space-probe-{}", crate::sys::pid()));
@@ -1549,6 +1581,11 @@ impl<'a> Writer<'a> {
         }
         if state == HumanItemState::Completed && item.approval.is_some() {
             if let Some(replacement) = complete(&item, &actor)? {
+                // The replacement first: a process stopped between the two records
+                // leaves the obsolete task open beside it, and completing that task
+                // again finds the same changed version, re-raises the replacement as
+                // the one item its key names, and dismisses the obsolete one.
+                self.raise(replacement)?;
                 self.resolve(
                     &item,
                     HumanItemState::Dismissed,
@@ -1557,7 +1594,6 @@ impl<'a> Writer<'a> {
                     None,
                     Some(super::approval::REREAD.to_owned()),
                 )?;
-                self.raise(replacement)?;
                 return Err(conflict(super::approval::REREAD));
             }
         }

@@ -55,7 +55,22 @@ pub struct HookApproval {
 pub struct ApprovalAdapter {
     /// The program and its arguments. It reads `{board_copy,key,actor,on_behalf_of}`
     /// on standard input and, approving, answers `{board_copy,key}` on standard output.
+    #[serde(deserialize_with = "command")]
+    // llmlint: ignore[invalid_states_unrepresentable] the configured shape is the task's `command: [program, args...]` list; its decoder refuses an empty list or a blank program, so no adapter without a program is ever constructed from configuration.
     pub command: Vec<String>,
+}
+
+fn command<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let command = Vec::<String>::deserialize(d)?;
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
+        return Err(serde::de::Error::custom(
+            "an approval adapter's command names a program",
+        ));
+    }
+    Ok(command)
 }
 
 /// Aggregations a hook may select.
@@ -86,6 +101,7 @@ pub struct HumanItemHook {
     pub block: HookBlock,
     /// The trusted approval adapter a completion of this task runs, if any.
     #[serde(default)]
+    // llmlint: ignore[invalid_states_unrepresentable] the task prescribes the flat hook `{phase, kind, title, body, priority, block, approval}`; the loader's `validate` refuses a question carrying an approval or an aggregation before any consumer sees the configuration.
     pub approval: Option<HookApproval>,
     /// An aggregation over the context, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,21 +134,13 @@ pub struct HumanItemsConfig {
     pub approval_adapters: BTreeMap<String, ApprovalAdapter>,
 }
 
-/// One layer, every key optional so a layer above can leave a key to the one below.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Layer {
-    enabled: Option<bool>,
-    task_source: Option<String>,
-    hooks: Option<Vec<HumanItemHook>>,
-    approval_adapters: Option<BTreeMap<String, ApprovalAdapter>>,
-}
-
+/// One file: a `human_items` mapping whose keys are [`HumanItemsConfig`]'s own,
+/// held as a mapping so a layer above replaces exactly the keys it states.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct File {
     #[serde(default)]
-    human_items: Option<Layer>,
+    human_items: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// The effective configuration and the files it was read from, in layer order.
@@ -183,7 +191,7 @@ fn host_file() -> Option<PathBuf> {
     file.is_file().then_some(file)
 }
 
-fn read_layer(path: &Path) -> Result<Option<Layer>, String> {
+fn read_layer(path: &Path) -> Result<Option<serde_json::Map<String, serde_json::Value>>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: File =
         crate::yaml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -197,7 +205,7 @@ fn read_layer(path: &Path) -> Result<Option<Layer>, String> {
 /// A file that cannot be read or parsed, or a hook that is not valid, named by
 /// its file.
 pub fn effective(dir: &Path) -> Result<EffectiveConfig, String> {
-    let mut config = HumanItemsConfig::default();
+    let mut merged = serde_json::Map::new();
     let mut sources = Vec::new();
     let host = host_file();
     if host.as_deref().is_some_and(|h| !h.is_file()) {
@@ -211,21 +219,16 @@ pub fn effective(dir: &Path) -> Result<EffectiveConfig, String> {
     }
     for path in [repository_file(dir), host].into_iter().flatten() {
         if let Some(layer) = read_layer(&path)? {
-            if let Some(enabled) = layer.enabled {
-                config.enabled = enabled;
-            }
-            if let Some(source) = layer.task_source {
-                config.task_source = Some(source);
-            }
-            if let Some(hooks) = layer.hooks {
-                config.hooks = hooks;
-            }
-            if let Some(adapters) = layer.approval_adapters {
-                config.approval_adapters = adapters;
-            }
+            // Each layer is read as the whole shape first, so a key it misspells or
+            // a value it mistypes is named with the file it is in.
+            serde_json::from_value::<HumanItemsConfig>(serde_json::Value::Object(layer.clone()))
+                .map_err(|e| format!("{}: human_items: {e}", path.display()))?;
+            merged.extend(layer);
         }
         sources.push(path);
     }
+    let config: HumanItemsConfig = serde_json::from_value(serde_json::Value::Object(merged))
+        .map_err(|e| format!("human_items: {e}"))?;
     validate(&config)?;
     Ok(EffectiveConfig {
         human_items: config,
@@ -282,13 +285,6 @@ fn validate(config: &HumanItemsConfig) -> Result<(), String> {
                     approval.adapter
                 ));
             }
-        }
-    }
-    for (name, adapter) in &config.approval_adapters {
-        if adapter.command.first().is_none_or(|p| p.trim().is_empty()) {
-            return Err(format!(
-                "human_items.approval_adapters.{name}: the command names a program"
-            ));
         }
     }
     Ok(())

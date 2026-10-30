@@ -16,12 +16,23 @@ use std::path::{Path, PathBuf};
 
 use super::{HumanItem, HumanItemKind, HumanItemState, HumanItemTracker};
 
-fn word(state: HumanItemState) -> &'static str {
-    match state {
-        HumanItemState::Open => "open",
-        HumanItemState::Completed => "completed",
-        // A question never reaches here; a dismissed task is dismissed.
-        HumanItemState::Answered | HumanItemState::Dismissed => "dismissed",
+/// The lifecycle a task is projected at: the store's own three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Projected {
+    Open,
+    Completed,
+    Dismissed,
+}
+
+impl Projected {
+    fn of(state: HumanItemState) -> Self {
+        match state {
+            HumanItemState::Open => Self::Open,
+            HumanItemState::Completed => Self::Completed,
+            // A question never reaches here; a dismissed task is dismissed.
+            HumanItemState::Answered | HumanItemState::Dismissed => Self::Dismissed,
+        }
     }
 }
 
@@ -29,12 +40,21 @@ fn projected_path(journal: &Path) -> PathBuf {
     journal.with_file_name("projected.json")
 }
 
-/// Each task's last projected state, by item id.
-fn projected(journal: &Path) -> BTreeMap<String, String> {
-    std::fs::read(projected_path(journal))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+/// Each task's last projected state, by item id. A record that is not one is
+/// said and read as empty: every task is then projected again, which the store's
+/// intent answers without a second ticket.
+fn projected(journal: &Path) -> BTreeMap<String, Projected> {
+    let path = projected_path(journal);
+    let Ok(bytes) = std::fs::read(&path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_else(|why| {
+        eprintln!(
+            "onepipeline: {} is not a projection record ({why}); every task is projected again",
+            path.display()
+        );
+        BTreeMap::new()
+    })
 }
 
 /// The tasks whose state is ahead of what has been projected.
@@ -45,7 +65,7 @@ pub(crate) fn pending<'a>(
     let done = projected(journal);
     items
         .filter(|item| item.kind == HumanItemKind::Task)
-        .filter(|item| done.get(&item.id).map(String::as_str) != Some(word(item.state)))
+        .filter(|item| done.get(&item.id) != Some(&Projected::of(item.state)))
         .cloned()
         .collect()
 }
@@ -69,7 +89,7 @@ pub(crate) fn project(
             "repositories": [],
             "project": item.owner.plan,
             "source": source,
-            "state": word(item.state),
+            "state": Projected::of(item.state),
             "reason": if item.state == HumanItemState::Dismissed {
                 resolution.and_then(|r| r.reason.clone())
             } else {
@@ -97,7 +117,7 @@ pub(crate) fn project(
 /// Record that `item` has been projected at its current state.
 pub(crate) fn record(journal: &Path, item: &HumanItem) {
     let mut done = projected(journal);
-    done.insert(item.id.clone(), word(item.state).to_owned());
+    done.insert(item.id.clone(), Projected::of(item.state));
     if let Err(why) = crate::ledger::write_atomic(
         &projected_path(journal),
         &serde_json::to_vec(&done).unwrap_or_default(),

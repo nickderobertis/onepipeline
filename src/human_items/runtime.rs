@@ -58,7 +58,9 @@ pub(crate) fn dispatch_refused(error: &crate::error::Error) {
     let Some((store, session)) = driving else {
         return;
     };
-    let probe = serde_json::json!({"dir": path.parent().unwrap_or(path)});
+    let probe = super::live::Probe::Space {
+        dir: path.parent().unwrap_or(path).to_path_buf(),
+    };
     if let Err(why) = store.raise_condition(
         super::live::DISPATCH_NO_SPACE,
         &session,
@@ -123,7 +125,11 @@ pub(crate) fn chain_exhausted(
              {refusals}\nRestore one of them; this resolves itself once they report headroom.",
             stopped.member
         ),
-        serde_json::json!({"identities": identities, "cwd": cwd}),
+        super::live::Probe::Identities {
+            cwd: Some(cwd.to_path_buf()),
+            identities: identities.iter().map(|i| (*i).to_owned()).collect(),
+            probed_at: None,
+        },
     ) {
         eprintln!(
             "onepipeline: every identity was refused, and its host item was not raised: {why}"
@@ -253,7 +259,7 @@ impl Gate {
             self.store.probe();
         }
         self.reconcile(paths, state, statuses, &items);
-        self.held = held(&self.run, &self.plan, state, &items);
+        self.held = held(&self.run, &self.plan, state, statuses, &items);
         self.held.clone()
     }
 
@@ -311,7 +317,9 @@ impl Gate {
             };
             let waiting = statuses.get(&node.id) == Some(&NodeStatus::Waiting);
             match item.state {
-                HumanItemState::Open if !waiting && self.raised.contains(&node.id) => {
+                // The step is done without its item — attested another way — so the
+                // item stands for nothing: whichever driver sees that resolves it.
+                HumanItemState::Open if statuses.get(&node.id) == Some(&NodeStatus::Done) => {
                     let _ = self
                         .store
                         .auto_resolve_item(&item.id, "the step was settled outside its human item");
@@ -442,6 +450,7 @@ fn held(
     run: &str,
     plan: &str,
     state: &RunState,
+    statuses: &BTreeMap<String, NodeStatus>,
     items: &BTreeMap<String, HumanItem>,
 ) -> BTreeSet<String> {
     let mut held = BTreeSet::new();
@@ -451,7 +460,11 @@ fn held(
             HumanItemBlock::Plan { plan: p } if p == plan => {
                 held.extend(state.graph.ids().cloned());
             }
-            HumanItemBlock::Work { run: r, node } if r == run => {
+            // A work hold binds a step that has not settled; once its step is
+            // done it holds nothing, whatever the item says.
+            HumanItemBlock::Work { run: r, node }
+                if r == run && statuses.get(node) != Some(&NodeStatus::Done) =>
+            {
                 if state
                     .graph
                     .get(node)
@@ -476,12 +489,14 @@ fn held(
 
 /// Apply a resolved human node item to its node through the run's own
 /// commands, as the person who resolved it would.
-pub(crate) fn release(item: &HumanItem) -> Result<(), String> {
+pub(crate) fn release(root: &std::path::Path, item: &HumanItem) -> Result<(), String> {
     let Some((run, _)) = node_of(item) else {
         return Ok(());
     };
-    let paths = RunPaths::new(run);
-    release_at(&paths, item)
+    if item.state == HumanItemState::Open {
+        return Ok(());
+    }
+    release_at(&RunPaths::under(root, run), item)
 }
 
 fn release_at(paths: &RunPaths, item: &HumanItem) -> Result<(), String> {

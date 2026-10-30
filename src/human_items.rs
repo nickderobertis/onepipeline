@@ -1335,12 +1335,6 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
     };
     let receipt = store.apply(action).map_err(|e| refused(&e))?;
     println!("{}", to_json(&receipt)?);
-    // The resolution is durable; the step it stands for is released through the
-    // run's own commands. One that cannot be released now is released by the
-    // run's driver, so this is said and the receipt stands.
-    if let Err(why) = runtime::release(&receipt.item.item) {
-        eprintln!("onepipeline: {why}");
-    }
     Ok(0)
 }
 

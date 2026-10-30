@@ -1350,3 +1350,91 @@ cp "{runs}/human-items/events.ndjson" "{out}/journal-after"
         1
     );
 }
+
+/// An authority that cannot be started, or answers anything but the version it
+/// holds for the stored board copy, leaves the task open and records nothing.
+#[test]
+fn an_authority_that_cannot_answer_properly_leaves_the_task_open() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let adapter = world.root.join("adapter.sh");
+    let raise = |name: &str| {
+        let ctx = context(
+            &world,
+            name,
+            &json!({
+                "owner": owner, "dedup_key": name, "approval": {"board_copy": "plans:doc-1", "key": "v1"}
+            }),
+        );
+        phase(&world, None, "design-review", &ctx)["item"]["item"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    for (name, script, refusal) in [
+        (
+            "garbled",
+            "cat > /dev/null; echo 'not json'",
+            "answered something other than",
+        ),
+        (
+            "elsewhere",
+            "cat > /dev/null; printf '{\"board_copy\":\"plans:doc-9\",\"key\":\"v1\"}'",
+            "answered for board copy plans:doc-9",
+        ),
+        (
+            "blank",
+            "cat > /dev/null; printf '{\"board_copy\":\"plans:doc-1\",\"key\":\" \"}'",
+            "blank document version",
+        ),
+    ] {
+        std::fs::write(&adapter, script).unwrap();
+        let id = raise(name);
+        world.refused(None, &["complete", &id], refusal);
+        assert_eq!(
+            world.json(None, &["show", &id, "--json"])["item"]["state"],
+            "open",
+            "{name}"
+        );
+    }
+    std::fs::remove_file(&adapter).unwrap();
+    let configured =
+        std::fs::read_to_string(world.repo().join(".onepipeline/config.yaml")).unwrap();
+    world.configure(&configured.replace("[\"sh\", ", "[\"/nonexistent/approve-design\", "));
+    let id = raise("unstartable");
+    world.refused(None, &["complete", &id], "could not be started");
+    assert_eq!(
+        world.json(None, &["show", &id, "--json"])["item"]["state"],
+        "open"
+    );
+    assert!(lines(&world.root.join("approvals.ndjson")).is_empty());
+}
+
+/// A watch given a timeout waits for its owner's next event, and returns with
+/// exit 5 when none arrives in time.
+#[test]
+fn a_waiting_watch_receives_an_arriving_event_or_runs_out() {
+    let world = Live::enabled();
+    let began = std::time::Instant::now();
+    let output = world.run(Some("waiter"), &["watch", "--timeout", "1"]);
+    assert_eq!(output.status.code(), Some(5));
+    assert!(began.elapsed() >= std::time::Duration::from_millis(900));
+    let waiting = world
+        .cmd(Some("waiter"), &["watch", "--timeout", "30"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    world.raise(&item(
+        "arrives",
+        "question",
+        "low",
+        "waiter",
+        json!({"scope": "nothing"}),
+    ));
+    let output = waiting.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let event: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(event["kind"], "human-item-raised");
+    assert_eq!(event["payload"]["owner"]["session"], "waiter");
+}

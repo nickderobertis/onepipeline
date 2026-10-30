@@ -71,7 +71,14 @@ pub(crate) fn deliver(root: &Path, _just: &Envelope) {
     }
 }
 
-fn journal_error(journal: &Path, error: std::io::Error) -> TransportError {
+/// One record of the journal or of an owner's queue, read as the item event it
+/// carries.
+fn item_event(line: &[u8]) -> Result<super::HumanItemEventPayload, String> {
+    let envelope: Envelope = serde_json::from_slice(line).map_err(|e| e.to_string())?;
+    serde_json::from_value(serde_json::Value::Object(envelope.payload)).map_err(|e| e.to_string())
+}
+
+fn journal_error(journal: &Path, error: impl std::fmt::Display) -> TransportError {
     TransportError::Backend {
         transport: "human-items".to_owned(),
         detail: format!("{}: {error}", journal.display()),
@@ -113,17 +120,20 @@ pub(crate) fn catch_up(root: &Path) -> Result<u64, TransportError> {
     let mut offset = 0usize;
     while let Some(end) = rest[offset..].iter().position(|b| *b == b'\n') {
         let line = &rest[offset..offset + end];
-        if let Ok(envelope) = serde_json::from_slice::<Envelope>(line) {
-            if let Some(session) = envelope
-                .payload
-                .get("owner")
-                .and_then(|owner| owner.get("session"))
-                .and_then(serde_json::Value::as_str)
-            {
-                transport.append(&queue_of(session), line)?;
-                carried += 1;
-            }
-        }
+        // The journal's own records, held to the item event they must carry: one
+        // that is not is refused here rather than carried or passed over, and
+        // delivery stops at it until it is repaired.
+        let payload = item_event(line).map_err(|why| {
+            journal_error(
+                &journal,
+                format!(
+                    "the record at byte {} is not an item event: {why}",
+                    delivered.through
+                ),
+            )
+        })?;
+        transport.append(&queue_of(&payload.owner.session), line)?;
+        carried += 1;
         offset += end + 1;
         delivered.through += end as u64 + 1;
         transport.replace_document(
@@ -160,12 +170,12 @@ pub(crate) fn watch(
     let consumer: ConsumerName = name(WATCH);
     let document: DocumentName = name(&format!("watched-{}.json", queue.as_str()));
     let since = transport.fingerprint(&queue).map_err(|e| e.to_string())?;
-    let mut batch = read_pending(&transport, &queue, &consumer)?;
+    let mut batch = read_pending(&transport, &queue, &consumer, session)?;
     if batch.is_empty() && !within.is_zero() {
         transport
             .wait_for_change(&queue, &since, within)
             .map_err(|e| e.to_string())?;
-        batch = read_pending(&transport, &queue, &consumer)?;
+        batch = read_pending(&transport, &queue, &consumer, session)?;
     }
     let mut watched: Watched = transport
         .document(&queue, &document)
@@ -201,6 +211,7 @@ fn read_pending(
     transport: &LocalTransport,
     queue: &QueueName,
     consumer: &ConsumerName,
+    session: &str,
 ) -> Result<Vec<(Envelope, onemessagebus::Position)>, String> {
     let from = transport
         .cursor(queue, consumer)
@@ -212,11 +223,18 @@ fn read_pending(
         .records
         .into_iter()
         .map(|stored| {
+            let event = item_event(&stored.bytes).map_err(|e| {
+                format!("the owner's queue holds a record that is not an item event: {e}")
+            })?;
+            if event.owner.session != session {
+                return Err(format!(
+                    "the queue of {session} holds an event owned by {}",
+                    event.owner.session
+                ));
+            }
             serde_json::from_slice::<Envelope>(&stored.bytes)
                 .map(|envelope| (envelope, stored.after))
-                .map_err(|e| {
-                    format!("the owner's queue holds a record that is not an envelope: {e}")
-                })
+                .map_err(|e| e.to_string())
         })
         .collect()
 }
