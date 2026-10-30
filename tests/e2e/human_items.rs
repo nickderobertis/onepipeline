@@ -1622,3 +1622,148 @@ fn an_outage_whose_probe_cannot_be_recorded_stays_open_until_raised_again() {
     let probes: Value = serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
     assert_eq!(probes["identities-refused"]["probe"], "identities");
 }
+
+/// A design review whose document changed is projected as what it became in the
+/// same command that refused it: the obsolete task cancelled on the tracker and
+/// its replacement filed, then completed through the authority.
+#[test]
+fn a_stale_design_review_projects_its_dismissal_and_replacement_at_once() {
+    use crate::private_github_home::{described, GitHub};
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = World::new("human-item-design-tracker")
+        .with_env("HOSTNAME", "projection-host")
+        .with_env("ONEPIPELINE_LOOPBACK_BOARD_TOKEN", "loopback-token")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {"owner/service": "public"},
+            "boards": {"1": {"public": true, "priority": true}},
+            "issues": [{"id": "human", "repository": "owner/service", "title": "Human work", "board": 1,
+                        "status": "Todo", "parent": null,
+                        "body": described("## Plan\n- Work for people.", &json!({}))}],
+        }),
+    );
+    let key = world.root.join("current-key");
+    std::fs::write(&key, "v1").unwrap();
+    let adapter = world.root.join("approve.sh");
+    std::fs::write(
+        &adapter,
+        format!(
+            "request=$(cat)\ncopy=$(printf '%s' \"$request\" | sed 's/.*\"board_copy\":\"\\([^\"]*\\)\".*/\\1/')\n\
+             printf '{{\"board_copy\":\"%s\",\"key\":\"%s\"}}' \"$copy\" \"$(cat {})\"\n",
+            key.display()
+        ),
+    )
+    .unwrap();
+    let repo = checkout(
+        &world,
+        Some(&format!(
+            "human_items:\n  enabled: true\n  task_source: board\n  approval_adapters:\n    \
+             approve-design:\n      command: [\"sh\", \"{}\"]\n  hooks:\n    - phase: design-review\n      \
+             kind: task\n      title: Approve the design\n      body: Read the design and approve it.\n      \
+             priority: high\n      block: {{scope: nothing}}\n      approval: {{adapter: approve-design}}\n",
+            adapter.display()
+        )),
+    );
+    let intents = world.root.join("intents");
+    std::fs::create_dir_all(&intents).unwrap();
+    std::fs::write(
+        repo.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  board:\n    plugin: github-projects\n    visibility: public\n    \
+             task_projection:\n      host: projection-host\n      directory: {}\n      project: human\n    \
+             config:\n      owner: owner\n      project_number: 1\n      repository: owner/service\n      \
+             token_env: ONEPIPELINE_LOOPBACK_BOARD_TOKEN\n      endpoint: {}\n      status_mapping:\n        \
+             todo: Todo\n        queued: Queued\n        in-progress: In Progress\n        unknown: Needs Attention\n        \
+             done: Done\n        cancelled: Canceled\n      priority_mapping:\n        urgent: Urgent\n        \
+             high: High\n        medium: Medium\n        low: Low\n",
+            intents.display(),
+            github.board(1)
+        ),
+    )
+    .unwrap();
+    let in_repo = |args: &[&str]| {
+        let mut command = world.cmd(args);
+        command.current_dir(&repo);
+        world.run_on(command, &args.join(" "))
+    };
+    let context = world.root.join("context.json");
+    std::fs::write(
+        &context,
+        json!({"owner": {"session": "mgr", "run": null, "plan": null}, "dedup_key": "doc",
+               "approval": {"board_copy": "board:doc-1", "key": "v1"}})
+        .to_string(),
+    )
+    .unwrap();
+    let raised = in_repo(&[
+        "human-items",
+        "raise",
+        "--phase",
+        "design-review",
+        "--context",
+        context.to_str().unwrap(),
+    ]);
+    raised.exited(0);
+    let obsolete: String = serde_json::from_str::<Value>(&raised.stdout).unwrap()["item"]["item"]
+        ["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let status_of = |state: &Value, issue: &Value| {
+        state["items"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find(|it| it["content"] == issue["id"])
+            .unwrap()["values"]["STATUS_1"]
+            .clone()
+    };
+    let filed = |state: &Value| -> Vec<Value> {
+        state["issues"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter(|i| i["title"] == "Approve the design")
+            .cloned()
+            .collect()
+    };
+    assert_eq!(filed(&github.state()).len(), 1);
+
+    std::fs::write(&key, "v2").unwrap();
+    in_repo(&["human-items", "complete", &obsolete]).err_has("Re-read the current document");
+    let state = github.state();
+    let issues = filed(&state);
+    assert_eq!(
+        issues.len(),
+        2,
+        "the replacement was filed in the same command: {issues:#?}"
+    );
+    let statuses: Vec<Value> = issues.iter().map(|i| status_of(&state, i)).collect();
+    assert!(
+        statuses.contains(&json!("Canceled")) && statuses.contains(&json!("Todo")),
+        "{statuses:?}"
+    );
+
+    let listed: Value =
+        serde_json::from_str(&in_repo(&["human-items", "list", "--json"]).stdout).unwrap();
+    let replacement = listed[0]["item"]["id"].as_str().unwrap().to_owned();
+    in_repo(&["human-items", "complete", &replacement]).exited(0);
+    let state = github.state();
+    let statuses: Vec<Value> = filed(&state).iter().map(|i| status_of(&state, i)).collect();
+    assert!(
+        statuses.contains(&json!("Canceled")) && statuses.contains(&json!("Done")),
+        "{statuses:?}"
+    );
+    assert_eq!(filed(&state).len(), 2);
+}

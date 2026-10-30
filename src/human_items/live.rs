@@ -476,9 +476,12 @@ impl HumanItems {
         complete: &mut Approve<'_>,
     ) -> Result<HumanItemReceipt, HumanItemRefusal> {
         let mut writer = Writer::open(self)?;
-        let receipt = writer.apply(action, complete)?;
+        // Finished whatever the action answered: a refusal can follow records it
+        // made — a stale design's replacement and its dismissal — which are
+        // caught up and projected like any other.
+        let answered = writer.apply(action, complete);
         writer.finish();
-        Ok(receipt)
+        answered
     }
 
     /// Dismiss every open item holding the work of `run` — its work and its plan
