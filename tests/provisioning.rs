@@ -86,7 +86,10 @@ mod unix {
         // toolchain with every component and both dev tools on PATH. The cargo
         // double fetches nothing and installs nothing — the store is linked, so a
         // bootstrap that asked for a binary install is one it refuses.
+        // and a host whose unprivileged user namespaces are already available,
+        // which `userns_is_enabled_in_ci_and_named_with_its_command_elsewhere` covers.
         executable(&bin.join("rustup"), "#!/bin/sh\nexit 0\n");
+        executable(&bin.join("unshare"), "#!/bin/sh\nexit 0\n");
         for tool in ["cargo-nextest", "cargo-llvm-cov"] {
             executable(&bin.join(tool), "#!/bin/sh\nexit 0\n");
         }
@@ -224,6 +227,145 @@ esac
             before,
             "the package manager was asked for a tracer the host already had"
         );
+    }
+
+    /// The unprivileged user namespace the full-disk journeys mount in is enabled
+    /// where the host is this repository's to provision — CI, through a recording
+    /// `sudo` and `sysctl` stood ahead of the host's — and named with its command
+    /// where it is not; a host that already has one, and a platform without those
+    /// journeys, is left alone, and a CI host the restriction cannot be lifted on,
+    /// or that still refuses a namespace once it is, fails the provisioning.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn userns_is_enabled_in_ci_and_named_with_its_command_elsewhere() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-provisioning-userns-{}",
+            std::process::id()
+        ));
+        fs::create_dir(&root).expect("a fresh provisioning scratch directory");
+        let _scratch = Scratch(root.clone());
+        let bin = root.join("bin");
+        fs::create_dir(&bin).expect("the test PATH has a bin directory");
+        // `sed` is the justfile's own need, to read its MSRV when it loads.
+        tools_only(&bin, &["bash", "just", "sed"]);
+        let platform = root.join("platform");
+        fs::write(&platform, "Linux\n").expect("the platform is set");
+        executable(
+            &bin.join("uname"),
+            format!(
+                "#!/bin/sh\nread -r name < {}\necho \"$name\"\n",
+                platform.display()
+            ),
+        );
+        // A namespace is granted while `userns.enabled` stands, as the kernel
+        // grants one once the AppArmor restriction is lifted.
+        let enabled = root.join("userns.enabled");
+        executable(
+            &bin.join("unshare"),
+            format!(
+                "#!/bin/sh\n[ \"$*\" = '-rm true' ] || {{ echo \"unshare was asked something else: $*\" >&2; exit 2; }}\n[ -e {enabled} ] || {{ echo 'unshare: write failed /proc/self/uid_map: Operation not permitted' >&2; exit 1; }}\n",
+                enabled = enabled.display(),
+            ),
+        );
+        executable(
+            &bin.join("sudo"),
+            "#!/bin/sh\nset -eu\n[ \"$1\" = -n ] || { echo \"sudo was not asked non-interactively: $*\" >&2; exit 1; }\nshift\nexec \"$@\"\n",
+        );
+        // Records every request; refuses them while `sysctl.refuses` stands, and
+        // lifts nothing while `sysctl.inert` stands, as a kernel whose namespaces
+        // another policy still denies.
+        let asked = root.join("sysctl.asked");
+        let refusing = root.join("sysctl.refuses");
+        let inert = root.join("sysctl.inert");
+        executable(
+            &bin.join("sysctl"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {asked}\n[ ! -e {refusing} ] || {{ echo 'sysctl: permission denied on key' >&2; exit 1; }}\n[ -e {inert} ] || : > {enabled}\n",
+                asked = asked.display(),
+                refusing = refusing.display(),
+                inert = inert.display(),
+                enabled = enabled.display(),
+            ),
+        );
+        let path = std::env::join_paths([&bin]).expect("the test PATH joins");
+        let ensure = |ci: bool| {
+            let mut command = Command::new("just");
+            command
+                .arg("_ensure-userns")
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .env_clear()
+                .env("PATH", &path)
+                .env("HOME", &root);
+            if ci {
+                command.env("CI", "true");
+            }
+            let output = command.output().expect("the recipe runs");
+            (
+                output.status.success(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        let requests = || fs::read_to_string(&asked).unwrap_or_default();
+
+        // Outside CI the restriction is named with its command and left alone.
+        let (passed, stderr) = ensure(false);
+        assert!(!passed, "passed outside CI with no namespace:\n{stderr}");
+        assert!(
+            stderr.contains("unprivileged user namespaces are unavailable")
+                && stderr.contains("sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"),
+            "refused without naming the restriction and its command:\n{stderr}"
+        );
+        assert!(requests().is_empty(), "sysctl was asked outside CI");
+
+        // A platform without those journeys is not asked about namespaces at all.
+        fs::write(&platform, "Darwin\n").expect("the platform is set");
+        for ci in [false, true] {
+            let (passed, stderr) = ensure(ci);
+            assert!(
+                passed,
+                "refused a platform without those journeys:\n{stderr}"
+            );
+        }
+        assert!(requests().is_empty(), "sysctl was asked off Linux");
+        fs::write(&platform, "Linux\n").expect("the platform is set");
+
+        // In CI a restriction that cannot be lifted fails, naming what it is for.
+        fs::write(&refusing, "").expect("sysctl is set to refuse");
+        let (passed, stderr) = ensure(true);
+        assert!(!passed, "passed in CI though sysctl refused:\n{stderr}");
+        assert!(
+            stderr.contains("could not be enabled"),
+            "failed without naming the namespace it could not enable:\n{stderr}"
+        );
+        fs::remove_file(&refusing).expect("sysctl is set to answer");
+
+        // A lifted restriction the kernel still refuses a namespace under fails too.
+        fs::write(&inert, "").expect("sysctl is set to lift nothing");
+        let (passed, stderr) = ensure(true);
+        assert!(
+            !passed,
+            "passed in CI with namespaces still refused:\n{stderr}"
+        );
+        assert!(stderr.contains("could not be enabled"), "{stderr}");
+        fs::remove_file(&inert).expect("sysctl is set to lift the restriction");
+        fs::remove_file(&asked).expect("the failed requests are cleared");
+
+        // In CI the restriction is lifted, and a namespace is then granted.
+        let (passed, stderr) = ensure(true);
+        assert!(passed, "failed in CI:\n{stderr}");
+        assert_eq!(
+            requests(),
+            "-q -w kernel.apparmor_restrict_unprivileged_userns=0\n",
+            "sysctl was not asked to lift exactly the namespace restriction"
+        );
+        assert!(enabled.exists(), "the restriction was not lifted");
+
+        // A host that has namespaces is left alone, in CI and out.
+        for ci in [false, true] {
+            let (passed, stderr) = ensure(ci);
+            assert!(passed, "refused a host that has namespaces:\n{stderr}");
+        }
+        assert_eq!(requests().lines().count(), 1, "sysctl was asked again");
     }
 
     /// The template journeys' preflight refuses where the released `onetaskgraph` is not
