@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.2](https://github.com/nickderobertis/onepipeline/compare/v0.96.1...v0.96.2) - 2026-10-30
+
+### Fixed
+
+- *(deps)* link the plan store that sends no write when an unchanged plan is copied again ([#1302](https://github.com/nickderobertis/onepipeline/pull/1302))
+
 ## [0.96.1](https://github.com/nickderobertis/onepipeline/compare/v0.96.0...v0.96.1) - 2026-10-30
 
 ### Fixed
