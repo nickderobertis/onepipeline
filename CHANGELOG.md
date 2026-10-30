@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.1](https://github.com/nickderobertis/onepipeline/compare/v0.96.0...v0.96.1) - 2026-10-30
+
+### Fixed
+
+- *(deps)* link the onejudge that keeps a stopped observer's turn from reading as lost ([#1300](https://github.com/nickderobertis/onepipeline/pull/1300))
+
 ## [0.96.0](https://github.com/nickderobertis/onepipeline/compare/v0.95.7...v0.96.0) - 2026-10-30
 
 ### Added
