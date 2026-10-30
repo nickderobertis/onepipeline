@@ -56,9 +56,26 @@ export function validateEvidence(evidence) {
   const suites = Object.keys(result.mapping.selection.suites);
   if (result.suites !== suites.length)
     throw new Error("split evidence suite count differs from its selection");
-  for (const [name, suite] of Object.entries(split.suites))
-    if (!suites.includes(name) || !Array.isArray(suite.tests) || !suite.tests.length)
-      throw new Error(`split suite ${name} is not a replayed suite with tests`);
+  const count = (value) => Number.isInteger(value) && value > 0;
+  if (!count(result.tests) || !count(result.originalTests) || result.originalTests > result.tests)
+    throw new Error("split evidence needs positive phase and original-test counts");
+  const named = (value) => typeof value === "string" && value.trim() !== "";
+  const listed = new Set();
+  for (const [name, suite] of Object.entries(split.suites)) {
+    if (
+      !suites.includes(name) ||
+      !named(suite.parent) ||
+      !name.startsWith(`${suite.parent}--`) ||
+      !Array.isArray(suite.tests) ||
+      !suite.tests.length ||
+      new Set(suite.tests).size !== suite.tests.length ||
+      suite.tests.some((id) => !named(id) || listed.has(id))
+    )
+      throw new Error(`split suite ${name} is not a replayed suite with its own tests`);
+    for (const id of suite.tests) listed.add(id);
+    if (!result.mapping.crates?.[`runner-${name}`])
+      throw new Error(`split suite ${name} has no runner`);
+  }
   const compiled = compileMapping(result.mapping.selection);
   for (const row of result.rows) {
     if (!Array.isArray(row.effectiveFiles) || !Array.isArray(row.affected))
@@ -74,9 +91,14 @@ export function validateEvidence(evidence) {
       !fraction(data.suiteSkip) ||
       !fraction(data.secondsSkip) ||
       !finite(data.secondsPerRun) ||
+      data.secondsPerRun === 0 ||
       suites.some((suite) => !finite(data.suiteSeconds?.[suite]))
     )
       throw new Error(`invalid split platform data: ${platform}`);
+    // The denominator is the suites' own weights, so a larger one cannot overstate the savings.
+    const weighed = suites.reduce((sum, suite) => sum + data.suiteSeconds[suite], 0);
+    if (Math.abs(weighed - data.secondsPerRun) > 1e-6 * data.secondsPerRun)
+      throw new Error(`split seconds per run differs from its suite weights: ${platform}`);
     const ran = result.rows.reduce(
       (sum, row) => sum + row.affected.reduce((s, suite) => s + data.suiteSeconds[suite], 0),
       0,
@@ -117,6 +139,32 @@ export function validateEvidence(evidence) {
     )
       throw new Error(`invalid wall projection: ${platform}`);
   }
+  const local = result.wall?.local;
+  if (
+    !local ||
+    !finite(local.testPhase) ||
+    ![local.projected?.median, local.projected?.p90, local.projected?.max].every(finite) ||
+    local.projected.median > local.projected.p90 ||
+    local.projected.p90 > local.projected.max ||
+    local.projected.max > local.testPhase + 1e-9
+  )
+    throw new Error("invalid wall projection: local");
+  if (["linux", "macos", "windows"].some((platform) => !result.wallBreakdown?.[platform]))
+    throw new Error("split evidence needs a residual breakdown for every job");
+  for (const [platform, breakdown] of Object.entries(result.wallBreakdown)) {
+    const legs = breakdown?.legs ?? [{ segments: breakdown?.segments }];
+    if (
+      !named(breakdown?.how) ||
+      legs.some(
+        (leg) =>
+          !Array.isArray(leg.segments) ||
+          !leg.segments.length ||
+          leg.segments.some((segment) => !named(segment?.part) || !finite(segment.seconds)),
+      ) ||
+      (breakdown.overlapping ?? []).some((task) => !named(task?.part) || !finite(task.seconds))
+    )
+      throw new Error(`invalid residual breakdown: ${platform}`);
+  }
   const linux = result.platforms.linux;
   const broad = result.rows.filter(
     (row) =>
@@ -134,6 +182,9 @@ export function validateEvidence(evidence) {
     ["sibling", "thirdParty", "both"].some((key) => !Number.isInteger(causes.lock?.[key])) ||
     causes.lock.sibling + causes.lock.thirdParty + causes.lock.both !==
       (causes.prs["lockfile resolution"] ?? 0) ||
+    Object.entries(causes.sole ?? {}).some(
+      ([kind, value]) => !Number.isInteger(value) || value < 0 || value > (causes.prs[kind] ?? 0),
+    ) ||
     !Array.isArray(causes.freed) ||
     causes.freed.some(
       (entry) =>
@@ -154,7 +205,27 @@ export function validateEvidence(evidence) {
     !fraction(sib.adapters?.secondsSkip) ||
     sib.adapters.secondsSkip + 1e-9 < result.platforms.linux.secondsSkip ||
     Object.values(sib.roles ?? {}).some(
-      (entry) => !finite(entry.seconds) || entry.only > entry.seconds + 1e-9,
+      (entry) =>
+        !Number.isInteger(entry.prs) ||
+        !finite(entry.seconds) ||
+        !finite(entry.only) ||
+        entry.only > entry.seconds + 1e-9,
+    ) ||
+    sib.prs.some(
+      (entry) =>
+        !named(entry.commit) ||
+        !Number.isInteger(entry.crates) ||
+        Object.values(entry.byRole ?? {}).some((value) => !Number.isInteger(value) || value < 0),
+    ) ||
+    Object.values(sib.crates ?? {}).some(
+      (entry) =>
+        !named(entry.role) ||
+        !Number.isInteger(entry.prs) ||
+        entry.prs > sib.prs.length ||
+        !Array.isArray(entry.reach) ||
+        !entry.reach.every(named) ||
+        !Array.isArray(entry.roots) ||
+        !entry.roots.every(named),
     )
   )
     throw new Error("split sibling-engine paths differ from their rows");

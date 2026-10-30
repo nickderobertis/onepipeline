@@ -4377,6 +4377,27 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
     refusedRender((copy) => {
       copy.result.wall.macos.projected.max = Number.NaN;
     }, /invalid wall projection: macos/);
+    // An inflated denominator with the shares rescaled to match is still refused.
+    refusedRender((copy) => {
+      const linux = copy.result.platforms.linux;
+      const ran = (1 - linux.secondsSkip) * linux.secondsPerRun;
+      linux.secondsPerRun *= 2;
+      linux.secondsSkip = 1 - ran / linux.secondsPerRun;
+      copy.result.splitMigration.at(-1).secondsSkip.linux = linux.secondsSkip;
+    }, /seconds per run differs from its suite weights: linux/);
+    refusedRender((copy) => {
+      copy.result.wall.local.projected.median = -1;
+    }, /invalid wall projection: local/);
+    refusedRender((copy) => {
+      delete copy.result.wallBreakdown.windows;
+    }, /residual breakdown for every job/);
+    refusedRender((copy) => {
+      const [name] = Object.keys(copy.split.suites);
+      copy.split.suites[name].tests.push(copy.split.suites[name].tests[0]);
+    }, /is not a replayed suite with its own tests/);
+    refusedRender((copy) => {
+      copy.result.originalTests = 0;
+    }, /positive phase and original-test counts/);
     refusedRender((copy) => {
       copy.result.causes.broad += 1;
     }, /decision summary differs from its rows/);
