@@ -80,28 +80,58 @@ fn sample(world: &World, args: &[&str], telemetry: &Path) -> Sample {
     }
 }
 
+/// The timing `key` of one telemetry record, refused when the engine stopped
+/// writing it or wrote something other than a finite number, so a renamed or
+/// dropped field fails here instead of reaching the report as zero.
+fn number(record: &Value, key: &str) -> f64 {
+    record
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|n| n.is_finite())
+        .unwrap_or_else(|| panic!("telemetry `{key}` is missing or not a finite number: {record}"))
+}
+
+/// The count `key` of one telemetry record, refused like [`number`] when it is
+/// missing or not a whole number.
+fn count(record: &Value, key: &str) -> u64 {
+    record
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("telemetry `{key}` is missing or not a count: {record}"))
+}
+
 fn record(name: &str, s: &Sample) -> Value {
-    let read = s.reads.first().cloned().unwrap_or(Value::Null);
-    let process_ms = s.process["process_ms"].as_f64().unwrap_or(0.0);
+    let read = s
+        .reads
+        .first()
+        .unwrap_or_else(|| panic!("{name}: the CLI recorded no read telemetry"));
+    let mode = read["mode"]
+        .as_str()
+        .unwrap_or_else(|| panic!("telemetry `mode` is missing or not a string: {read}"));
+    let rebuilt_because = read
+        .get("rebuilt_because")
+        .filter(|v| v.is_null() || v.is_string())
+        .unwrap_or_else(|| panic!("telemetry `rebuilt_because` is missing or mistyped: {read}"));
+    let process_ms = number(&s.process, "process_ms");
     json!({
         "phase": name,
         "elapsed_s": s.elapsed_s,
-        "mode": read["mode"],
-        "item_events_replayed": read["item_events_replayed"],
-        "item_bytes_replayed": read["item_bytes_replayed"],
-        "run_events_replayed": read["run_events_replayed"],
-        "runs_rederived": read["runs_rederived"],
-        "runs_discovered": read["runs_discovered"],
-        "discovery_ms": read["discovery_ms"],
-        "replay_ms": read["replay_ms"],
-        "index_io_ms": read["index_io_ms"],
-        "blocker_ms": read["blocker_ms"],
-        "render_ms": s.process["render_ms"],
+        "mode": mode,
+        "item_events_replayed": count(read, "item_events_replayed"),
+        "item_bytes_replayed": count(read, "item_bytes_replayed"),
+        "run_events_replayed": count(read, "run_events_replayed"),
+        "runs_rederived": count(read, "runs_rederived"),
+        "runs_discovered": count(read, "runs_discovered"),
+        "discovery_ms": number(read, "discovery_ms"),
+        "replay_ms": number(read, "replay_ms"),
+        "index_io_ms": number(read, "index_io_ms"),
+        "blocker_ms": number(read, "blocker_ms"),
+        "render_ms": number(&s.process, "render_ms"),
         "process_ms": process_ms,
         // What the process took that its own phases do not: start, exit and the
         // pipe this harness captured stdout through.
         "capture_ms": (s.elapsed_s * 1000.0 - process_ms).max(0.0),
-        "rebuilt_because": read["rebuilt_because"],
+        "rebuilt_because": rebuilt_because,
     })
 }
 
