@@ -800,21 +800,31 @@ fn raising_a_work_hold_derives_its_affected_steps_or_refuses_without_context() {
     assert_eq!(std::fs::read(world.sample()).unwrap(), before);
 }
 
-/// The documented exporter, run as documented: its stdout is the checked-in
+/// The executable `cargo run --example human_items_schema` runs, which the
+/// build that compiles this suite already produced beside the `onepipeline`
+/// binary: `cargo test` and nextest build every example, and
+/// `.config/nextest.toml` archives them for a re-run.
+fn schema_exporter() -> PathBuf {
+    let built = Path::new(env!("CARGO_BIN_EXE_onepipeline"))
+        .with_file_name("examples")
+        .join(format!(
+            "human_items_schema{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    assert!(
+        built.is_file(),
+        "{} was not built; build the examples with the suite, e.g. `cargo nextest run -E 'binary(human_items)'`",
+        built.display()
+    );
+    built
+}
+
+/// The documented exporter's own executable: its stdout is the checked-in
 /// schema bundle, and each schema it prints accepts the shipped fixture.
+/// Nothing is compiled while this runs, so it costs what the exporter does.
 #[test]
 fn the_documented_schema_exporter_prints_the_published_schemas() {
-    let output = Command::new(env!("CARGO"))
-        .args([
-            "run",
-            "--quiet",
-            "--locked",
-            "--example",
-            "human_items_schema",
-        ])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap();
+    let output = Command::new(schema_exporter()).output().unwrap();
     assert!(
         output.status.success(),
         "{}",
