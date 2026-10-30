@@ -134,7 +134,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         `pinned: ${command.join(" ")} ended on signal ${run.signal} before it exited\nnext: rerun it if the signal was an interruption; otherwise check what stopped it (memory, a timeout or a kill) before rerunning the same pinned.mjs invocation`,
       );
       status = 1;
-    } else status = run.status;
+    } else {
+      status = run.status;
+      if (status !== 0)
+        console.error(
+          `pinned: ${command.join(" ")} exited ${status} over reviewed source ${commit.slice(0, 12)}\nnext: read the command's own output above, fix what it names, and rerun the same pinned.mjs invocation`,
+        );
+    }
     stage = "write-back";
     if (back && status === 0) writeBack(root, into, readSnapshot(root).design);
   } catch (error) {

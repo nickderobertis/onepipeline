@@ -2177,6 +2177,10 @@ test("pinned runs a command over the reviewed source with the working tree's des
     // regenerated design file stays in the clone.
     const failed = pinned("--", process.execPath, "-e", report, "regenerate", "3");
     assert.equal(failed.status, 3, failed.stderr);
+    assert.match(
+      failed.stderr,
+      /exited 3 over reviewed source [0-9a-f]{12}\nnext: read the command's own output/,
+    );
     assert.equal(readFileSync(join(root, "docs/design.md"), "utf8"), "working design\n");
     assert.deepEqual(readdirSync(clones), []);
     const regenerated = pinned("--write-back", "--", process.execPath, "-e", report, "regenerate");
@@ -3802,7 +3806,7 @@ test("engine proposal CLI isolates query and effect capabilities, refuses cycles
     assert.match(invalidOutput.stderr, /EISDIR|EPERM|EACCES/);
     assert.match(invalidOutput.stderr, /output parent is writable/);
     const usage = spawnSync(process.execPath, [cli], { encoding: "utf8" });
-    assert.equal(usage.status, 1);
+    assert.equal(usage.status, 2);
     assert.match(usage.stderr, /usage: engine-graph/);
     const validProposal = structuredClone(proposal);
     const refusals = [
@@ -4547,6 +4551,28 @@ test("engine split attributes assertions to the crates naming their literals in 
     assert.match(refused.stderr, /differs from the split its rule derives\nnext: regenerate/);
     assert.equal(cli("--write").status, 0);
     assert.equal(cli("--check").status, 0);
+    // An input path that cannot be read is named with an IO repair; a usage error exits 2.
+    const tool = (name, ...args) =>
+      spawnSync(process.execPath, [`scripts/modularization/${name}`, ...args], {
+        cwd: clone,
+        encoding: "utf8",
+      });
+    const evidencePath = join(clone, "scripts/modularization/engine-evidence.json");
+    const evidence = readFileSync(evidencePath, "utf8");
+    rmSync(evidencePath);
+    mkdirSync(evidencePath);
+    const unreadable = tool("engine-report.mjs", "--check");
+    assert.equal(unreadable.status, 1);
+    assert.match(unreadable.stderr, /EISDIR.*\nnext: check the named path's type/s);
+    rmSync(evidencePath, { recursive: true });
+    writeFileSync(evidencePath, evidence);
+    assert.equal(tool("engine-report.mjs", "--both").status, 2);
+    rmSync(path);
+    mkdirSync(path);
+    const replay = tool("engine-replay.mjs", join(clone, "out.json"));
+    assert.equal(replay.status, 1);
+    assert.match(replay.stderr, /EISDIR.*\nnext: check the named path's type/s);
+    assert.throws(() => readFileSync(join(clone, "out.json")), /ENOENT/);
   } finally {
     rmSync(clone, { recursive: true, force: true });
   }
@@ -4618,7 +4644,7 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
       ["scripts/modularization/engine-replay.mjs", join(root, "x.json"), "--parents", "cmd-label"],
       { encoding: "utf8" },
     );
-    assert.equal(usage.status, 1);
+    assert.equal(usage.status, 2);
     assert.match(usage.stderr, /usage: engine-replay.mjs OUTPUT.json \[--parents/);
     const steps = [
       ["cmd-start"],
