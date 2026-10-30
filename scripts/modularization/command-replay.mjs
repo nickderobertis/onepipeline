@@ -563,8 +563,6 @@ export function commandMapping(layout, catalog, options = {}) {
       for (const [fake, entry] of Object.entries(fakes.crates)) {
         const { selection } = entry;
         if (selection.everySuite) used.add(fake);
-        // An engine suite reads recorded fixtures in place of the processes its journey started.
-        if (suite.engine) continue;
         if (
           selection.capabilities?.some((cap) => suite.crates.some((crate) => reaches(crate, cap)))
         )
@@ -582,7 +580,9 @@ export function commandMapping(layout, catalog, options = {}) {
         )
           used.add(fake);
       }
-      for (const id of suite.engine ? [] : suite.tests)
+      // An engine suite keeps its journeys' fakes: their recorders replay the journeys, and what a
+      // fake answers is part of what each fixture records.
+      for (const id of suite.tests)
         for (const started of phases[id].doubles)
           if (!wiredDoubles.has(started)) used.add(fakes.doubleOwner.get(started.split("=")[1]));
       suite.crates.push(...used);

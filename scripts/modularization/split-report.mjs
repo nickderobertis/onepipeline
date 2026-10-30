@@ -290,6 +290,107 @@ const ROLE_LABELS = {
   "the dispatcher or facade every e2e suite runs": "the dispatcher or facade",
 };
 
+/**
+ * Why the typical PR still selects nearly every second: what the median PR changed and what each
+ * of its inputs selects alone, how often each kind of input changes across the replayed PRs, and
+ * the crates that suites holding at least 90% of the seconds all reach.
+ */
+export function typicalFigures(result) {
+  const compiled = compileMapping(result.mapping.selection);
+  const linux = result.platforms.linux;
+  const share = (files) =>
+    affectedSuites(compiled, files).affected.reduce(
+      (sum, suite) => sum + linux.suiteSeconds[suite],
+      0,
+    ) / linux.secondsPerRun;
+  const byKind = (row) => {
+    const kinds = {};
+    for (const file of row.effectiveFiles) {
+      const kind = classify(file, row)[0];
+      kinds[kind] ??= [];
+      kinds[kind].push(file);
+    }
+    return kinds;
+  };
+  const ranked = result.rows
+    .map((row) => ({ row, share: share(row.effectiveFiles) }))
+    .sort((a, b) => a.share - b.share || (a.row.commit < b.row.commit ? -1 : 1));
+  const typical = ranked[ranked.length >> 1];
+  const kinds = {};
+  for (const row of result.rows)
+    for (const [kind, files] of Object.entries(byKind(row))) {
+      kinds[kind] ??= [];
+      kinds[kind].push(share(files));
+    }
+  const middle = (values) => [...values].sort((a, b) => a - b)[values.length >> 1];
+  const closure = (crate, seen = new Set()) => {
+    if (seen.has(crate)) return seen;
+    seen.add(crate);
+    for (const dep of result.mapping.crates[crate]?.deps ?? []) closure(dep, seen);
+    return seen;
+  };
+  const reach = {};
+  for (const [name, suite] of Object.entries(result.mapping.selection.suites))
+    for (const crate of new Set(suite.crates.flatMap((runner) => [...closure(runner)])))
+      if (!crate.startsWith("runner-"))
+        reach[crate] = (reach[crate] ?? 0) + linux.suiteSeconds[name] / linux.secondsPerRun;
+  const changes = (row, crate) =>
+    row.effectiveFiles.some(
+      (file) => file.startsWith(`moved/${crate}/`) || file.startsWith(`resolved/${crate}/`),
+    );
+  const universal = Object.entries(reach)
+    .filter(([, value]) => value >= 0.9)
+    .map(([crate, value]) => ({
+      crate,
+      share: value,
+      prs: result.rows.filter((row) => changes(row, crate)).length,
+    }))
+    .sort((a, b) => b.prs - a.prs || (a.crate < b.crate ? -1 : 1));
+  return {
+    prs: result.rows.length,
+    pr: pr(typical.row),
+    share: typical.share,
+    typicalKinds: Object.entries(byKind(typical.row))
+      .map(([kind, files]) => ({ kind, share: share(files) }))
+      .sort((a, b) => b.share - a.share || (a.kind < b.kind ? -1 : 1)),
+    kinds: Object.entries(kinds)
+      .map(([kind, values]) => ({ kind, prs: values.length, median: middle(values) }))
+      .sort((a, b) => b.prs - a.prs || (a.kind < b.kind ? -1 : 1)),
+    universal,
+    changingUniversal: result.rows.filter((row) =>
+      universal.some(({ crate }) => changes(row, crate)),
+    ).length,
+  };
+}
+
+/** The decision summary's lines for `typicalFigures`. */
+export function typicalLines(figures) {
+  return [
+    "### Why a typical PR still selects nearly every second",
+    "",
+    `**Projected** (replay model): the typical (median) PR, ${figures.pr}, selects ${pct(figures.share)} of a full run's estimated Linux seconds. Each kind of input it changed selects, on its own:`,
+    "",
+    "| Input kind in the typical PR | Linux seconds its own inputs select |",
+    "| --- | ---: |",
+    ...figures.typicalKinds.map(({ kind, share }) => `| ${kind} | ${pct(share)} |`),
+    "",
+    `Across all ${figures.prs} PRs, how often each kind of input changes and what its own inputs select in the median PR that changes it:`,
+    "",
+    "| Input kind | PRs changing it | Median Linux seconds it selects alone |",
+    "| --- | ---: | ---: |",
+    ...figures.kinds.map(({ kind, prs, median }) => `| ${kind} | ${prs} | ${pct(median)} |`),
+    "",
+    `${figures.universal.length} crates are reached by suites holding at least 90% of a full run's Linux seconds, and ${figures.changingUniversal} of the ${figures.prs} PRs change at least one of them (its source, resolved dependencies or manifest requirement). No split of the suites removes these, because the runners of suites holding that much of the seconds link every one of them. The ones a PR changed:`,
+    "",
+    "| Crate | Linux seconds of the suites reaching it | PRs changing it |",
+    "| --- | ---: | ---: |",
+    ...figures.universal
+      .filter((entry) => entry.prs)
+      .map((entry) => `| ${entry.crate} | ${pct(entry.share)} | ${entry.prs} |`),
+    "",
+  ];
+}
+
 /** The decision summary's answer to why a bump of only sibling engines reaches most suites. */
 function siblingSection(result) {
   const { siblings } = result;
@@ -414,6 +515,7 @@ export function splitAppendix({ split, result }, targetDoc) {
     `| third-party packages only | ${causes.lock.thirdParty} |`,
     `| both | ${causes.lock.both} |`,
     "",
+    ...typicalLines(typicalFigures(result)),
     "### Why a sibling-only lockfile change selects nearly everything",
     "",
     ...siblingSection(result),

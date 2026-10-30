@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, KEEP, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
+import { typicalLines } from "./split-report.mjs";
 
 export const ENGINE_MARKER = "<!-- BEGIN ENGINE TESTS -->";
 export const EVIDENCE_PATH = "scripts/modularization/engine-evidence.json";
@@ -84,6 +85,7 @@ export function validateEngineEvidence(evidence) {
         "overHalf",
         "crateReach",
         "engineSuites",
+        "typical",
       ]) ||
       step.schema !== 1 ||
       step.prs !== 144 ||
@@ -185,6 +187,46 @@ export function validateEngineEvidence(evidence) {
       )
     )
       refuse("lists an engine suite that is not one");
+    const typical = step.typical;
+    if (
+      !shaped(typical, [
+        "prs",
+        "pr",
+        "share",
+        "typicalKinds",
+        "kinds",
+        "universal",
+        "changingUniversal",
+      ]) ||
+      typical.prs !== step.prs ||
+      typeof typical.pr !== "string" ||
+      !/^(?:#\d+|[0-9a-f]{8})$/.test(typical.pr) ||
+      !fraction(typical.share) ||
+      !count(typical.changingUniversal, step.prs) ||
+      !Array.isArray(typical.typicalKinds) ||
+      typical.typicalKinds.some(
+        (row) =>
+          !shaped(row, ["kind", "share"]) || typeof row.kind !== "string" || !fraction(row.share),
+      ) ||
+      !Array.isArray(typical.kinds) ||
+      typical.kinds.some(
+        (row) =>
+          !shaped(row, ["kind", "prs", "median"]) ||
+          typeof row.kind !== "string" ||
+          !count(row.prs, step.prs) ||
+          !fraction(row.median),
+      ) ||
+      !Array.isArray(typical.universal) ||
+      typical.universal.some(
+        (row) =>
+          !shaped(row, ["crate", "share", "prs"]) ||
+          !crateName(row.crate) ||
+          !fraction(row.share) ||
+          row.share < 0.9 ||
+          !count(row.prs, step.prs),
+      )
+    )
+      refuse("does not explain its typical PR's selection");
   }
   return evidence;
 }
@@ -245,6 +287,7 @@ export function engineAppendix(evidence, split, splitDoc) {
     "",
     `Of the lockfile-forced PRs, ${final.lock.sibling} moved only sibling-engine packages, ${final.lock.thirdParty} only third-party packages and ${final.lock.both} both.`,
     "",
+    ...typicalLines(final.typical),
     "### Crates whose change still selects more than half the suites",
     "",
     "**Projected**: what a change to the crate alone selects, and how many of the 144 PRs changed its source, its resolved dependencies or its manifest requirement. Every production crate here is in the closure of `cmd-start`, `cmd-reply` or `cmd-adopt`, whose kept full journeys link the whole command, and every test-fake crate here is one those journeys start or link; no further crate split removes that. Only moving more of those journeys onto engine crates, which needs attributable assertions (see the kept reasons below), frees it.",
@@ -311,15 +354,34 @@ export function engineAppendix(evidence, split, splitDoc) {
           `| ${crate} | ${moved.filter(([, entry]) => entry.crate === crate).length} | ${assertedBy[crate] ?? 0} |`,
       ),
     "",
+    "## Where the recorded fixtures are re-verified",
+    "",
+    `Each of the ${moved.length} re-homed test phases has a recorder: its original journey, driven through the real binary, which writes the fixture and fails when it differs from the committed one. The recorder runs in its engine suite, so a pull request runs it whenever it runs the crate-level test. That is any change to the engine crate or a crate in its closure, which holds every crate the test asserts (\`engine-tests.mjs --check\` refuses one outside it). It also runs on a change to the fixture, the test's own code, a harness item it calls or a test fake its journey starts. The replay charges each selected engine suite each re-homed phase's full measured end-to-end seconds, which is what its recorder costs. The skip shares above are therefore the measured cost of re-verifying the fixtures on those pull requests. The crate-level tests' own seconds are not measured and add to it.`,
+    "",
+    `Only a change outside all of those inputs that still alters what the binary records for a re-homed scenario is left for the release PR's full sweep, which re-records every fixture. Such a change is to production code on the journey's path outside the engine crate's closure: a command, the dispatcher, or an engine crate the engine crate does not reach. These engine crates keep no full journey asserting them, so their re-homed tests' recorders are their only end-to-end check:`,
+    "",
+    "| Engine crate | Re-homed test phases with no kept journey asserting the crate |",
+    "| --- | --- |",
+    ...[...new Set(moved.map(([, entry]) => entry.crate))]
+      .filter((crate) => !assertedBy[crate])
+      .sort()
+      .map(
+        (crate) =>
+          `| ${crate} | ${moved
+            .filter(([, entry]) => entry.crate === crate)
+            .map(([id]) => id)
+            .join(", ")} |`,
+      ),
+    "",
     "## Every test that leaves the binary",
     "",
-    "Each re-homed test phase, the crate-level test that keeps every assertion it makes, the recorded fixture that test reads, and the literals that attributed it (at most three shown; `engine-tests.json` holds all).",
+    "Each re-homed test phase, the crate-level test that keeps every assertion it makes, the recorded fixture that test reads, the crates it asserts, and the literals that attributed it (at most three shown; `engine-tests.json` holds all).",
     "",
-    "| Test | Parent | Engine suite | Crate-level test | Recorded fixture | Attributed by |",
-    "| --- | --- | --- | --- | --- | --- |",
+    "| Test | Parent | Engine suite | Crate-level test | Recorded fixture | Asserted crates | Attributed by |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
     ...moved.map(
       ([id, entry]) =>
-        `| ${id} | ${entry.parent} | ${entry.suite} | ${entry.crateTest} | ${entry.fixture} | ${cell(
+        `| ${id} | ${entry.parent} | ${entry.suite} | ${entry.crateTest} | ${entry.fixture} | ${entry.assertedCrates.join(", ")} | ${cell(
           Object.keys(entry.evidence)
             .slice(0, 3)
             .map((literal) => `\`${literal}\``)

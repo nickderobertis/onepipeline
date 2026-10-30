@@ -26,7 +26,7 @@ The decision summary below counts the PRs still selecting at least 90% of the se
 
 **Why sibling-only lockfile bumps select nearly everything.** The user asked why a lockfile change moving only sibling-engine packages selects at least 90% of the seconds, when only some crates use those engines. The decision summary answers from the replay, path by path. One path was a model artifact. Production crates' external roots counted the imports of their own `#[cfg(test)]` unit-test modules, so `plan-validation` and `plan-edits` appeared to link the test-fake package and, through it, every engine its fakes use. Those imports are dev-dependencies, which reach no dependent and no e2e suite, so the target model now excludes them. That moved the PRs this cause forces from 41 to 40 and left the published shares unchanged at two decimals. The rest is real. The foundational engine crates (`plan-model`, `plan-edits`, `publication`, `event-payloads`, `publication-boundary`) name sibling types in their production code, and nearly every command reaches them. Separately, the suites' own test code calls the engines in-process: the harness registers every checkout through `onevcs`, reads a schema constant from `oneagentgraph`, and drives task stores through `onetaskgraph-core`. The agent and host fakes link the engines they act out. Confining the engines behind adapter crates, with the shared crates holding their own value types, frees only part of this, as the summary's projection shows, because the test code's own dependencies stay.
 
-The 30-minute line is not reached by selection under this design. The wall-clock table holds each measured job's non-e2e residual fixed and scales its e2e tier by the PR's selected share. Typical PRs project to today's full sweep on every platform, because the median PR still selects nearly all the seconds, and the Linux job's residual alone is over 30 minutes. Reaching the line needs per-test and per-job cost reduction, which the parallel `onepipeline-test-cost` work owns, or a coverage trade-off that only the user can make. These measurements were sent to the manager. The estimates divide each module's measured seconds evenly among its tests, and the job measurements are full sweeps of today's tree on run 40947970908. Neither is a benchmark of the future layout.
+The decision summary's "Why a typical PR still selects nearly every second" subsection names what the typical PR changed and the crates that suites holding at least 90% of the seconds all reach. No split of the suites removes those crates. The 30-minute line is not reached by selection under this design. The wall-clock table holds each measured job's non-e2e residual fixed and scales its e2e tier by the PR's selected share. Typical PRs project to today's full sweep on every platform, because the median PR still selects nearly all the seconds, and the Linux job's residual alone is over 30 minutes. Reaching the line needs per-test and per-job cost reduction, which the parallel `onepipeline-test-cost` work owns, or a coverage trade-off that only the user can make. These measurements were sent to the manager. The estimates divide each module's measured seconds evenly among its tests, and the job measurements are full sweeps of today's tree on run 40947970908. Neither is a benchmark of the future layout.
 
 ## Migration
 
@@ -113,6 +113,75 @@ Local gate test phase: 10294 s (171.6 min) **measured** (the profile's run F); *
 | sibling-engine packages only | 40 |
 | third-party packages only | 2 |
 | both | 14 |
+
+### Why a typical PR still selects nearly every second
+
+**Projected** (replay model): the typical (median) PR, #613, selects 99.97% of a full run's estimated Linux seconds. Each kind of input it changed selects, on its own:
+
+| Input kind in the typical PR | Linux seconds its own inputs select |
+| --- | ---: |
+| lockfile resolution | 99.97% |
+| manifest requirement | 99.97% |
+| test fake | 20.02% |
+| test file outside one test | 1.38% |
+| other | 0.00% |
+
+Across all 144 PRs, how often each kind of input changes and what its own inputs select in the median PR that changes it:
+
+| Input kind | PRs changing it | Median Linux seconds it selects alone |
+| --- | ---: | ---: |
+| other | 135 | 0.00% |
+| engine source outside any attributed item | 105 | 97.24% |
+| engine source | 85 | 97.24% |
+| test code | 84 | 2.55% |
+| test file outside one test | 83 | 9.05% |
+| document read whole | 75 | 10.11% |
+| lockfile resolution | 56 | 99.97% |
+| manifest requirement | 53 | 99.97% |
+| test fake | 42 | 82.44% |
+| harness helper | 32 | 20.53% |
+| test configuration section | 16 | 100.00% |
+| harness item outside one helper | 14 | 100.00% |
+| workspace tooling | 12 | 100.00% |
+
+34 crates are reached by suites holding at least 90% of a full run's Linux seconds, and 104 of the 144 PRs change at least one of them (its source, resolved dependencies or manifest requirement). No split of the suites removes these, because the runners of suites holding that much of the seconds link every one of them. The ones a PR changed:
+
+| Crate | Linux seconds of the suites reaching it | PRs changing it |
+| --- | ---: | ---: |
+| run-projection | 97.09% | 70 |
+| run-result | 96.17% | 63 |
+| run-views | 93.79% | 61 |
+| run-state | 97.09% | 60 |
+| plan-model | 98.47% | 56 |
+| plan-compat | 97.74% | 52 |
+| plan-criteria | 98.47% | 52 |
+| plan-preservation | 97.74% | 52 |
+| event-payloads | 97.24% | 49 |
+| plan-validation | 97.74% | 45 |
+| event-vocabulary | 97.24% | 43 |
+| fake-gh | 97.20% | 38 |
+| readjust-state | 97.09% | 38 |
+| publication-query | 95.18% | 34 |
+| run-files | 97.86% | 26 |
+| run-report | 96.17% | 26 |
+| member-liveness | 93.79% | 25 |
+| processes | 96.89% | 25 |
+| run-paths | 97.86% | 24 |
+| diagnostics | 98.51% | 23 |
+| run-record | 97.30% | 13 |
+| journal-reader | 97.24% | 11 |
+| branch-template | 98.47% | 7 |
+| test-fake-codec | 100.00% | 6 |
+| test-containment | 100.00% | 5 |
+| test-profile | 100.00% | 5 |
+| append-stamp | 96.17% | 2 |
+| checkpoint | 96.17% | 2 |
+| cross-run-query | 93.79% | 2 |
+| event-filter | 95.18% | 2 |
+| render-cost | 96.89% | 2 |
+| run-labels | 96.21% | 2 |
+| run-summary | 96.17% | 2 |
+| yaml-codec | 98.47% | 2 |
 
 ### Why a sibling-only lockfile change selects nearly everything
 

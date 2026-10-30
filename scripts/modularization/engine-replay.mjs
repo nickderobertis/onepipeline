@@ -7,6 +7,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { ENGINE_PATH, STEPS, checkEngineSplit, targetLayout } from "./engine-tests.mjs";
 import { classify, splitEvidence } from "./split-replay.mjs";
+import { typicalFigures } from "./split-report.mjs";
 import { targetCatalog } from "./test-split.mjs";
 import { affectedSuites, compileMapping } from "../crate-split-replay.mjs";
 import { UsageError, exitStatus } from "./cli.mjs";
@@ -115,6 +116,7 @@ export function engineSummary(result, parents) {
     overHalf,
     crateReach,
     engineSuites,
+    typical: typicalFigures(result),
   };
 }
 

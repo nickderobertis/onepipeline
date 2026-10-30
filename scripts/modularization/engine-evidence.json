@@ -10,20 +10,20 @@
       "suites": 481,
       "platforms": {
         "linux": {
-          "suiteSkip": 0.1318,
-          "secondsSkip": 0.120405
+          "suiteSkip": 0.130789,
+          "secondsSkip": 0.119779
         },
         "macos": {
-          "suiteSkip": 0.1318,
-          "secondsSkip": 0.119158
+          "suiteSkip": 0.130789,
+          "secondsSkip": 0.118563
         },
         "windows": {
-          "suiteSkip": 0.1318,
-          "secondsSkip": 0.118199
+          "suiteSkip": 0.130789,
+          "secondsSkip": 0.117694
         },
         "local": {
-          "suiteSkip": 0.1318,
-          "secondsSkip": 0.119754
+          "suiteSkip": 0.130789,
+          "secondsSkip": 0.11903
         }
       },
       "broad": 122,
@@ -36,9 +36,8 @@
         "lockfile resolution": 56,
         "manifest requirement": 53,
         "test configuration section": 16,
-        "test file outside one test": 2,
-        "several inputs together": 1,
-        "test fake": 1
+        "test fake": 11,
+        "test file outside one test": 2
       },
       "sole": {
         "engine source outside any attributed item": 6,
@@ -48,7 +47,7 @@
         "lockfile resolution": 2,
         "workspace tooling": 3,
         "test file outside one test": 1,
-        "several inputs together": 1
+        "test fake": 1
       },
       "lock": {
         "sibling": 40,
@@ -59,30 +58,30 @@
         "linux": {
           "today": 6474,
           "residual": 2971.176,
-          "median": 6469.294969,
+          "median": 6470.465532,
           "max": 6474,
           "over": 144,
-          "typicalShare": 0.998657
+          "typicalShare": 0.998991
         },
         "macos": {
           "today": 7890,
           "residual": 1665.584,
-          "median": 7883.674279,
+          "median": 7884.734588,
           "max": 7890,
           "over": 136,
-          "typicalShare": 0.998984
+          "typicalShare": 0.999154
         },
         "windows": {
           "today": 11759,
           "residual": 2629.335,
-          "median": 11754.033207,
+          "median": 11755.267636,
           "max": 11759,
           "over": 144,
-          "typicalShare": 0.999456
+          "typicalShare": 0.999591
         },
         "local": {
           "testPhase": 10293.5,
-          "median": 10267.018239,
+          "median": 10277.66242,
           "max": 10293.5
         }
       },
@@ -197,7 +196,7 @@
         {
           "pr": "350",
           "commit": "57fb8a3b",
-          "share": 0.99976,
+          "share": 1,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -244,7 +243,7 @@
         {
           "pr": "394",
           "commit": "03253f06",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -343,7 +342,7 @@
         {
           "pr": "437",
           "commit": "b1bbb4f2",
-          "share": 0.969111,
+          "share": 0.979488,
           "forcing": [
             "engine source outside any attributed item",
             "manifest requirement"
@@ -388,7 +387,7 @@
         {
           "pr": "477",
           "commit": "88caf5fd",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "lockfile resolution"
           ]
@@ -572,7 +571,7 @@
         {
           "pr": "543",
           "commit": "cb8228d2",
-          "share": 0.998777,
+          "share": 0.999281,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -599,7 +598,7 @@
         {
           "pr": "556",
           "commit": "55df74af",
-          "share": 0.956509,
+          "share": 0.958609,
           "forcing": [
             "engine source",
             "engine source outside any attributed item"
@@ -714,7 +713,7 @@
         {
           "pr": "600",
           "commit": "bae70c28",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -779,7 +778,7 @@
         {
           "pr": "612",
           "commit": "7cf175e6",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -920,7 +919,7 @@
         {
           "pr": "717",
           "commit": "bffe2c72",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -970,7 +969,7 @@
         {
           "pr": "755",
           "commit": "e8b21d5c",
-          "share": 0.99564,
+          "share": 0.996144,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -1012,7 +1011,7 @@
         {
           "pr": "776",
           "commit": "1a47dc37",
-          "share": 0.99564,
+          "share": 0.996144,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -1078,7 +1077,7 @@
         {
           "pr": "813",
           "commit": "b5eb5154",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -1177,7 +1176,7 @@
         {
           "pr": "866",
           "commit": "cce8e7f8",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -1230,7 +1229,7 @@
         {
           "pr": "875",
           "commit": "7681b6ed",
-          "share": 0.932852,
+          "share": 0.959963,
           "forcing": [
             "engine source outside any attributed item",
             "test fake"
@@ -1250,7 +1249,7 @@
         {
           "pr": "865",
           "commit": "4c236086",
-          "share": 0.990682,
+          "share": 0.997061,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -1268,7 +1267,7 @@
         {
           "pr": "886",
           "commit": "c1f8e4cf",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "lockfile resolution",
             "manifest requirement",
@@ -1299,7 +1298,7 @@
         {
           "pr": "909",
           "commit": "ce8595d6",
-          "share": 0.998657,
+          "share": 0.999161,
           "forcing": [
             "engine source outside any attributed item",
             "lockfile resolution",
@@ -1464,8 +1463,8 @@
         },
         {
           "crate": "fake-oneagentgraph",
-          "suites": 249,
-          "linuxShare": 0.621092,
+          "suites": 312,
+          "linuxShare": 0.743552,
           "prs": 46
         },
         {
@@ -1482,8 +1481,8 @@
         },
         {
           "crate": "fake-gh",
-          "suites": 350,
-          "linuxShare": 0.768737,
+          "suites": 451,
+          "linuxShare": 0.932956,
           "prs": 38
         },
         {
@@ -1530,8 +1529,8 @@
         },
         {
           "crate": "test-fake-member",
-          "suites": 262,
-          "linuxShare": 0.66767,
+          "suites": 337,
+          "linuxShare": 0.812086,
           "prs": 29
         },
         {
@@ -1712,7 +1711,7 @@
           "tests": 2,
           "closure": 5,
           "linuxShare": 0.000504,
-          "skipped": 0.423611
+          "skipped": 0.326389
         },
         {
           "suite": "engine--branch-publication",
@@ -1736,7 +1735,7 @@
           "tests": 17,
           "closure": 17,
           "linuxShare": 0.007918,
-          "skipped": 0.166667
+          "skipped": 0.159722
         },
         {
           "suite": "engine--dispatch-cancellation",
@@ -1808,7 +1807,7 @@
           "tests": 3,
           "closure": 50,
           "linuxShare": 0.000567,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--edit-reconciler--dispatch_env_hook",
@@ -2000,7 +1999,7 @@
           "tests": 29,
           "closure": 2,
           "linuxShare": 0.008277,
-          "skipped": 0.236111
+          "skipped": 0.229167
         },
         {
           "suite": "engine--event-vocabulary",
@@ -2008,7 +2007,7 @@
           "tests": 4,
           "closure": 1,
           "linuxShare": 0.000452,
-          "skipped": 0.409722
+          "skipped": 0.402778
         },
         {
           "suite": "engine--home",
@@ -2024,7 +2023,7 @@
           "tests": 14,
           "closure": 26,
           "linuxShare": 0.001841,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--plan-edits",
@@ -2040,7 +2039,7 @@
           "tests": 1,
           "closure": 5,
           "linuxShare": 0.00024,
-          "skipped": 0.368056
+          "skipped": 0.347222
         },
         {
           "suite": "engine--plan-validation",
@@ -2056,7 +2055,7 @@
           "tests": 9,
           "closure": 8,
           "linuxShare": 0.001031,
-          "skipped": 0.270833
+          "skipped": 0.263889
         },
         {
           "suite": "engine--planner-notes",
@@ -2064,7 +2063,7 @@
           "tests": 10,
           "closure": 39,
           "linuxShare": 0.002413,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--pool-maintenance",
@@ -2080,7 +2079,7 @@
           "tests": 1,
           "closure": 2,
           "linuxShare": 0.0021,
-          "skipped": 0.444444
+          "skipped": 0.430556
         },
         {
           "suite": "engine--publication",
@@ -2088,7 +2087,7 @@
           "tests": 2,
           "closure": 36,
           "linuxShare": 0.000393,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--publication-boundary",
@@ -2104,7 +2103,7 @@
           "tests": 2,
           "closure": 21,
           "linuxShare": 0.000366,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--publication-host",
@@ -2128,7 +2127,7 @@
           "tests": 14,
           "closure": 31,
           "linuxShare": 0.00216,
-          "skipped": 0.131944
+          "skipped": 0.125
         },
         {
           "suite": "engine--render-cost",
@@ -2160,7 +2159,7 @@
           "tests": 46,
           "closure": 36,
           "linuxShare": 0.012025,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--run-paths",
@@ -2184,7 +2183,7 @@
           "tests": 26,
           "closure": 8,
           "linuxShare": 0.005634,
-          "skipped": 0.298611
+          "skipped": 0.284722
         },
         {
           "suite": "engine--run-report",
@@ -2192,7 +2191,7 @@
           "tests": 2,
           "closure": 17,
           "linuxShare": 0.000779,
-          "skipped": 0.173611
+          "skipped": 0.166667
         },
         {
           "suite": "engine--run-views--boundary",
@@ -2200,7 +2199,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000359,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--branch_template",
@@ -2208,7 +2207,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000222,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--channel",
@@ -2216,7 +2215,7 @@
           "tests": 7,
           "closure": 30,
           "linuxShare": 0.000691,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--closures",
@@ -2224,7 +2223,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--crossdag",
@@ -2232,7 +2231,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.001225,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--dispatch",
@@ -2240,7 +2239,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.001009,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--dispatch_env_hook",
@@ -2248,7 +2247,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000225,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--driver",
@@ -2256,7 +2255,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.000818,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--driver_exit",
@@ -2264,7 +2263,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000806,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--holds",
@@ -2272,7 +2271,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000176,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal",
@@ -2280,7 +2279,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000277,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal_scaling",
@@ -2288,7 +2287,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--landing",
@@ -2296,7 +2295,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.001025,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--lifecycle",
@@ -2304,7 +2303,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.003011,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--linear_launch",
@@ -2312,7 +2311,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--listing",
@@ -2320,7 +2319,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.001825,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--loopcost",
@@ -2328,7 +2327,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.004856,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--plan",
@@ -2336,7 +2335,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000175,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--public_id",
@@ -2344,7 +2343,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--publication_boundary",
@@ -2352,7 +2351,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000105,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--publish_preserve",
@@ -2360,7 +2359,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000619,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--readjust",
@@ -2376,7 +2375,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000206,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--rework",
@@ -2392,7 +2391,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000133,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--run_ending",
@@ -2400,7 +2399,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000146,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--scratch",
@@ -2408,7 +2407,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000186,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--shutdown",
@@ -2416,7 +2415,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000201,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--store",
@@ -2424,7 +2423,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.002115,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--summary",
@@ -2432,7 +2431,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.003811,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--turns",
@@ -2440,7 +2439,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000274,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--views",
@@ -2448,7 +2447,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.000547,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--wake_budget",
@@ -2456,7 +2455,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.001273,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--watch",
@@ -2464,7 +2463,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000427,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--withdrawn",
@@ -2472,7 +2471,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--scheduler--adoption",
@@ -2528,7 +2527,7 @@
           "tests": 2,
           "closure": 55,
           "linuxShare": 0.000378,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--scheduler--dispatch_env_hook",
@@ -2674,7 +2673,262 @@
           "linuxShare": 0.000405,
           "skipped": 0.222222
         }
-      ]
+      ],
+      "typical": {
+        "prs": 144,
+        "pr": "#402",
+        "share": 0.999152943818112,
+        "typicalKinds": [
+          {
+            "kind": "engine source",
+            "share": 0.9732628169103175
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "share": 0.9492329897490206
+          },
+          {
+            "kind": "test file outside one test",
+            "share": 0.3617721449118051
+          },
+          {
+            "kind": "document read whole",
+            "share": 0.13175655992266289
+          },
+          {
+            "kind": "harness helper",
+            "share": 0.09079751227866101
+          },
+          {
+            "kind": "test code",
+            "share": 0.0005403977327312902
+          },
+          {
+            "kind": "other",
+            "share": 0
+          }
+        ],
+        "kinds": [
+          {
+            "kind": "other",
+            "prs": 135,
+            "median": 0
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "prs": 105,
+            "median": 0.9439958449667404
+          },
+          {
+            "kind": "engine source",
+            "prs": 85,
+            "median": 0.9493068335340491
+          },
+          {
+            "kind": "test code",
+            "prs": 84,
+            "median": 0.02096988436120564
+          },
+          {
+            "kind": "test file outside one test",
+            "prs": 83,
+            "median": 0.1137325361509672
+          },
+          {
+            "kind": "document read whole",
+            "prs": 75,
+            "median": 0.10709783038479663
+          },
+          {
+            "kind": "lockfile resolution",
+            "prs": 56,
+            "median": 0.9991611603918261
+          },
+          {
+            "kind": "manifest requirement",
+            "prs": 53,
+            "median": 0.9991611603918261
+          },
+          {
+            "kind": "test fake",
+            "prs": 42,
+            "median": 0.7435520510912136
+          },
+          {
+            "kind": "harness helper",
+            "prs": 32,
+            "median": 0.1888280604725129
+          },
+          {
+            "kind": "test configuration section",
+            "prs": 16,
+            "median": 1
+          },
+          {
+            "kind": "harness item outside one helper",
+            "prs": 14,
+            "median": 1
+          },
+          {
+            "kind": "workspace tooling",
+            "prs": 12,
+            "median": 1
+          }
+        ],
+        "universal": [
+          {
+            "crate": "run-projection",
+            "share": 0.9413892137588981,
+            "prs": 70
+          },
+          {
+            "crate": "run-result",
+            "share": 0.9311580242014837,
+            "prs": 63
+          },
+          {
+            "crate": "run-state",
+            "share": 0.9493068335340483,
+            "prs": 60
+          },
+          {
+            "crate": "plan-model",
+            "share": 0.9724221982149566,
+            "prs": 56
+          },
+          {
+            "crate": "plan-compat",
+            "share": 0.9571102980960872,
+            "prs": 52
+          },
+          {
+            "crate": "plan-criteria",
+            "share": 0.9724221982149566,
+            "prs": 52
+          },
+          {
+            "crate": "plan-preservation",
+            "share": 0.9571102980960872,
+            "prs": 52
+          },
+          {
+            "crate": "event-payloads",
+            "share": 0.9594663083046483,
+            "prs": 49
+          },
+          {
+            "crate": "plan-validation",
+            "share": 0.9571102980960872,
+            "prs": 45
+          },
+          {
+            "crate": "event-vocabulary",
+            "share": 0.9599185684408358,
+            "prs": 43
+          },
+          {
+            "crate": "fake-gh",
+            "share": 0.932956311689193,
+            "prs": 38
+          },
+          {
+            "crate": "readjust-state",
+            "share": 0.9493068335340483,
+            "prs": 38
+          },
+          {
+            "crate": "run-files",
+            "share": 0.9652563908474007,
+            "prs": 26
+          },
+          {
+            "crate": "run-report",
+            "share": 0.9311580242014837,
+            "prs": 26
+          },
+          {
+            "crate": "processes",
+            "share": 0.9406044371659273,
+            "prs": 25
+          },
+          {
+            "crate": "run-paths",
+            "share": 0.9660365205784384,
+            "prs": 24
+          },
+          {
+            "crate": "diagnostics",
+            "share": 0.9732628169103164,
+            "prs": 23
+          },
+          {
+            "crate": "run-record",
+            "share": 0.955594001357599,
+            "prs": 13
+          },
+          {
+            "crate": "journal-reader",
+            "share": 0.9497400739720223,
+            "prs": 11
+          },
+          {
+            "crate": "branch-template",
+            "share": 0.9724221982149566,
+            "prs": 7
+          },
+          {
+            "crate": "test-fake-codec",
+            "share": 0.9999999999999991,
+            "prs": 6
+          },
+          {
+            "crate": "test-containment",
+            "share": 0.9999999999999991,
+            "prs": 5
+          },
+          {
+            "crate": "test-profile",
+            "share": 0.9999999999999991,
+            "prs": 5
+          },
+          {
+            "crate": "append-stamp",
+            "share": 0.930379081967961,
+            "prs": 2
+          },
+          {
+            "crate": "checkpoint",
+            "share": 0.930379081967961,
+            "prs": 2
+          },
+          {
+            "crate": "event-filter",
+            "share": 0.9032053955549768,
+            "prs": 2
+          },
+          {
+            "crate": "render-cost",
+            "share": 0.9407111823970842,
+            "prs": 2
+          },
+          {
+            "crate": "run-labels",
+            "share": 0.9307153294461049,
+            "prs": 2
+          },
+          {
+            "crate": "run-summary",
+            "share": 0.930379081967961,
+            "prs": 2
+          },
+          {
+            "crate": "yaml-codec",
+            "share": 0.9724221982149566,
+            "prs": 2
+          }
+        ],
+        "changingUniversal": 101
+      }
     },
     {
       "schema": 1,
@@ -2686,20 +2940,20 @@
       "suites": 475,
       "platforms": {
         "linux": {
-          "suiteSkip": 0.132091,
-          "secondsSkip": 0.121289
+          "suiteSkip": 0.131067,
+          "secondsSkip": 0.120574
         },
         "macos": {
-          "suiteSkip": 0.132091,
-          "secondsSkip": 0.120032
+          "suiteSkip": 0.131067,
+          "secondsSkip": 0.119345
         },
         "windows": {
-          "suiteSkip": 0.132091,
-          "secondsSkip": 0.118796
+          "suiteSkip": 0.131067,
+          "secondsSkip": 0.118189
         },
         "local": {
-          "suiteSkip": 0.132091,
-          "secondsSkip": 0.12069
+          "suiteSkip": 0.131067,
+          "secondsSkip": 0.119874
         }
       },
       "broad": 122,
@@ -2712,9 +2966,9 @@
         "lockfile resolution": 56,
         "manifest requirement": 53,
         "test configuration section": 16,
-        "several inputs together": 2,
-        "test file outside one test": 2,
-        "test fake": 1
+        "several inputs together": 1,
+        "test fake": 11,
+        "test file outside one test": 2
       },
       "sole": {
         "engine source outside any attributed item": 5,
@@ -2723,8 +2977,9 @@
         "manifest requirement": 1,
         "lockfile resolution": 2,
         "workspace tooling": 3,
-        "several inputs together": 2,
-        "test file outside one test": 1
+        "several inputs together": 1,
+        "test file outside one test": 1,
+        "test fake": 1
       },
       "lock": {
         "sibling": 40,
@@ -2735,30 +2990,30 @@
         "linux": {
           "today": 6474,
           "residual": 2971.176,
-          "median": 6468.87432,
+          "median": 6469.898153,
           "max": 6474,
           "over": 144,
-          "typicalShare": 0.998537
+          "typicalShare": 0.998829
         },
         "macos": {
           "today": 7890,
           "residual": 1665.584,
-          "median": 7883.03237,
+          "median": 7884.610045,
           "max": 7890,
           "over": 136,
-          "typicalShare": 0.998881
+          "typicalShare": 0.999134
         },
         "windows": {
           "today": 11759,
           "residual": 2629.335,
-          "median": 11754.033207,
+          "median": 11755.267636,
           "max": 11759,
           "over": 144,
-          "typicalShare": 0.999456
+          "typicalShare": 0.999591
         },
         "local": {
           "testPhase": 10293.5,
-          "median": 10265.577655,
+          "median": 10275.575586,
           "max": 10293.5
         }
       },
@@ -2873,7 +3128,7 @@
         {
           "pr": "350",
           "commit": "57fb8a3b",
-          "share": 0.99976,
+          "share": 1,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -2920,7 +3175,7 @@
         {
           "pr": "394",
           "commit": "03253f06",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3019,7 +3274,7 @@
         {
           "pr": "437",
           "commit": "b1bbb4f2",
-          "share": 0.96623,
+          "share": 0.979023,
           "forcing": [
             "engine source outside any attributed item",
             "manifest requirement"
@@ -3064,7 +3319,7 @@
         {
           "pr": "477",
           "commit": "88caf5fd",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution"
           ]
@@ -3248,7 +3503,7 @@
         {
           "pr": "543",
           "commit": "cb8228d2",
-          "share": 0.998777,
+          "share": 0.999281,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3275,7 +3530,7 @@
         {
           "pr": "556",
           "commit": "55df74af",
-          "share": 0.951672,
+          "share": 0.953772,
           "forcing": [
             "engine source",
             "engine source outside any attributed item"
@@ -3390,7 +3645,7 @@
         {
           "pr": "600",
           "commit": "bae70c28",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -3455,7 +3710,7 @@
         {
           "pr": "612",
           "commit": "7cf175e6",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3596,7 +3851,7 @@
         {
           "pr": "717",
           "commit": "bffe2c72",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3646,7 +3901,7 @@
         {
           "pr": "755",
           "commit": "e8b21d5c",
-          "share": 0.995055,
+          "share": 0.99556,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3688,7 +3943,7 @@
         {
           "pr": "776",
           "commit": "1a47dc37",
-          "share": 0.995055,
+          "share": 0.99556,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3754,7 +4009,7 @@
         {
           "pr": "813",
           "commit": "b5eb5154",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -3853,7 +4108,7 @@
         {
           "pr": "866",
           "commit": "cce8e7f8",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3906,7 +4161,7 @@
         {
           "pr": "875",
           "commit": "7681b6ed",
-          "share": 0.925967,
+          "share": 0.955313,
           "forcing": [
             "engine source outside any attributed item",
             "test fake"
@@ -3926,7 +4181,7 @@
         {
           "pr": "865",
           "commit": "4c236086",
-          "share": 0.98903,
+          "share": 0.996941,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -3944,7 +4199,7 @@
         {
           "pr": "886",
           "commit": "c1f8e4cf",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement",
@@ -3975,7 +4230,7 @@
         {
           "pr": "909",
           "commit": "ce8595d6",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source outside any attributed item",
             "lockfile resolution",
@@ -4140,8 +4395,8 @@
         },
         {
           "crate": "fake-oneagentgraph",
-          "suites": 243,
-          "linuxShare": 0.599537,
+          "suites": 306,
+          "linuxShare": 0.729826,
           "prs": 46
         },
         {
@@ -4158,8 +4413,8 @@
         },
         {
           "crate": "fake-gh",
-          "suites": 344,
-          "linuxShare": 0.747182,
+          "suites": 445,
+          "linuxShare": 0.926185,
           "prs": 38
         },
         {
@@ -4206,8 +4461,8 @@
         },
         {
           "crate": "test-fake-member",
-          "suites": 256,
-          "linuxShare": 0.646114,
+          "suites": 331,
+          "linuxShare": 0.803164,
           "prs": 29
         },
         {
@@ -4388,7 +4643,7 @@
           "tests": 2,
           "closure": 5,
           "linuxShare": 0.000504,
-          "skipped": 0.423611
+          "skipped": 0.326389
         },
         {
           "suite": "engine--branch-publication",
@@ -4412,7 +4667,7 @@
           "tests": 21,
           "closure": 17,
           "linuxShare": 0.008349,
-          "skipped": 0.166667
+          "skipped": 0.159722
         },
         {
           "suite": "engine--dispatch-cancellation",
@@ -4484,7 +4739,7 @@
           "tests": 3,
           "closure": 50,
           "linuxShare": 0.000567,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--edit-reconciler--dispatch_env_hook",
@@ -4676,7 +4931,7 @@
           "tests": 42,
           "closure": 2,
           "linuxShare": 0.010694,
-          "skipped": 0.180556
+          "skipped": 0.173611
         },
         {
           "suite": "engine--event-vocabulary",
@@ -4684,7 +4939,7 @@
           "tests": 4,
           "closure": 1,
           "linuxShare": 0.000452,
-          "skipped": 0.409722
+          "skipped": 0.402778
         },
         {
           "suite": "engine--home",
@@ -4700,7 +4955,7 @@
           "tests": 17,
           "closure": 26,
           "linuxShare": 0.002548,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--plan-edits",
@@ -4716,7 +4971,7 @@
           "tests": 1,
           "closure": 5,
           "linuxShare": 0.00024,
-          "skipped": 0.368056
+          "skipped": 0.347222
         },
         {
           "suite": "engine--plan-validation",
@@ -4732,7 +4987,7 @@
           "tests": 17,
           "closure": 8,
           "linuxShare": 0.002015,
-          "skipped": 0.270833
+          "skipped": 0.263889
         },
         {
           "suite": "engine--planner-notes",
@@ -4740,7 +4995,7 @@
           "tests": 16,
           "closure": 39,
           "linuxShare": 0.003493,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--pool-maintenance",
@@ -4756,7 +5011,7 @@
           "tests": 1,
           "closure": 2,
           "linuxShare": 0.0021,
-          "skipped": 0.444444
+          "skipped": 0.430556
         },
         {
           "suite": "engine--publication",
@@ -4764,7 +5019,7 @@
           "tests": 2,
           "closure": 36,
           "linuxShare": 0.000393,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--publication-boundary",
@@ -4780,7 +5035,7 @@
           "tests": 2,
           "closure": 21,
           "linuxShare": 0.000366,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--publication-host",
@@ -4804,7 +5059,7 @@
           "tests": 23,
           "closure": 31,
           "linuxShare": 0.00331,
-          "skipped": 0.131944
+          "skipped": 0.125
         },
         {
           "suite": "engine--render-cost",
@@ -4836,7 +5091,7 @@
           "tests": 52,
           "closure": 36,
           "linuxShare": 0.01281,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--run-paths",
@@ -4860,7 +5115,7 @@
           "tests": 34,
           "closure": 8,
           "linuxShare": 0.007167,
-          "skipped": 0.298611
+          "skipped": 0.284722
         },
         {
           "suite": "engine--run-report",
@@ -4868,7 +5123,7 @@
           "tests": 2,
           "closure": 17,
           "linuxShare": 0.000779,
-          "skipped": 0.173611
+          "skipped": 0.166667
         },
         {
           "suite": "engine--run-views--boundary",
@@ -4876,7 +5131,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000359,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--branch_template",
@@ -4884,7 +5139,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000444,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--channel",
@@ -4892,7 +5147,7 @@
           "tests": 7,
           "closure": 30,
           "linuxShare": 0.000691,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--closures",
@@ -4900,7 +5155,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--crossdag",
@@ -4908,7 +5163,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.001225,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--dispatch",
@@ -4916,7 +5171,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.001009,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--dispatch_env_hook",
@@ -4924,7 +5179,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000225,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--driver",
@@ -4932,7 +5187,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.000818,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--driver_exit",
@@ -4940,7 +5195,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.000953,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--holds",
@@ -4948,7 +5203,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000176,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal",
@@ -4956,7 +5211,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000277,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal_scaling",
@@ -4964,7 +5219,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--landing",
@@ -4972,7 +5227,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.001025,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--lifecycle",
@@ -4980,7 +5235,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.003011,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--linear_launch",
@@ -4988,7 +5243,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--listing",
@@ -4996,7 +5251,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.001825,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--loopcost",
@@ -5004,7 +5259,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.004856,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--plan",
@@ -5012,7 +5267,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000175,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--public_id",
@@ -5020,7 +5275,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--publication_boundary",
@@ -5028,7 +5283,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000105,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--publish_preserve",
@@ -5036,7 +5291,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.001006,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--readjust",
@@ -5052,7 +5307,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000413,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--rework",
@@ -5068,7 +5323,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000133,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--run_ending",
@@ -5076,7 +5331,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000146,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--scratch",
@@ -5084,7 +5339,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000186,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--shutdown",
@@ -5092,7 +5347,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000201,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--store",
@@ -5100,7 +5355,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.002115,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--summary",
@@ -5108,7 +5363,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.003811,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--turns",
@@ -5116,7 +5371,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000274,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--views",
@@ -5124,7 +5379,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.000547,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--wake_budget",
@@ -5132,7 +5387,7 @@
           "tests": 12,
           "closure": 30,
           "linuxShare": 0.002546,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--watch",
@@ -5140,7 +5395,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000427,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--withdrawn",
@@ -5148,7 +5403,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--scheduler--adoption",
@@ -5204,7 +5459,7 @@
           "tests": 2,
           "closure": 55,
           "linuxShare": 0.000378,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--scheduler--dispatch_env_hook",
@@ -5350,7 +5605,257 @@
           "linuxShare": 0.000405,
           "skipped": 0.222222
         }
-      ]
+      ],
+      "typical": {
+        "prs": 144,
+        "pr": "#778",
+        "share": 0.9988289886406901,
+        "typicalKinds": [
+          {
+            "kind": "lockfile resolution",
+            "share": 0.9838882479793517
+          },
+          {
+            "kind": "manifest requirement",
+            "share": 0.9838882479793517
+          },
+          {
+            "kind": "engine source",
+            "share": 0.9408053190866551
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "share": 0.6915931441702649
+          },
+          {
+            "kind": "document read whole",
+            "share": 0.08896510070795786
+          },
+          {
+            "kind": "test file outside one test",
+            "share": 0.036027760793518174
+          },
+          {
+            "kind": "other",
+            "share": 0
+          }
+        ],
+        "kinds": [
+          {
+            "kind": "other",
+            "prs": 135,
+            "median": 0
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "prs": 105,
+            "median": 0.937731968825534
+          },
+          {
+            "kind": "engine source",
+            "prs": 85,
+            "median": 0.9434739540504458
+          },
+          {
+            "kind": "test code",
+            "prs": 84,
+            "median": 0.020969884361205633
+          },
+          {
+            "kind": "test file outside one test",
+            "prs": 83,
+            "median": 0.11731844658553119
+          },
+          {
+            "kind": "document read whole",
+            "prs": 75,
+            "median": 0.107930325797516
+          },
+          {
+            "kind": "lockfile resolution",
+            "prs": 56,
+            "median": 0.9990410720067747
+          },
+          {
+            "kind": "manifest requirement",
+            "prs": 53,
+            "median": 0.9990410720067747
+          },
+          {
+            "kind": "test fake",
+            "prs": 42,
+            "median": 0.7298258001766768
+          },
+          {
+            "kind": "harness helper",
+            "prs": 32,
+            "median": 0.1907832471140289
+          },
+          {
+            "kind": "test configuration section",
+            "prs": 16,
+            "median": 1
+          },
+          {
+            "kind": "harness item outside one helper",
+            "prs": 14,
+            "median": 1
+          },
+          {
+            "kind": "workspace tooling",
+            "prs": 12,
+            "median": 1
+          }
+        ],
+        "universal": [
+          {
+            "crate": "run-projection",
+            "share": 0.9351253376176916,
+            "prs": 70
+          },
+          {
+            "crate": "run-result",
+            "share": 0.9248941480602773,
+            "prs": 63
+          },
+          {
+            "crate": "run-state",
+            "share": 0.9434739540504451,
+            "prs": 60
+          },
+          {
+            "crate": "plan-model",
+            "share": 0.9694209331755672,
+            "prs": 56
+          },
+          {
+            "crate": "plan-compat",
+            "share": 0.951487027430028,
+            "prs": 52
+          },
+          {
+            "crate": "plan-criteria",
+            "share": 0.9694209331755672,
+            "prs": 52
+          },
+          {
+            "crate": "plan-preservation",
+            "share": 0.951487027430028,
+            "prs": 52
+          },
+          {
+            "crate": "event-payloads",
+            "share": 0.9560500530384732,
+            "prs": 49
+          },
+          {
+            "crate": "plan-validation",
+            "share": 0.951487027430028,
+            "prs": 45
+          },
+          {
+            "crate": "event-vocabulary",
+            "share": 0.9565023131746606,
+            "prs": 43
+          },
+          {
+            "crate": "fake-gh",
+            "share": 0.9261850653569923,
+            "prs": 38
+          },
+          {
+            "crate": "readjust-state",
+            "share": 0.9434739540504451,
+            "prs": 38
+          },
+          {
+            "crate": "run-files",
+            "share": 0.9622551258080112,
+            "prs": 26
+          },
+          {
+            "crate": "run-report",
+            "share": 0.9248941480602773,
+            "prs": 26
+          },
+          {
+            "crate": "processes",
+            "share": 0.9343405610247209,
+            "prs": 25
+          },
+          {
+            "crate": "run-paths",
+            "share": 0.9630352555390489,
+            "prs": 24
+          },
+          {
+            "crate": "diagnostics",
+            "share": 0.970261551870927,
+            "prs": 23
+          },
+          {
+            "crate": "run-record",
+            "share": 0.9512937919978708,
+            "prs": 13
+          },
+          {
+            "crate": "journal-reader",
+            "share": 0.943907194488419,
+            "prs": 11
+          },
+          {
+            "crate": "branch-template",
+            "share": 0.9694209331755672,
+            "prs": 7
+          },
+          {
+            "crate": "test-fake-codec",
+            "share": 0.999999999999999,
+            "prs": 6
+          },
+          {
+            "crate": "test-containment",
+            "share": 0.999999999999999,
+            "prs": 5
+          },
+          {
+            "crate": "test-profile",
+            "share": 0.999999999999999,
+            "prs": 5
+          },
+          {
+            "crate": "append-stamp",
+            "share": 0.9241152058267545,
+            "prs": 2
+          },
+          {
+            "crate": "checkpoint",
+            "share": 0.9241152058267545,
+            "prs": 2
+          },
+          {
+            "crate": "render-cost",
+            "share": 0.9344473062558777,
+            "prs": 2
+          },
+          {
+            "crate": "run-labels",
+            "share": 0.9244514533048984,
+            "prs": 2
+          },
+          {
+            "crate": "run-summary",
+            "share": 0.9241152058267545,
+            "prs": 2
+          },
+          {
+            "crate": "yaml-codec",
+            "share": 0.9694209331755672,
+            "prs": 2
+          }
+        ],
+        "changingUniversal": 101
+      }
     },
     {
       "schema": 1,
@@ -5363,20 +5868,20 @@
       "suites": 468,
       "platforms": {
         "linux": {
-          "suiteSkip": 0.132434,
-          "secondsSkip": 0.12182
+          "suiteSkip": 0.131395,
+          "secondsSkip": 0.121056
         },
         "macos": {
-          "suiteSkip": 0.132434,
-          "secondsSkip": 0.120722
+          "suiteSkip": 0.131395,
+          "secondsSkip": 0.119971
         },
         "windows": {
-          "suiteSkip": 0.132434,
-          "secondsSkip": 0.120034
+          "suiteSkip": 0.131395,
+          "secondsSkip": 0.119312
         },
         "local": {
-          "suiteSkip": 0.132434,
-          "secondsSkip": 0.121144
+          "suiteSkip": 0.131395,
+          "secondsSkip": 0.120287
         }
       },
       "broad": 122,
@@ -5389,9 +5894,9 @@
         "lockfile resolution": 56,
         "manifest requirement": 53,
         "test configuration section": 16,
-        "several inputs together": 2,
-        "test file outside one test": 2,
-        "test fake": 1
+        "several inputs together": 1,
+        "test fake": 11,
+        "test file outside one test": 2
       },
       "sole": {
         "engine source outside any attributed item": 5,
@@ -5400,8 +5905,9 @@
         "manifest requirement": 1,
         "lockfile resolution": 2,
         "workspace tooling": 3,
-        "several inputs together": 2,
-        "test file outside one test": 1
+        "several inputs together": 1,
+        "test file outside one test": 1,
+        "test fake": 1
       },
       "lock": {
         "sibling": 40,
@@ -5412,30 +5918,30 @@
         "linux": {
           "today": 6474,
           "residual": 2971.176,
-          "median": 6468.87432,
+          "median": 6469.898153,
           "max": 6474,
           "over": 144,
-          "typicalShare": 0.998537
+          "typicalShare": 0.998829
         },
         "macos": {
           "today": 7890,
           "residual": 1665.584,
-          "median": 7883.03237,
+          "median": 7884.610045,
           "max": 7890,
           "over": 136,
-          "typicalShare": 0.998881
+          "typicalShare": 0.999134
         },
         "windows": {
           "today": 11759,
           "residual": 2629.335,
-          "median": 11754.033207,
+          "median": 11755.267636,
           "max": 11759,
           "over": 144,
-          "typicalShare": 0.999456
+          "typicalShare": 0.999591
         },
         "local": {
           "testPhase": 10293.5,
-          "median": 10265.577655,
+          "median": 10275.575586,
           "max": 10293.5
         }
       },
@@ -5550,7 +6056,7 @@
         {
           "pr": "350",
           "commit": "57fb8a3b",
-          "share": 0.99976,
+          "share": 1,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -5597,7 +6103,7 @@
         {
           "pr": "394",
           "commit": "03253f06",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -5696,7 +6202,7 @@
         {
           "pr": "437",
           "commit": "b1bbb4f2",
-          "share": 0.964741,
+          "share": 0.978868,
           "forcing": [
             "engine source outside any attributed item",
             "manifest requirement"
@@ -5741,7 +6247,7 @@
         {
           "pr": "477",
           "commit": "88caf5fd",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution"
           ]
@@ -5925,7 +6431,7 @@
         {
           "pr": "543",
           "commit": "cb8228d2",
-          "share": 0.998777,
+          "share": 0.999281,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -5952,7 +6458,7 @@
         {
           "pr": "556",
           "commit": "55df74af",
-          "share": 0.949361,
+          "share": 0.951461,
           "forcing": [
             "engine source",
             "engine source outside any attributed item"
@@ -6067,7 +6573,7 @@
         {
           "pr": "600",
           "commit": "bae70c28",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -6132,7 +6638,7 @@
         {
           "pr": "612",
           "commit": "7cf175e6",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6273,7 +6779,7 @@
         {
           "pr": "717",
           "commit": "bffe2c72",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6323,7 +6829,7 @@
         {
           "pr": "755",
           "commit": "e8b21d5c",
-          "share": 0.9949,
+          "share": 0.995405,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6365,7 +6871,7 @@
         {
           "pr": "776",
           "commit": "1a47dc37",
-          "share": 0.9949,
+          "share": 0.995405,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6431,7 +6937,7 @@
         {
           "pr": "813",
           "commit": "b5eb5154",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement"
@@ -6530,7 +7036,7 @@
         {
           "pr": "866",
           "commit": "cce8e7f8",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6583,7 +7089,7 @@
         {
           "pr": "875",
           "commit": "7681b6ed",
-          "share": 0.922599,
+          "share": 0.954233,
           "forcing": [
             "engine source outside any attributed item",
             "test fake"
@@ -6603,7 +7109,7 @@
         {
           "pr": "865",
           "commit": "4c236086",
-          "share": 0.98903,
+          "share": 0.996941,
           "forcing": [
             "engine source",
             "engine source outside any attributed item",
@@ -6621,7 +7127,7 @@
         {
           "pr": "886",
           "commit": "c1f8e4cf",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "lockfile resolution",
             "manifest requirement",
@@ -6652,7 +7158,7 @@
         {
           "pr": "909",
           "commit": "ce8595d6",
-          "share": 0.998537,
+          "share": 0.999041,
           "forcing": [
             "engine source outside any attributed item",
             "lockfile resolution",
@@ -6817,8 +7323,8 @@
         },
         {
           "crate": "fake-oneagentgraph",
-          "suites": 236,
-          "linuxShare": 0.584354,
+          "suites": 299,
+          "linuxShare": 0.721303,
           "prs": 46
         },
         {
@@ -6835,8 +7341,8 @@
         },
         {
           "crate": "fake-gh",
-          "suites": 337,
-          "linuxShare": 0.731999,
+          "suites": 438,
+          "linuxShare": 0.923252,
           "prs": 38
         },
         {
@@ -6883,8 +7389,8 @@
         },
         {
           "crate": "test-fake-member",
-          "suites": 249,
-          "linuxShare": 0.630931,
+          "suites": 324,
+          "linuxShare": 0.796495,
           "prs": 29
         },
         {
@@ -7065,7 +7571,7 @@
           "tests": 2,
           "closure": 5,
           "linuxShare": 0.000504,
-          "skipped": 0.423611
+          "skipped": 0.326389
         },
         {
           "suite": "engine--branch-publication",
@@ -7089,7 +7595,7 @@
           "tests": 24,
           "closure": 17,
           "linuxShare": 0.009262,
-          "skipped": 0.166667
+          "skipped": 0.159722
         },
         {
           "suite": "engine--dispatch-cancellation",
@@ -7161,7 +7667,7 @@
           "tests": 3,
           "closure": 50,
           "linuxShare": 0.000567,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--edit-reconciler--dispatch_env_hook",
@@ -7353,7 +7859,7 @@
           "tests": 47,
           "closure": 2,
           "linuxShare": 0.012027,
-          "skipped": 0.180556
+          "skipped": 0.173611
         },
         {
           "suite": "engine--event-vocabulary",
@@ -7361,7 +7867,7 @@
           "tests": 4,
           "closure": 1,
           "linuxShare": 0.000452,
-          "skipped": 0.409722
+          "skipped": 0.402778
         },
         {
           "suite": "engine--home",
@@ -7377,7 +7883,7 @@
           "tests": 19,
           "closure": 26,
           "linuxShare": 0.003041,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--plan-edits",
@@ -7393,7 +7899,7 @@
           "tests": 1,
           "closure": 5,
           "linuxShare": 0.00024,
-          "skipped": 0.368056
+          "skipped": 0.347222
         },
         {
           "suite": "engine--plan-validation",
@@ -7409,7 +7915,7 @@
           "tests": 18,
           "closure": 8,
           "linuxShare": 0.002462,
-          "skipped": 0.270833
+          "skipped": 0.263889
         },
         {
           "suite": "engine--planner-notes",
@@ -7417,7 +7923,7 @@
           "tests": 20,
           "closure": 39,
           "linuxShare": 0.004361,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--pool-maintenance",
@@ -7433,7 +7939,7 @@
           "tests": 1,
           "closure": 2,
           "linuxShare": 0.0021,
-          "skipped": 0.444444
+          "skipped": 0.430556
         },
         {
           "suite": "engine--publication",
@@ -7441,7 +7947,7 @@
           "tests": 2,
           "closure": 36,
           "linuxShare": 0.000393,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--publication-boundary",
@@ -7457,7 +7963,7 @@
           "tests": 2,
           "closure": 21,
           "linuxShare": 0.000366,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--publication-host",
@@ -7481,7 +7987,7 @@
           "tests": 23,
           "closure": 31,
           "linuxShare": 0.00331,
-          "skipped": 0.131944
+          "skipped": 0.125
         },
         {
           "suite": "engine--render-cost",
@@ -7513,7 +8019,7 @@
           "tests": 56,
           "closure": 36,
           "linuxShare": 0.01353,
-          "skipped": 0.118056
+          "skipped": 0.111111
         },
         {
           "suite": "engine--run-paths",
@@ -7537,7 +8043,7 @@
           "tests": 34,
           "closure": 8,
           "linuxShare": 0.007167,
-          "skipped": 0.298611
+          "skipped": 0.284722
         },
         {
           "suite": "engine--run-report",
@@ -7545,7 +8051,7 @@
           "tests": 2,
           "closure": 17,
           "linuxShare": 0.000779,
-          "skipped": 0.173611
+          "skipped": 0.166667
         },
         {
           "suite": "engine--run-views--boundary",
@@ -7553,7 +8059,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000359,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--branch_template",
@@ -7561,7 +8067,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000666,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--channel",
@@ -7569,7 +8075,7 @@
           "tests": 7,
           "closure": 30,
           "linuxShare": 0.000691,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--closures",
@@ -7577,7 +8083,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--crossdag",
@@ -7585,7 +8091,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.001585,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--dispatch",
@@ -7593,7 +8099,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.001009,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--dispatch_env_hook",
@@ -7601,7 +8107,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000225,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--driver",
@@ -7609,7 +8115,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.000981,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--driver_exit",
@@ -7617,7 +8123,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.000953,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--holds",
@@ -7625,7 +8131,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000352,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal",
@@ -7633,7 +8139,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000277,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--journal_scaling",
@@ -7641,7 +8147,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--landing",
@@ -7649,7 +8155,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.00205,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--lifecycle",
@@ -7657,7 +8163,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.003011,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--linear_launch",
@@ -7665,7 +8171,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--listing",
@@ -7673,7 +8179,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.001825,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--loopcost",
@@ -7681,7 +8187,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.004856,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--plan",
@@ -7689,7 +8195,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000175,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--public_id",
@@ -7697,7 +8203,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--publication_boundary",
@@ -7705,7 +8211,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000105,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--publish_preserve",
@@ -7713,7 +8219,7 @@
           "tests": 6,
           "closure": 30,
           "linuxShare": 0.001161,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--readjust",
@@ -7729,7 +8235,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000413,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--rework",
@@ -7745,7 +8251,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000266,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--run_ending",
@@ -7753,7 +8259,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000199,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--scratch",
@@ -7761,7 +8267,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000186,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--shutdown",
@@ -7769,7 +8275,7 @@
           "tests": 2,
           "closure": 30,
           "linuxShare": 0.000201,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--store",
@@ -7777,7 +8283,7 @@
           "tests": 5,
           "closure": 30,
           "linuxShare": 0.002115,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--summary",
@@ -7785,7 +8291,7 @@
           "tests": 8,
           "closure": 30,
           "linuxShare": 0.003811,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--turns",
@@ -7793,7 +8299,7 @@
           "tests": 1,
           "closure": 30,
           "linuxShare": 0.000274,
-          "skipped": 0.159722
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--views",
@@ -7801,7 +8307,7 @@
           "tests": 4,
           "closure": 30,
           "linuxShare": 0.000547,
-          "skipped": 0.152778
+          "skipped": 0.145833
         },
         {
           "suite": "engine--run-views--wake_budget",
@@ -7809,7 +8315,7 @@
           "tests": 12,
           "closure": 30,
           "linuxShare": 0.002546,
-          "skipped": 0.145833
+          "skipped": 0.138889
         },
         {
           "suite": "engine--run-views--watch",
@@ -7817,7 +8323,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0.000427,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--run-views--withdrawn",
@@ -7825,7 +8331,7 @@
           "tests": 3,
           "closure": 30,
           "linuxShare": 0,
-          "skipped": 0.159722
+          "skipped": 0.152778
         },
         {
           "suite": "engine--scheduler--adoption",
@@ -7881,7 +8387,7 @@
           "tests": 2,
           "closure": 55,
           "linuxShare": 0.000378,
-          "skipped": 0.111111
+          "skipped": 0.104167
         },
         {
           "suite": "engine--scheduler--dispatch_env_hook",
@@ -8027,7 +8533,257 @@
           "linuxShare": 0.000405,
           "skipped": 0.222222
         }
-      ]
+      ],
+      "typical": {
+        "prs": 144,
+        "pr": "#778",
+        "share": 0.9988289886406899,
+        "typicalKinds": [
+          {
+            "kind": "lockfile resolution",
+            "share": 0.9838882479793516
+          },
+          {
+            "kind": "manifest requirement",
+            "share": 0.9838882479793516
+          },
+          {
+            "kind": "engine source",
+            "share": 0.9379570242451416
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "share": 0.6819709656009618
+          },
+          {
+            "kind": "document read whole",
+            "share": 0.09186122095934737
+          },
+          {
+            "kind": "test file outside one test",
+            "share": 0.03602776079351817
+          },
+          {
+            "kind": "other",
+            "share": 0
+          }
+        ],
+        "kinds": [
+          {
+            "kind": "other",
+            "prs": 135,
+            "median": 0
+          },
+          {
+            "kind": "engine source outside any attributed item",
+            "prs": 105,
+            "median": 0.9348836739840205
+          },
+          {
+            "kind": "engine source",
+            "prs": 85,
+            "median": 0.9415388427155019
+          },
+          {
+            "kind": "test code",
+            "prs": 84,
+            "median": 0.020992367536757397
+          },
+          {
+            "kind": "test file outside one test",
+            "prs": 83,
+            "median": 0.11963309839996061
+          },
+          {
+            "kind": "document read whole",
+            "prs": 75,
+            "median": 0.10910402624780821
+          },
+          {
+            "kind": "lockfile resolution",
+            "prs": 56,
+            "median": 0.9990410720067747
+          },
+          {
+            "kind": "manifest requirement",
+            "prs": 53,
+            "median": 0.9990410720067747
+          },
+          {
+            "kind": "test fake",
+            "prs": 42,
+            "median": 0.721303372689605
+          },
+          {
+            "kind": "harness helper",
+            "prs": 32,
+            "median": 0.19158535975834165
+          },
+          {
+            "kind": "test configuration section",
+            "prs": 16,
+            "median": 1
+          },
+          {
+            "kind": "harness item outside one helper",
+            "prs": 14,
+            "median": 1
+          },
+          {
+            "kind": "workspace tooling",
+            "prs": 12,
+            "median": 1
+          }
+        ],
+        "universal": [
+          {
+            "crate": "run-projection",
+            "share": 0.9322770427761781,
+            "prs": 70
+          },
+          {
+            "crate": "run-result",
+            "share": 0.9220458532187639,
+            "prs": 63
+          },
+          {
+            "crate": "run-state",
+            "share": 0.941538842715501,
+            "prs": 60
+          },
+          {
+            "crate": "plan-model",
+            "share": 0.9679327285417332,
+            "prs": 56
+          },
+          {
+            "crate": "plan-compat",
+            "share": 0.9495519160950842,
+            "prs": 52
+          },
+          {
+            "crate": "plan-criteria",
+            "share": 0.9679327285417332,
+            "prs": 52
+          },
+          {
+            "crate": "plan-preservation",
+            "share": 0.9495519160950842,
+            "prs": 52
+          },
+          {
+            "crate": "event-payloads",
+            "share": 0.9554482955250602,
+            "prs": 49
+          },
+          {
+            "crate": "plan-validation",
+            "share": 0.9495519160950842,
+            "prs": 45
+          },
+          {
+            "crate": "event-vocabulary",
+            "share": 0.9559005556612477,
+            "prs": 43
+          },
+          {
+            "crate": "fake-gh",
+            "share": 0.923251740917847,
+            "prs": 38
+          },
+          {
+            "crate": "readjust-state",
+            "share": 0.941538842715501,
+            "prs": 38
+          },
+          {
+            "crate": "run-files",
+            "share": 0.9607669211741773,
+            "prs": 26
+          },
+          {
+            "crate": "run-report",
+            "share": 0.9220458532187639,
+            "prs": 26
+          },
+          {
+            "crate": "processes",
+            "share": 0.9314922661832074,
+            "prs": 25
+          },
+          {
+            "crate": "run-paths",
+            "share": 0.961547050905215,
+            "prs": 24
+          },
+          {
+            "crate": "diagnostics",
+            "share": 0.968773347237093,
+            "prs": 23
+          },
+          {
+            "crate": "run-record",
+            "share": 0.9493586806629268,
+            "prs": 13
+          },
+          {
+            "crate": "journal-reader",
+            "share": 0.9419720831534751,
+            "prs": 11
+          },
+          {
+            "crate": "branch-template",
+            "share": 0.9679327285417332,
+            "prs": 7
+          },
+          {
+            "crate": "test-fake-codec",
+            "share": 0.9999999999999991,
+            "prs": 6
+          },
+          {
+            "crate": "test-containment",
+            "share": 0.9999999999999991,
+            "prs": 5
+          },
+          {
+            "crate": "test-profile",
+            "share": 0.9999999999999991,
+            "prs": 5
+          },
+          {
+            "crate": "append-stamp",
+            "share": 0.9212669109852412,
+            "prs": 2
+          },
+          {
+            "crate": "checkpoint",
+            "share": 0.9212669109852412,
+            "prs": 2
+          },
+          {
+            "crate": "render-cost",
+            "share": 0.9315990114143642,
+            "prs": 2
+          },
+          {
+            "crate": "run-labels",
+            "share": 0.921603158463385,
+            "prs": 2
+          },
+          {
+            "crate": "run-summary",
+            "share": 0.9212669109852412,
+            "prs": 2
+          },
+          {
+            "crate": "yaml-codec",
+            "share": 0.9679327285417332,
+            "prs": 2
+          }
+        ],
+        "changingUniversal": 101
+      }
     }
   ]
 }

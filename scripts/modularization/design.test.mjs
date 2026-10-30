@@ -4409,6 +4409,12 @@ test("split replay CLI replays crates and test split on the 144 PRs and renders 
       splitAppendix(evidence, targetDoc),
     );
     assert.match(doc, /\| linux \| 6\.61% \| 2\.55% \| 13\.52% \| 6\.39% \|/);
+    // The decision summary names what the typical PR changed and the crates nearly every suite reaches.
+    assert.match(
+      doc,
+      /### Why a typical PR still selects nearly every second\n\n\*\*Projected\*\* \(replay model\): the typical \(median\) PR, #\d+, selects [\d.]+%/,
+    );
+    assert.match(doc, /\| plan-model \| [\d.]+% \| \d+ \|/);
     const renderer = resolve("scripts/modularization/split-report.mjs");
     const render = () =>
       spawnSync(process.execPath, [renderer, output], { cwd: root, encoding: "utf8" });
@@ -4691,6 +4697,14 @@ test("engine split attributes assertions to the crates naming their literals in 
   refused((copy) => {
     copy.moved[movedId].suite = "cmd-start--lifecycle";
   }, /not its crate's suite/);
+  // A fixture asserted against a crate its engine crate does not reach would go unrechecked on the
+  // pull requests changing that crate.
+  refused((copy) => {
+    copy.moved[movedId].assertedCrates = [...copy.moved[movedId].assertedCrates, "cmd-start"];
+  }, /against crates outside .*'s closure/);
+  refused((copy) => {
+    copy.moved[movedId].assertedCrates = [];
+  }, /against crates outside/);
   refused((copy) => {
     copy.moved["views::no_such_test"] = copy.moved[movedId];
   }, /unknown test views::no_such_test/);
@@ -4773,6 +4787,13 @@ test("engine replay CLI replays each re-homing step on the 144 PRs and renders f
         );
     }
     const doc = readFileSync("docs/modularization-engine-tests.md", "utf8");
+    // The document says where each fixture is re-verified and names the crates left without a journey.
+    assert.match(
+      doc,
+      /## Where the recorded fixtures are re-verified\n\nEach of the \d+ re-homed test phases has a recorder/,
+    );
+    assert.match(doc, /^\| dispatch-cancellation \| driver::/m);
+    assert.match(doc, /### Why a typical PR still selects nearly every second/);
     const [prefix] = doc.split(ENGINE_MARKER);
     assert.equal(
       doc,

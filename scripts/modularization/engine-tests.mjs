@@ -12,6 +12,8 @@
 // engine crate's closure contains everything it asserts. As in the test split, an engine crate's
 // tests holding more than THRESHOLD of a full Linux run's estimated seconds run as one suite per
 // source module.
+// Each moved test lists the crates it asserts, all of which its engine crate reaches, so the recorder
+// that re-checks its fixture in the engine suite runs whenever a change reaches one of them.
 import { readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { codeOnly } from "./graph.mjs";
@@ -228,6 +230,7 @@ export function deriveEngineSplit(catalog, layout) {
           suite: `engine--${crate}`,
           crateTest: `${crate}/tests/${module}.rs::${name}`,
           fixture: `tests/recorded/engine/${crate}/${module}/${name}/`,
+          assertedCrates: [...asserted].sort(),
           evidence,
         };
       }
@@ -315,6 +318,25 @@ export function checkEngineSplit(text, catalog, layout) {
         /^engine--([a-z][a-z0-9-]*?)(?:--([a-z][a-z0-9_]*))?$/.exec(entry.suite ?? "") ?? [];
       if (crate !== entry.crate || (module !== undefined && module !== id.split("::")[0]))
         throw new Error(`engine split runs ${id} in ${entry.suite}, not its crate's suite`);
+      // The recorder in the engine suite re-checks the fixture on every change reaching a crate the
+      // test asserts only if the engine crate reaches all of them.
+      const reached = new Set();
+      const reach = (name) => {
+        if (reached.has(name)) return;
+        reached.add(name);
+        for (const dep of layout.crates[name]?.deps ?? []) reach(dep);
+      };
+      reach(entry.crate);
+      if (
+        !Array.isArray(entry.assertedCrates) ||
+        !entry.assertedCrates.length ||
+        entry.assertedCrates.some(
+          (asserted) => typeof asserted !== "string" || !reached.has(asserted),
+        )
+      )
+        throw new Error(
+          `engine split asserts ${id} against crates outside ${entry.crate}'s closure`,
+        );
       engineOf.set(id, { crate: entry.crate, suite: entry.suite });
     }
   for (const [id, test] of Object.entries(catalog.tests))
