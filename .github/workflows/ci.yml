@@ -117,14 +117,17 @@ jobs:
           tool: just,nextest,cargo-deny,cargo-machete
       # The pinned-wheel channel journeys resolve uv and the wheel first.
       - uses: astral-sh/setup-uv@v6
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential] the
       # pinned-wheel channel journeys are placed in `lint` by the plan that made these
       # four jobs, and they stay what they were: their project's own uncached
       # `release-compat` target, reached by no `check`. The `release-compat` job ran
-      # them on `changes.outputs.crate`, which is this same affected answer.
+      # them on `changes.outputs.crate`, which is this same affected answer. They have
+      # no credential to require — what they reach is PyPI's public copy of one pinned
+      # wheel, read anonymously — and they resolve uv and the wheel first, failing
+      # naming whichever is missing, so this step cannot pass having run none of them.
       - name: Formatting, lints, MSRV, audit and the pinned-wheel journeys (affected projects)
         run: just ci-lint
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
       # engine-currency.yml's check: whether the lock still resolves the sibling
       # engines the manifest permits. Advisory here as it is there — its answer
       # moves when the registry does, not when this tree does, so a release

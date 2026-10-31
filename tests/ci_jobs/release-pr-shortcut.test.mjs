@@ -435,6 +435,83 @@ describe("the release pull request's shortcut", () => {
     );
   });
 
+  it("runs them for a path dependency outside the workspace re-versioned", (t) => {
+    const outside = (version) =>
+      `${LOCK(version === "0.1.0" ? "0.1.0" : "0.2.0")}\n[[package]]\nname = "outside"\nversion = "${version}"\n`;
+    const repo = scratch(t, { "Cargo.lock": outside("0.1.0") });
+    commitAll(repo.work, { ...RELEASE, "Cargo.lock": outside("0.2.0") }, "chore: release v0.2.0");
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(
+      result.stderr,
+      /Cargo\.lock line \d+ is a version under \[package\], not this workspace's own package/,
+    );
+  });
+
+  it("passes no base on a CI run of another workflow, commit or conclusion", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    answers(repo.fake, {
+      [`repos/${REPO}/actions/runs?head_sha=${repo.base}&status=success&per_page=100`]: {
+        workflow_runs: [
+          { path: ".github/workflows/visual-docs.yml", conclusion: "success", head_sha: repo.base },
+          { path: ".github/workflows/ci.yml", conclusion: "success", head_sha: "f".repeat(40) },
+          { path: ".github/workflows/ci.yml", conclusion: "failure", head_sha: repo.base },
+        ],
+      },
+      [`repos/${REPO}/commits/${repo.base}/pulls`]: [],
+    });
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /no record that main passed/);
+  });
+
+  // The merged pull request's answers, each malformed or missing in turn.
+  const PULL = { number: 12, merge_commit_sha: null, head: { sha: "a".repeat(40) } };
+  for (const [what, broken, reason] of [
+    [
+      "a pull list that is not a list",
+      { pulls: { not: "a list" } },
+      /in a shape this does not read/,
+    ],
+    ["a pull list GitHub does not serve", { pulls: undefined }, /GitHub did not answer/],
+    [
+      "a head commit with no tree",
+      { commit: { sha: "a".repeat(40) } },
+      /in a shape this does not read/,
+    ],
+    [
+      "check runs that are not a list",
+      { checks: { check_runs: "none" } },
+      /in a shape this does not read/,
+    ],
+  ]) {
+    it(`runs them when GitHub answers ${what}`, (t) => {
+      const repo = scratch(t);
+      commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+      const tree = git(repo.work, "rev-parse", `${repo.base}^{tree}`);
+      const parts = {
+        pulls: [{ ...PULL, merge_commit_sha: repo.base }],
+        commit: { tree: { sha: tree } },
+        checks: { check_runs: [{ name: "test-linux", conclusion: "success" }] },
+        ...broken,
+      };
+      const routes = {
+        ...noRuns(repo.base),
+        [`repos/${REPO}/git/commits/${PULL.head.sha}`]: parts.commit,
+        [`repos/${REPO}/commits/${PULL.head.sha}/check-runs?per_page=100`]: parts.checks,
+      };
+      if (parts.pulls !== undefined)
+        routes[`repos/${REPO}/commits/${repo.base}/pulls`] = parts.pulls;
+      answers(repo.fake, routes);
+      const result = shortcut(repo);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "skip=false\n", result.stderr);
+      assert.match(result.stderr, reason);
+    });
+  }
+
   it("runs them when GitHub answers in a shape it does not read", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
