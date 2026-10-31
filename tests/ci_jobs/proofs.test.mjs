@@ -9,7 +9,8 @@
 // a proof does once it gets past them is what the jobs themselves run, on every
 // pull request that reaches the crate.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { commit, root, run, scratchWorkspace } from "./support.mjs";
@@ -65,6 +66,40 @@ describe("the visual-docs capture's refusals", () => {
       const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], { SHOTS_OUT: out });
       assert.equal(status, 2, log);
       assert.match(log, /is not a directory under shots\//);
+    });
+  }
+
+  it("fails the wait for a capture it started in the background when a lane fails", (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "ci-capture-lanes-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const started = run(root, "bash", ["screenshots/ci-capture-lanes.sh", "start", dir], {
+      SHOTS_LANES: "../escape shots/verify/x86_64",
+    });
+    assert.equal(started.status, 0, started.log);
+    assert.match(started.log, /capturing \.\.\/escape shots\/verify\/x86_64 in the background/);
+    const waited = run(root, "bash", ["screenshots/ci-capture-lanes.sh", "wait", dir]);
+    assert.equal(waited.status, 2, waited.log);
+    assert.match(waited.log, /SHOTS_OUT='\.\.\/escape' is not a directory under shots\//);
+    assert.match(waited.log, /the capture failed \(exit 2\)/);
+    assert.equal(readFileSync(join(dir, "capture.exit"), "utf8").trim(), "2");
+  });
+
+  for (const [what, args, env, refusal] of [
+    ["a wait for a capture never started", ["wait"], {}, /no capture was started/],
+    ["a start that names no lane", ["start"], { SHOTS_LANES: "" }, /SHOTS_LANES names no lane/],
+    ["a mode it does not have", ["resume"], {}, /is not a mode/],
+  ]) {
+    it(`refuses ${what}`, (t) => {
+      const dir = mkdtempSync(join(tmpdir(), "ci-capture-lanes-"));
+      t.after(() => rmSync(dir, { recursive: true, force: true }));
+      const { status, log } = run(
+        root,
+        "bash",
+        ["screenshots/ci-capture-lanes.sh", ...args, dir],
+        env,
+      );
+      assert.equal(status, 2, log);
+      assert.match(log, refusal);
     });
   }
 

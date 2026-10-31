@@ -142,19 +142,22 @@ describe("the judged lint", () => {
 describe("the visual docs", () => {
   it("are captured, judged and given every publishing step as steps of `lint`", () => {
     const lint = steps(ci.jobs.lint);
-    const captures = lint.filter((step) => runs(step).includes("screenshots/ci-capture.sh"));
+    const captures = lint.filter((step) =>
+      runs(step).startsWith("bash screenshots/ci-capture-lanes.sh start "),
+    );
     assert.equal(captures.length, 1, "`lint` does not start the capture exactly once");
-    for (const lane of ["SHOTS_OUT=shots/current/x86_64", "SHOTS_OUT=shots/verify/x86_64"]) {
-      assert.ok(
-        runs(captures[0]).includes(lane),
-        `\`lint\` does not capture ${lane}, which the reproducibility gate compares`,
-      );
-    }
+    assert.deepEqual(
+      String(captures[0].env?.SHOTS_LANES).split(" "),
+      ["shots/current/x86_64", "shots/verify/x86_64"],
+      "`lint` does not capture both lanes the reproducibility gate compares",
+    );
     const started = lint.indexOf(captures[0]);
     const judged = lint.findIndex((step) =>
       uses(step).startsWith("nickderobertis/screencomp/visual-docs@"),
     );
-    const waited = lint.findIndex((step) => /until \[ -f "\$RUNNER_TEMP\/capture\.exit" \]/.test(runs(step)));
+    const waited = lint.findIndex((step) =>
+      runs(step).startsWith("bash screenshots/ci-capture-lanes.sh wait "),
+    );
     assert.ok(
       started < waited && waited < judged,
       "`lint` judges the capture before waiting for it",
@@ -168,7 +171,7 @@ describe("the visual docs", () => {
     for (const [id, job] of Object.entries(ci.jobs)) {
       if (id === "lint") continue;
       assert.ok(
-        !steps(job).some((step) => runs(step).includes("screenshots/ci-capture.sh")),
+        !steps(job).some((step) => runs(step).includes("screenshots/ci-capture")),
         `ci.yml's \`${id}\` captures the visual docs, which is \`lint\`'s`,
       );
     }
@@ -233,10 +236,11 @@ describe("the visual docs", () => {
         gallery_title: title,
       },
     ]);
-    const capture = lint.find((step) => runs(step).includes("screenshots/ci-capture.sh"));
-    for (const out of [`${current}/${arch}`, `${verify}/${arch}`]) {
-      assert.ok(runs(capture).includes(`SHOTS_OUT=${out} `), `the capture does not write ${out}`);
-    }
+    const capture = lint.find((step) => step.env?.SHOTS_LANES !== undefined);
+    assert.deepEqual(capture.env.SHOTS_LANES.split(" "), [
+      `${current}/${arch}`,
+      `${verify}/${arch}`,
+    ]);
   });
 
   it("are judged by the screencomp release visual-docs.yml pins", () => {

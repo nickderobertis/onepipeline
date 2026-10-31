@@ -33,6 +33,7 @@
         "{workspaceRoot}/scripts/install-proof.sh",
         "{workspaceRoot}/scripts/warm-rust-cache.sh",
         "{workspaceRoot}/screenshots/ci-capture.sh",
+        "{workspaceRoot}/screenshots/ci-capture-lanes.sh",
         "{workspaceRoot}/.github/workflows/visual-docs.yml",
         "{workspaceRoot}/.github/workflows/ci.yml",
         "{workspaceRoot}/README.md",

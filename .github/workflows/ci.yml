@@ -81,16 +81,13 @@ jobs:
           persist-credentials: false
       # The capture builds release binaries in a container for most of this
       # job's length, so it starts first and runs beside the checks below, from
-      # its own clone of HEAD (screenshots/ci-capture.sh); the step that judges
-      # it waits for it. Both lanes, one after the other: the second reuses the
-      # first's build, for the reproducibility gate.
+      # its own clone of HEAD (screenshots/ci-capture-lanes.sh); the step that
+      # judges it waits for it. Both lanes, one after the other: the second reuses
+      # the first's build, for the reproducibility gate.
       - name: Start the visual docs capture beside the checks
-        run: |
-          nohup bash -c '
-            { SHOTS_OUT=shots/current/x86_64 bash screenshots/ci-capture.sh \
-              && SHOTS_OUT=shots/verify/x86_64 bash screenshots/ci-capture.sh; } > "$RUNNER_TEMP/capture.log" 2>&1
-            echo $? > "$RUNNER_TEMP/capture.exit"
-          ' > /dev/null 2>&1 &
+        env:
+          SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
+        run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
       # rust-cache keys on the OS, every installed toolchain and every Cargo
       # manifest and lockfile; restored only. Before the MSRV toolchain is
       # installed, so the key is the one `rust-cache-warm.yml` saves from main
@@ -180,10 +177,7 @@ jobs:
       # one capture command; started at the top of this job.
       - name: Wait for the visual docs capture
         if: ${{ !cancelled() }}
-        run: |
-          until [ -f "$RUNNER_TEMP/capture.exit" ]; do sleep 5; done
-          cat "$RUNNER_TEMP/capture.log"
-          exit "$(cat "$RUNNER_TEMP/capture.exit")"
+        run: bash screenshots/ci-capture-lanes.sh wait "$RUNNER_TEMP"
       - uses: nickderobertis/screencomp@v0
         if: ${{ !cancelled() }}
         with:
