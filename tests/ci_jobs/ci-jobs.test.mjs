@@ -81,7 +81,8 @@ describe("the Linux recipes run what they select and nothing else", () => {
       assert.deepEqual(ran(log), expected, log);
       if (recipe === "ci-test-linux") {
         // The project's own suite ran, rather than a runner that skipped it.
-        assert.match(log, /^ℹ pass [1-9]/m, log);
+        // Either of node's reporters: spec at a terminal here, TAP on a runner.
+        assert.match(log, /^(ℹ|#) pass [1-9]/m, log);
       }
       for (const project of UNREACHED) {
         assert.ok(!ran(log).some((task) => task.startsWith(`${project}:`)), `${project} ran`);
@@ -97,6 +98,22 @@ describe("the Linux recipes run what they select and nothing else", () => {
       assert.deepEqual(ran(log), [], log);
     });
   }
+
+  it("ci-test-linux hands its tasks none of the Nx wrapper's own switches", (t) => {
+    // A suite that drives Nx itself, as the npm suite does, must meet the
+    // wrapper as a developer does, not switched by the recipe that started it.
+    const dir = scratchWorkspace(t);
+    commit(
+      dir,
+      "pool-maintenance/env.test.mjs",
+      'import assert from "node:assert/strict";\nimport { it } from "node:test";\n\nit("inherits no wrapper switch", () => assert.equal(process.env.ONEPIPELINE_NX_SHOW_OUTPUT, undefined));\n',
+    );
+    const { status, log } = run(dir, "just", ["ci-test-linux"], {
+      ONEPIPELINE_NX_BASE_REF: "main",
+    });
+    assert.equal(status, 0, log);
+    assert.deepEqual(ran(log), ["pool-maintenance:test"], log);
+  });
 
   it("ci-test-linux exits non-zero when a selected target fails", (t) => {
     const dir = scratchWorkspace(t);

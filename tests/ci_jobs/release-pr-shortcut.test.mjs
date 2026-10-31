@@ -115,6 +115,8 @@ function shortcut({ work, fake }, args = ["--repo", REPO, "--base-ref", "main"],
     env: {
       ...process.env,
       CI: "",
+      // A runner names its own repository; these cases name theirs.
+      GITHUB_REPOSITORY: "",
       PATH: `${join(fake, "bin")}:${process.env.PATH}`,
       FAKE_GH_DIR: fake,
       ...env,

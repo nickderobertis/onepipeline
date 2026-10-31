@@ -47,6 +47,15 @@ platform="$(uname -s)/$(uname -m)"
 
 # The root an install writes into, emptied first so the smoke can only find what
 # this run installed.
+installed_into() {
+  [ -x "$1/bin/onepipeline" ] || [ -x "$1/bin/onepipeline.exe" ] || {
+    echo "install-proof: cargo reported success but $1/bin holds no onepipeline; the root holds:" >&2
+    ls -laR "$1" >&2 || true
+    echo "ACTION: compare where cargo installed (its output above, without --quiet) with $1/bin" >&2
+    exit 1
+  }
+}
+
 fresh_root() {
   local root="$ROOT/target/install-proof/$1"
   rm -rf -- "$root"
@@ -71,7 +80,8 @@ case "${1:-}" in
     # On a pull request the change is not on the registry yet, so `--path .` is
     # the only way to install *this* revision; it is the code path of the
     # documented `cargo install onepipeline`, less the registry fetch.
-    cargo install --path . --locked --quiet --root "$(native "$root")"
+    cargo install --path . --locked --root "$(native "$root")"
+    installed_into "$root"
     PATH="$root/bin:$PATH" bash scripts/smoke-published.sh --label "cargo install on $platform"
     # The `host-view-time` budget times the binary users run, and this is the
     # build of it from this revision, so it is measured against that very binary
@@ -104,6 +114,7 @@ case "${1:-}" in
     # The root is cargo's environment rather than an added argument, so the argv
     # run is exactly the README's.
     CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
+    installed_into "$root"
     # A `--git` install with no revision resolves the remote's default branch, so
     # the smoke is the installed revision's own copy of the assertions rather
     # than this checkout's: they assert the binary's whole command list, which a
