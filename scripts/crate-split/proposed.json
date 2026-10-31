@@ -200,7 +200,8 @@
         "tests/e2e/stacked_drafts.rs",
         "tests/golden/review-results-v2.json",
         "tests/e2e/private_github_home.rs",
-        "tests/e2e/github_world.py"
+        "tests/e2e/github_world.py",
+        "tests/e2e/github_create_retry.rs"
       ],
       "crates": [
         "onepipeline"
@@ -228,7 +229,8 @@
         "linear_loopback",
         "linear_launch",
         "withdrawn",
-        "private_github_home"
+        "private_github_home",
+        "github_create_retry"
       ]
     },
     "e2e-views": {
