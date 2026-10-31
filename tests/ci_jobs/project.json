@@ -1,0 +1,43 @@
+{
+  "name": "onepipeline-ci-jobs",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/ci_jobs",
+  "tags": ["scope:tests", "lang:js"],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "executor": "nx:noop"
+    },
+    "format": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format --write tests/ci_jobs"
+    },
+    "format-check": {
+      "command": "node node_modules/@biomejs/biome/bin/biome format tests/ci_jobs"
+    },
+    "lint": {
+      "command": "node node_modules/@biomejs/biome/bin/biome lint tests/ci_jobs"
+    },
+    "test": {
+      "command": "node --test tests/ci_jobs/*.test.mjs",
+      "//": "ci.yml's four job recipes and the release pull request's shortcut, driven over scratch copies of this workspace. Keyed on everything the recipes read to select and run: a project declaration or the Nx configuration changes what they select.",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/scripts/ci-job.sh",
+        "{workspaceRoot}/scripts/ci-job-tasks.mjs",
+        "{workspaceRoot}/scripts/nx.sh",
+        "{workspaceRoot}/scripts/nx-affected.sh",
+        "{workspaceRoot}/scripts/release-pr-shortcut.mjs",
+        "{workspaceRoot}/**/project.json",
+        "{workspaceRoot}/biome.json",
+        "sharedGlobals"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

@@ -26,6 +26,480 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # One lint job and one test job per platform. Each of the four runs its checks
+  # through one recipe of its own — `just ci-lint`, `ci-test-linux`,
+  # `ci-test-windows`, `ci-test-macos`, all of them `scripts/ci-job.sh` — as one
+  # Nx invocation scoped to the projects the diff reaches, so a job's checks run
+  # side by side rather than one after another, and a pull request touching
+  # nothing a platform tests finishes that job quickly. None waits on another: a
+  # pull request's wait is its slowest job, and every runner slot is one of the
+  # account-wide limit all repositories share. `.github/ci-shape/` holds the
+  # four to this shape.
+  #
+  # The jobs below the four are what branch protection still names; they stay,
+  # passing, until protection moves to these.
+  #
+  # Rust caches: each test job restores the build `rust-cache-warm.yml` saves on
+  # `main` under the job's own key, and no pull-request run saves one, so the
+  # repository's Actions cache holds main's builds rather than one per branch.
+
+  # What does not depend on the platform it runs on: formatting, lints, the JS
+  # syntax check, the MSRV floor, the dependency audit, the pinned-wheel channel
+  # journeys, the judged lint, the engine-currency check, the PR title, the
+  # suppressions comment and the visual docs.
+  lint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # llmlint: ignore-block[least_privilege_grants] what the visual docs' composite
+    # actions need, granted here because they are steps of this job rather than
+    # screencomp's reusable workflow: the gallery deploy writes contents, the
+    # sticky comment and notignored's comment write the pull request, and the
+    # Pages build screencomp gates on is read. `permissions` takes literals only,
+    # so a narrower grant per step is not something GitHub offers.
+    permissions:
+      contents: write
+      pull-requests: write
+      pages: read
+    # llmlint: ignore-end[least_privilege_grants]
+    env:
+      # The one switch for the visual docs' side effects: the sticky comment and
+      # the /pr-<n>/ preview deploy. Off while visual-docs.yml still captures,
+      # comments and deploys on pull requests, because two deploys per push race
+      # the Pages build screencomp gates on. The change that removes that
+      # workflow's pull_request trigger turns it on. The capture, the
+      # reproducibility gate, classify and the gallery build run either way.
+      VISUAL_DOCS_PUBLISH: "false"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge base for affected selection, notignored's scan and the
+          # judge's diff.
+          fetch-depth: 0
+          # This job's token can write, and the judge runs harness agents over
+          # the checkout: no credential is left in it for them to find.
+          persist-credentials: false
+      - name: Read the MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
+          [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # rust-cache keys on the OS, every installed toolchain and every Cargo
+      # manifest and lockfile; restored only, from main's warm run.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: lint
+          save-if: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-deny,cargo-machete
+      # The pinned-wheel channel journeys resolve uv and the wheel first.
+      - uses: astral-sh/setup-uv@v6
+      - name: Formatting, lints, MSRV, audit and the pinned-wheel journeys (affected projects)
+        run: just ci-lint
+      # engine-currency.yml's check: whether the lock still resolves the sibling
+      # engines the manifest permits. Advisory here as it is there — its answer
+      # moves when the registry does, not when this tree does, so a release
+      # nobody here made must not fail an unrelated pull request (AGENTS.md).
+      - name: Engine currency (advisory)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: just engines-current
+      # The judged tier, as the `llmlint` job below runs it and for its reasons:
+      # pinned harnesses, the fallback installed and credentialled, and a missing
+      # credential failing rather than reporting unlinted files as clean.
+      - name: Install the Codex harness
+        if: ${{ !cancelled() }}
+        run: npm install -g @openai/codex@0.145.0
+      - name: Install the Claude Code harness (oneharness fallback)
+        if: ${{ !cancelled() }}
+        run: npm install -g @anthropic-ai/claude-code@2.1.220
+      - name: Install llmlint toolchain
+        if: ${{ !cancelled() }}
+        run: just setup-llmlint
+      - name: Validate llmlint config
+        if: ${{ !cancelled() }}
+        run: just lint-llm-validate --diff-base origin/main
+      - name: Lint changed files
+        if: ${{ !cancelled() }}
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::error::llmlint needs OPENAI_API_KEY for the Codex harness" >&2
+            exit 1
+          fi
+          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+            echo "::error::llmlint needs CLAUDE_CODE_OAUTH_TOKEN for the claude-code fallback harness" >&2
+            exit 1
+          fi
+          just lint-llm-diff origin/main
+      # The visual docs, through screencomp's composite actions as steps of this
+      # job rather than its reusable workflow, which would add five jobs. The
+      # capture is visual-docs.yml's own `capture-command`, read out of that file
+      # and run in the image it names (`screenshots/ci-capture.sh`), so there is
+      # one capture command; twice, for the reproducibility gate.
+      - name: Capture the visual docs
+        if: ${{ !cancelled() }}
+        env:
+          SHOTS_OUT: shots/current/x86_64
+        run: bash screenshots/ci-capture.sh
+      - name: Capture again for the reproducibility gate
+        if: ${{ !cancelled() }}
+        env:
+          SHOTS_OUT: shots/verify/x86_64
+        run: bash screenshots/ci-capture.sh
+      - uses: nickderobertis/screencomp@v0
+        if: ${{ !cancelled() }}
+        with:
+          # The release visual-docs.yml's reusable workflow is pinned to, so both
+          # paths judge with one CLI; `.github/ci-shape/` holds the two equal.
+          version: v0.4.8
+      - name: Classify, gate and build the gallery
+        id: classify
+        if: ${{ !cancelled() }}
+        uses: nickderobertis/screencomp/visual-docs@v0
+        with:
+          project: ""
+          arch: x86_64
+          current: shots/current
+          manifest: ""
+          gallery-title: Visual docs
+          verify-second: shots/verify
+          pages: "true"
+          publish: ${{ env.VISUAL_DOCS_PUBLISH }}
+          fail-on-drift: "true"
+          update-manifest: "false"
+          comment-mode: aggregated
+          pages-artifact: screencomp-gallery-x86_64
+          github-token: ${{ github.token }}
+      - name: Deploy the gallery preview
+        if: env.VISUAL_DOCS_PUBLISH == 'true' && !cancelled() && steps.classify.outcome != 'skipped'
+        uses: nickderobertis/screencomp/visual-docs-pages@v0
+        with:
+          github-token: ${{ github.token }}
+      - name: Post the visual docs comment
+        if: ${{ !cancelled() && steps.classify.outcome != 'skipped' }}
+        uses: nickderobertis/screencomp/visual-docs-aggregate@v0
+        with:
+          matrix: '[{"arch":"x86_64","project":"","current":"shots/current","verify":"shots/verify","manifest":"","gallery_title":"Visual docs"}]'
+          publish: ${{ env.VISUAL_DOCS_PUBLISH }}
+          github-token: ${{ github.token }}
+      # Under squash-merge the title becomes the release-driving commit.
+      - name: Lint the PR title
+        if: ${{ !cancelled() }}
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # notignored.yml's comment, for the reason that file gives. A fork's token
+      # cannot upsert a comment, so a fork's pull request skips it there and here.
+      - name: Comment the suppressions this change adds
+        if: github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
+        uses: nickderobertis/notignored@v0
+
+  # The Linux test job: every test tier under coverage with its floor, the docs
+  # and the budgets (`check` less `lint`'s formatting and lints), the live smoke,
+  # the workflow-shape test, the install and documented-install proofs and the
+  # x86_64 wheel, in one Nx run so the proofs build beside the tiers.
+  test-linux:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The shortcut reads whether main passed: runs, merged pull requests, checks.
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # On a release pull request whose tree main already passed, plus only
+      # release-plz's version and changelog edits, every step below is skipped
+      # and the job succeeds having proven it already had (scripts/
+      # release-pr-shortcut.mjs, decided from the trees alone).
+      - name: Whether this pull request's tests are already proven
+        id: shortcut
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2.9.2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          shared-key: test-linux
+          save-if: false
+      - uses: actions/setup-node@v4
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - uses: actions/setup-python@v5
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.shortcut.outputs.skip != 'true'
+      # The released tools `just bootstrap` installs into `target/tools`, keyed
+      # on the versions the justfile pins and the toolchain that compiles them.
+      - name: What the bootstrap tools are built from
+        id: pins
+        if: steps.shortcut.outputs.skip != 'true'
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        if: steps.shortcut.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      # Also provisions `strace` and the unprivileged user namespace, which the
+      # Linux-only e2e journeys refuse without.
+      - name: Bootstrap
+        if: steps.shortcut.outputs.skip != 'true'
+        run: just bootstrap
+      - name: The smoke's credential and scratch repository are present
+        if: steps.shortcut.outputs.skip != 'true'
+        env:
+          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
+        run: |
+          if [ "$HAS_CREDENTIAL" != "true" ]; then
+            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. This job never skips it and never falls back to a fake." >&2
+            exit 1
+          fi
+          if [ "$HAS_SMOKE_REPO" != "true" ]; then
+            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke." >&2
+            exit 1
+          fi
+      # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
+      # cannot turn a failed run green); the archive is the instrumented test
+      # build, kept for that step to re-run without compiling.
+      - name: Tiers, smoke, install proofs and wheel (affected projects)
+        id: gate
+        if: steps.shortcut.outputs.skip != 'true'
+        env:
+          # llmlint: ignore-block[least_privilege_grants] the `smoke` job's PAT,
+          # for the reason that job gives: the journey publishes to a scratch
+          # repository the default token cannot reach.
+          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # llmlint: ignore-end[least_privilege_grants]
+          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      - name: Keep the per-test profile records
+        if: always() && steps.shortcut.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-test-linux
+          path: target/test-profile/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+
+  # The Windows test job: clippy over the Windows build, the uninstrumented suite
+  # (`check-cross` less formatting, which `lint` runs), the npm launcher's
+  # process-tree journeys and the two install proofs, on a Dev Drive.
+  test-windows:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Whether this pull request's tests are already proven
+        id: shortcut
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
+      # The suite is git- and filesystem-bound on Windows: a ReFS Dev Drive for
+      # the checkout and the temp directory every journey writes its scratch
+      # repositories into, trusted so the Defender filter does not scan it,
+      # and Defender's real-time scan kept off the toolchain's directories too.
+      - uses: samypr100/setup-dev-drive@v3
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build and the suite
+        if: steps.shortcut.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      - uses: Swatinem/rust-cache@v2.9.2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          shared-key: test-windows
+          save-if: false
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+      - uses: actions/setup-node@v4
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          tool: just,nextest
+      - uses: actions/setup-python@v5
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.shortcut.outputs.skip != 'true'
+      - name: What the bootstrap tools are built from
+        id: pins
+        if: steps.shortcut.outputs.skip != 'true'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        if: steps.shortcut.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Bootstrap
+        if: steps.shortcut.outputs.skip != 'true'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: just bootstrap
+      - name: Clippy, suite, launcher and install proofs (affected projects)
+        id: gate
+        if: steps.shortcut.outputs.skip != 'true'
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # On Windows there are no process groups to make a leaked process visible
+      # afterwards, so what was still running is read while it is still true.
+      - name: What was still running when it stopped
+        if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
+        continue-on-error: true
+        shell: pwsh
+        run: Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | Format-Table -AutoSize -Wrap
+      - name: Keep the per-test profile records
+        if: always() && steps.shortcut.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-test-windows
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/test-profile/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+
+  # The macOS test job (Apple silicon): the same as Windows.
+  test-macos:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    env:
+      NEXTEST_PROFILE: ci
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Whether this pull request's tests are already proven
+        id: shortcut
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-pr-shortcut.mjs --base-ref "$GITHUB_BASE_REF" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2.9.2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          shared-key: test-macos
+          save-if: false
+      - uses: actions/setup-node@v4
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          tool: just,nextest
+      - uses: actions/setup-python@v5
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.shortcut.outputs.skip != 'true'
+      - name: What the bootstrap tools are built from
+        id: pins
+        if: steps.shortcut.outputs.skip != 'true'
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        if: steps.shortcut.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Bootstrap
+        if: steps.shortcut.outputs.skip != 'true'
+        run: just bootstrap
+      - name: Clippy, suite, launcher and install proofs (affected projects)
+        id: gate
+        if: steps.shortcut.outputs.skip != 'true'
+        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      - name: What was still running when it stopped
+        if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
+        continue-on-error: true
+        run: ps -ef
+      - name: Keep the per-test profile records
+        if: always() && steps.shortcut.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-profile-test-macos
+          path: target/test-profile/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Does each failed test fail again on this build
+        if: failure() && steps.gate.outcome == 'failure'
+        continue-on-error: true
+        timeout-minutes: 25
+        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
+
   # Which projects this change can reach, derived once so every Rust-artifact
   # job below can skip on a packaging-only change instead of paying the full
   # matrix. A pull request is scoped against its merge base, and a push to main
@@ -91,7 +565,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -260,7 +737,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -346,7 +826,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./.github/actions/setup-just
       # `just msrv` runs the crate's `msrv` Nx target, and the project graph
       # needs Node.
@@ -375,7 +858,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
@@ -443,7 +929,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest
@@ -497,7 +986,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # On a PR the change is not on the registry yet, so `--path .` is the only
       # way to install *this* revision.
       - name: Install (this revision)
@@ -557,7 +1049,10 @@ jobs:
       # For README.md, which is the one source of the command below. The install
       # itself resolves everything it builds from the remote, which is the point.
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install (the command the README gives users)
         run: |
           documented=$(grep -m1 '^cargo install --git ' README.md || true)
@@ -783,7 +1278,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -936,7 +1434,10 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        # Restored on a pull request, saved only from main.
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

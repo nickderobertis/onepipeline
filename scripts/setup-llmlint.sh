@@ -34,7 +34,7 @@ set -uo pipefail
 # Version floor, as a PyPI constraint (the `llmlint-cli` package version tracks the
 # wrapped binary version). `uv tool install --upgrade` installs the newest release
 # satisfying it; oneharness comes along transitively at a compatible version.
-# 0.4.11 ships `llmlint fingerprint`, the judge digest `onepipeline:lint-llm-diff`
+# 0.4.11 ships `llmlint fingerprint`, the judge digest `onepipeline-lint-llm:lint-llm-diff`
 # keys its Nx cache on, and refuses a judge reply that leaves a selected rule
 # unanswered; everything the header above relies on shipped before it.
 readonly LLMLINT_MIN="0.4.11"

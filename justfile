@@ -202,6 +202,34 @@ check-affected:
 check-cross: fmt-check lint test-quick
     @echo "check-cross: ok"
 
+# ci.yml's four jobs, each one recipe the job's step calls and a developer can
+# run: `scripts/ci-job.sh` holds which Nx targets each runs and why it is one Nx
+# invocation. All four are scoped to the projects this branch's diff can reach,
+# failing closed as `check-affected` does; `--plan` prints the selection and runs
+# nothing, which is how a Linux host reads what the Windows and macOS jobs select.
+# The platform-independent checks: formatting, lints, MSRV, audit, the pinned-wheel journeys.
+ci-lint *args:
+    @bash scripts/ci-job.sh lint "$@"
+
+# The Linux test job: `check`'s tiers under coverage, the live smoke, the install proofs and the x86_64 wheel.
+ci-test-linux *args:
+    @bash scripts/ci-job.sh test-linux "$@"
+
+# The Windows test job: clippy, the uninstrumented suite, the npm launcher, the install proofs.
+ci-test-windows *args:
+    @bash scripts/ci-job.sh test-windows "$@"
+
+# The macOS test job: clippy, the uninstrumented suite, the npm launcher, the install proofs.
+ci-test-macos *args:
+    @bash scripts/ci-job.sh test-macos "$@"
+
+# Whether a release pull request's tests are already proven: its tree is a tree
+# `main` passed plus only release-plz's version and changelog edits. The three
+# test jobs ask it first; `lint` never does.
+# Answer `skip=true` when HEAD only versions a tree main already passed, else `skip=false`.
+release-pr-shortcut *args:
+    @node scripts/release-pr-shortcut.mjs "$@"
+
 # CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
 # this is what says the split drops and repeats nothing. Outside `check`, because
 # it lists the uninstrumented build the cross legs run, which `check` never builds.
@@ -567,8 +595,11 @@ _release-compat-run *args:
 stop-verdict-journeys:
     @node scripts/stop-guard-unpublished-invocation.mjs just _stop-verdict-run
 
+# `--test stop_verdict` is what keeps the run to its own binary: an expression
+# filters what runs, not what builds, so `-E` alone has nextest build every
+# integration binary in the workspace first.
 _stop-verdict-run: _stop-verdict-build
-    @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked -E 'binary(stop_verdict)' --no-tests=fail
+    @ONEPIPELINE_BUDGET_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo nextest run --locked --test stop_verdict -E 'binary(stop_verdict)' --no-tests=fail
     @node --test scripts/stop-guard-unpublished-budget.test.mjs
 
 # The release binary the run above times, built alone: the
@@ -895,7 +926,7 @@ lint-llm-validate *args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     llmlint validate {{args}}
 
-# The cached `onepipeline:lint-llm-diff` target runs llmlint itself, keyed on the
+# The cached `onepipeline-lint-llm:lint-llm-diff` target (`lint-llm/project.json` says why it has a project of its own) runs llmlint itself, keyed on the
 # tree, the resolved base commit and `llmlint fingerprint`, so an unchanged pass
 # replays and a failure is judged again; `--skip-nx-cache` forces a fresh judgement.
 # NX_RUN_COMMANDS_DIRECTLY=false: Nx 23.1 resolves a run-commands task on the
@@ -915,7 +946,7 @@ lint-llm-diff base="origin/main" *nx_args:
     }
     echo "lint-llm-diff: judging the diff against $base ($sha)"
     LLMLINT_DIFF_BASE_SHA="$sha" ONEPIPELINE_NX_SHOW_OUTPUT=1 NX_RUN_COMMANDS_DIRECTLY=false \
-      exec bash scripts/nx.sh run onepipeline:lint-llm-diff "$@"
+      exec bash scripts/nx.sh run onepipeline-lint-llm:lint-llm-diff "$@"
 
 
 # The double's own protocol/backstop checks, with an independent cache edge.

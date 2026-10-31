@@ -1,0 +1,157 @@
+# Build, testing nothing, what each of ci.yml's test jobs compiles, and save it
+# from `main` under the key that job restores. Pull-request runs restore Rust
+# caches and never save one, so the repository's Actions cache holds main's
+# builds rather than one per branch, and this is where they are made: each leg
+# restores its own previous main cache, so it rebuilds only what the push changed.
+#
+# Not a pull-request check: it runs on push to `main` alone, and nothing
+# requires it. `.github/ci-shape/` holds each leg to its job's key and runner.
+
+name: Rust cache warm
+
+on:
+  push:
+    branches: [main]
+
+# A newer push's build supersedes an older one's, which would save a cache the
+# newer one replaces anyway.
+concurrency:
+  group: rust-cache-warm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # ci.yml sets it workflow-wide, and rust-cache hashes the CARGO_* environment
+  # into its key: the two must agree or no pull request finds this cache.
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One build-only job per OS whose pull-request test job compiles Rust.
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - name: What the bootstrap tools are built from
+        id: pins
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install the bootstrap tools
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+      - name: Save the bootstrap tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Build what test-linux builds
+        run: bash scripts/warm-rust-cache.sh linux
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      # test-windows builds on a Dev Drive, so this does too: the cache paths
+      # rust-cache records are the ones that job restores into.
+      - uses: samypr100/setup-dev-drive@v3
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          drive-type: Dynamic
+          trusted-dev-drive: true
+          workspace-copy: true
+          env-mapping: |
+            TEMP,{{ DEV_DRIVE }}/tmp
+            TMP,{{ DEV_DRIVE }}/tmp
+      - name: Keep Defender's real-time scan off the build
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath $env:DEV_DRIVE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup", $env:RUNNER_TEMP
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-windows
+          workspaces: ${{ env.DEV_DRIVE_WORKSPACE }} -> target
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: What the bootstrap tools are built from
+        id: pins
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install the bootstrap tools
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+      - name: Save the bootstrap tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Build what test-windows builds
+        working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
+        run: bash scripts/warm-rust-cache.sh cross
+
+  macos:
+    # The push that merges release-plz's release pull request changes only
+    # versions and the changelog, and a Mac job is the scarcest slot the
+    # account has (five at once, shared): that push warms Linux and Windows only.
+    if: "${{ !startsWith(github.event.head_commit.message, 'chore: release') }}"
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-macos
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: What the bootstrap tools are built from
+        id: pins
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+      - name: Restore the bootstrap tools
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install the bootstrap tools
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+      - name: Save the bootstrap tools
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/tools
+          key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Build what test-macos builds
+        run: bash scripts/warm-rust-cache.sh cross
