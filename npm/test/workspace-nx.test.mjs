@@ -144,12 +144,19 @@ const declaresUniform = (declared, target) =>
 // per-change selection pays for one.
 const WORKLOAD = projects.filter((declared) => declared.tags?.includes("tier:workload"));
 
-// The budget tiers (`tier:budget`: `onepipeline-stop-verdict`) produce the telemetry
-// `onepipeline:budgets` reads. They time an uninstrumented release binary over full
-// workloads, so they write no coverage profiles and have no cross-platform
-// `test-quick`: their journeys are Unix-only and run on the merge path, through the
-// `budgets` edge, rather than on the macOS and Windows legs.
+// The budget tiers (`tier:budget`: `onepipeline-stop-verdict`, `human-items-e2e`)
+// produce budget telemetry from their `test` target. They time an uninstrumented
+// release binary over full workloads, so they write no coverage profiles and have no
+// cross-platform `test-quick`: their journeys are Unix-only and run on the merge
+// path rather than on the macOS and Windows legs. Each one's record is read either
+// by `onepipeline:budgets`, through its edge, or by that same `test` target checking
+// the project's own budgets file from the record it just saved.
+// `BUDGET_READERS` names which, so neither reader is assumed.
 const BUDGET = projects.filter((declared) => declared.tags?.includes("tier:budget"));
+const BUDGET_READERS = {
+  "onepipeline-stop-verdict": "onepipeline:budgets",
+  "human-items-e2e": "own test",
+};
 
 // The Rust projects that run a share of the offline suite, each declaring
 // `test-quick` so `just check-cross` reaches all of it on the macOS and Windows
@@ -342,15 +349,35 @@ describe("the offline tier split", () => {
 
   it("runs each budget tier's journeys before the budgets that read them", () => {
     assert.deepEqual(
-      BUDGET.map((declared) => declared.name),
-      ["onepipeline-stop-verdict"],
+      BUDGET.map((declared) => declared.name).sort(),
+      Object.keys(BUDGET_READERS).sort(),
     );
     const budgets = project("onepipeline").targets.budgets;
     const waitedOn = budgets.dependsOn.flatMap((need) =>
       typeof need === "string" ? [] : need.projects.map((name) => `${name}:${need.target}`),
     );
     for (const declared of BUDGET) {
-      assert.ok(waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
+      if (BUDGET_READERS[declared.name] === "onepipeline:budgets") {
+        assert.ok(waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
+      } else {
+        // Its own `test` recipe checks the project's budgets file from the saved
+        // record, after the journey that wrote it — never a second timed run.
+        assert.ok(!waitedOn.includes(`${declared.name}:test`), JSON.stringify(waitedOn));
+        const recipe = /^just ([\w-]+)$/.exec(declared.targets.test.command)?.[1];
+        assert.ok(recipe, `${declared.name}:test runs no recipe: ${declared.targets.test.command}`);
+        const body = justfile.split(`\n${recipe}:\n`)[1]?.split("\n\n")[0] ?? "";
+        const lines = body.split("\n");
+        const journey = lines.findIndex((line) => /cargo test /.test(line));
+        const check = lines.findIndex((line) =>
+          new RegExp(`cd ${declared.sourceRoot} && .*onebudgetspec check budgets\\.yaml`).test(
+            line,
+          ),
+        );
+        assert.ok(
+          journey >= 0 && check > journey,
+          `${recipe} does not check its budgets after its journey:\n${body}`,
+        );
+      }
       const outputs = declared.targets.test.outputs ?? [];
       assert.ok(
         outputs.length > 0 &&
@@ -375,6 +402,7 @@ describe("the offline tier split", () => {
       "pool_workload",
       "scratch_workload",
       "journal_workload",
+      "human_items_workload",
     ]) {
       assert.ok(
         rest.includes(`not binary(${binary})`),

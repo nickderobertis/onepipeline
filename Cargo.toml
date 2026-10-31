@@ -1289,14 +1289,19 @@ onevcs-testing = "0.19.26"
 # `tests/e2e/linear_launch.rs`'s `an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write`
 # drives it and fails on 0.12.11 and on 0.12.7, where the second copy sends six issue updates
 # and deletes and re-files the dependency.
-onetaskgraph-core = "=0.12.12"
-onetaskgraph-plugin-api = "=0.12.12"
-onetaskgraph-local-md = "=0.12.12"
+# **0.12.13 is the floor for human items** (`task-projection`): it publishes
+# `onetaskgraph_core::task_projection` and `Engine::project_human`, which `src/human_items/`
+# projects an open task through to the configured `human_items.task_source` and nothing
+# else. Questions are never projected. Its one new refusal, `ProjectionRefused`, is named
+# by `src/writeback.rs`'s exhaustive classification.
+onetaskgraph-core = "=0.12.13"
+onetaskgraph-plugin-api = "=0.12.13"
+onetaskgraph-local-md = "=0.12.13"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.12.12"
+onetaskgraph-linear = "=0.12.13"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"
@@ -1617,6 +1622,12 @@ path = "tests/scratch_workload/main.rs"
 [[test]]
 name = "journal_workload"
 path = "tests/journal_workload/main.rs"
+
+# The human-items read budget: a million-record workload of real launches, measured
+# against the release-built binary only by the `human-items-e2e` project's `test`.
+[[test]]
+name = "human_items_workload"
+path = "tests/human_items/main.rs"
 
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]

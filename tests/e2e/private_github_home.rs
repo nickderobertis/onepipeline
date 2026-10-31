@@ -35,14 +35,14 @@ const PUBLIC_BOARD: u64 = 2;
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
 
 /// The loopback GitHub, for as long as this is held.
-struct GitHub {
+pub(crate) struct GitHub {
     child: onepipeline_testfakes::profile::process::Child,
     url: String,
 }
 
 impl GitHub {
     /// Serve the model `seed` describes, in the shape `github_world.py` documents.
-    fn serve(world: &World, seed: &Value) -> Self {
+    pub(crate) fn serve(world: &World, seed: &Value) -> Self {
         let dir = world.root.join("github-world");
         std::fs::create_dir_all(&dir).expect("the loopback's directory");
         let seeded = dir.join("seed.json");
@@ -67,12 +67,12 @@ impl GitHub {
     }
 
     /// The GraphQL endpoint board `number`'s source names.
-    fn board(&self, number: u64) -> String {
+    pub(crate) fn board(&self, number: u64) -> String {
         format!("{}/board/{number}/graphql", self.url)
     }
 
     /// The whole model and every request it was sent.
-    fn state(&self) -> Value {
+    pub(crate) fn state(&self) -> Value {
         use std::io::{Read, Write};
         let address = self.url.strip_prefix("http://").expect("a loopback URL");
         let mut socket = std::net::TcpStream::connect(address).expect("the loopback listens");
@@ -129,12 +129,12 @@ fn linked_schema() -> std::path::PathBuf {
 }
 
 /// `content` with `metadata` in the trailing slot the `github-projects` plugin keeps it in.
-fn described(content: &str, metadata: &Value) -> String {
+pub(crate) fn described(content: &str, metadata: &Value) -> String {
     format!("{content}\n\n<!-- onetaskgraph.metadata\n{metadata}\n-->")
 }
 
 /// The caller metadata an issue body carries in its trailing slot.
-fn metadata_of(body: &str) -> Map<String, Value> {
+pub(crate) fn metadata_of(body: &str) -> Map<String, Value> {
     body.rsplit_once("<!-- onetaskgraph.metadata")
         .and_then(|(_, slot)| slot.rsplit_once("-->"))
         .and_then(|(json, _)| serde_json::from_str(json.trim()).ok())

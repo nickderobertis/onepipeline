@@ -32,7 +32,7 @@ set positional-arguments := true
 # release into this clone's own build directory, never onto `PATH`, and
 # `tests/linked_engines.rs` fails if this line ever names a release other than the one
 # the lock links.
-onetaskgraph-version := "0.12.12"
+onetaskgraph-version := "0.12.13"
 onetaskgraph-root := justfile_directory() / "target" / "tools" / ("onetaskgraph-" + onetaskgraph-version)
 
 # The budget checker `budgets.yaml` is measured with (`just budgets`), installed at this
@@ -83,6 +83,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-strace
+    @just _ensure-userns
     @just _ensure-onetaskgraph
     @just _ensure-onebudgetspec
     @cargo fetch --locked --quiet
@@ -101,6 +102,24 @@ _ensure-strace:
           || { echo "strace could not be installed through apt-get, and the Linux-only e2e journeys refuse without it" >&2; exit 1; }; \
       else \
         just _strace-preflight; \
+      fi
+
+# The unprivileged user and mount namespace the Linux-only full-disk journeys
+# (`tests/human_items_live.rs`, `tests/e2e/human_items.rs`) mount a size-capped
+# tmpfs in, so that `ENOSPC` is the kernel's rather than an injected one. Ubuntu
+# 24.04 — the CI runner's image — denies those namespaces to unconfined
+# processes through AppArmor, so a runner, which `CI` marks, lifts that one
+# restriction; elsewhere it is named with its command, for the same reason as
+# `_ensure-strace`. Nothing on other platforms, where those journeys are
+# compiled out.
+_ensure-userns:
+    @[ "$(uname -s)" = Linux ] || exit 0; \
+      unshare -rm true 2>/dev/null && exit 0; \
+      if [ -n "${CI:-}" ]; then \
+        sudo -n sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0 >/dev/null && unshare -rm true \
+          || { echo "an unprivileged user namespace could not be enabled, and the Linux-only full-disk journeys refuse without one" >&2; exit 1; }; \
+      else \
+        echo "unprivileged user namespaces are unavailable — the Linux-only full-disk journeys in tests/human_items_live.rs and tests/e2e/human_items.rs refuse without them: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 (or your distribution's equivalent), then re-run" >&2; exit 1; \
       fi
 
 # The locked Node packages `host-view-budget` reads — the onebudgetspec SDK and
@@ -263,7 +282,9 @@ _crate-lint:
 # name rather than by `#[ignore]` so neither journey is ever a skipped test.
 # `stop_verdict` is offline but in none of the four either: it times the release
 # binary rather than the instrumented one, so its project
-# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`. Nor
+# (`onepipeline-stop-verdict`) runs it through `just stop-verdict-journeys`, and
+# `human_items_workload` is the same kind of budget tier, run by `human-items-e2e`'s
+# `test` through `just human-items-budget`. Nor
 # are `pool_workload`, `scratch_workload` and `journal_workload`: each measures a
 # whole host-shaped workload, so its project (`onepipeline-pool-workload`,
 # `onepipeline-scratch-workload`, `onepipeline-journal-workload`) runs it only
@@ -283,7 +304,7 @@ _crate-lint:
 # so no change could ever select one without the other, and running the two as
 # separate nextest processes would put eight process trees on the machine where
 # `.config/nextest.toml`'s one group allows four.
-rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload)"
+rest-tier := "not binary(pooled_slot) and not binary(codex_server) and not binary(smoke) and not binary(release_channel) and not binary(note) and not binary(e2e) and not binary(contract) and not binary(stop_verdict) and not binary(pool_workload) and not binary(scratch_workload) and not binary(journal_workload) and not binary(human_items_workload)"
 codex-server-tier := "binary(codex_server)"
 e2e-tier := "binary(e2e)"
 contract-tier := "binary(contract)"
@@ -586,6 +607,16 @@ _journal-workload-run:
     @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
     @ulimit -v $((24 * 1024 * 1024)) && JOURNAL_WORKLOAD_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test journal_workload -- --skip harness:: --test-threads 1 --nocapture
     @cd tests/journal_workload && ../../node_modules/.bin/onebudgetspec check budgets.yaml
+
+# The `human-items-e2e` project's `test` target: the release-built binary's host-wide
+# `human-items list` over 100 launched runs of 10,000 events, written to
+# `target/budget-records/human-items.json` and then checked against
+# `tests/human_items/budgets.yaml` from that saved recording — never a second timed run.
+# It takes about ten minutes, most of it launching the hundred runs it measures.
+human-items-budget:
+    @RUSTFLAGS="-D warnings" cargo build --release --locked --bin onepipeline --quiet
+    @HUMAN_ITEMS_BINARY="$PWD/target/release/onepipeline" RUSTFLAGS="-D warnings" cargo test --locked --test human_items_workload -- --skip harness:: --test-threads 1 --nocapture
+    @cd tests/human_items && ../../node_modules/.bin/onebudgetspec check budgets.yaml
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`),

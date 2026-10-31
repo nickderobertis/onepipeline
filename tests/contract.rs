@@ -1827,6 +1827,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/name".into(),
                 "github.com/owner/other".into(),
             ],
+            priority: None,
         }),
         assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
@@ -11937,6 +11938,97 @@ fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_s
         resolved >= 1 && unavailable >= 1,
         "the example shows {resolved} resolved and {unavailable} unavailable forms, not both"
     );
+}
+
+/// The four priority definitions and the authoring guidance are stated once, in the
+/// engine, and the contract, the README and every shipped human node carry them.
+#[test]
+fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
+    use onepipeline::human_items::{
+        priority_label, Priority, AUTHORING_GUIDANCE, PRIORITY_DEFINITIONS,
+    };
+    let readme = include_str!("../README.md");
+    let labels: Vec<&str> = PRIORITY_DEFINITIONS
+        .iter()
+        .map(|(label, _)| *label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            Priority::Urgent,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low
+        ]
+        .map(priority_label)
+    );
+    for (label, meaning) in PRIORITY_DEFINITIONS {
+        let sentence = if label == "Low" {
+            format!("Low means {meaning}.")
+        } else if label == "Medium" {
+            format!("Medium means {meaning};")
+        } else {
+            format!("{label} means {meaning}.")
+        };
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat(CONTRACT).contains(&sentence),
+            "the contract lacks {sentence:?}"
+        );
+        assert!(
+            flat(readme).contains(&sentence),
+            "the README lacks {sentence:?}"
+        );
+    }
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat(CONTRACT).contains(AUTHORING_GUIDANCE));
+    assert!(flat(readme).contains(AUTHORING_GUIDANCE));
+    // The shipped example plan states every human node's item, priority included.
+    let tasks = repo_root().join("examples/plan-store/tasks/tracked-release");
+    for entry in std::fs::read_dir(tasks).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        if text.contains("\"onepipeline.kind\": \"human\"") {
+            assert!(text.contains("\"onepipeline.human_item\""), "{text}");
+            assert!(text.contains("\"priority\":"), "{text}");
+        }
+    }
+}
+
+/// The configuration shape the contract documents is the public types' own: every
+/// key of `HumanItemsConfig` and of a hook is named where the contract states the
+/// `human_items` mapping, and nothing else is.
+#[test]
+fn the_documented_human_items_configuration_is_the_public_shape() {
+    use onepipeline::human_items::config::{HumanItemHook, HumanItemsConfig};
+    let flat = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat
+        .find("Each holds one `human_items` mapping:")
+        .expect("the mapping is stated");
+    let stated = &flat[start..start + flat[start..].find("Hooks are validated").expect("its end")];
+    let keys = |schema: schemars::Schema| -> Vec<String> {
+        schema.as_value()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let config = keys(schemars::schema_for!(HumanItemsConfig));
+    assert_eq!(
+        config,
+        ["enabled", "task_source", "hooks", "approval_adapters"]
+    );
+    for key in &config {
+        assert!(
+            stated.contains(&format!("`{key}:")) || stated.contains(&format!(" {key}:")),
+            "{key}: {stated}"
+        );
+    }
+    let hook_start = stated.find("`hooks: [{").expect("the hook shape");
+    let hook = &stated[hook_start..hook_start + stated[hook_start..].find("}]`").unwrap()];
+    for key in keys(schemars::schema_for!(HumanItemHook)) {
+        assert!(hook.contains(&key), "the hook shape lacks {key}: {hook}");
+    }
 }
 
 #[test]

@@ -3130,6 +3130,10 @@ impl World {
         if let Some(classification) = node.get("classification") {
             front.push(("classification", classification.clone()));
         }
+        // And so is its priority, which a human action's item carries.
+        if let Some(priority) = node.get("priority") {
+            front.push(("priority", priority.clone()));
+        }
         for (key, value) in node {
             if matches!(
                 key.as_str(),
@@ -3140,6 +3144,7 @@ impl World {
                     | "repo"
                     | "delivers"
                     | "classification"
+                    | "priority"
             ) {
                 continue;
             }

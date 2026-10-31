@@ -1,10 +1,20 @@
 //! Human attention records and their version-one wire contract.
+mod approval;
+pub mod config;
+mod delivery;
+mod durable;
+mod live;
+pub mod phases;
+mod projection;
+pub(crate) mod runtime;
+pub use approval::REREAD;
+pub use live::{item_id_for, Actor, HumanItems, ReadMode, ReadTelemetry, RUN_ENDED, TELEMETRY_ENV};
 /// The store priority vocabulary; human-item boundaries reject None.
 pub use onetaskgraph_plugin_api::Priority;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The human-item journal relative to the engine home; no writer is installed yet.
+/// The human-item journal relative to the engine home (the runs root).
 pub const JOURNAL_PATH: &str = "human-items/events.ndjson";
 
 fn nonempty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -21,7 +31,7 @@ fn priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Priority, D::Error
     }
     Ok(value)
 }
-fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub(crate) fn priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = Priority::ALL
         .into_iter()
         .filter(|p| *p != Priority::None)
@@ -518,7 +528,7 @@ pub fn schemas() -> serde_json::Value {
 /// Explicit sample adapter selection and command.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 pub struct HumanItemsArgs {
-    /// Fixture bundle to query or mutate; live state is unavailable in this release.
+    /// Fixture bundle to query or mutate instead of the host's live journal.
     #[arg(long, global = true)]
     pub sample: Option<std::path::PathBuf>,
     /// Human attention operation.
@@ -529,11 +539,19 @@ pub struct HumanItemsArgs {
 /// The CLI operations; every task, including design review, uses complete.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Subcommand)]
 pub enum HumanItemsCommand {
-    /// Raise an item from JSON immutable fields.
+    /// Raise an item from JSON immutable fields, or what a configured phase's
+    /// hook expands to against a JSON context.
+    // llmlint: ignore[invalid_states_unrepresentable] clap's own `required_unless_present`, `conflicts_with_all` and `requires` admit exactly `--input FILE` or `--phase P --context FILE`, refusing any other combination before this value exists; the contract publishes the first spelling and the phase form beside it.
     Raise {
         /// JSON input file.
-        #[arg(long)]
-        input: std::path::PathBuf,
+        #[arg(long, required_unless_present = "phase", conflicts_with_all = ["phase", "context"])]
+        input: Option<std::path::PathBuf>,
+        /// A phase configured under `human_items.hooks`.
+        #[arg(long, requires = "context")]
+        phase: Option<String>,
+        /// The phase's JSON context: owner, dedup_key, and what the hook expands.
+        #[arg(long, requires = "phase")]
+        context: Option<std::path::PathBuf>,
     },
     /// List matching items and their full bodies.
     List(HumanItemsQuery),
@@ -569,6 +587,22 @@ pub enum HumanItemsCommand {
     },
     /// Report matching items and their full bodies.
     Report(HumanItemsQuery),
+    /// Print the effective `human_items` configuration and where it was read from.
+    Config {
+        /// Emit engine JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the item events delivered to one manager session that its watch
+    /// has not printed yet, waiting up to `--timeout` seconds for one.
+    Watch {
+        /// The owning session; omitted, `ONEPIPELINE_LAUNCHER_SESSION`.
+        #[arg(long)]
+        session: Option<String>,
+        /// Seconds to wait when nothing is pending; `0` reads once.
+        #[arg(long, default_value_t = 0)]
+        timeout: u64,
+    },
 }
 
 /// Human-facing selectors. Scope is deliberately not an input.
@@ -591,6 +625,23 @@ fn parse_priority(value: &str) -> Result<Priority, String> {
         _ => Err("priority must be Critical, High, Medium or Low".into()),
     }
 }
+
+/// What each display priority means, as the contract and the README state it.
+pub const PRIORITY_DEFINITIONS: [(&str, &str); 4] = [
+    (
+        "Critical",
+        "drop everything for complete development disruption or critical production journeys down with only a human able to fix",
+    ),
+    (
+        "High",
+        "substantial development outage, less significant journeys impaired or partial critical-journey outage needing a human",
+    ),
+    ("Medium", "significant lifecycle or experience decisions"),
+    ("Low", "everything else"),
+];
+
+/// How an item's title and body are written, as the contract and the README state it.
+pub const AUTHORING_GUIDANCE: &str = "Bodies are pithy and contain only needed input; question titles ask at high level, task titles say what to do.";
 
 /// Human-facing priority label; wire values continue to use the imported vocabulary.
 pub fn priority_label(priority: Priority) -> &'static str {
@@ -936,6 +987,11 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
             (None, None) => format!("session {}", item.owner.session),
         }
     };
+    let tracker = item
+        .tracker
+        .as_ref()
+        .map(|t| format!("tracker {}\n", t.url))
+        .unwrap_or_default();
     let blocking = if item.is_blocking() {
         match &item.block {
             HumanItemBlock::Host => "blocks all work on this host".into(),
@@ -952,7 +1008,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
         String::new()
     };
     format!(
-        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}\n",
+        "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}\n",
         item.id,
         priority_label(item.priority),
         item.kind,
@@ -960,6 +1016,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
         source,
         blocking,
         item.title,
+        tracker,
         item.body
     )
 }
@@ -967,10 +1024,7 @@ fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
 pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
     use crate::error::Error;
     let Some(path) = args.sample else {
-        return Err(Error::Refused(
-            serde_json::to_string(&HumanItemRefusal::Unavailable)
-                .map_err(|e| Error::Invalid(e.to_string()))?,
-        ));
+        return live_dispatch(args.command);
     };
     let read =
         std::fs::read(&path).map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))?;
@@ -1020,7 +1074,18 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
             }
             return Ok(0);
         }
-        HumanItemsCommand::Raise { input } => {
+        HumanItemsCommand::Watch { .. } | HumanItemsCommand::Config { .. } => {
+            return Err(Error::Invalid(
+                "watch and config read the live store; they take no --sample".into(),
+            ))
+        }
+        HumanItemsCommand::Raise { phase: Some(_), .. } => {
+            return Err(Error::Invalid(
+                "a phase raise expands a configured hook; it takes no --sample".into(),
+            ))
+        }
+        HumanItemsCommand::Raise { input, .. } => {
+            let input = input.ok_or_else(|| Error::Invalid("raise names --input".into()))?;
             let input = std::fs::read(input).map_err(|e| Error::Invalid(e.to_string()))?;
             HumanItemAction::Raise(
                 serde_json::from_slice(&input).map_err(|e| Error::Invalid(e.to_string()))?,
@@ -1061,6 +1126,216 @@ pub(crate) fn dispatch(args: HumanItemsArgs) -> crate::error::Result<i32> {
         "{}",
         serde_json::to_string(&receipt).map_err(|e| Error::Invalid(e.to_string()))?
     );
+    Ok(0)
+}
+
+fn refused(refusal: &HumanItemRefusal) -> crate::error::Error {
+    crate::error::Error::Refused(
+        serde_json::to_string(refusal).unwrap_or_else(|_| refusal.to_string()),
+    )
+}
+
+fn to_json<T: Serialize>(value: &T) -> crate::error::Result<String> {
+    serde_json::to_string(value).map_err(|e| crate::error::Error::Invalid(e.to_string()))
+}
+
+/// The one printable manager report: a count, then the blocking items and the
+/// rest, each with its full body.
+fn report(views: &[HumanItemView]) -> String {
+    let blocking: Vec<_> = views.iter().filter(|v| v.item.is_blocking()).collect();
+    let rest: Vec<_> = views.iter().filter(|v| !v.item.is_blocking()).collect();
+    let mut out = format!(
+        "Human items: {} listed, {} blocking\n",
+        views.len(),
+        blocking.len()
+    );
+    for (heading, group) in [("Blocking", blocking), ("Not blocking", rest)] {
+        if group.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n{heading} ({})\n\n", group.len()));
+        for view in group {
+            out.push_str(&render(&view.item, &view.blocked));
+            for plan in &view.blocked.plans {
+                for node in &plan.preview {
+                    out.push_str(&format!(
+                        "  - {} / {}: {}\n",
+                        node.run, node.node, node.title
+                    ));
+                }
+                if plan.count > plan.preview.len() as u64 {
+                    out.push_str(&format!(
+                        "  - and {} more in {}\n",
+                        plan.count - plan.preview.len() as u64,
+                        plan.plan
+                    ));
+                }
+            }
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn live_dispatch(command: HumanItemsCommand) -> crate::error::Result<i32> {
+    let began = std::time::Instant::now();
+    let mut rendered = 0.0;
+    let answered = live_command(command, &mut rendered);
+    live::record_telemetry(&serde_json::json!({
+        "pid": std::process::id(),
+        "process": {
+            "render_ms": rendered,
+            "process_ms": began.elapsed().as_secs_f64() * 1000.0,
+        }
+    }));
+    answered
+}
+
+fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error::Result<i32> {
+    use crate::error::Error;
+    if let HumanItemsCommand::Config { json } = &command {
+        let config = config::here().map_err(Error::Invalid)?;
+        if *json {
+            println!("{}", to_json(&config)?);
+        } else {
+            let effective = &config.human_items;
+            println!("enabled: {}", effective.enabled);
+            println!(
+                "task_source: {}",
+                effective.task_source.as_deref().unwrap_or("(none)")
+            );
+            let phases: Vec<&str> = effective.hooks.iter().map(|h| h.phase.as_str()).collect();
+            println!(
+                "hooks: {}",
+                if phases.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    phases.join(", ")
+                }
+            );
+            for source in &config.sources {
+                println!("read from: {}", source.display());
+            }
+        }
+        return Ok(0);
+    }
+    let dir = std::env::current_dir().map_err(|e| Error::Invalid(e.to_string()))?;
+    let store = HumanItems::open(crate::ledger::runs_root(), &dir).map_err(|e| refused(&e))?;
+    let actor = Actor::from_environment();
+    let action = match command {
+        HumanItemsCommand::Config { .. } => unreachable!("answered above"),
+        HumanItemsCommand::Raise {
+            phase: Some(phase),
+            context: Some(context),
+            ..
+        } => {
+            let bytes = std::fs::read(&context)
+                .map_err(|e| Error::Invalid(format!("{}: {e}", context.display())))?;
+            let context: phases::PhaseContext = serde_json::from_slice(&bytes)
+                .map_err(|e| Error::Invalid(format!("{}: {e}", context.display())))?;
+            match store
+                .raise_phase(&phase, &context)
+                .map_err(|e| refused(&e))?
+            {
+                Some(receipt) => println!("{}", to_json(&receipt)?),
+                None => println!("null"),
+            }
+            return Ok(0);
+        }
+        HumanItemsCommand::List(query) | HumanItemsCommand::Report(query) if query.json => {
+            let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let started = std::time::Instant::now();
+            println!("{}", to_json(&views)?);
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
+            return Ok(0);
+        }
+        HumanItemsCommand::List(query) => {
+            let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let started = std::time::Instant::now();
+            let text: String = views.iter().map(|v| render(&v.item, &v.blocked)).collect();
+            print!("{text}");
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
+            return Ok(0);
+        }
+        HumanItemsCommand::Report(query) => {
+            let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let started = std::time::Instant::now();
+            print!("{}", report(&views));
+            *rendered = started.elapsed().as_secs_f64() * 1000.0;
+            return Ok(0);
+        }
+        HumanItemsCommand::Show { id, json } => {
+            let detail = store.show(&id).map_err(|e| refused(&e))?;
+            if json {
+                println!("{}", to_json(&detail)?);
+            } else {
+                print!("{}", render(&detail.item, &detail.blocked));
+                for node in &detail.nodes {
+                    println!("{} / {}: {}", node.run, node.node, node.title);
+                }
+            }
+            return Ok(0);
+        }
+        HumanItemsCommand::Watch { session, timeout } => {
+            let session = session
+                .or_else(|| std::env::var(crate::sys::LAUNCHER_SESSION_ENV).ok())
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    Error::Invalid(format!(
+                        "no session to watch: name one with --session, or export {}",
+                        crate::sys::LAUNCHER_SESSION_ENV
+                    ))
+                })?;
+            let mut out = std::io::stdout().lock();
+            let printed = delivery::watch(
+                &crate::ledger::runs_root(),
+                &session,
+                std::time::Duration::from_secs(timeout),
+                &mut |envelope| {
+                    use std::io::Write as _;
+                    writeln!(
+                        out,
+                        "{}",
+                        serde_json::to_string(envelope).unwrap_or_default()
+                    )?;
+                    out.flush()
+                },
+            )
+            .map_err(Error::Invalid)?;
+            return Ok(if printed == 0 {
+                crate::error::EXIT_WATCH_ELAPSED
+            } else {
+                0
+            });
+        }
+        HumanItemsCommand::Raise { input, .. } => {
+            let input = input.ok_or_else(|| Error::Invalid("raise names --input".into()))?;
+            let bytes = std::fs::read(&input)
+                .map_err(|e| Error::Invalid(format!("{}: {e}", input.display())))?;
+            HumanItemAction::Raise(
+                serde_json::from_slice(&bytes).map_err(|e| Error::Invalid(e.to_string()))?,
+            )
+        }
+        HumanItemsCommand::Answer { id, text } => HumanItemAction::Answer {
+            id,
+            text,
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        },
+        HumanItemsCommand::Complete { id } => HumanItemAction::Complete {
+            id,
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        },
+        HumanItemsCommand::Dismiss { id, reason } => HumanItemAction::Dismiss {
+            id,
+            reason,
+            actor: actor.actor,
+            on_behalf_of: actor.on_behalf_of,
+        },
+    };
+    let receipt = store.apply(action).map_err(|e| refused(&e))?;
+    println!("{}", to_json(&receipt)?);
     Ok(0)
 }
 
@@ -1120,7 +1395,7 @@ fn optional_priority<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Pr
     }
     Ok(value)
 }
-fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub(crate) fn optional_priority_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let values: Vec<_> = std::iter::once(serde_json::Value::Null)
         .chain(
             Priority::ALL

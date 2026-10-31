@@ -124,6 +124,11 @@ const NAMES_GATE_ENV: &str = "ONEPIPELINE_TEST_RETIREMENT_NAMES_GATE";
 /// at its sweep's `stop`: the loop that would answer may be the one joining it.
 const NAMES_STOP_POLL: Duration = Duration::from_millis(50);
 
+/// The longest a closing driver waits for a joined sweep's last report to come
+/// through the loop's journal relay: the thread has sent it, so what is left is
+/// one hop through a thread with nothing else in flight.
+const LAST_REPORT_WAIT: Duration = Duration::from_secs(30);
+
 /// Meet `variable`'s failpoint the first time `met` is asked, and never again.
 fn meet_once(met: &AtomicBool, variable: &str) {
     if !met.swap(true, Ordering::SeqCst) {
@@ -907,20 +912,25 @@ impl Sweep {
     ///
     /// Where the thread has already sent its last report — the loop taking up
     /// its retirement pass — the stop reaches nothing and the wait is its exit.
-    fn join(&mut self) {
+    ///
+    /// Whether this join is what saw the thread end normally, which is the one
+    /// case its last report was sent and not yet taken up.
+    fn join(&mut self) -> bool {
         self.stop.store(true, Ordering::SeqCst);
         static MET: AtomicBool = AtomicBool::new(false);
         meet_once(&MET, STOP_GATE_ENV);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        let ended = self
+            .handle
+            .take()
+            .is_some_and(|handle| handle.join().is_ok());
         let _ = std::fs::remove_file(self.paths.maintenance());
+        ended
     }
 }
 
 impl Drop for Sweep {
     fn drop(&mut self) {
-        self.join();
+        let _ = self.join();
     }
 }
 
@@ -1334,12 +1344,49 @@ impl Maintenance {
         let Some(mut sweep) = self.sweep.take() else {
             return Ok(());
         };
-        sweep.join();
+        let reported = sweep.join();
         drop(sweep);
-        for message in rx.try_iter() {
+        // The thread's reports reach `rx` through the loop's journal relay, a
+        // thread of its own, so a joined sweep's `Retired` may still be on its
+        // way: a thread that ended normally sent it, and it is waited for rather
+        // than lost to a drain that ran first.
+        let deadline = Instant::now() + LAST_REPORT_WAIT;
+        let mut owed = reported;
+        loop {
+            let message = if owed {
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(message) => message,
+                    // A relay that has gone or stalled past the wait: what the
+                    // pass did is lost to the record, and said so.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user
+                    // can type reaches this arm: the relay forwards every message while the
+                    // loop holds its receiver, which it does until this returns, so a report
+                    // the sweep thread sent always arrives. The arm is the bound on a relay
+                    // that died, and the unit test
+                    // `a_closing_driver_records_the_retirement_its_relay_hands_on_late` drives
+                    // it through a relay that closes without handing the report on.
+                    Err(why) => {
+                        eprintln!(
+                            "onepipeline: run '{}': the pool-maintenance sweep's retirement \
+                             pass ended, and its report never reached the driver ({why}); \
+                             its branches-retired record is not written",
+                            paths.run
+                        );
+                        break;
+                    } // llmlint: ignore-end[changed_behavior_has_e2e]
+                }
+            } else {
+                match rx.try_recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                }
+            };
             match message {
                 Message::Maintained(swept) => self.record(paths, journal, &swept)?,
-                Message::Retired(retirements) => self.retired(paths, journal, &retirements)?,
+                Message::Retired(retirements) => {
+                    owed = false;
+                    self.retired(paths, journal, &retirements)?;
+                }
                 _ => {}
             }
         }
@@ -2256,6 +2303,84 @@ mod tests {
         let gone = retire(&keys, &tx, &stop);
         assert_eq!(gone.unreached, keys);
         assert!(gone.retired.is_empty() && gone.failed.is_empty());
+    }
+
+    /// A closing driver records a joined sweep's last report even where the
+    /// loop's journal relay hands it on only after the join: the thread sent it,
+    /// so it is waited for rather than lost to a drain that ran first.
+    #[test]
+    fn a_closing_driver_records_the_retirement_its_relay_hands_on_late() {
+        let root = std::env::temp_dir().join(format!(
+            "onepipeline-maintenance-late-report-{}",
+            std::process::id()
+        ));
+        let paths = RunPaths::under(&root, "late");
+        paths.create().expect("the run directory");
+        let (to_loop, rx) = mpsc::channel::<Message>();
+        let (tx, relayed) = mpsc::channel::<Message>();
+        // The relay: one hop, slower than the join.
+        let relay = std::thread::spawn(move || {
+            for message in relayed {
+                std::thread::sleep(Duration::from_millis(300));
+                if to_loop.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let keys = vec!["github.com/owner/service".to_owned()];
+        let handle = std::thread::spawn({
+            let keys = keys.clone();
+            move || {
+                let _ = tx.send(Message::Retired(Box::new(Retirements::never_begun(keys))));
+            }
+        });
+        let mut maintenance = Maintenance::of_launch(None, &paths);
+        maintenance.sweep = Some(Sweep {
+            handle: Some(handle),
+            paths: paths.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        let mut journal = crate::journal::Journal::open(&paths);
+        maintenance
+            .close(&paths, &mut journal, &rx)
+            .expect("the record is written");
+        let kinds: Vec<String> = crate::journal::read(&paths.journal())
+            .into_iter()
+            .map(|event| event.kind.to_string())
+            .collect();
+        assert_eq!(kinds, ["branches-retired"]);
+        drop(rx);
+        relay.join().expect("the relay ends");
+
+        // A relay that goes without handing the report on ends the wait at
+        // once: nothing is recorded, and the close still succeeds.
+        let (to_loop, rx) = mpsc::channel::<Message>();
+        let (tx, relayed) = mpsc::channel::<Message>();
+        let relay = std::thread::spawn(move || {
+            let _ = relayed.recv();
+            drop(to_loop);
+        });
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(Message::Retired(Box::new(Retirements::never_begun(keys))));
+        });
+        let mut maintenance = Maintenance::of_launch(None, &paths);
+        maintenance.sweep = Some(Sweep {
+            handle: Some(handle),
+            paths: paths.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+        });
+        let started = Instant::now();
+        maintenance
+            .close(&paths, &mut journal, &rx)
+            .expect("a lost report is not a failed close");
+        assert!(
+            started.elapsed() < LAST_REPORT_WAIT,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(crate::journal::read(&paths.journal()).len(), 1);
+        relay.join().expect("the relay ends");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A driver with no schedule starts nothing and waits on nothing; one with a

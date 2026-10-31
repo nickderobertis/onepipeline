@@ -5998,6 +5998,7 @@ mod tests {
             title: "Build it".into(),
             source: None,
             repositories: Vec::new(),
+            priority: None,
         };
         let mut read = agent("build", &[]);
         read.task_record = Some(record.clone());
@@ -6028,6 +6029,7 @@ mod tests {
             title: "Not this task".into(),
             source: None,
             repositories: Vec::new(),
+            priority: None,
         };
         let claiming = |id: &str| {
             let mut node = agent(id, &[]);

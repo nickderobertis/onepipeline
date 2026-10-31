@@ -1,0 +1,24 @@
+# The budget the `human-items-e2e` project holds the host-wide human-items list to, checked
+# by `onebudgetspec check budgets.yaml` from this directory in that project's `test` target,
+# after the journey that writes `target/budget-records/human-items.json`. The figure is read
+# from that saved recording; nothing is timed twice.
+schema_version: 1
+budgets:
+  - id: human-items-read-seconds
+    measure: reported
+    command: [node, report.mjs]
+    unit: seconds
+    direction: max
+    threshold: 0.45
+    description: >-
+      Elapsed time of the complete host-wide `onepipeline human-items list` as a subprocess
+      of the release-built binary: the maximum of ten unchanged warm reads of each of
+      `list --json`, `list` and `report`, over 100 retained runs of 10,000 events, 100 open
+      items and 10 managers whose plans hold 5 to 50 steps (275 in all), with full bodies,
+      three-step previews and complete blocked sets. Detail separates index I/O, run
+      discovery, replay, blocked-work calculation, rendering and process/capture, and
+      discloses the cold, deleted-index and corrupt-index rebuilds and the ten-event tail
+      separately; those recoveries are not a second ceiling. The threshold is arithmetic
+      headroom, ceil((2 x 0.197229 + 0.025) / 0.05) x 0.05, over the indexed-read spike's
+      largest mutable call (report authoring:human-action-items-spike-indexed-read-report),
+      not a measured percentile.

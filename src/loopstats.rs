@@ -141,6 +141,12 @@ pub(crate) fn records_folded(records: u64) {
     RECORDS_FOLDED.fetch_add(records, Ordering::Relaxed);
 }
 
+/// How many journal records this process has folded so far: what the human-item
+/// read index reports as the run events a rebuild replayed.
+pub(crate) fn records_folded_total() -> u64 {
+    RECORDS_FOLDED.load(Ordering::Relaxed)
+}
+
 /// The environment variable asking a process to report **where** it read a run's
 /// journal: a file it appends one line to per read of an `events.jsonl` —
 /// `{"pid", "journal", "offset", "bytes"}` — the byte the read began at and how

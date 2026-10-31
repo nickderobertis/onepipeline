@@ -1,0 +1,73 @@
+{
+  "name": "human-items-e2e",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/human_items",
+  "tags": [
+    "scope:tests",
+    "lang:rust",
+    "tier:budget"
+  ],
+  "targets": {
+    "bootstrap": {
+      "executor": "nx:noop"
+    },
+    "build": {
+      "command": "just _tier-build human_items_workload",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/human_items/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "format": {
+      "command": "just _tier-format tests/human_items/main.rs"
+    },
+    "format-check": {
+      "command": "just _tier-fmt-check tests/human_items/main.rs",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/human_items/**/*",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "lint": {
+      "command": "just _tier-lint human_items_workload",
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/human_items/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test"
+      ]
+    },
+    "test": {
+      "command": "just human-items-budget",
+      "dependsOn": [
+        "build"
+      ],
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/human_items/**/*",
+        "{workspaceRoot}/tests/e2e/harness.rs",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ],
+      "parallelism": false,
+      "cache": false,
+      "outputs": [
+        "{workspaceRoot}/target/budget-records/human-items.json"
+      ]
+    }
+  }
+}

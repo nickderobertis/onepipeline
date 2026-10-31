@@ -928,6 +928,17 @@ impl Reader {
                 ),
             );
         }
+        // A human action's own store priority, which the item raised for it carries:
+        // recorded only for a `kind: human` node with one, so every other record is
+        // written exactly as before.
+        if node.get("kind").and_then(Value::as_str) == Some("human")
+            && task.item.priority != onetaskgraph_plugin_api::Priority::None
+        {
+            record.insert(
+                "priority".to_owned(),
+                Value::String(task.item.priority.as_str().to_owned()),
+            );
+        }
         node.insert("task_record".to_owned(), Value::Object(record));
         // The task's own visibility, as the store answers it: a task is classified by its
         // own declaration and its own repositories, never by the project it is filed under,

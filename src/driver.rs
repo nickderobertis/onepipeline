@@ -1146,7 +1146,9 @@ fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
             }
         })
         .collect();
-    if !root.join(&base).exists() {
+    // The host's human-item store sits beside the runs, so no run takes its name.
+    let reserved = |id: &str| Some(id) == crate::human_items::JOURNAL_PATH.split('/').next();
+    if !root.join(&base).exists() && !reserved(&base) {
         return base;
     }
     (2..)
@@ -3557,6 +3559,8 @@ pub(crate) fn stop_run(
             (journal::STOP_TEARDOWN, json!(established)),
         ]),
     )?;
+    // A stopped run's work will not run: the items holding it are retired.
+    crate::human_items::runtime::run_ended(paths);
     let stopped = crate::verbs::Stopped {
         run: paths.run.clone(),
         owner,
@@ -4651,6 +4655,12 @@ pub(crate) fn submit_envelope(
                 // A `settle` stating a landing is a landing with nothing driving the
                 // run to see it, so what it superseded is told to `onevcs` here.
                 crate::supersession::record_landed(paths, &mut journal)?;
+                // Edits that ended the run — its remaining work dropped — end it here,
+                // with nothing driving it to see that: the items holding its work go.
+                let after = crate::checkpoint::current(paths);
+                if graph::state_of(&after.statuses()) != GraphState::Waiting {
+                    crate::human_items::runtime::run_ended(paths);
+                }
                 // This process was the run's writer, so it lets go of it the way a
                 // driver does: under the handover, and not while the queue holds
                 // something another supervisor's edit put there while this one was

@@ -333,6 +333,7 @@ mod tests {
                 title: "Build it".into(),
                 source: None,
                 repositories: Vec::new(),
+                priority: None,
             }),
             ..Node::default()
         }
