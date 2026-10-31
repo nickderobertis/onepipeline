@@ -1,4 +1,5 @@
-// The release pull request's shortcut (`just release-pr-shortcut`), driven over a
+// The release pull request's shortcut (`node scripts/release-pr-shortcut.mjs`,
+// the step each test job asks first), driven over a
 // scratch repository: a bare `origin` whose `main` holds a small crate, and a
 // head commit on top of it carrying release-plz's edits, or more than them.
 //
@@ -236,6 +237,48 @@ describe("the release pull request's shortcut", () => {
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /GitHub did not answer/);
   });
+
+  // A subset of release-plz's edits is still only release-plz's edits, and a
+  // head with none is the tree main passed.
+  for (const [what, files] of [
+    [
+      "only the version",
+      { "Cargo.toml": RELEASE["Cargo.toml"], "Cargo.lock": RELEASE["Cargo.lock"] },
+    ],
+    ["only the changelog", { "CHANGELOG.md": RELEASE["CHANGELOG.md"] }],
+  ]) {
+    it(`skips them for a head that changes ${what}`, (t) => {
+      const repo = scratch(t);
+      commitAll(repo.work, files, "chore: release v0.2.0");
+      answers(repo.fake, pushRunPassed(repo.base));
+      const result = shortcut(repo);
+      assert.equal(result.stdout, "skip=true\n", result.stderr);
+    });
+  }
+
+  it("skips them for a head that is the tree main passed", (t) => {
+    const repo = scratch(t);
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=true\n", result.stderr);
+  });
+
+  for (const [what, manifest] of [
+    [
+      "inserts a version line",
+      MANIFEST("0.1.0").replace('edition = "2021"\n', 'edition = "2021"\nversion = "0.2.0"\n'),
+    ],
+    ["deletes a version line", MANIFEST("0.1.0").replace('version = "0.1.0"\n', "")],
+  ]) {
+    it(`runs them for a manifest that ${what}`, (t) => {
+      const repo = scratch(t);
+      commitAll(repo.work, { "Cargo.toml": manifest }, "chore: release v0.2.0");
+      answers(repo.fake, pushRunPassed(repo.base));
+      const result = shortcut(repo);
+      assert.equal(result.stdout, "skip=false\n", result.stderr);
+      assert.match(result.stderr, /Cargo\.toml changes more than a version line/);
+    });
+  }
 
   it("skips them for a release that versions the workspace's shared package version", (t) => {
     const workspace = (version) =>
