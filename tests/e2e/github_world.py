@@ -1121,11 +1121,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == "/drop-create":
-            length = int(self.headers.get("Content-Length", "0"))
-            request = json.loads(self.rfile.read(length)) if length else None
-            if (not isinstance(request, dict) or set(request) != {"title"}
-                    or not isinstance(request["title"], str) or not request["title"]):
-                self.reply({"message": "a dropped create names a title fragment"}, 400)
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+                if not 0 < length <= 4096:
+                    raise ValueError("Content-Length must be between 1 and 4096")
+                request = json.loads(self.rfile.read(length))
+                if (not isinstance(request, dict) or set(request) != {"title"}
+                        or not isinstance(request["title"], str) or not request["title"]):
+                    raise ValueError("a dropped create names a title fragment")
+            except ValueError as error:
+                self.reply({"message": str(error)}, 400)
                 return
             with lock:
                 world.drop_title = request["title"]

@@ -301,7 +301,8 @@ impl Linear {
         linear
     }
 
-    /// The project's id, as [`World::project_id`] holds it.
+    /// The project's id: [`PROJECT`] for one served from the start, and for one a copy filed
+    /// into [`Linear::serve_empty`], the id that copy's create sent, which only it knows.
     pub fn project_id(&self) -> String {
         self.lock().project_id.clone()
     }

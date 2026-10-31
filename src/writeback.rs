@@ -548,6 +548,7 @@ impl Classified {
     /// for.
     fn of_engine(error: &EngineError) -> Self {
         let (kind, cause) = cause_of(error);
+        // llmlint: ignore[changed_behavior_has_e2e] the held-under-a-lease case is driven end to end by `writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it`; the linked and released holders need a second copy of the same shadow running at once, which the run's `writeback-landing.lock` rules out for every process that projects a run, so no journey can reach them and `writeback::tests::a_create_held_under_a_lease_waits_for_the_lease_to_end` holds their class.
         let class = if matches!(error, EngineError::CreateInProgress { .. }) {
             FailureClass::Transient
         } else {
@@ -674,6 +675,7 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         // its own kinds, which `writeback::tests` holds. [`Classified::of_engine`] retries the
         // first once its lease ends (`writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it`).
         EngineError::CreateInProgress { .. } => decided("create-in-progress"),
+        // llmlint: ignore[changed_behavior_has_e2e] the store reports a duplicate only when two attempts created under one key, and two attempts at one shadow's create never run at once under the run's `writeback-landing.lock`; it is refused as the store refuses it, since only a person can say which item to keep, and `writeback::tests::every_engine_failure_is_named_as_the_store_names_it` holds the word and the class.
         EngineError::CreateDuplicated { .. } => decided("create-duplicated"),
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
