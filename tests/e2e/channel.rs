@@ -2749,11 +2749,11 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     world.script("build.wait", "hold");
     let run = running(&world, "otherasker", vec![agent("build", &[])]);
 
-    let serving = |asker: &str, frame: &str| {
+    let serving = |asker: &str, frame: &str, timeout: &str| {
         let mut serving = world
             .host_channel(&run)
             .env(onepipeline::channel::ASKER_ENV, asker)
-            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", "1")
+            .env("ONEPIPELINE_REPLY_TIMEOUT_SECONDS", timeout)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -2771,6 +2771,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     let asked = serving(
         "the-asker-that-ended",
         r#"{"kind":"blocker","message":"who owns this decision?","node":"build"}"#,
+        "1",
     );
     world.until("the question to reach the planner", |world| {
         !world.queued_surfaces(&run).is_empty()
@@ -2798,6 +2799,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     let stranger = serving(
         "some-other-dispatch",
         r#"{"kind":"monitor","message":"unrelated work is green","blocking":false}"#,
+        "1",
     );
     world.until("the stranger's report to reach the planner", |world| {
         world.queued_surfaces(&run).len() == 2
@@ -2818,6 +2820,7 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
     let pressing = serving(
         "some-other-dispatch",
         r#"{"kind":"blocker","message":"whose call is the base?","node":"build"}"#,
+        "120",
     );
     world.until("the stranger's question to reach the planner", |world| {
         world.queued_surfaces(&run).len() == 3
@@ -2846,6 +2849,19 @@ fn a_listener_of_another_asker_leaves_an_ended_askers_question_alone() {
         "who owns this decision?"
     );
     assert_eq!(displaced.json()["surface"]["abandoned"], json!(true));
+    // Its live state is what the assertions need, not a one-second window in
+    // which the host must execute them. End it with the ruling it waited for.
+    world
+        .run_with_stdin(
+            &["reply", &run],
+            &json!({
+                "completion": false, "reason": "the scoped channel assertions are complete",
+                "version": 2, "commands": []
+            })
+            .to_string(),
+        )
+        .exited(0)
+        .out_has("\"delivered\"");
     ended(pressing);
     world.release("build.go");
 }

@@ -150,6 +150,404 @@ fn generator(world: &World, args: &[&str]) -> String {
     String::from_utf8(output.stdout).expect("UTF-8")
 }
 
+/// Dead fixture entries share one reaped process; live entries still name the
+/// caller's real processes. Observe execve so this holds the generator's cost,
+/// and exercise a missing executable followed by recovery in the same process.
+#[test]
+fn the_generator_reaps_once_and_does_not_cache_a_failed_spawn() {
+    let world = World::new("fixture-reaped-pid");
+    let module = crate::harness::repo_file(GENERATOR);
+    let script = r#"
+        import {pathToFileURL} from 'node:url';
+        const {reapedPid} = await import(pathToFileURL(process.argv[2]));
+        console.log(JSON.stringify({node: process.execPath, pids: [reapedPid(), reapedPid(), reapedPid()]}));
+    "#;
+    let trace = world.root.join("generator.strace");
+    let output = Command::new("strace")
+        .args(["-f", "-e", "trace=execve", "-o"])
+        .arg(&trace)
+        .args(["node", "--input-type=module", "-e", script])
+        .arg("fixture-probe")
+        .arg(&module)
+        .output()
+        .expect("the generator runs under strace");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let held: Value = serde_json::from_slice(&output.stdout).expect("the reaped pids");
+    let pids = held["pids"].as_array().expect("three pids");
+    assert!(pids[0].as_u64().is_some_and(|pid| pid > 0));
+    assert!(pids.iter().all(|pid| pid == &pids[0]), "{held}");
+    let trace = std::fs::read_to_string(trace).expect("the exec trace");
+    assert_eq!(
+        trace
+            .lines()
+            .filter(|line| line.contains("/true\",") && line.ends_with("= 0"))
+            .count(),
+        1,
+        "{trace}"
+    );
+
+    let recovery = r#"
+        import {pathToFileURL} from 'node:url';
+        import assert from 'node:assert/strict';
+        const {reapedPid} = await import(pathToFileURL(process.argv[2]));
+        const path = process.env.PATH;
+        process.env.PATH = '';
+        assert.throws(() => reapedPid(), /could not reap/);
+        process.env.PATH = path;
+        assert.ok(reapedPid() > 0);
+    "#;
+    let recovered = Command::new(held["node"].as_str().expect("node's executable"))
+        .args(["--input-type=module", "-e", recovery])
+        .arg("fixture-probe")
+        .arg(module)
+        .output()
+        .expect("the generator retries after PATH is restored");
+    assert!(
+        recovered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+}
+
+/// Copies retain the CLI's records, but their live entries belong to the new
+/// caller and their journals can be changed without touching the shared source.
+#[test]
+fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
+    let world = World::new("host-fixture-copies");
+    let mut fixture = Fixture::empty(&world);
+    let (old_pid, old_token) = fixture.sleeper();
+    let (new_pid, new_token) = fixture.sleeper();
+    let started = now_millis();
+    for (run, nodes) in [
+        ("live-0", vec!["plan", "build"]),
+        ("live-1", vec!["plan", "review"]),
+        ("live-2", vec!["plan"]),
+    ] {
+        let mut spec = json!({
+            "run": run, "started_ms": started, "nodes": &nodes[1..],
+            "registry": nodes.iter().map(|node| json!({"node": node, "pid": old_pid, "token": old_token, "recorded_ms": started})).collect::<Vec<_>>()
+        });
+        if run != "live-2" {
+            spec["driver"] = json!({"pid": old_pid, "token": old_token});
+        }
+        fixture.run(&world, &spec);
+    }
+    fixture.run(
+        &world,
+        &json!({"run": "sparse", "started_ms": started, "settled": true, "registry": []}),
+    );
+    let sparse = fixture.runs.join("sparse/events.jsonl");
+    let prefix = std::fs::metadata(&sparse).unwrap().len();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&sparse)
+        .unwrap()
+        .set_len(8 * 1024 * 1024)
+        .unwrap();
+    let cache = world.root.join("template");
+    std::fs::create_dir(&cache).unwrap();
+    std::fs::rename(&fixture.runs, cache.join("runs")).unwrap();
+    write(
+        &cache.join("manifest.json"),
+        &json!({
+            "expected": {"held": [], "unproven": [], "stale": [], "stopped": [], "skipped": []},
+            "live_runs": ["live-0", "live-1", "live-2"], "ended": ["sparse"], "settled": ["sparse"],
+            "sparse_run": "sparse", "sparse_record_bytes": prefix
+        }),
+    );
+    let process = json!({"pid": new_pid, "token": new_token});
+    let processes = world.root.join("processes.json");
+    write(
+        &processes,
+        &json!({"drivers": [process, process], "entries": [[process, process], [process, process], [process]]}),
+    );
+    let copied = world.root.join("copy");
+    generator(
+        &world,
+        &["clone", path(&copied), path(&processes), path(&cache)],
+    );
+    for run in ["live-0", "live-1", "live-2"] {
+        let source = cache.join("runs").join(run);
+        let target = copied.join(run);
+        if run != "live-2" {
+            assert_eq!(read_json(&source.join("launch.json"))["pid"], old_pid);
+            assert_eq!(read_json(&target.join("launch.json"))["pid"], new_pid);
+        } else {
+            assert_eq!(
+                read_json(&source.join("launch.json")),
+                read_json(&target.join("launch.json"))
+            );
+        }
+        let entries: Vec<_> = std::fs::read_dir(target.join("dispatches"))
+            .unwrap()
+            .collect();
+        assert_eq!(entries.len(), if run == "live-2" { 1 } else { 2 });
+        for entry in entries {
+            let entry = read_json(&entry.unwrap().path());
+            assert_eq!(entry["pid"], new_pid);
+            assert_eq!(entry["started"], new_token);
+        }
+        assert_eq!(
+            std::fs::read(source.join("events.jsonl")).unwrap(),
+            std::fs::read(target.join("events.jsonl")).unwrap()
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(copied.join("sparse/events.jsonl"))
+            .unwrap()
+            .len(),
+        8 * 1024 * 1024
+    );
+    let source = cache.join("runs/live-0/events.jsonl");
+    let bytes = std::fs::read(&source).unwrap();
+    std::fs::write(copied.join("live-0/events.jsonl"), "the copy changes").unwrap();
+    assert_eq!(
+        std::fs::read(&source).unwrap(),
+        bytes,
+        "a clone cannot mutate its template"
+    );
+
+    let refused_clone = |name: &str| {
+        Command::new("node")
+            .arg(crate::harness::repo_file(GENERATOR))
+            .arg("clone")
+            .arg(world.root.join(name))
+            .arg(&processes)
+            .arg(&cache)
+            .output()
+            .unwrap()
+    };
+    let launch = cache.join("runs/live-0/launch.json");
+    let original = read_json(&launch);
+    let dead_launch = cache.join("runs/live-2/launch.json");
+    let original_dead_launch = read_json(&dead_launch);
+    let plan = cache.join("runs/live-2/plan.json");
+    let original_plan = read_json(&plan);
+    let dispatch = cache
+        .join("runs/live-0/dispatches")
+        .join(format!("{old_pid}-0.json"));
+    let original_dispatch = read_json(&dispatch);
+    let mut unknown = original.clone();
+    unknown["typo"] = json!(true);
+    let mut unknown_dead = original_dead_launch.clone();
+    unknown_dead["typo"] = json!(true);
+    let mut unknown_plan = original_plan.clone();
+    unknown_plan["typo"] = json!(true);
+    let mut wrong_type = original_dispatch.clone();
+    wrong_type["pid"] = json!([]);
+    let mut wrong_time = original_dispatch.clone();
+    wrong_time["dispatched_at"] = json!("yesterday");
+    for (nth, (file, bad, message)) in [
+        (&launch, unknown, "cached launch has unknown field typo"),
+        (
+            &dead_launch,
+            unknown_dead,
+            "cached launch has unknown field typo",
+        ),
+        (&plan, unknown_plan, "cached plan has unknown field typo"),
+        (
+            &dispatch,
+            wrong_type,
+            "cached dispatch.pid has the wrong type",
+        ),
+        (
+            &dispatch,
+            wrong_time,
+            "cached dispatch.dispatched_at must be a timestamp",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write(file, &bad);
+        let refused = refused_clone(&format!("bad-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        write(&launch, &original);
+        write(&dead_launch, &original_dead_launch);
+        write(&plan, &original_plan);
+        write(&dispatch, &original_dispatch);
+    }
+    let manifest = cache.join("manifest.json");
+    let original_manifest = read_json(&manifest);
+    let mut fixed = original.clone();
+    fixed["host"] = json!("another host");
+    let mut invalid_pid = original.clone();
+    invalid_pid["pid"] = json!(-1);
+    let mut fractional_pid = original.clone();
+    fractional_pid["pid"] = json!(1.5);
+    let mut empty_plan = original_plan.clone();
+    empty_plan["tasks"] = json!([]);
+    let mut non_array_plan = original_plan.clone();
+    non_array_plan["tasks"] = json!(null);
+    let mut invalid_task = read_json(&cache.join("runs/live-0/plan.json"));
+    invalid_task["tasks"][1]["id"] = json!("../outside");
+    let mut wrong_shape = original_manifest.clone();
+    wrong_shape["live_runs"] = json!(["live-0", "live-1"]);
+    let mut repeated_live = original_manifest.clone();
+    let first_live = repeated_live["live_runs"][0].clone();
+    repeated_live["live_runs"][1] = first_live;
+    let extra_plan = cache.join("runs/live-0/plan.json");
+    for (nth, (file, bad, message)) in [
+        (&launch, json!(null), "cached launch must be an object"),
+        (&launch, json!([]), "cached launch must be an object"),
+        (&launch, json!({}), "cached launch is missing"),
+        (&launch, fixed, "cached launch.host differs"),
+        (&launch, invalid_pid, "cached launch must be {pid, token}"),
+        (
+            &launch,
+            fractional_pid,
+            "cached launch must be {pid, token}",
+        ),
+        (
+            &plan,
+            empty_plan,
+            "cached plan.tasks must be a nonempty array",
+        ),
+        (
+            &plan,
+            non_array_plan,
+            "cached plan.tasks must be a nonempty array",
+        ),
+        (
+            &extra_plan,
+            invalid_task,
+            "cached plan task.id must be a run name",
+        ),
+        (
+            &manifest,
+            wrong_shape,
+            "the template's live runs differ from the process shape",
+        ),
+        (
+            &manifest,
+            repeated_live,
+            "live_runs must not name a run twice",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let valid = read_json(file);
+        write(file, &bad);
+        let refused = refused_clone(&format!("invalid-metadata-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains(message),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        write(file, &valid);
+    }
+    let registry = cache.join("runs/live-0/dispatches");
+    for (nth, replacement) in [
+        None,
+        Some("duplicate-1.json"),
+        Some("gap-9.json"),
+        Some("malformed.json"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let moved = registry.join(format!("{old_pid}-0.json"));
+        // Remove an index, duplicate the remaining index, leave a gap, or
+        // replace its spelling: all must fail before a registry is rebound.
+        let saved = std::fs::read(&moved).unwrap();
+        std::fs::remove_file(&moved).unwrap();
+        if let Some(name) = replacement {
+            std::fs::write(registry.join(name), &saved).unwrap();
+        }
+        let refused = refused_clone(&format!("invalid-registry-{nth}"));
+        assert_eq!(refused.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("the template's registry for live-0 differs from the process shape"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        if let Some(name) = replacement {
+            std::fs::remove_file(registry.join(name)).unwrap();
+        }
+        std::fs::write(moved, saved).unwrap();
+    }
+    std::fs::write(cache.join("runs/sparse/events.jsonl"), "").unwrap();
+    let refused = refused_clone("refused");
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr)
+        .contains("the sparse fixture's recorded prefix is truncated"));
+}
+
+fn fixture_cache(world: &World) -> PathBuf {
+    match std::env::var("NEXTEST_RUN_ID") {
+        Ok(run) => {
+            assert!(
+                !run.is_empty()
+                    && run
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            );
+            crate::harness::binary()
+                .parent()
+                .unwrap()
+                .join("host-fixtures")
+                .join(run)
+        }
+        Err(_) => world.root.join("host-fixture-template"),
+    }
+}
+
+/// Compare the raw CLI fixture with its first copy, including sparse prefixes
+/// and file lengths. No host read has yet written summaries or checkpoints.
+fn same_fixture(template: &Path, copied: &Path, sparse: &Path, sparse_prefix: u64) {
+    use std::io::Read;
+    let names = |root| {
+        std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let entries = names(template);
+    assert_eq!(entries, names(copied), "{}", template.display());
+    for name in entries {
+        let source = template.join(&name);
+        let destination = copied.join(&name);
+        if source.is_dir() {
+            same_fixture(&source, &destination, sparse, sparse_prefix);
+        } else {
+            let length = std::fs::metadata(&source).unwrap().len();
+            assert_eq!(
+                length,
+                std::fs::metadata(&destination).unwrap().len(),
+                "{}",
+                source.display()
+            );
+            let prefix = if destination == sparse {
+                sparse_prefix
+            } else {
+                length
+            };
+            let bytes = |path| {
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .unwrap()
+                    .take(prefix)
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                bytes
+            };
+            assert_eq!(bytes(&source), bytes(&destination), "{}", source.display());
+        }
+    }
+}
+
 fn pairs(value: &Value) -> BTreeSet<(String, String)> {
     value
         .as_array()
@@ -203,7 +601,34 @@ impl Fixture {
         });
         let file = world.root.join("processes.json");
         write(&file, &processes);
-        let manifest = generator(world, &["generate", path(&fixture.runs), path(&file)]);
+        let cache = fixture_cache(world);
+        let mut generated = false;
+        crate::harness::build_once(&cache, || {
+            let template = cache.join("runs");
+            let _ = std::fs::remove_dir_all(&template);
+            let manifest = generator(world, &["generate", path(&template), path(&file)]);
+            std::fs::write(cache.join("manifest.json"), manifest)
+                .expect("the raw fixture's manifest");
+            generated = true;
+        });
+        let manifest = generator(
+            world,
+            &["clone", path(&fixture.runs), path(&file), path(&cache)],
+        );
+        if generated {
+            // The first copy uses the very processes the CLI-generated template
+            // names, so every byte must agree before later copies rebind them.
+            let parsed: Value = serde_json::from_str(&manifest).unwrap();
+            same_fixture(
+                &cache.join("runs"),
+                &fixture.runs,
+                &fixture
+                    .runs
+                    .join(parsed["sparse_run"].as_str().unwrap())
+                    .join("events.jsonl"),
+                parsed["sparse_record_bytes"].as_u64().unwrap(),
+            );
+        }
         fixture.adopt(&manifest);
         fixture
     }
@@ -1979,6 +2404,8 @@ fn a_live_dispatch_recorded_with_a_legacy_ps_start_token_is_held() {
 #[test]
 fn the_budget_measurement_records_what_each_scaling_read_opened() {
     let world = World::new("host-view-measure");
+    let _fixture = Fixture::generate(&world);
+    let cache = fixture_cache(&world);
     let real = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|dir| dir.join("strace"))
         .find(|strace| strace.is_file())
@@ -2014,7 +2441,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
         .status()
         .expect("binutils' strip runs");
     assert!(strip.success(), "strip refused the suite's build");
-    let measure = |record: &Path, refuse: Option<&str>| {
+    let measure = |record: &Path, refuse: Option<&str>, template: &Path| {
         let mut command = Command::new("node");
         command
             .arg(crate::harness::repo_file("scripts/host-view-measure.mjs"))
@@ -2025,6 +2452,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
                 "tests/e2e/host_view.rs: a stripped copy of the suite's build",
             )
             .env("PATH", &path)
+            .env("ONEPIPELINE_TEST_HOST_FIXTURE", template)
             .stdin(Stdio::null());
         if let Some(refuse) = refuse {
             command.env("REFUSE_TRACE", refuse);
@@ -2041,7 +2469,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     };
 
     let record = world.root.join("host-view.json");
-    let measured = measure(&record, None);
+    let measured = measure(&record, None, &cache);
     assert!(
         measured.status.success(),
         "{}",
@@ -2083,7 +2511,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
 
     std::fs::remove_file(&asked).expect("the noted traces");
     let refused_record = world.root.join("refused.json");
-    let refused = measure(&refused_record, Some("scaling-400"));
+    let refused = measure(&refused_record, Some("scaling-400"), &cache);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(1), "{stderr}");
     assert!(
@@ -2103,5 +2531,22 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     assert!(
         !refused_record.exists(),
         "a measurement whose read went unobserved recorded it"
+    );
+
+    // A template the suite never wrote is refused before anything is measured, with the
+    // step that repairs the override or drops it rather than the measurement's own.
+    let missing_record = world.root.join("missing-template.json");
+    let missing = world.root.join("no-such-template");
+    let refused = measure(&missing_record, None, &missing);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(&format!("the host fixture template {}", missing.display()))
+            && stderr.contains("next: unset ONEPIPELINE_TEST_HOST_FIXTURE"),
+        "{stderr}"
+    );
+    assert!(
+        !missing_record.exists(),
+        "a measurement over a template it could not copy recorded it"
     );
 }

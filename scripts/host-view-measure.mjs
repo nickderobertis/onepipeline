@@ -35,6 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  cloneFixture,
   cold,
   generate,
   grow,
@@ -68,6 +69,8 @@ const NEXT =
   "pass an installed release build of this tree's onepipeline (`cargo install --path .`), on Linux, with `npm ci` done; a read that answered wrongly is a defect of the view, which `just test-e2e 'test(/^host_view::/)'` reproduces against this tree's own build";
 const TRACER_NEXT =
   "install `strace` on PATH and let this user trace its own children (`kernel.yama.ptrace_scope` 0 or 1), then measure again";
+const TEMPLATE_NEXT =
+  "unset ONEPIPELINE_TEST_HOST_FIXTURE to generate the fixture afresh, or point it at a template the host-view journeys wrote (a directory holding `manifest.json` and `runs/`), then measure again";
 /** An error carrying the next step its own failure needs, in place of {@link NEXT}. */
 const failed = (message, next) => Object.assign(new Error(message), { next });
 const recordRefused = (error) =>
@@ -306,7 +309,16 @@ try {
     entries: [[sleeper(), sleeper()], [sleeper(), sleeper()], [sleeper()]],
   };
   const generating = process.hrtime.bigint();
-  const manifest = generate(runs, processes);
+  const template = process.env.ONEPIPELINE_TEST_HOST_FIXTURE;
+  let manifest;
+  if (template === undefined) manifest = generate(runs, processes);
+  else {
+    try {
+      manifest = cloneFixture(runs, processes, template);
+    } catch (error) {
+      throw failed(`the host fixture template ${template}: ${error.message}`, TEMPLATE_NEXT);
+    }
+  }
   const generatedMs = Number(process.hrtime.bigint() - generating) / 1e6;
 
   cold(runs, manifest);

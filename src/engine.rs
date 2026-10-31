@@ -1598,6 +1598,10 @@ fn converge(
     let channel = ChannelState::of_run(paths, launch);
     let rules = executor_rules()?;
     let (to_loop, rx): (Sender<Message>, Receiver<Message>) = mpsc::channel();
+    // Sweep reports are control messages, not agent envelopes. Send them
+    // directly: close-out joins their producer before draining this receiver,
+    // which must not race a relay that has yet to forward its last reports.
+    let maintenance_tx = to_loop.clone();
     // Every dispatch, delivery and probe sends through the relay, which journals a
     // dispatch's envelopes as they arrive rather than when this loop next waits.
     // A driver taking the run over has ended every dispatch the one before it
@@ -2268,7 +2272,7 @@ fn converge(
             && !readied
             && in_flight.len() < state.graph.concurrency as usize
             && crate::maintenance::host_has_room();
-        maintenance.consider(idle, paths, &tx);
+        maintenance.consider(idle, paths, &maintenance_tx);
 
         // Nothing more to do until something happens — unless this pass is what
         // happened, in which case the next one is due now. The longest this loop
@@ -3332,8 +3336,14 @@ fn journalling_relay(paths: &RunPaths, to_loop: Sender<Message>) -> Result<Sende
                     },
                     other => other,
                 };
+                let settlement = matches!(message, Message::Settled(_));
                 if to_loop.send(message).is_err() {
                     break;
+                }
+                if settlement {
+                    if let Err(error) = crate::ordering::settlement_relayed() {
+                        eprintln!("{error}");
+                    }
                 }
             }
         })

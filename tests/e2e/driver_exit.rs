@@ -250,6 +250,47 @@ fn a_driver_that_completes_its_run_records_its_exit_before_the_run_is_free() {
     assert_eq!(world.run_json(run, "result.json")["state"], "complete");
 }
 
+/// **An attached launch with no observer leaves once its driver has.** Nothing
+/// relays an observer's last envelopes, so the launch has nothing to drain once its
+/// loop has finished: it prints its settlement and exits without waiting out the two
+/// seconds it gives an observer's stream to close.
+#[test]
+fn an_attached_launch_with_no_observer_exits_once_its_driver_has_exited() {
+    let world = World::new("exit-no-observer");
+    let run = "unobserved";
+    let path = world.plan(run, &plan_of(run, vec![agent("build", &[])]));
+    let launched = world
+        .cmd(&["start", &path, "--attach"])
+        .current_dir(&world.project)
+        .output()
+        .expect("the binary runs");
+    let left = crate::harness::now_millis();
+    assert_eq!(
+        launched.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&launched.stderr)
+    );
+    assert!(String::from_utf8_lossy(&launched.stdout).contains("\"settlement\":\"complete\""));
+    let launch = world.run_json(run, "launch.json");
+    assert!(
+        launch["graph"].as_str().unwrap_or_default().is_empty(),
+        "the launch named an observer graph: {launch}"
+    );
+
+    let exited = crate::harness::epoch_millis(
+        the_exit(&world, run)["ts"]
+            .as_str()
+            .expect("the record is stamped"),
+    );
+    let after = left.saturating_sub(exited);
+    assert!(
+        after < 2_000,
+        "the launch exited {after} ms after its driver recorded its exit — it waited out \
+         the drain an observer's stream is given, with no observer to drain"
+    );
+}
+
 /// **A run paused on a person.** The record says `awaiting-planner` — the word
 /// the attached launch printed — answers no command, and comes before the hook
 /// the pause withheld.

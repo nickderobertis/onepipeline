@@ -26,6 +26,7 @@
 //
 // As a command:
 //   host_view_fixture.mjs generate RUNS PROCESSES.json   writes the 100-run root, prints its manifest
+//   host_view_fixture.mjs clone RUNS PROCESSES.json CACHE  copies a raw fixture and rebinds its live processes
 //   host_view_fixture.mjs grow RUNS MANIFEST.json TOTAL    grows it with ended history, prints the manifest
 //   host_view_fixture.mjs cold RUNS MANIFEST.json          forgets every ended run's derived documents
 //   host_view_fixture.mjs stamp-sparse RUNS MANIFEST.json BINARY   the sparse run's summary, as its writer keeps it
@@ -35,17 +36,22 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  closeSync,
+  constants,
+  copyFileSync,
   chmodSync,
   linkSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
   truncateSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -240,9 +246,19 @@ export function dispatched(run, node, at) {
   return ["node-ready", "node-dispatched"].map((kind) => pipeline(run, kind, node, at));
 }
 
-/** A pid this host has just reaped, so a probe of it answers gone. */
+// Every dead entry also carries an impossible start token, so even PID reuse
+// cannot turn it into a live dispatch. Reaping once keeps a 100-run fixture from
+// spawning a process for each dead driver and registry entry.
+let reaped;
+/** A pid this generator reaped, so a probe cannot prove the fixture's dead token. */
 export function reapedPid() {
-  return spawnSync("true").pid;
+  if (reaped !== undefined) return reaped;
+  const child = spawnSync("true");
+  if (child.status !== 0 || !Number.isSafeInteger(child.pid) || child.pid <= 0) {
+    throw new Error(`could not reap a fixture process: ${child.error?.message ?? child.stderr}`);
+  }
+  reaped = child.pid;
+  return reaped;
 }
 
 /** The procfs start token of a live process, as the engine records one. */
@@ -259,20 +275,43 @@ const readJson = (path) => JSON.parse(readFileSync(path, "utf8"));
 export function writeRun(runs, seed, { run, journal: text, registry = null, driver = GONE, nodes = [] }) {
   const dir = join(runs, run);
   mkdirSync(dir, { recursive: true });
-  writeJson(join(dir, "launch.json"), {
-    ...seed.launch,
-    run_id: run,
-    project: `authoring:${run}`,
-    host: HOST,
-    pid: driver.pid || reapedPid(),
-    started: driver.token,
-  });
+  writeJson(join(dir, "launch.json"), launchOf(seed, run, driver));
   writeJson(join(dir, "plan.json"), planWith(seed, nodes));
   writeFileSync(join(dir, "events.jsonl"), text);
   if (registry !== null) {
     mkdirSync(join(dir, "dispatches"));
     registry.forEach((entry, n) => writeJson(join(dir, "dispatches", `${entry.pid}-${n}.json`), entry));
   }
+}
+
+function launchOf(seed, run, driver) {
+  return {
+    ...seed.launch,
+    run_id: run,
+    project: `authoring:${run}`,
+    host: HOST,
+    pid: driver.pid || reapedPid(),
+    started: driver.token,
+  };
+}
+
+// Cache records must be exactly the shape this generator writes. Derive keys
+// and fixed fields from its writers, rather than copying the engine's schema.
+function fixtureRecord(value, expected, varying, label) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) refuse(`${label} must be an object`);
+  for (const key of Object.keys(value)) {
+    if (!Object.hasOwn(expected, key)) refuse(`${label} has unknown field ${key}`);
+  }
+  for (const key of Object.keys(expected)) {
+    if (!Object.hasOwn(value, key)) refuse(`${label} is missing ${key}`);
+    if (varying.includes(key)) {
+      if (typeof value[key] !== typeof expected[key]) refuse(`${label}.${key} has the wrong type`);
+    } else if (JSON.stringify(value[key]) !== JSON.stringify(expected[key])) {
+      refuse(`${label}.${key} differs from the generated fixture`);
+    }
+  }
+  if (Object.hasOwn(expected, "pid")) processOf({pid: value.pid, token: value.started}, label);
+  return value;
 }
 
 /** A registry entry, stamped just after the run recorded the dispatch it names. */
@@ -379,6 +418,92 @@ export function generate(runs, processes, now = Date.now()) {
   }
   const roots = readdirSync(runs).length;
   if (roots !== 100) throw new Error(`the fixture is ${roots} run roots, not 100`);
+  return manifest;
+}
+
+/** Copy a raw CLI-generated fixture, rebinding its live processes to this caller.
+ * Journals are independent copies: cold reads chmod and truncate them, so links
+ * would let one journey change the template another journey reads.
+ */
+export function cloneFixture(runs, live, cache) {
+  root(runs);
+  root(cache);
+  processes(live);
+  const manifest = manifestOf(readJson(join(cache, "manifest.json")));
+  const template = join(cache, "runs");
+  const seed = readSeed();
+  const cachedDispatch = (file) => {
+    const value = fixtureRecord(readJson(file), entry("plan", GONE, 0), ["node", "pid", "started", "dispatched_at"], "cached dispatch");
+    runName(value.node, "cached dispatch.node");
+    const time = Date.parse(value.dispatched_at);
+    if (!Number.isFinite(time) || stamp(time) !== value.dispatched_at) refuse("cached dispatch.dispatched_at must be a timestamp");
+    return value;
+  };
+  const validateMetadata = (file) => {
+    const run = basename(dirname(file));
+    if (basename(file) === "launch.json") {
+      fixtureRecord(readJson(file), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
+    } else if (basename(file) === "plan.json") {
+      const value = readJson(file);
+      if (!Array.isArray(value?.tasks) || value.tasks.length === 0) refuse("cached plan.tasks must be a nonempty array");
+      const nodes = value.tasks.slice(1).map((task) => {
+        runName(task?.id, "cached plan task.id");
+        return task.id;
+      });
+      fixtureRecord(value, planWith(seed, nodes), [], "cached plan");
+    } else if (basename(dirname(file)) === "dispatches") cachedDispatch(file);
+  };
+  const copy = (from, to) => {
+    mkdirSync(to, { recursive: true });
+    for (const item of readdirSync(from, { withFileTypes: true })) {
+      const source = join(from, item.name);
+      const destination = join(to, item.name);
+      if (item.isDirectory()) copy(source, destination);
+      else if (source === join(template, manifest.sparse_run, "events.jsonl")) {
+        // Copy only the sparse file's real prefix, never materialize its holes.
+        const file = openSync(source, "r");
+        try {
+          const bytes = Buffer.alloc(manifest.sparse_record_bytes);
+          let read = 0;
+          while (read < bytes.length) {
+            const got = readSync(file, bytes, read, bytes.length - read, read);
+            if (got === 0) throw new Error("the sparse fixture's recorded prefix is truncated");
+            read += got;
+          }
+          writeFileSync(destination, bytes);
+          truncateSync(destination, statSync(source).size);
+        } finally {
+          closeSync(file);
+        }
+      } else {
+        validateMetadata(source);
+        copyFileSync(source, destination, constants.COPYFILE_FICLONE);
+      }
+    }
+  };
+  if (manifest.live_runs.length !== live.entries.length) throw new Error("the template's live runs differ from the process shape");
+  copy(template, runs);
+  manifest.live_runs.forEach((run, i) => {
+    const directory = join(runs, run);
+    const launch = fixtureRecord(readJson(join(directory, "launch.json")), launchOf(seed, run, GONE), ["pid", "started"], "cached launch");
+    if (live.drivers[i]) {
+      writeJson(join(directory, "launch.json"), { ...launch, pid: live.drivers[i].pid, started: live.drivers[i].token });
+    }
+    const registry = join(directory, "dispatches");
+    const entries = readdirSync(registry).map((file) => ({
+      index: Number(file.match(/-(\d+)\.json$/)?.[1]),
+      value: cachedDispatch(join(registry, file)),
+    })).sort((a, b) => a.index - b.index);
+    if (entries.length !== live.entries[i].length || entries.some((entry, n) => entry.index !== n)) {
+      throw new Error(`the template's registry for ${run} differs from the process shape`);
+    }
+    rmSync(registry, { recursive: true });
+    mkdirSync(registry);
+    entries.forEach(({ value }, n) => {
+      const process = live.entries[i][n];
+      writeJson(join(registry, `${process.pid}-${n}.json`), { ...value, pid: process.pid, started: process.token });
+    });
+  });
   return manifest;
 }
 
@@ -563,6 +688,8 @@ function manifestOf(value) {
     });
   }
   for (const key of ["live_runs", "ended", "settled"]) names(value[key], key);
+  // Each live run is rebound to its own processes; a repeat would rebind one twice.
+  if (new Set(value.live_runs).size !== value.live_runs.length) refuse("live_runs must not name a run twice");
   names(value.expected.skipped, "expected.skipped");
   runName(value.sparse_run, "sparse_run");
   count(value.sparse_record_bytes, "sparse_record_bytes");
@@ -620,6 +747,8 @@ function command(argv) {
   switch (verb) {
     case "generate":
       return out(generate(root(args[0]), processes(readJson(args[1]))));
+    case "clone":
+      return out(cloneFixture(root(args[0]), processes(readJson(args[1])), root(args[2])));
     case "grow": {
       const total = Number(args[2]);
       if (!Number.isSafeInteger(total) || total < 100) refuse(`grow wants a total of at least 100 run roots, not ${args[2]}`);
@@ -639,7 +768,7 @@ function command(argv) {
       return append(root(args[0]), spec);
     }
     default:
-      throw new Error(`unknown verb ${verb}: generate, grow, cold, stamp-sparse, run or append`);
+      throw new Error(`unknown verb ${verb}: generate, clone, grow, cold, stamp-sparse, run or append`);
   }
 }
 

@@ -973,6 +973,10 @@ impl World {
     /// reads as one statement of what this world is.
     #[must_use]
     pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        assert!(
+            !key.is_empty() && !key.contains(['=', '\0']) && !value.contains('\0'),
+            "a fixture environment assignment must be valid for a child process"
+        );
         self.environment.push((key.to_owned(), value.to_owned()));
         self
     }
@@ -1721,21 +1725,7 @@ impl World {
         for dir in [&origin, &home] {
             profile::fs::create_dir_all(dir).expect("a scratch directory");
         }
-        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
-        git(
-            self,
-            &self.root,
-            &["clone", &origin.to_string_lossy(), "service"],
-        );
-        profile::fs::write(checkout.join("README.md"), "the repository under test\n")
-            .expect("the seed file is written");
-        git(self, &checkout, &["add", "-A"]);
-        git(
-            self,
-            &checkout,
-            &["commit", "-m", "chore: seed the repository"],
-        );
-        git(self, &checkout, &["push", "-u", "origin", "main"]);
+        seed_repository(self, &origin, &checkout, "the repository under test\n");
 
         // Version 4: no `gate:` in it at all — what verifies a change is the
         // repository's own merge path, so the rules file says how the change is
@@ -1787,25 +1777,12 @@ impl World {
         let _fixture = profile::span(profile::Category::Fixture);
         let origin = self.root.join(format!("{alias}.git"));
         let checkout = self.root.join(alias);
-        profile::fs::create_dir_all(&origin).expect("a scratch directory");
-        git(self, &origin, &["init", "--bare", "--initial-branch=main"]);
-        git(
+        seed_repository(
             self,
-            &self.root,
-            &["clone", &origin.to_string_lossy(), alias],
-        );
-        profile::fs::write(
-            checkout.join("README.md"),
-            format!("the {alias} repository\n"),
-        )
-        .expect("the seed file is written");
-        git(self, &checkout, &["add", "-A"]);
-        git(
-            self,
+            &origin,
             &checkout,
-            &["commit", "-m", "chore: seed the repository"],
+            &format!("the {alias} repository\n"),
         );
-        git(self, &checkout, &["push", "-u", "origin", "main"]);
         self.register(
             &checkout,
             Some(&format!("https://github.com/owner/{alias}.git")),
@@ -1958,7 +1935,6 @@ impl World {
     /// launch then met as `"engine" is not a registered repository`, naming the
     /// repository whichever thread had lost the race.
     fn pointed_at_this_world(&self) -> std::sync::MutexGuard<'static, ()> {
-        static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
         std::env::set_var("ONEVCS_HOME", self.onevcs_home());
         std::env::set_var("GIT_CONFIG_GLOBAL", self.gitconfig());
@@ -4647,6 +4623,49 @@ fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
 /// [`as_session`](World::as_session) makes a real case.
 static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+// The same environment lock covers repository registration and native cleanup.
+static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply a world's command environment to one synchronous library call, then
+/// restore every value, including removed variables, even while unwinding.
+struct WorldEnvironment {
+    _held: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>,
+}
+
+impl WorldEnvironment {
+    fn enter(command: &Command) -> Self {
+        let held = POINTING.lock().unwrap_or_else(|held| held.into_inner());
+        let changes: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+            .collect();
+        let saved = changes
+            .iter()
+            .map(|(key, _)| (key.clone(), std::env::var_os(key)))
+            .collect();
+        let environment = Self { _held: held, saved };
+        for (key, value) in changes {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        environment
+    }
+}
+
+impl Drop for WorldEnvironment {
+    fn drop(&mut self) {
+        for (key, value) in &self.saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 impl World {
     /// Stop the runs this world started that can be stopped, before it goes.
     ///
@@ -4658,11 +4677,10 @@ impl World {
     /// the pipe `cargo nextest` reads this test's output from: the test exits,
     /// the pipe never reaches EOF, and the test is reported `LEAK`.
     ///
-    /// Through the binary's own `stop`, which on either platform walks the run's
-    /// descendants and waits until they are gone, rather than a second teardown
-    /// here that would walk the tree differently. `--force` because a world seen
-    /// through [`as_session`](World::as_session) is ending a run another
-    /// session's label owns.
+    /// Through the approved `verbs::stop` API, whose body the CLI calls too.
+    /// Cleanup has no stdout or exit-code assertion; explicit stop journeys
+    /// still drive the compiled binary. `force` stops a run another session's
+    /// label owns, as a world seen through [`as_session`](World::as_session) may.
     ///
     /// What it cannot stop it leaves, which is why it promises only the runs it
     /// can: `stop` refuses a run whose dispatch registry it cannot read, and
@@ -4672,18 +4690,25 @@ impl World {
         let Ok(entries) = profile::fs::read_dir(&self.runs) else {
             return;
         };
-        for entry in entries.flatten() {
-            // A directory with no launch record is not a run anything is
-            // driving — a plan that was refused before it started, or a run
-            // whose record a journey removed to see what the views make of it.
-            if !entry.path().join("launch.json").is_file() {
-                continue;
-            }
-            let run = entry.file_name();
-            let Some(run) = run.to_str() else {
-                continue;
-            };
-            let _ = self.cmd(&["stop", run, "--force"]).output();
+        let runs: Vec<_> = entries
+            .flatten()
+            .filter(|entry| entry.path().join("launch.json").is_file())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect();
+        if runs.is_empty() {
+            return;
+        }
+        let command = self.cmd(&[]);
+        let _environment = WorldEnvironment::enter(&command);
+        for run in runs {
+            let paths = onepipeline::views::RunPaths::under(&self.runs, &run);
+            let _ = onepipeline::verbs::stop(
+                &paths,
+                onepipeline::verbs::StopRequest {
+                    session: &self.session,
+                    force: true,
+                },
+            );
         }
     }
 }
@@ -4767,6 +4792,167 @@ fn a_worlds_teardown_ends_a_run_that_is_still_working() {
         stopped[0]
     );
 } // llmlint: ignore-end[tests_mirror_real_usage]
+
+/// Keep another world alive so containment cannot hide a missed stop. Both
+/// drivers must be gone after Drop, before the final world reaps descendants.
+#[test]
+fn teardown_stops_every_driver_without_spawning_the_cli() {
+    let world = World::new("teardown-library");
+    let mut drivers = Vec::new();
+    for run in ["first", "second"] {
+        let node = format!("{run}-work");
+        world.script(&format!("{node}.wait"), "hold");
+        let project = world.plan(run, &plan_of(run, vec![agent(&node, &[])]));
+        world.run(&["start", &project, "--detach"]).exited(0);
+        world.until("the driver to dispatch its held worker", |world| {
+            !world.events_of(run, "node-dispatched").is_empty()
+        });
+        let pid =
+            u32::try_from(world.run_json(run, "launch.json")["pid"].as_u64().unwrap()).unwrap();
+        assert!(
+            !process_ended(pid),
+            "the driver must be alive before cleanup"
+        );
+        drivers.push(pid);
+    }
+    let holder = world.as_session("keep-containment-owned");
+    let environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let starts = || {
+        profile::snapshot()
+            .programs
+            .get("onepipeline")
+            .map_or(0, |entry| entry.0)
+    };
+    let before = starts();
+    let began = std::time::Instant::now();
+    drop(world);
+    println!(
+        "teardown of two live runs: {:.6}s; CLI starts: {}",
+        began.elapsed().as_secs_f64(),
+        starts() - before
+    );
+    for pid in drivers {
+        assert!(
+            process_ended(pid),
+            "cleanup left driver {pid} alive before containment"
+        );
+    }
+    assert_eq!(
+        starts(),
+        before,
+        "fixture cleanup does not need another CLI process"
+    );
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == environment,
+        "cleanup restores the caller's environment"
+    );
+    drop(holder);
+}
+
+/// Reject invalid child settings before they enter a world. Unwinding that
+/// constructor still stops its live driver and restores the caller's environment.
+#[test]
+fn teardown_with_invalid_child_settings_restores_the_environment() {
+    let world = World::new("teardown-invalid-environment");
+    world.script("work.wait", "hold");
+    let project = world.plan("invalid", &plan_of("invalid", vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the run to dispatch", |world| {
+        !world.events_of("invalid", "node-dispatched").is_empty()
+    });
+    let pid = u32::try_from(
+        world.run_json("invalid", "launch.json")["pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
+    let holder = world.as_session("keep-the-cleanup-owner");
+    let before = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.with_env("ONEPIPELINE_TEST_INVALID_ENV", "bad\0value")
+    }));
+    if let Ok(mut world) = refused {
+        // A broken validator must fail this test without leaking its driver.
+        world
+            .environment
+            .retain(|(key, _)| key != "ONEPIPELINE_TEST_INVALID_ENV");
+        drop(world);
+        panic!("an invalid child setting must be rejected");
+    }
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == before,
+        "the caller's environment was not restored"
+    );
+    assert!(
+        process_ended(pid),
+        "invalid configuration left driver {pid} alive before containment"
+    );
+    drop(holder);
+}
+
+/// A native caller inherits the world's removals as well as its assignments;
+/// unwinding after the real stop restores both for the next caller.
+#[test]
+fn a_native_stop_restores_removed_settings_when_its_caller_unwinds() {
+    let world = World::new("teardown-unwind");
+    world.script("work.wait", "hold");
+    let project = world.plan("unwind", &plan_of("unwind", vec![agent("work", &[])]));
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("the driver to dispatch", |world| {
+        !world.events_of("unwind", "node-dispatched").is_empty()
+    });
+    let pid = u32::try_from(
+        world.run_json("unwind", "launch.json")["pid"]
+            .as_u64()
+            .unwrap(),
+    )
+    .unwrap();
+    let holder = world.as_session("keep-the-unwind-owner");
+    let key = onepipeline::cli::FLOW_ENV;
+    let previous = std::env::var_os(key);
+    std::env::set_var(key, "the parent owns this setting");
+    let before = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+    let command = world.cmd(&[]);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _environment = WorldEnvironment::enter(&command);
+        let probe = Command::new("node")
+            .args(["-e", "process.stdout.write(JSON.stringify({flow:process.env.ONEPIPELINE_FLOW??null,runs:process.env.ONEPIPELINE_RUNS_DIR}))"])
+            .output().expect("a real child inherits the native caller's environment");
+        assert!(probe.status.success());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&probe.stdout).unwrap(),
+            serde_json::json!({"flow": null, "runs": world.runs})
+        );
+        onepipeline::verbs::stop(
+            &onepipeline::views::RunPaths::under(&world.runs, "unwind"),
+            onepipeline::verbs::StopRequest {
+                session: &world.session,
+                force: true,
+            },
+        )
+        .expect("the public API stops the real run");
+        panic!("the native caller unwinds after stopping its run");
+    }));
+    let panic = unwound.expect_err("the native caller deliberately unwinds");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"the native caller unwinds after stopping its run")
+    );
+    assert!(
+        std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>() == before,
+        "the caller's environment was not restored"
+    );
+    assert!(
+        process_ended(pid),
+        "the native stop left its driver alive before containment"
+    );
+    match previous {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+    drop(world);
+    drop(holder);
+}
 
 /// A dump carries what the run directory holds, including a file nothing in
 /// this suite names.
@@ -5463,6 +5649,123 @@ impl Repository {
     }
 }
 
+/// Seed the bare origin in one plumbing transaction before cloning it. Clone
+/// then establishes the worktree, remote tracking ref and upstream together;
+/// there is no empty checkout to add, commit and push separately.
+fn seed_repository(world: &World, origin: &Path, checkout: &Path, readme: &str) {
+    profile::fs::create_dir_all(origin).expect("a scratch origin");
+    git(world, origin, &["init", "--bare", "--initial-branch=main"]);
+    let message = "chore: seed the repository";
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after the epoch")
+        .as_secs();
+    let stream = format!(
+        "blob\nmark :1\ndata {}\n{readme}\ncommit refs/heads/main\n\
+         committer {GIT_WHO} <{GIT_EMAIL}> {timestamp} +0000\ndata {}\n{message}\n\
+         M 100644 :1 README.md\n\ndone\n",
+        readme.len(),
+        message.len(),
+    );
+    let mut import = Command::new("git")
+        .args(["fast-import", "--quiet", "--done"])
+        .current_dir(origin)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git imports the seed commit");
+    std::io::Write::write_all(
+        &mut import.stdin.take().expect("the import stream"),
+        stream.as_bytes(),
+    )
+    .expect("the seed stream is written");
+    let imported = import.wait_with_output().expect("git finishes importing");
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    git(
+        world,
+        &world.root,
+        &[
+            "clone",
+            &origin.to_string_lossy(),
+            &checkout.to_string_lossy(),
+        ],
+    );
+}
+
+#[test]
+fn seeded_repositories_track_their_own_origin_and_keep_hooks() {
+    let world = World::new("seed-repositories");
+    let starts = || {
+        profile::snapshot()
+            .programs
+            .get("git")
+            .map_or(0, |entry| entry.0)
+    };
+    let before = starts();
+    let first = world.repository("local-direct", &["exit 1"]);
+    let second = world.extra_repository("dependency");
+    assert_eq!(
+        starts() - before,
+        9,
+        "two seeds use three git starts each, plus a hook configuration and two remote lookups"
+    );
+    for (repository, readme) in [
+        (&first, "the repository under test\n"),
+        (&second, "the dependency repository\n"),
+    ] {
+        assert_eq!(
+            git(&world, &repository.checkout, &["show", "HEAD:README.md"]),
+            readme
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["log", "-1", "--format=%s"]).trim(),
+            "chore: seed the repository"
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["status", "--porcelain"]),
+            ""
+        );
+        assert_eq!(
+            git(&world, &repository.checkout, &["rev-parse", "HEAD"]),
+            git(&world, &repository.origin, &["rev-parse", "main"])
+        );
+        assert_eq!(
+            git(
+                &world,
+                &repository.checkout,
+                &["rev-parse", "--abbrev-ref", "@{upstream}"]
+            )
+            .trim(),
+            "origin/main"
+        );
+    }
+    git(
+        &world,
+        &first.checkout,
+        &["commit", "--allow-empty", "-m", "fix: exercise the hook"],
+    );
+    let pushed = Command::new("git")
+        .arg("push")
+        .current_dir(&first.checkout)
+        .env("GIT_CONFIG_GLOBAL", world.gitconfig())
+        .output()
+        .unwrap();
+    assert!(
+        !pushed.status.success(),
+        "the installed pre-push hook must still refuse"
+    );
+    assert_ne!(
+        git(&world, &first.checkout, &["rev-parse", "HEAD"]),
+        git(&world, &first.origin, &["rev-parse", "main"])
+    );
+}
+
 /// Run git in a repository, refusing to continue on anything it rejects.
 ///
 /// Through the world's own git config, like every git `onevcs` runs from here:
@@ -5634,26 +5937,11 @@ pub fn rows(stdout: &str) -> Vec<&str> {
 
 /// One of the sibling doubles, pinned to a name only this process holds.
 ///
-/// The doubles live in a separate workspace member so they can never ship, and a
-/// package-scoped build — `cargo llvm-cov` runs one — does not build another
-/// member's binaries. So the fixture builds itself.
-///
-/// Cargo is the freshness check, not the file's existence: a double whose source
-/// changed has to be rebuilt, and a harness that stopped at "the binary is
-/// there" would silently run last week's fixture against this week's test. The
-/// build happens once per process; `.config/nextest.toml` bounds how many run at
-/// a time, and cargo's own lock serialises those.
-///
-/// The path handed back is **never** the one cargo publishes. Every test runs in
-/// its own process and each builds the doubles, so several cargo invocations
-/// uplift the same `target/debug/<name>` — and an uplift is a remove followed by
-/// a replacement, so that name is briefly absent. A test that had already looked
-/// would then spawn a binary that vanished under it: on macOS that surfaced both
-/// as a missing double and, worse, as a whole run stuck at `run-started` because
-/// the launcher could not start its driver. Giving each process its own name for
-/// the binary closes the window, because a later uplift replaces the *name* it
-/// published and never touches this one. See [`held_alias`] for why that name is
-/// a link rather than a copy wherever the filesystem allows one.
+/// The doubles live in a separate workspace member so they can never ship. The
+/// first test needing a package builds it; the rest of that nextest run reuse
+/// that freshness check. Direct test-binary runs still ask cargo each time.
+/// Each process holds its own alias, so another build's uplift cannot remove a
+/// binary from underneath a running journey (see [`held_alias`]).
 pub fn double(name: &str) -> PathBuf {
     static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let held = BUILT.get_or_init(|| build(&["--package", "onepipeline-testfakes"]));
@@ -6385,17 +6673,145 @@ fn held_dir() -> PathBuf {
 /// Build one package's binaries into the target directory this test's own binary
 /// came out of, and return the per-process directory they are held in.
 ///
-/// The one wait in this harness that is deliberately left unbounded. Every test
-/// process needing a double runs this, so several of them queue on cargo's lock
-/// over the shared target directory and cargo says so — `Blocking waiting for
-/// file lock on build directory` — and then waits as long as it takes. A
-/// deadline here would end whichever process drew the short straw, on a host
-/// that was working the whole time, and it would do it more often the more
-/// parallel the runner is. What bounds it instead is the runner: `slow-timeout`
-/// in `.config/nextest.toml` names the test that is waiting and then ends it, so
-/// a lock nothing is going to release reads as one named test rather than as a
-/// suite that stopped.
+/// Cargo and the per-run file lock may wait for another builder. The runner's
+/// slow-timeout bounds that wait, as it bounds the subprocess journeys.
 fn build(selection: &[&str]) -> PathBuf {
+    if let Ok(run) = std::env::var("NEXTEST_RUN_ID") {
+        assert!(
+            !run.is_empty()
+                && run
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-'),
+            "nextest's run id must be a safe path component"
+        );
+        let key = selection.join("_").replace('-', "");
+        let cache = binary()
+            .parent()
+            .expect("the binary's directory")
+            .join("double-builds")
+            .join(run)
+            .join(key);
+        build_once(&cache, || build_package(selection));
+    } else {
+        build_package(selection);
+    }
+    let held = held_dir();
+    profile::fs::create_dir_all(&held).expect("a directory for this process's doubles");
+    held
+}
+
+/// A failed or interrupted builder leaves no success marker; dropping its OS
+/// lock lets the next process retry. Only small markers are shared, never a
+/// mutable executable or a process's aliases.
+pub(crate) fn build_once(cache: &Path, build: impl FnOnce()) {
+    let ready = cache.join("ready");
+    if ready.is_file() {
+        return;
+    }
+    profile::fs::create_dir_all(cache).expect("a directory for the run's build marker");
+    let lock = profile::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(cache.join("lock"))
+        .expect("a build lock");
+    {
+        let _wait = profile::span(profile::Category::Wait);
+        fs4::fs_std::FileExt::lock_exclusive(&lock).expect("the run's build lock");
+    }
+    if !ready.is_file() {
+        build();
+        profile::fs::write(ready, b"").expect("the completed build marker");
+    }
+}
+
+/// Ask for real doubles from independent test processes. A recording forwarder
+/// observes Cargo starts; a missing compiler exercises Cargo's actual refusal.
+#[test]
+fn concurrent_builders_share_success_and_retry_failure() {
+    const CHILD: &str = "ONEPIPELINE_BUILD_CACHE_CHILD";
+    if let Some(scripts) = std::env::var_os(CHILD) {
+        let _world = World::new("build-cache-child");
+        let output = Command::new(double("reviewer-bar"))
+            .env(SCRIPT_DIR_ENV, scripts)
+            .output()
+            .expect("the built double runs");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"fixture built\n");
+        return;
+    }
+    let world = World::new("build-cache");
+    world.script("reviewer-bar.fingerprint", "fixture built");
+    let recorder = double("cargo-record");
+    let log = world.root.join("cargo-starts");
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let run = |nth: u32| {
+        let hex = format!("{:032x}", stamp + u128::from(nth));
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    };
+    let child = |run: &str| {
+        let mut command = Command::new(std::env::current_exe().expect("the test executable"));
+        command
+            .args([
+                "--exact",
+                "harness::concurrent_builders_share_success_and_retry_failure",
+            ])
+            .env(CHILD, &world.fakes)
+            .env("NEXTEST_RUN_ID", run)
+            .env("CARGO", &recorder)
+            .env(
+                "ONEPIPELINE_REAL_CARGO",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .env("ONEPIPELINE_CARGO_STARTS", &log);
+        command
+    };
+    let failed = child(&run(0))
+        .env("RUSTC", world.root.join("missing-rustc"))
+        .output()
+        .expect("a builder starts");
+    assert!(
+        !failed.status.success(),
+        "the missing compiler must refuse the build"
+    );
+    let refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failed.stdout),
+        String::from_utf8_lossy(&failed.stderr)
+    );
+    assert!(refusal.contains("missing-rustc"), "{refusal}");
+    let starts = || profile::fs::read_to_string(&log).unwrap().lines().count();
+    assert_eq!(starts(), 1, "Cargo was asked and refused");
+    let children: Vec<_> = (0..4)
+        .map(|_| child(&run(0)).spawn().expect("a waiting builder starts"))
+        .collect();
+    for mut child in children {
+        assert!(child.wait().expect("a builder exits").success());
+    }
+    assert_eq!(
+        starts(),
+        2,
+        "one successful build after the refusal, reused by every waiter"
+    );
+    assert!(child(&run(1)).status().unwrap().success());
+    assert_eq!(
+        starts(),
+        3,
+        "a new run must ask Cargo about freshness again"
+    );
+}
+
+fn build_package(selection: &[&str]) {
     let debug = binary()
         .parent()
         .expect("the binary is in a directory")
@@ -6445,9 +6861,6 @@ fn build(selection: &[&str]) -> PathBuf {
         "{selection:?} did not build: {}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let held = held_dir();
-    profile::fs::create_dir_all(&held).expect("a directory for this process's doubles");
-    held
 }
 
 /// This process's own name for a built binary, made once and kept.
