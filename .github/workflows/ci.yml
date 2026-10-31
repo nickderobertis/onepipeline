@@ -96,22 +96,13 @@ jobs:
           SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
         run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
       # rust-cache keys on the OS, every installed toolchain and every Cargo
-      # manifest and lockfile; restored only. Before the MSRV toolchain is
-      # installed, so the key is the one `rust-cache-warm.yml` saves from main
-      # for `test-linux`, whose warm build includes this job's clippy build.
+      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
+      # saves from main for `test-linux`, whose warm build includes this job's
+      # clippy build.
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           shared-key: test-linux
           save-if: false
-      - name: Read the MSRV from Cargo.toml
-        id: msrv
-        run: |
-          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
-          [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -122,7 +113,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the old jobs this repeats stay, passing, until
       # protection moves to the four and `onepipeline-ci-budgets` retires them.
-      - name: Formatting, lints, MSRV and audit (affected projects)
+      - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
       # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
       # engine-currency.yml's check: whether the lock still resolves the sibling
@@ -279,6 +270,21 @@ jobs:
         with:
           shared-key: test-linux
           save-if: false
+      # The MSRV floor's check, here rather than in `lint`: a second toolchain's
+      # whole-workspace build, which in `lint` shared the runner with the
+      # visual-docs capture's and left it no headroom under 30 minutes. After
+      # rust-cache, so the key stays the one main's warm run saves.
+      - name: Read the MSRV from Cargo.toml
+        id: msrv
+        if: steps.shortcut.outputs.skip != 'true'
+        run: |
+          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
+          [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        if: steps.shortcut.outputs.skip != 'true'
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
       - uses: actions/setup-node@v4
         if: steps.shortcut.outputs.skip != 'true'
         with:
@@ -326,7 +332,7 @@ jobs:
       # jobs, and it stays what it was: `onepipeline-real-smoke`'s own uncached `smoke`
       # target, reached by no `check`, its credential required above. The `smoke` job
       # ran it on `changes.outputs.crate`, which is this same affected answer.
-      - name: Tiers, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
+      - name: Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         env:

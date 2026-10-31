@@ -213,11 +213,11 @@ check-cross: fmt-check lint test-quick
 # and `smoke` jobs ran them on `changes.outputs.crate`, which is the same affected answer. The
 # three test jobs' documented install reaches the remote default branch, as the required
 # `install-documented` jobs did on every pull request.
-# The platform-independent checks: formatting, lints, MSRV, audit.
+# The platform-independent checks: formatting, lints, audit.
 ci-lint *args:
     @bash scripts/ci-job.sh lint "$@"
 
-# The Linux test job: `check`'s tiers under coverage, the live smoke, the pinned-wheel journeys, the install proofs and the x86_64 wheel.
+# The Linux test job: `check`'s tiers under coverage, the MSRV floor, the live smoke, the pinned-wheel journeys, the install proofs and the x86_64 wheel.
 ci-test-linux *args:
     @bash scripts/ci-job.sh test-linux "$@"
 
