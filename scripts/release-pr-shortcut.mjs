@@ -149,8 +149,10 @@ function hunksOf(path) {
       });
       continue;
     }
+    // The `---`/`+++` file headers come before the first hunk; inside one, a
+    // line starting so is content (`-` or `+` before a line of its own).
     const hunk = hunks.at(-1);
-    if (!hunk || line.startsWith("---") || line.startsWith("+++")) continue;
+    if (!hunk) continue;
     if (line.startsWith("-")) {
       hunk.removed.push({ text: line.slice(1), at: hunk.oldStart + hunk.removed.length });
     } else if (line.startsWith("+")) hunk.added.push(line.slice(1));

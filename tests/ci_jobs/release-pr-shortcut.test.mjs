@@ -426,6 +426,19 @@ describe("the release pull request's shortcut", () => {
     assert.match(result.stderr, /CHANGELOG\.md changes as binary/);
   });
 
+  it("runs them when the changelog rewrites a line that reads like a diff header", (t) => {
+    const repo = scratch(t, { "CHANGELOG.md": `${CHANGELOG}-- an old note\n` });
+    commitAll(
+      repo.work,
+      { ...RELEASE, "CHANGELOG.md": `${RELEASE["CHANGELOG.md"]}++ a rewritten note\n` },
+      "chore: release v0.2.0",
+    );
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /CHANGELOG\.md rewrites existing lines/);
+  });
+
   it("runs them for a release file deleted", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
