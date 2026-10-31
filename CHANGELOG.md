@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.97.0](https://github.com/nickderobertis/onepipeline/compare/v0.96.2...v0.97.0) - 2026-10-31
+
+### Added
+
+- operate durable human items across host sessions ([#1317](https://github.com/nickderobertis/onepipeline/pull/1317))
+
 ## [0.96.2](https://github.com/nickderobertis/onepipeline/compare/v0.96.1...v0.96.2) - 2026-10-30
 
 ### Fixed
