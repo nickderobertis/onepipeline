@@ -65,6 +65,25 @@ jobs:
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Build what test-linux and lint build
         run: bash scripts/warm-rust-cache.sh linux
+      # lint's visual-docs capture builds release binaries in its own image and
+      # target; one capture here leaves that build for lint to restore.
+      - name: Restore the visual docs capture's build
+        id: capture
+        uses: actions/cache/restore@v4
+        with:
+          path: target/ci-capture-target
+          key: ci-capture-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/workflows/visual-docs.yml') }}
+      - name: Build what lint's visual docs capture builds
+        if: steps.capture.outputs.cache-hit != 'true'
+        env:
+          SHOTS_OUT: shots/current/x86_64
+        run: bash screenshots/ci-capture.sh
+      - name: Save the visual docs capture's build
+        if: steps.capture.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/ci-capture-target
+          key: ci-capture-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.github/workflows/visual-docs.yml') }}
 
   windows:
     runs-on: windows-latest

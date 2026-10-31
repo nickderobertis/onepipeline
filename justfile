@@ -208,16 +208,16 @@ check-cross: fmt-check lint test-quick
 # failing closed as `check-affected` does; `--plan` prints the selection and runs
 # nothing, which is how a Linux host reads what the Windows and macOS jobs select.
 # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the plan that made the four jobs places
-# the pinned-wheel channel journeys in `lint` and the credentialled smoke in `test-linux`, and
+# the credentialled smoke in `test-linux`, beside the pinned-wheel channel journeys, and
 # both stay their projects' own uncached targets that no `check` reaches. The `release-compat`
 # and `smoke` jobs ran them on `changes.outputs.crate`, which is the same affected answer. The
 # three test jobs' documented install reaches the remote default branch, as the required
 # `install-documented` jobs did on every pull request.
-# The platform-independent checks: formatting, lints, MSRV, audit, the pinned-wheel journeys.
+# The platform-independent checks: formatting, lints, MSRV, audit.
 ci-lint *args:
     @bash scripts/ci-job.sh lint "$@"
 
-# The Linux test job: `check`'s tiers under coverage, the live smoke, the install proofs and the x86_64 wheel.
+# The Linux test job: `check`'s tiers under coverage, the live smoke, the pinned-wheel journeys, the install proofs and the x86_64 wheel.
 ci-test-linux *args:
     @bash scripts/ci-job.sh test-linux "$@"
 

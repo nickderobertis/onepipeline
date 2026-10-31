@@ -7,8 +7,9 @@
 # under the same `sh -e`, because a step of a job on the runner cannot itself
 # run in a container.
 #
-# It captures HEAD, from a clone of it under `target/ci-capture`, with only
-# `shots/` mounted back into this checkout: the capture builds its release
+# It captures HEAD, from a clone of it under `target/ci-capture`, with `shots/`
+# and its own cargo target (`target/ci-capture-target`) mounted from this
+# checkout: the capture builds its release
 # binaries into its tree's own `target/release`, and `lint` runs it beside its
 # own builds, which must not meet that build's lock or its files. The clone is
 # kept for the second capture of the same commit, which then builds nothing.
@@ -96,8 +97,12 @@ echo "ci-capture: running visual-docs.yml's capture-command in $image into $SHOT
 # capture normalises its own checkout's path out of what the CLI prints: a
 # short mount point such as `/w` also matches inside other paths a shot shows.
 inside=/__w/onepipeline/onepipeline
+# Its cargo target lives outside the clone, so a new HEAD's clone keeps the
+# build, and `lint` restores what main's warm run built into it.
+build="$ROOT/target/ci-capture-target"
+mkdir -p "$build"
 docker run --rm \
-  -v "$copy":"$inside" -v "$ROOT/shots":"$inside/shots" -w "$inside" \
+  -v "$copy":"$inside" -v "$ROOT/shots":"$inside/shots" -v "$build":"$inside/target" -w "$inside" \
   -e SHOTS_OUT \
   -e HOST_OWNER="$(id -u):$(id -g)" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \

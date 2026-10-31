@@ -54,14 +54,16 @@ done
 # the recipe, never these. Between them `lint` and `test-linux` hold every target
 # a project's `check` reaches, and `lint` and each of the other two every target
 # `just check-cross` runs (tests/ci_jobs holds both); formatting and the
-# platform-independent lints run once, in `lint`.
-# llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] `release-compat` in `lint` and `smoke`
-# in `test-linux` are where the plan that made the four jobs places them; each stays its
-# project's own uncached target that no `check` reaches, selected on the crate being affected
-# exactly as the `release-compat` and `smoke` jobs were.
+# platform-independent lints run once, in `lint`. The pinned-wheel channel
+# journeys (`release-compat`) run in `test-linux`, after the crate's debug build
+# they reuse, rather than in `lint`, where they compiled it a second time beside
+# the visual-docs capture and held `lint` past its 30 minutes.
+# llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] `release-compat` and `smoke`
+# in `test-linux` are each their project's own uncached target that no `check` reaches,
+# selected on the crate being affected exactly as the `release-compat` and `smoke` jobs were.
 case "$job" in
-  lint) targets="format-check,lint,syntax-check,msrv,deps-check,release-compat" ;;
-  test-linux) targets="test,doc,budgets,test-ci-shape,smoke,install-smoke,install-documented,wheel-smoke" ;;
+  lint) targets="format-check,lint,syntax-check,msrv,deps-check" ;;
+  test-linux) targets="test,doc,budgets,test-ci-shape,smoke,release-compat,install-smoke,install-documented,wheel-smoke" ;;
   test-windows | test-macos) targets="lint,test-quick,test-launcher,install-smoke,install-documented" ;;
   *) usage "'$job' is not one of ci.yml's jobs" ;;
 esac

@@ -332,6 +332,17 @@ const CACHE_INPUTS = [
     path: /(^|\/)target\/tools\n~\/\.cargo\/bin\/cargo-prune-superseded\*$/,
     key: ["runner.os", "runner.arch", "steps.pins.outputs.tools", "hashFiles('rust-toolchain.toml')"],
   },
+  // The visual-docs capture's build: also the workflow naming its image.
+  {
+    path: /^target\/ci-capture-target$/,
+    key: [
+      "runner.os",
+      "runner.arch",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      ".github/workflows/visual-docs.yml",
+    ],
+  },
   // Anything else cargo builds or fetches: the lockfile and the toolchain.
   {
     path: /(^|\/)(target|\.cargo)(\/|$)/,
@@ -446,6 +457,18 @@ describe("rust-cache-warm.yml", () => {
       }
     });
   }
+
+  it("saves from its Linux leg every cache `lint` restores", () => {
+    const keys = (all) =>
+      all.filter((step) => uses(step).startsWith("actions/cache")).map((step) => step.with.key);
+    const saved = steps(warm.jobs.linux)
+      .filter((step) => uses(step).startsWith("actions/cache/save@"))
+      .map((step) => step.with.key);
+    assert.ok(keys(steps(ci.jobs.lint)).length > 0, "lint restores no cache");
+    for (const key of keys(steps(ci.jobs.lint))) {
+      assert.ok(saved.includes(key), `nothing on main saves ${key}`);
+    }
+  });
 
   it("skips the macOS build on the push that merges a release pull request", () => {
     assert.match(String(warm.jobs.macos.if), /head_commit\.message, 'chore: release'/);
