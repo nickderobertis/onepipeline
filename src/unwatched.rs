@@ -784,9 +784,6 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
             continue;
         }
         let paths = RunPaths::under(root, &name);
-        // The launch record and nothing else. Read leniently, exactly as every
-        // other reader of it: a record this build cannot parse names no session,
-        // and a run belonging to nobody is passed over.
         candidates.push((candidates.len(), paths));
     }
     let readers = std::thread::available_parallelism()
@@ -830,8 +827,12 @@ fn discover_owned_runs(root: &Path, session: &str) -> Result<Discovered> {
     Ok(owned)
 }
 
-/// Read each complete launch record before deciding ownership. Both discovery
-/// paths use this reader, including all of the launch schema's validation.
+/// Which of `candidates` the session owns, each kept with its discovery index.
+///
+/// The launch record and nothing else, read whole before deciding ownership by
+/// both discovery paths. Read leniently, exactly as every other reader of it: a
+/// record this build cannot parse names no session, and a run belonging to nobody
+/// is passed over.
 fn owned_launches(
     candidates: &[(usize, RunPaths)],
     session: &str,
