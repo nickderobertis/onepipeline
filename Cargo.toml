@@ -1294,14 +1294,24 @@ onevcs-testing = "0.19.26"
 # projects an open task through to the configured `human_items.task_source` and nothing
 # else. Questions are never projected. Its one new refusal, `ProjectionRefused`, is named
 # by `src/writeback.rs`'s exhaustive classification.
-onetaskgraph-core = "=0.12.13"
-onetaskgraph-plugin-api = "=0.12.13"
-onetaskgraph-local-md = "=0.12.13"
+# **0.12.14 is linked for the hosts that adopt this engine** (`otg-follow-up-sync`): a host
+# holds its standalone plan-store CLI to the store release this engine links, so a host can use
+# the store's new copy options only once an engine links them. This repository's code calls
+# none of them. Its copies keep the store's defaults, which write what they wrote before. The
+# one default that changes is that a create is now safe to retry: a write-back that creates a
+# board item records its intent on its source item first, so a write-back retried after the
+# board took the create finds that item instead of filing a second
+# (`tests/e2e/multi_source.rs`'s
+# `a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_on_retry`).
+# `src/writeback.rs`'s exhaustive classification names the store's seven new refusals.
+onetaskgraph-core = "=0.12.14"
+onetaskgraph-plugin-api = "=0.12.14"
+onetaskgraph-local-md = "=0.12.14"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.12.13"
+onetaskgraph-linear = "=0.12.14"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

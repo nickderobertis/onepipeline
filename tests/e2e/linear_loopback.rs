@@ -224,6 +224,9 @@ struct World {
     /// Whether the project exists yet: [`Linear::serve_empty`] serves a workspace a copy files
     /// it into.
     project_held: bool,
+    /// The project's id: [`PROJECT`] for one [`Linear::serve`] holds from the start, and the id
+    /// a create sent for one a copy files, as Linear takes the `id` a create names.
+    project_id: String,
     issues: Vec<Issue>,
     documents: Vec<Document>,
     relations: Vec<Relation>,
@@ -270,6 +273,7 @@ impl Linear {
             project_name: name.to_owned(),
             project_content: linear_stores(description),
             project_held: true,
+            project_id: PROJECT.to_owned(),
             project_status: project_status.to_owned(),
             ..World::default()
         };
@@ -295,6 +299,11 @@ impl Linear {
         let linear = Self::serve(states, statuses, "", "", "");
         linear.lock().project_held = false;
         linear
+    }
+
+    /// The project's id, as [`World::project_id`] holds it.
+    pub fn project_id(&self) -> String {
+        self.lock().project_id.clone()
     }
 
     /// Edit one issue's stored description in place, as a person editing it in Linear does:
@@ -684,7 +693,7 @@ impl Linear {
                 }
                 world.project_status = status.name.clone();
                 json!({"projectUpdate": {"success": true, "project": {
-                    "id": PROJECT, "status": {"name": status.name, "type": status.kind},
+                    "id": world.project_id, "status": {"name": status.name, "type": status.kind},
                 }}})
             }
             Operation::ProjectUpdate => {
@@ -807,14 +816,15 @@ impl Linear {
 impl World {
     /// Whether `id` names the project, once there is one.
     fn holds(&self, id: &str) -> bool {
-        self.project_held && id == PROJECT
+        self.project_held && id == self.project_id
     }
 
     /// File the one project this endpoint holds, its content stored as Linear stores it.
     fn create_project(&mut self, input: &Map<String, Value>) -> Result<Value, String> {
         if self.project_held {
             return Err(format!(
-                "the loopback holds one project, and {PROJECT} is filed"
+                "the loopback holds one project, and {} is filed",
+                self.project_id
             ));
         }
         let (Some(name), Some(content), Some(status)) = (
@@ -832,6 +842,10 @@ impl World {
         self.project_status = status.name.clone();
         self.project_name = name.to_owned();
         self.project_content = linear_stores(content);
+        // Linear files a create under the `id` it names, where it names one.
+        if let Some(id) = input.get("id").and_then(Value::as_str) {
+            id.clone_into(&mut self.project_id);
+        }
         self.project_held = true;
         Ok(self.project())
     }
@@ -854,7 +868,8 @@ impl World {
         }
         let n = self.issues.len() + 1;
         let issue = Issue {
-            id: format!("issue-{n}"),
+            // Linear files a create under the `id` it names, where it names one.
+            id: text("id").map_or_else(|| format!("issue-{n}"), str::to_owned),
             identifier: format!("{TEAM}-{n}"),
             title: title.to_owned(),
             description: linear_stores(description),
@@ -887,7 +902,11 @@ impl World {
                 let (Some(title), Some(_)) = (text("title"), text("content")) else {
                     return Err("a documentCreate carries a `title` and a `content`".to_owned());
                 };
-                let id = format!("document-{}", self.documents.len() + 1);
+                // Linear files a create under the `id` it names, where it names one.
+                let id = text("id").map_or_else(
+                    || format!("document-{}", self.documents.len() + 1),
+                    str::to_owned,
+                );
                 self.documents.push(Document {
                     id,
                     title: title.to_owned(),
@@ -915,7 +934,7 @@ impl World {
             "createdAt": "2026-10-01T00:00:00.000Z",
             "updatedAt": "2026-10-01T00:00:00.000Z",
             "archivedAt": null,
-            "project": {"id": PROJECT},
+            "project": {"id": self.project_id},
         })
     }
 
@@ -937,7 +956,7 @@ impl World {
             "state": state,
             "priority": issue.priority,
             "labels": {"nodes": []},
-            "project": {"id": PROJECT},
+            "project": {"id": self.project_id},
         })
     }
 
@@ -976,10 +995,10 @@ impl World {
             .find(|named| named.name == self.project_status)
             .map(|named| json!({"name": named.name, "type": named.kind}));
         json!({
-            "id": PROJECT,
+            "id": self.project_id,
             "name": self.project_name,
             "content": self.project_content,
-            "url": "https://linear.app/generic/project/project-1",
+            "url": format!("https://linear.app/generic/project/{}", self.project_id),
             "createdAt": "2026-10-01T00:00:00.000Z",
             "updatedAt": "2026-10-01T00:00:00.000Z",
             "archivedAt": null,

@@ -653,6 +653,21 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::StatusesNotTasks => decided("statuses-not-tasks"),
         EngineError::ChangedWhileCopied { .. } => decided("changed-while-copied"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
+        // llmlint: ignore-block[changed_behavior_has_e2e] unreachable from a write-back: its
+        // copies set no condition on the counterpart they update, which is what each of these
+        // refuses or guards, and a write-back's GitHub Projects destination names no
+        // `creation_owners`; `writeback::tests` holds each word.
+        EngineError::ConditionsNotTasks => decided("conditions-not-tasks"),
+        EngineError::OtherwiseWithoutStatus => decided("otherwise-without-status"),
+        EngineError::StatusConditionPreserved => decided("status-condition-preserved"),
+        EngineError::DestinationStatus { .. } => decided("destination-status"),
+        EngineError::CreationOwner { .. } => decided("creation-owner"),
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+        // A create another attempt holds under a live lease, or settled, and one whose key more
+        // than one destination item carries: the store wrote nothing more for either, and the
+        // words are its own kinds, which `writeback::tests` holds.
+        EngineError::CreateInProgress { .. } => decided("create-in-progress"),
+        EngineError::CreateDuplicated { .. } => decided("create-duplicated"),
         EngineError::NotWritable { .. }
         | EngineError::CommentsNotWritable { .. }
         | EngineError::StatusNotWritable { .. }
@@ -3335,6 +3350,9 @@ fn create(
         // No narrowing: every member is copied whatever its status, as before the store
         // could narrow a copy by it.
         statuses: Vec::new(),
+        // No condition on the counterpart: every member is written as before the store could
+        // guard a write by what its counterpart holds.
+        conditions: onetaskgraph_core::CopyConditions::default(),
     };
     // The one call that is linear in what it carries, so the one whose deadline is.
     let deadline = Deadline::Write {
@@ -6469,6 +6487,35 @@ mod tests {
             EngineError::TargetTaskOrigin {
                 target: id(),
                 item: id(),
+                held: None,
+            },
+            // The copy refusals 0.12.14 added: conditions on a counterpart, which a write-back
+            // never sets, a create another attempt holds or duplicated, and a create a GitHub
+            // Projects source's `creation_owners` refuses.
+            EngineError::ConditionsNotTasks,
+            EngineError::OtherwiseWithoutStatus,
+            EngineError::StatusConditionPreserved,
+            EngineError::DestinationStatus {
+                item: id(),
+                destination: id(),
+                held: onetaskgraph_plugin_api::StatusCategory::Done,
+                allowed: vec![onetaskgraph_plugin_api::StatusCategory::Todo],
+            },
+            EngineError::CreationOwner {
+                item: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("board")
+                    .expect("a source name"),
+                reason: words(),
+            },
+            EngineError::CreateInProgress {
+                item: id(),
+                by: onetaskgraph_core::CreateHolder::Released,
+            },
+            EngineError::CreateDuplicated {
+                item: id(),
+                destination: onetaskgraph_plugin_api::SourceName::new("board")
+                    .expect("a source name"),
+                found: vec![id(), id()],
             },
             // The `task locate` refusals 0.12.9 added: a write-back never locates.
             EngineError::TargetNativeNeedsOne { count: 2 },
@@ -7613,6 +7660,7 @@ mod tests {
                         no_link: false,
                         expect: None,
                         statuses: vec![],
+                        conditions: onetaskgraph_core::CopyConditions::default(),
                     }),
                 )
                 .unwrap();

@@ -2109,6 +2109,7 @@ fn a_private_linear_home_copied_through_the_linked_store_keeps_its_public_projec
                     no_link: false,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
                 .unwrap_or_else(|error| panic!("the linked store copies the plan: {error}"))

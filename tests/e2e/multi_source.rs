@@ -122,6 +122,7 @@ fn filed_anywhere(
                 no_link: false,
                 expect: None,
                 statuses: Vec::new(),
+                conditions: onetaskgraph_core::CopyConditions::default(),
             })
             .await
             .map_err(|error| format!("the routed copy did not file the plan: {error}"))
@@ -1251,6 +1252,7 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
                 no_link: false,
                 expect: None,
                 statuses: Vec::new(),
+                conditions: onetaskgraph_core::CopyConditions::default(),
             })
             .await
             .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
@@ -1373,6 +1375,7 @@ fn a_private_drafts_document_is_filed_under_the_boards_copy_of_its_plan() {
                     no_link: false,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
                 .unwrap_or_else(|error| panic!("the document copy runs: {error}"));
