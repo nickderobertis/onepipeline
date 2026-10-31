@@ -95,6 +95,13 @@ const pushRunPassed = (base) => ({
     ],
   },
 });
+// A check run as GitHub Actions reports one for a job of this repository.
+const actionsCheck = (name, conclusion = "success") => ({
+  name,
+  conclusion,
+  app: { slug: "github-actions" },
+  details_url: `https://github.com/${REPO}/actions/runs/1/job/2`,
+});
 const noRuns = (base) => ({
   [`repos/${REPO}/actions/runs?head_sha=${base}&status=success&per_page=100`]: {
     workflow_runs: [],
@@ -144,10 +151,9 @@ describe("the release pull request's shortcut", () => {
       ],
       [`repos/${REPO}/git/commits/${"f".repeat(40)}`]: { tree: { sha: tree } },
       [`repos/${REPO}/commits/${"f".repeat(40)}/check-runs?per_page=100`]: {
-        check_runs: ["lint", "test-linux", "test-windows", "test-macos"].map((name) => ({
-          name,
-          conclusion: "success",
-        })),
+        check_runs: ["lint", "test-linux", "test-windows", "test-macos"].map((name) =>
+          actionsCheck(name),
+        ),
       },
     });
     const result = shortcut(repo);
@@ -207,6 +213,31 @@ describe("the release pull request's shortcut", () => {
     assert.match(result.stderr, /no record that main passed/);
   });
 
+  it("runs them when the passing checks of those names are not this repository's Actions jobs", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    const tree = git(repo.work, "rev-parse", `${repo.base}^{tree}`);
+    answers(repo.fake, {
+      ...noRuns(repo.base),
+      [`repos/${REPO}/commits/${repo.base}/pulls`]: [
+        { number: 13, merge_commit_sha: repo.base, head: { sha: "d".repeat(40) } },
+      ],
+      [`repos/${REPO}/git/commits/${"d".repeat(40)}`]: { tree: { sha: tree } },
+      [`repos/${REPO}/commits/${"d".repeat(40)}/check-runs?per_page=100`]: {
+        check_runs: [
+          { ...actionsCheck("test-linux"), app: { slug: "some-other-app" } },
+          {
+            ...actionsCheck("test-windows"),
+            details_url: "https://github.com/someone/else/actions/runs/1/job/2",
+          },
+          actionsCheck("test-macos"),
+        ],
+      },
+    });
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+  });
+
   it("runs them when a merged head with the tree did not pass every test job", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
@@ -219,9 +250,9 @@ describe("the release pull request's shortcut", () => {
       [`repos/${REPO}/git/commits/${"e".repeat(40)}`]: { tree: { sha: tree } },
       [`repos/${REPO}/commits/${"e".repeat(40)}/check-runs?per_page=100`]: {
         check_runs: [
-          { name: "test-linux", conclusion: "success" },
-          { name: "test-windows", conclusion: "failure" },
-          { name: "test-macos", conclusion: "success" },
+          actionsCheck("test-linux"),
+          actionsCheck("test-windows", "failure"),
+          actionsCheck("test-macos"),
         ],
       },
     });
@@ -409,10 +440,7 @@ describe("the release pull request's shortcut", () => {
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");
     const green = (sha) => ({
       [`repos/${REPO}/commits/${sha}/check-runs?per_page=100`]: {
-        check_runs: ["test-linux", "test-windows", "test-macos"].map((name) => ({
-          name,
-          conclusion: "success",
-        })),
+        check_runs: ["test-linux", "test-windows", "test-macos"].map((name) => actionsCheck(name)),
       },
     });
     answers(repo.fake, {

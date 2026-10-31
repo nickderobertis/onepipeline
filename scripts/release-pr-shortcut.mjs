@@ -331,8 +331,14 @@ for (const pull of pulls) {
   const checks = gh(`repos/${options.repo}/commits/${tested}/check-runs?per_page=100`, (body) =>
     listOf(body, "check_runs"),
   ).check_runs;
+  // A check of that name proves the job only when GitHub Actions ran it for a
+  // workflow of this repository: any other app, or another repository's run,
+  // can report a check called `test-linux`.
+  const ours = (check) =>
+    check.app?.slug === "github-actions" &&
+    String(check.details_url ?? "").startsWith(`https://github.com/${options.repo}/actions/runs/`);
   const green = TEST_JOBS.every((job) =>
-    checks.some((check) => check.name === job && check.conclusion === "success"),
+    checks.some((check) => check.name === job && check.conclusion === "success" && ours(check)),
   );
   if (green) {
     answer(
