@@ -26,7 +26,7 @@ use serde_json::json;
 use crate::harness::{
     global, lifecycle, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE,
 };
-use crate::linear_loopback::{content_of, metadata_of, Linear, Operation, PROJECT};
+use crate::linear_loopback::{content_of, metadata_of, Linear, Operation};
 use crate::linear_writeback::{
     configuration, from_the_launch_directory, KEY_ENV, SETTLEMENT, SOURCE, STATES, STATUSES,
 };
@@ -111,7 +111,7 @@ fn homed(name: &str) -> Homed {
         &format!("{STORE_SOURCE}:{}", project_id(NAME)),
         onetaskgraph_core::CopyScope::Projects { tasks: true },
     );
-    assert_eq!(home, format!("{SOURCE}:{PROJECT}"));
+    assert_eq!(home, format!("{SOURCE}:{}", linear.project_id()));
     world.write_item(
         &world.store().join("documents").join("design.md"),
         &[
@@ -199,6 +199,7 @@ fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::Co
                 no_link: false,
                 expect: None,
                 statuses: Vec::new(),
+                conditions: onetaskgraph_core::CopyConditions::default(),
             })
             .await
             .unwrap_or_else(|error| panic!("the copy files it in Linear: {error}"))
@@ -291,7 +292,7 @@ where
 impl Homed {
     /// `start` of the Linear home under the rendered-only check, from the launch directory.
     fn start(&self) -> crate::harness::Run {
-        let home = format!("{SOURCE}:{PROJECT}");
+        let home = format!("{SOURCE}:{}", self.linear.project_id());
         let command = from_the_launch_directory(
             &self.world,
             &self.launch,
@@ -505,7 +506,7 @@ fn an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write() {
     // The first copy files the plan: its project, a Linear issue a task, the dependency between
     // `build` and `design`, and the design document, each held as Linear rewrites it.
     let (home, document) = copy();
-    assert_eq!(home, format!("{SOURCE}:{PROJECT}"));
+    assert_eq!(home, format!("{SOURCE}:{}", linear.project_id()));
     let node_of = |issue: &str| -> String {
         let (_, _, description) = linear
             .issues()
