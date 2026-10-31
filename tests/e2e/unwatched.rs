@@ -1569,10 +1569,15 @@ fn a_large_root_validates_owned_foreign_and_malformed_launches_before_reporting(
     }
     world.run(&["stop", &template.run, "--force"]).exited(0);
     world.release("build.go");
+    // llmlint: ignore-block[tests_mirror_real_usage] no verb writes a launch record whose pid
+    // is not a process id, and none could: the state is left by a damaged write or a build
+    // whose schema this one does not read. The record edited is this build's own, changed only
+    // in the field under test, and every claim afterwards is read off the compiled binary.
     let original = std::fs::read(launches[1].launch()).expect("the real launch record");
     let mut malformed: Value = serde_json::from_slice(&original).expect("the real schema");
     malformed["pid"] = json!("not a process id");
     std::fs::write(launches[1].launch(), malformed.to_string()).expect("the incomplete launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let (code, rows) = asked(&world, &["unwatched"]);
     assert_eq!(code, RUNS_UNWATCHED, "{rows}");
     assert_eq!(rows.lines().count(), 2, "{rows}");
@@ -1584,7 +1589,11 @@ fn a_large_root_validates_owned_foreign_and_malformed_launches_before_reporting(
         !rows.contains("discovery-01") && !rows.contains("discovery-03"),
         "{rows}"
     );
+    // llmlint: ignore-block[tests_mirror_real_usage] the repair is putting back the record
+    // this build's own writer wrote, byte for byte, which is what restoring a damaged run root
+    // does; no verb rewrites another run's launch record.
     std::fs::write(launches[1].launch(), original).expect("the recovered launch");
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let (code, recovered) = asked(&world, &["unwatched"]);
     assert_eq!(code, RUNS_UNWATCHED, "{recovered}");
     assert_eq!(recovered.lines().count(), 3, "{recovered}");

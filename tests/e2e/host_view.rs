@@ -2433,7 +2433,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
         .status()
         .expect("binutils' strip runs");
     assert!(strip.success(), "strip refused the suite's build");
-    let measure = |record: &Path, refuse: Option<&str>| {
+    let measure = |record: &Path, refuse: Option<&str>, template: &Path| {
         let mut command = Command::new("node");
         command
             .arg(crate::harness::repo_file("scripts/host-view-measure.mjs"))
@@ -2444,7 +2444,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
                 "tests/e2e/host_view.rs: a stripped copy of the suite's build",
             )
             .env("PATH", &path)
-            .env("ONEPIPELINE_TEST_HOST_FIXTURE", &cache)
+            .env("ONEPIPELINE_TEST_HOST_FIXTURE", template)
             .stdin(Stdio::null());
         if let Some(refuse) = refuse {
             command.env("REFUSE_TRACE", refuse);
@@ -2461,7 +2461,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     };
 
     let record = world.root.join("host-view.json");
-    let measured = measure(&record, None);
+    let measured = measure(&record, None, &cache);
     assert!(
         measured.status.success(),
         "{}",
@@ -2503,7 +2503,7 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
 
     std::fs::remove_file(&asked).expect("the noted traces");
     let refused_record = world.root.join("refused.json");
-    let refused = measure(&refused_record, Some("scaling-400"));
+    let refused = measure(&refused_record, Some("scaling-400"), &cache);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert_eq!(refused.status.code(), Some(1), "{stderr}");
     assert!(
@@ -2523,5 +2523,22 @@ fn the_budget_measurement_records_what_each_scaling_read_opened() {
     assert!(
         !refused_record.exists(),
         "a measurement whose read went unobserved recorded it"
+    );
+
+    // A template the suite never wrote is refused before anything is measured, with the
+    // step that repairs the override or drops it rather than the measurement's own.
+    let missing_record = world.root.join("missing-template.json");
+    let missing = world.root.join("no-such-template");
+    let refused = measure(&missing_record, None, &missing);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains(&format!("the host fixture template {}", missing.display()))
+            && stderr.contains("next: unset ONEPIPELINE_TEST_HOST_FIXTURE"),
+        "{stderr}"
+    );
+    assert!(
+        !missing_record.exists(),
+        "a measurement over a template it could not copy recorded it"
     );
 }
