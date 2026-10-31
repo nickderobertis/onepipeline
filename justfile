@@ -210,7 +210,9 @@ check-cross: fmt-check lint test-quick
 # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the plan that made the four jobs places
 # the pinned-wheel channel journeys in `lint` and the credentialled smoke in `test-linux`, and
 # both stay their projects' own uncached targets that no `check` reaches. The `release-compat`
-# and `smoke` jobs ran them on `changes.outputs.crate`, which is the same affected answer.
+# and `smoke` jobs ran them on `changes.outputs.crate`, which is the same affected answer. The
+# three test jobs' documented install reaches the remote default branch, as the required
+# `install-documented` jobs did on every pull request.
 # The platform-independent checks: formatting, lints, MSRV, audit, the pinned-wheel journeys.
 ci-lint *args:
     @bash scripts/ci-job.sh lint "$@"
@@ -218,7 +220,6 @@ ci-lint *args:
 # The Linux test job: `check`'s tiers under coverage, the live smoke, the install proofs and the x86_64 wheel.
 ci-test-linux *args:
     @bash scripts/ci-job.sh test-linux "$@"
-# llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
 # The Windows test job: clippy, the uninstrumented suite, the npm launcher, the install proofs.
 ci-test-windows *args:
@@ -227,6 +228,7 @@ ci-test-windows *args:
 # The macOS test job: clippy, the uninstrumented suite, the npm launcher, the install proofs.
 ci-test-macos *args:
     @bash scripts/ci-job.sh test-macos "$@"
+# llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
 # CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
 # this is what says the split drops and repeats nothing. Outside `check`, because

@@ -88,7 +88,6 @@ function answers(fake, responses) {
   }
 }
 
-// main's push run of CI succeeded on the base commit.
 const pushRunPassed = (base) => ({
   [`repos/${REPO}/actions/runs?head_sha=${base}&status=success&per_page=100`]: {
     workflow_runs: [

@@ -437,17 +437,19 @@ jobs:
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just bootstrap
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] transitional by the plan that made the four
+      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier] transitional by the plan that made the four
       # jobs: the jobs behind today's required contexts stay, passing, until branch
       # protection moves to the four (`onepipeline-required-checks`) and
       # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
-      # request; neither feeds the other.
+      # request; neither feeds the other. The documented install it runs reaches the
+      # remote default branch, as the required `install-documented` jobs did on every
+      # pull request.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
+      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier]
       # On Windows there are no process groups to make a leaked process visible
       # afterwards, so what was still running is read while it is still true.
       - name: What was still running when it stopped
@@ -528,16 +530,18 @@ jobs:
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] transitional by the plan that made the four
+      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier] transitional by the plan that made the four
       # jobs: the jobs behind today's required contexts stay, passing, until branch
       # protection moves to the four (`onepipeline-required-checks`) and
       # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
-      # request; neither feeds the other.
+      # request; neither feeds the other. The documented install it runs reaches the
+      # remote default branch, as the required `install-documented` jobs did on every
+      # pull request.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
+      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier]
       - name: What was still running when it stopped
         if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
         continue-on-error: true
