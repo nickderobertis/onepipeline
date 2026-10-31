@@ -369,6 +369,31 @@ describe("the release pull request's shortcut", () => {
     });
   }
 
+  it("runs them for a release file whose mode changes", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    chmodSync(join(repo.work, "Cargo.toml"), 0o755);
+    git(repo.work, "add", "Cargo.toml");
+    git(repo.work, "commit", "--quiet", "--message", "chore: make the manifest executable");
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /Cargo\.toml changes mode \(100644 -> 100755\)/);
+  });
+
+  it("runs them for a release file that changes as binary", (t) => {
+    const repo = scratch(t);
+    commitAll(
+      repo.work,
+      { ...RELEASE, "CHANGELOG.md": `${RELEASE["CHANGELOG.md"]}\u0000` },
+      "chore: release v0.2.0",
+    );
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /CHANGELOG\.md changes as binary/);
+  });
+
   it("runs them for a release file deleted", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");

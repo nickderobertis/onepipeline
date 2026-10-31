@@ -116,6 +116,22 @@ for (const line of changes.split("\n").filter(Boolean)) {
     answer(false, `${path} (${status}) is not one of release-plz's version or changelog edits`);
   }
 }
+// In place, as text: a mode change leaves no hunk for the checks below to read,
+// and a binary diff no lines, so either would pass them unread.
+for (const line of git("diff", "--no-renames", "--raw", base, head).split("\n").filter(Boolean)) {
+  const [modes, path] = line.split("\t");
+  const [oldMode, newMode] = modes.slice(1).split(" ");
+  if (oldMode !== "100644" || newMode !== "100644") {
+    answer(false, `${path} changes mode (${oldMode} -> ${newMode}), which no release edit does`);
+  }
+}
+for (const line of git("diff", "--no-renames", "--numstat", base, head)
+  .split("\n")
+  .filter(Boolean)) {
+  const [added, removed, path] = line.split("\t");
+  if (added === "-" || removed === "-")
+    answer(false, `${path} changes as binary, which no release edit does`);
+}
 
 // Each hunk of one file's diff: where it sits in the base, and the lines it
 // removes (with their base line numbers) and adds.
