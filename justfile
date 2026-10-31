@@ -568,7 +568,7 @@ _smoke-run *args:
 # installed command by, which only Windows takes through cmd.exe. Two files of
 # the `onepipeline-npm` project's `test`, which `check` runs on Linux;
 # `.github/workflows/launcher.yml` (Windows)
-# and `ci.yml`'s Mac lane call this, where `check` never runs and the launcher
+# and `ci.yml`'s `test-windows` and `test-macos` (`onepipeline-npm:test-launcher`) call this, where `check` never runs and the launcher
 # takes paths Linux cannot reach. The engine it builds denies warnings, as every
 # build the gate makes does.
 npm-launcher:

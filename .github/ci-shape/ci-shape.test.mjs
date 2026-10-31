@@ -34,6 +34,17 @@ const FOUR = {
   "test-windows": "windows-latest",
   "test-macos": "macos-latest",
 };
+// Each job's bound in minutes: `lint` at the 30 the four were planned to, and
+// each test job at its measured hosted duration with headroom, as ruled.
+const TIMEOUT = { lint: 30, "test-linux": 180, "test-windows": 270, "test-macos": 210 };
+const ON_PULL_REQUESTS = "github.event_name == 'pull_request'";
+// test-macos alone also skips release-plz's own release pull request.
+const CONDITION = {
+  lint: ON_PULL_REQUESTS,
+  "test-linux": ON_PULL_REQUESTS,
+  "test-windows": ON_PULL_REQUESTS,
+  "test-macos": `${ON_PULL_REQUESTS} && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)`,
+};
 const TESTS = ["test-linux", "test-windows", "test-macos"];
 
 // The contexts branch protection requires, from the tree's one copy of them
@@ -97,18 +108,19 @@ describe("ci.yml's four jobs", () => {
   });
 
   for (const [id, runner] of Object.entries(FOUR)) {
-    it(`define \`${id}\`: unnamed, on ${runner}, bounded at 30 minutes, waiting on nothing`, () => {
+    it(`define \`${id}\`: unnamed, on ${runner}, bounded at ${TIMEOUT[id]} minutes, waiting on nothing`, () => {
       const job = ci.jobs?.[id];
       assert.ok(job, `ci.yml defines no \`${id}\` job`);
       assert.equal(job.name, undefined, `\`${id}\` overrides its name, which renames its check`);
       assert.equal(job["runs-on"], runner);
-      assert.equal(job["timeout-minutes"], 30, `\`${id}\` is not bounded at 30 minutes`);
+      assert.equal(
+        job["timeout-minutes"],
+        TIMEOUT[id],
+        `\`${id}\` is not bounded at ${TIMEOUT[id]} minutes`,
+      );
       assert.deepEqual(needs(job), [], `\`${id}\` waits on ${needs(job).join(", ")}`);
       assert.equal(job.strategy, undefined, `\`${id}\` is a matrix, which renames its check`);
-      assert.ok(
-        job.if === undefined || job.if === "github.event_name == 'pull_request'",
-        `\`${id}\` runs only if ${job.if}, which can leave a pull request without it`,
-      );
+      assert.equal(job.if, CONDITION[id], `\`${id}\` runs on a condition nobody agreed`);
     });
   }
 
@@ -271,9 +283,12 @@ describe("the release pull request's shortcut", () => {
         `\`${id}\` does work before asking whether it is owed`,
       );
       for (const step of all.slice(at + 1)) {
+        // The verdict a carrier reads is recorded on a shortcut too: the job
+        // succeeded, having proven its tests already passed.
         const gated =
           String(step.if ?? "").includes("steps.shortcut.outputs.skip != 'true'") ||
-          String(step.if ?? "").includes("steps.gate.outcome == 'failure'");
+          String(step.if ?? "").includes("steps.gate.outcome == 'failure'") ||
+          (step.id === "proved" && step.if === undefined);
         assert.ok(gated, `\`${id}\`'s "${step.name ?? uses(step)}" runs on a shortcut`);
       }
     });

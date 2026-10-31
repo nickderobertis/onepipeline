@@ -263,7 +263,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
             assert_eq!(upstream.len(), 2, "`{context}` carries one proof");
             assert_eq!(upstream[0], "changes");
             if run.ends_with(" carrier") {
-                assert_eq!(upstream[1], "macos");
+                assert_eq!(upstream[1], "test-macos");
             }
             assert!(
                 rendered(&upstream[1], &jobs[upstream[1].as_str()])
@@ -844,37 +844,53 @@ fn a_hard_coded_scratch_repository_is_recognised() {
 #[test]
 fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
     let ci = workflow("ci.yml");
-    let lane = &ci["jobs"]["macos"];
+    // The pull request's one Mac job runs its proofs through its recipe, whose
+    // target list (`scripts/ci-job.sh`) holds the suite and both installs.
+    let lane = &ci["jobs"]["test-macos"];
     assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
-    assert_eq!(
-        condition(lane).as_deref(),
-        Some("needs.changes.outputs.macos == 'true'")
+    assert!(
+        ci["jobs"]["macos"].is_null(),
+        "the retired Mac lane is back"
     );
-    // Dispatch-local checks cannot initiate a paid manual Mac probe. These
-    // structural assertions preserve the diagnostic's same real install/smoke
-    // commands; native runner execution remains GitHub's third-party boundary.
-    for key in ["macos", "macos-diagnostic"] {
-        let lane = &ci["jobs"][key];
-        assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
-        let commands = lane["steps"]
+    let commands = |key: &str| {
+        ci["jobs"][key]["steps"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|step| step["run"].as_str())
             .collect::<Vec<_>>()
-            .join("\n");
-        for proof in [
-            "just check-cross",
-            "cargo install --path . --locked",
-            "documented=$(grep",
-            "git show FETCH_HEAD:scripts/smoke-published.sh",
-            "bash scripts/smoke-published.sh",
-            "bash \"$RUNNER_TEMP/smoke-published.sh\"",
-        ] {
-            assert!(commands.contains(proof), "{key} omitted {proof}");
-        }
+            .join("\n")
+    };
+    assert!(commands("test-macos").contains("just ci-test-macos"));
+    let script = fs::read_to_string(repo_root().join("scripts/ci-job.sh")).expect("ci-job.sh");
+    let mac_targets = script
+        .lines()
+        .find(|line| {
+            line.trim_start()
+                .starts_with("test-windows | test-macos) targets=")
+        })
+        .expect("ci-job.sh lists the macOS job's targets");
+    for target in ["test-quick", "install-smoke", "install-documented"] {
+        assert!(mac_targets.contains(target), "test-macos omitted {target}");
     }
-    for key in ["cross", "install", "install-documented"] {
+    // Dispatch-local checks cannot initiate a paid manual Mac probe. These
+    // structural assertions preserve the diagnostic's same real install/smoke
+    // commands; native runner execution remains GitHub's third-party boundary.
+    let diagnostic = commands("macos-diagnostic");
+    for proof in [
+        "just check-cross",
+        "cargo install --path . --locked",
+        "documented=$(grep",
+        "git show FETCH_HEAD:scripts/smoke-published.sh",
+        "bash scripts/smoke-published.sh",
+        "bash \"$RUNNER_TEMP/smoke-published.sh\"",
+    ] {
+        assert!(
+            diagnostic.contains(proof),
+            "macos-diagnostic omitted {proof}"
+        );
+    }
+    for key in ["install", "install-documented"] {
         assert!(!onepipeline_testfakes::yaml::to_string(&ci["jobs"][key])
             .unwrap()
             .contains("macos-latest"));
@@ -901,15 +917,20 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
         "ci.yml sets {DIR_ENV}, so its records are not where its uploads look"
     );
     let mut names = Vec::new();
-    for key in ["gate", "cross", "macos"] {
+    for key in ["gate", "test-linux", "test-windows", "test-macos"] {
         let steps = ci["jobs"][key]["steps"]
             .as_array()
             .unwrap_or_else(|| panic!("job {key} has no steps"));
         let kept: Vec<&Value> = steps
             .iter()
             .filter(|step| {
+                // test-windows builds and tests in its Dev Drive checkout, so its
+                // path names that checkout first.
                 scalar(&step["uses"]).starts_with("actions/upload-artifact@")
-                    && scalar(&step["with"]["path"]).trim_end_matches('/') == RECORD_DIR
+                    && scalar(&step["with"]["path"])
+                        .trim_start_matches("${{ env.DEV_DRIVE_WORKSPACE }}/")
+                        .trim_end_matches('/')
+                        == RECORD_DIR
             })
             .collect();
         assert_eq!(
@@ -919,7 +940,10 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
             kept.len()
         );
         let step = kept[0];
-        assert_eq!(scalar(&step["if"]), "always()", "job {key}: {step}");
+        assert!(
+            scalar(&step["if"]).starts_with("always()"),
+            "job {key}: {step}"
+        );
         assert_eq!(
             scalar(&step["with"]["if-no-files-found"]),
             "warn",
@@ -971,101 +995,38 @@ fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
     }
 }
 
-/// The Windows leg is one leg split across the jobs of `cross`'s `shard` axis.
-/// Each job is handed `count:K/N` of one partition — N the axis's length, K its own
-/// place on it — under a name of its own, and records a verdict of its own; and
-/// `cross (windows-latest)`, the context branch protection requires, passes only on
-/// every one of those verdicts, so a shard that failed, was cancelled or never ran
-/// is not outvoted by one that passed. That each test runs in exactly one shard is
-/// nextest's partition, which `nextest_runs` drives through `_tier-test-quick` and
-/// `just cross-shards` lists over this host's build.
+/// The Windows leg is one job, `test-windows`, running the whole suite: nothing
+/// hands it a share of a partition, and `cross (windows-latest)`, the context
+/// branch protection requires, passes only on the verdict that job records once
+/// every step before it passed.
 #[test]
-fn the_windows_leg_is_split_into_shards_that_each_report_and_pass_only_together() {
+fn the_windows_leg_runs_whole_in_one_job_whose_verdict_its_carrier_reads() {
     let ci = workflow("ci.yml");
-    let cross = &ci["jobs"]["cross"];
-    let shards: Vec<String> = cross["strategy"]["matrix"]["shard"]
-        .as_array()
-        .expect("`cross` splits its leg along a `shard` axis")
-        .iter()
-        .map(scalar)
-        .collect();
-    let count = shards.len();
-    assert_eq!(
-        shards,
-        (1..=count).map(|k| k.to_string()).collect::<Vec<_>>(),
-        "the shards are not 1 to {count} in order"
-    );
-    assert_eq!(
-        cross["env"]["ONEPIPELINE_TEST_PARTITION"].as_str(),
-        Some(format!("count:${{{{ matrix.shard }}}}/{count}").as_str()),
-        "each shard is not handed its own share of one {count}-way partition"
-    );
-    let names = rendered("cross", cross);
-    assert_eq!(names.len(), count, "{names:?}");
+    assert!(ci["jobs"]["cross"].is_null(), "the Windows shards are back");
+    let job = &ci["jobs"]["test-windows"];
+    let text = onepipeline_testfakes::yaml::to_string(job).unwrap();
     assert!(
-        names.windows(2).all(|pair| pair[0] != pair[1]),
-        "two shards report under one name: {names:?}"
+        !text.contains("ONEPIPELINE_TEST_PARTITION") && job.get("strategy").is_none(),
+        "test-windows runs a share of the suite: {text}"
     );
-    assert!(
-        names.iter().all(|name| !is_required(name)),
-        "a shard reports a required context itself: {names:?}"
-    );
-    let steps = cross["steps"].as_array().expect("`cross` has steps");
-    let gate = steps
-        .iter()
-        .find(|step| step["id"] == "gate")
-        .expect("`cross` has its quality gate");
-    // The first shard runs `check-cross` whole and every other its `test-quick`
-    // alone, so the format and lint checks run once and every shard tests its share.
+    let steps = job["steps"].as_array().expect("test-windows has steps");
+    let proved = steps.last().expect("test-windows has a last step");
+    assert_eq!(proved["id"], "proved", "the verdict is not recorded last");
+    assert!(proved.get("if").is_none(), "{proved}");
     assert_eq!(
-        gate["env"]["GATE"].as_str(),
-        Some("${{ matrix.shard == 1 && 'check-cross' || 'test-quick' }}"),
-        "the shards do not split `check-cross` between them: {gate}"
+        job["outputs"]["windows-latest"].as_str(),
+        Some("${{ steps.proved.outputs.windows-latest }}")
     );
-    assert!(
-        gate["run"]
-            .as_str()
-            .is_some_and(|run| run.contains("just \"$GATE\"")),
-        "the quality gate does not run the recipe its shard is given: {gate}"
-    );
-    let proved = steps
-        .iter()
-        .find(|step| step["id"] == "proved")
-        .expect("`cross` records its verdict");
-    assert_eq!(
-        proved["env"]["LEG"].as_str(),
-        Some("${{ matrix.os }}-${{ matrix.shard }}"),
-        "a shard's verdict is not recorded under its own name"
-    );
-    let outputs = cross["outputs"]
-        .as_object()
-        .expect("`cross` exports its verdicts");
-    let verdict = ci["jobs"]["cross-windows"]["steps"]
+    let carrier = &ci["jobs"]["cross-windows"];
+    assert_eq!(needs(carrier), ["changes", "test-windows"]);
+    let verdict = carrier["steps"]
         .as_array()
         .expect("the carrier has steps")
         .iter()
         .find_map(|step| step["env"]["LEG_VERDICT"].as_str())
         .expect("the carrier reads the leg's verdict");
-    assert_eq!(outputs.len(), count, "{outputs:?}");
     assert_eq!(
-        verdict.matches("needs.cross.outputs[").count(),
-        count,
-        "the carrier reads other than each shard's verdict once: {verdict}"
-    );
-    for k in 1..=count {
-        let key = format!("windows-latest-{k}");
-        assert_eq!(
-            outputs.get(&key).and_then(Value::as_str),
-            Some(format!("${{{{ steps.proved.outputs.{key} }}}}").as_str()),
-            "shard {k}'s verdict is not exported as {key}"
-        );
-        assert!(
-            verdict.contains(&format!("needs.cross.outputs['{key}'] == 'success' &&")),
-            "the carrier passes without shard {k}'s verdict: {verdict}"
-        );
-    }
-    assert!(
-        verdict.trim_end().ends_with("&& 'success' || '' }}"),
-        "the carrier's verdict is not success only when every shard's is: {verdict}"
+        verdict,
+        "${{ needs.test-windows.outputs['windows-latest'] }}"
     );
 }

@@ -312,9 +312,14 @@ test("actual workflow graph routes all events, preserves contexts and records li
                 // request beside the `macos` lane today's required contexts are
                 // carried from, until branch protection moves to the four and
                 // the lane is retired.
+                // `test-macos` runs on every pull request but release-plz's own,
+                // which the classifier's authorized omission covers.
+                const releasePlz =
+                  String(s.event.pull_request?.head?.ref ?? "").startsWith("release-plz-") &&
+                  s.event.pull_request?.head?.repo?.full_name === "nickderobertis/onepipeline";
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  s.classification.macosRequired ? ["test-macos", "macos"] : ["test-macos"],
+                  releasePlz ? [] : ["test-macos"],
                 );
                 for (const name of required)
                   assert.equal(
@@ -451,7 +456,7 @@ function driveCarrier(proof, changes, macos, required, crate = "true") {
   const context = {
     needs: {
       changes: { result: changes, outputs: { macos: required, crate } },
-      macos: { result: macos },
+      "test-macos": { result: macos },
     },
   };
   const env = Object.fromEntries(
@@ -587,16 +592,21 @@ test("the real path carriers pass only a proven leg or an authorized path omissi
               encoding: "utf8",
               env: { ...process.env, ...env },
             });
+            // A carrier whose proof runs on every pull request names the crate
+            // affected outright: its proof's own success is the verdict.
+            const affected = step.env.CRATE_AFFECTED.includes("${{")
+              ? crate
+              : step.env.CRATE_AFFECTED;
             const accepted =
               changes === "success" &&
-              ((crate === "false" && result === "skipped" && !verdict) ||
-                (crate === "true" &&
+              ((affected === "false" && result === "skipped" && !verdict) ||
+                (affected === "true" &&
                   ["success", "failure"].includes(result) &&
                   verdict === "success"));
             const label = `${key}/${changes}/${crate}/${result}/${shards}`;
             assert.equal(run.status === 0, accepted, `${label}: ${run.stdout}${run.stderr}`);
-            if (accepted && crate === "false") assert.match(run.stdout, /no tests claimed/);
-            if (accepted && crate === "true")
+            if (accepted && affected === "false") assert.match(run.stdout, /no tests claimed/);
+            if (accepted && affected === "true")
               assert.match(run.stdout, new RegExp(`${leg} succeeded`));
           }
   }
@@ -638,7 +648,7 @@ test("unknown PR metadata and ordinary version edits route through the actual Ma
     const jobs = runGraph(all["ci.yml"], s);
     assert.deepEqual(
       jobs.filter((j) => j.selected && j.macos).map((j) => j.job),
-      ["test-macos", "macos"],
+      ["test-macos"],
     );
   }
 });
@@ -702,12 +712,14 @@ test("actual carriers remain reachable through prerequisite failures and path-se
     { pypi: "false", npm: "false" },
     "feature",
   );
+  // The platform test jobs wait on nothing, so neither a path-sensitive skip nor
+  // a failed `changes` keeps them or the carriers that read them from running.
   const skipped = runGraph(ci, { ...s, crate: "false" });
-  assert.equal(skipped.find((j) => j.job === "cross").selected, false);
-  assert.equal(skipped.find((j) => j.job === "macos").selected, true);
+  assert.equal(skipped.find((j) => j.job === "test-windows").selected, true);
+  assert.equal(skipped.find((j) => j.job === "test-macos").selected, true);
   for (const result of ["failure", "cancelled", "skipped"]) {
     const rows = runGraph(ci, { ...s, results: { changes: result } });
-    assert.equal(rows.find((j) => j.job === "macos").selected, false);
+    assert.equal(rows.find((j) => j.job === "test-macos").selected, true);
     for (const proof of ["cross", "install", "install-documented"]) {
       assert.equal(rows.find((j) => j.job === `${proof}-macos`).selected, true);
       assert.notEqual(driveCarrier(proof, result, "skipped", "").status, 0);
@@ -1481,16 +1493,26 @@ test("budget reader refuses omitted, duplicated and unknown workload inventory",
 
 test("changes outputs follow actual declarations and producer wiring", () => {
   const ci = workflows()["ci.yml"];
-  const s = scenario("pr-opened", "pull_request", "opened", "source", false, {
-    pypi: "false",
-    npm: "false",
-  });
-  const renamed = structuredClone(ci);
+  const s = scenario(
+    "pr-opened",
+    "pull_request",
+    "opened",
+    "source",
+    false,
+    { pypi: "false", npm: "false" },
+    "feature",
+  );
+  // A job gated on the classifier's output, as the retired Mac lane was: it
+  // follows the output's declared name, not the name it once had.
+  const gated = structuredClone(ci);
+  gated.jobs["cross-macos"].if = "needs.changes.outputs.macos == 'true'";
+  assert.equal(runGraph(gated, s).find((j) => j.job === "cross-macos").selected, true);
+  const renamed = structuredClone(gated);
   renamed.jobs.changes.outputs.apple = renamed.jobs.changes.outputs.macos;
   delete renamed.jobs.changes.outputs.macos;
-  assert.equal(runGraph(renamed, s).find((j) => j.job === "macos").selected, false);
-  renamed.jobs.macos.if = "needs.changes.outputs.apple == 'true'";
-  assert.equal(runGraph(renamed, s).find((j) => j.job === "macos").selected, true);
+  assert.equal(runGraph(renamed, s).find((j) => j.job === "cross-macos").selected, false);
+  renamed.jobs["cross-macos"].if = "needs.changes.outputs.apple == 'true'";
+  assert.equal(runGraph(renamed, s).find((j) => j.job === "cross-macos").selected, true);
   const broken = structuredClone(ci);
   const producer = broken.jobs.changes.steps.find((step) => step.id === "macos");
   producer.run = producer.run.replace('echo "required=', 'echo "alternate=');
