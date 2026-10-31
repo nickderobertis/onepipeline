@@ -71,11 +71,16 @@ fi
 mkdir -p shots
 
 echo "ci-capture: running visual-docs.yml's capture-command in $image into $SHOTS_OUT"
+# Mounted where the reusable workflow's job container checks out, because the
+# capture normalises its own checkout's path out of what the CLI prints: a
+# short mount point such as `/w` also matches inside other paths a shot shows.
+inside=/__w/onepipeline/onepipeline
 docker run --rm \
-  -v "$copy":/w -v "$ROOT/shots":/w/shots -w /w \
+  -v "$copy":"$inside" -v "$ROOT/shots":"$inside/shots" -w "$inside" \
   -e SHOTS_OUT \
   -e HOST_OWNER="$(id -u):$(id -g)" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
-  "$image" sh -e -c 'trap "chown -R \"\$HOST_OWNER\" /w" EXIT
+  -e INSIDE="$inside" \
+  "$image" sh -e -c 'trap "chown -R \"\$HOST_OWNER\" \"\$INSIDE\"" EXIT
 '"$command"
 # llmlint: ignore-end[changed_behavior_has_e2e]
