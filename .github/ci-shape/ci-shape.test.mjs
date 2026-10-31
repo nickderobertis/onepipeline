@@ -2,8 +2,9 @@
 // (this target's inputs are `.github/` alone):
 //
 // - `lint`, `test-linux`, `test-windows` and `test-macos`, by those ids, unnamed,
-//   on the runners their names say, each bounded at 30 minutes, each starting on
-//   every pull request and none waiting on another job;
+//   on the runners their names say, each bounded at its ruled timeout, each
+//   starting on every pull request (test-macos on all but release-plz's own) and
+//   none waiting on another job;
 // - the visual docs captured and judged as steps of `lint`, through screencomp's
 //   composite actions, and never through its reusable workflow from ci.yml;
 // - the release pull request's shortcut asked by the three test jobs, gating

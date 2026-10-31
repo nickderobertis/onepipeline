@@ -140,6 +140,17 @@ describe("the visual-docs capture's refusals", () => {
     });
   }
 
+  it("refuses a visual-docs workflow that does not parse", (t) => {
+    const dir = scratchWorkspace(t);
+    commit(dir, ".github/workflows/visual-docs.yml", "jobs: [unclosed\n");
+    const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
+      SHOTS_OUT: "shots/current/x86_64",
+    });
+    assert.equal(status, 1, log);
+    assert.match(log, /visual-docs\.yml could not be read as YAML/);
+    assert.match(log, /^ACTION: restore \.github\/workflows\/visual-docs\.yml/m);
+  });
+
   it("refuses a visual-docs workflow that gives no capture-command", (t) => {
     const dir = scratchWorkspace(t);
     const workflow = ".github/workflows/visual-docs.yml";

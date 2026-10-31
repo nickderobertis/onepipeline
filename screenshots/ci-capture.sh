@@ -54,8 +54,17 @@ read_with() {
     import { readFileSync } from "node:fs";
     import { createRequire } from "node:module";
     const { parse } = createRequire(process.cwd() + "/.github/package.json")("yaml");
-    const value = parse(readFileSync(".github/workflows/visual-docs.yml", "utf8"))
-      ?.jobs?.["visual-docs"]?.with?.[process.argv[1]];
+    let workflow;
+    try {
+      workflow = parse(readFileSync(".github/workflows/visual-docs.yml", "utf8"));
+    } catch (error) {
+      process.stderr.write(
+        `visual-docs.yml could not be read as YAML: ${error.message}\n` +
+          "ACTION: restore .github/workflows/visual-docs.yml to a workflow that parses\n",
+      );
+      process.exit(1);
+    }
+    const value = workflow?.jobs?.["visual-docs"]?.with?.[process.argv[1]];
     if (typeof value !== "string" || value.trim() === "") {
       process.stderr.write(
         `visual-docs.yml gives the visual-docs job no ${process.argv[1]}\n` +

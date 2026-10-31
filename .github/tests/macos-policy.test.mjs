@@ -308,10 +308,6 @@ test("actual workflow graph routes all events, preserves contexts and records li
                   .map((j) => ({ workflow: r.workflow, ...j })),
               );
               if (eventName === "pull_request") {
-                // `test-macos`, one of ci.yml's four jobs, runs on every pull
-                // request beside the `macos` lane today's required contexts are
-                // carried from, until branch protection moves to the four and
-                // the lane is retired.
                 // `test-macos` runs on every pull request but release-plz's own,
                 // which the classifier's authorized omission covers.
                 const releasePlz =
