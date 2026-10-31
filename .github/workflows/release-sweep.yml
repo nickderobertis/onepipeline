@@ -48,8 +48,9 @@ jobs:
         with:
           tool: just,nextest,cargo-llvm-cov
       - uses: astral-sh/setup-uv@v6
-      # Also provisions `strace`, which the Linux-only e2e journeys refuse
-      # without (`_ensure-strace` in the justfile).
+      # Also provisions `strace` and the unprivileged user namespace, which the
+      # Linux-only e2e journeys refuse without (`_ensure-strace` and
+      # `_ensure-userns` in the justfile).
       - name: Bootstrap
         run: just bootstrap
       # Teed for the re-run step below, under `shell: bash` for pipefail, so the

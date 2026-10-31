@@ -98,8 +98,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just,nextest,cargo-llvm-cov
-      # Also provisions `strace`, which the Linux-only e2e journeys refuse
-      # without (`_ensure-strace` in the justfile).
+      # Also provisions `strace` and the unprivileged user namespace, which the
+      # Linux-only e2e journeys refuse without (`_ensure-strace` and
+      # `_ensure-userns` in the justfile).
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

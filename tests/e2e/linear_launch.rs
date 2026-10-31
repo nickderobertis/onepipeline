@@ -9,6 +9,9 @@
 //! launch reads is not the bytes the template rendered. The check holds because the copy records
 //! the digest of what each write's own answer said Linear stored; and it is no weaker for that,
 //! because an edit made in Linear after the copy is still refused.
+//!
+//! The same plan store copies a Linear-homed plan there again after every review, finish and
+//! approval, and an unchanged plan copied again costs Linear no write.
 
 // llmlint: ignore-file[e2e_not_mocked] `World` substitutes `oneagentgraph` at its subprocess
 // boundary and nothing inside the crate under test, which is driven as a real compiled binary.
@@ -20,7 +23,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-use crate::harness::{global, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE};
+use crate::harness::{
+    global, lifecycle, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE,
+};
 use crate::linear_loopback::{content_of, metadata_of, Linear, Operation, PROJECT};
 use crate::linear_writeback::{
     configuration, from_the_launch_directory, KEY_ENV, SETTLEMENT, SOURCE, STATES, STATUSES,
@@ -436,4 +441,134 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
         said.contains(RULE_BODY_CHANGED) && said.contains(&format!("{SOURCE}:{edited}")),
         "the refusal does not name {SOURCE}:{edited} as differing from its rendering:\n{said}"
     );
+}
+
+/// A plan homed in Linear is copied there again after every review, finish and approval, and
+/// each write spends Linear's quota, notifies the people following the item and churns its
+/// dependency links. A plan with a design document, three tasks and a dependency between two of
+/// them, copied into a Linear that rewrites its Markdown on write by the store the binary links,
+/// lands whole; copied again unchanged, the store reads what Linear holds and sends no write.
+#[test]
+fn an_unchanged_plan_copied_into_linear_a_second_time_sends_no_write() {
+    const PLAN: &str = "linear-recopy";
+    let world = World::new(PLAN).with_env(KEY_ENV, "a-loopback-key");
+    let linear = Linear::serve_empty(STATES, STATUSES);
+    let launch = world.root.join("launch-directory");
+    std::fs::create_dir_all(&launch).expect("a launch directory");
+    std::fs::write(launch.join("onetaskgraph.yaml"), configuration(&linear))
+        .expect("the launch directory's store configuration");
+    // Each task names a hosted origin, which rides the store's own `repositories` field: a
+    // folder keeps it in front matter and Linear in the item's metadata slot, the difference a
+    // store before 0.12.12 took for an edit and rewrote, re-filing the dependency with it.
+    let plan = world.plan(
+        PLAN,
+        &plan_of(
+            PLAN,
+            [
+                ("design", &[][..]),
+                ("build", &["design"][..]),
+                ("docs", &[][..]),
+            ]
+            .into_iter()
+            .map(|(id, deps)| {
+                let mut node = lifecycle(id, deps);
+                node["repo"] = json!("github.com/owner/service");
+                node
+            })
+            .collect(),
+        ),
+    );
+    world.write_item(
+        &world.store().join("documents").join("design.md"),
+        &[
+            ("title", json!("Design")),
+            ("project", json!(project_id(PLAN))),
+        ],
+        DESIGN,
+    );
+    let copy = || {
+        let home = copied(
+            &world,
+            &launch,
+            &plan,
+            onetaskgraph_core::CopyScope::Projects { tasks: true },
+        );
+        let document = copied(
+            &world,
+            &launch,
+            &format!("{STORE_SOURCE}:design"),
+            onetaskgraph_core::CopyScope::Documents,
+        );
+        (home, document)
+    };
+
+    // The first copy files the plan: its project, a Linear issue a task, the dependency between
+    // `build` and `design`, and the design document, each held as Linear rewrites it.
+    let (home, document) = copy();
+    assert_eq!(home, format!("{SOURCE}:{PROJECT}"));
+    let node_of = |issue: &str| -> String {
+        let (_, _, description) = linear
+            .issues()
+            .into_iter()
+            .find(|(id, _, _)| id == issue)
+            .unwrap_or_else(|| panic!("Linear holds no {issue}"));
+        metadata_of(&description)["onepipeline.id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a copied issue carries its node id: {description}"))
+            .to_owned()
+    };
+    let mut nodes: Vec<String> = linear
+        .issues()
+        .iter()
+        .map(|(id, _, _)| node_of(id))
+        .collect();
+    nodes.sort();
+    assert_eq!(nodes, ["build", "design", "docs"], "{:#?}", linear.log());
+    let relations = || -> Vec<(String, String, String)> {
+        linear
+            .relations()
+            .into_iter()
+            .map(|(issue, related, kind)| (node_of(&issue), node_of(&related), kind))
+            .collect()
+    };
+    let related = relations();
+    assert_eq!(
+        related,
+        [("build".to_owned(), "design".to_owned(), "blocks".to_owned())],
+        "{:#?}",
+        linear.log()
+    );
+    let held = linear.documents();
+    assert!(
+        held.iter()
+            .any(|(id, content)| document == format!("{SOURCE}:{id}")
+                && content_of(content) == DESIGN_STORED),
+        "the design document is not held as Linear stores it: {held:?}"
+    );
+    for (issue, _, description) in linear.issues() {
+        assert!(
+            !description.contains("\n- "),
+            "{issue} kept a `- ` bullet Linear rewrites:\n{description}"
+        );
+    }
+    let issues = linear.issues();
+    let project = linear.project_content();
+
+    let first = linear.log().len();
+    assert_eq!(copy(), (home, document));
+    let again = &linear.log()[first..];
+    let written: Vec<&crate::linear_loopback::Request> = again
+        .iter()
+        .filter(|request| request.operation.writes())
+        .collect();
+    assert!(
+        written.is_empty(),
+        "the second copy of an unchanged plan sent {} Linear write(s): {written:#?}",
+        written.len()
+    );
+    assert!(!again.is_empty(), "the second copy read nothing of Linear");
+    assert_eq!(linear.issues(), issues);
+    assert_eq!(relations(), related);
+    assert_eq!(linear.documents(), held);
+    assert_eq!(linear.project_content(), project);
 }

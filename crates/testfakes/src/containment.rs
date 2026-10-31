@@ -126,15 +126,25 @@ mod platform {
     /// as still running, and every teardown journey failed on the macOS leg
     /// alone. `ps` leads a zombie's state with `Z` on every Unix, so Linux runs
     /// this path too.
+    ///
+    /// A zombie its parent reaps after the signal-0 probe and before `ps` reads
+    /// the table is listed as nothing, which is not `Z`; read as still running,
+    /// that turned an ended driver into a live one on a loaded runner. So a
+    /// listing that is not a zombie's asks the probe again, and a pid that has
+    /// gone by then has ended.
     pub fn process_ended(pid: u32) -> bool {
         let Ok(raw) = libc::pid_t::try_from(pid) else {
             return false;
         };
-        // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
-        if unsafe { libc::kill(raw, 0) } != 0 {
-            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+        let gone = || {
+            // SAFETY: signal 0 delivers nothing and touches no memory this call owns.
+            let refused = unsafe { libc::kill(raw, 0) } != 0;
+            refused && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        };
+        if gone() {
+            return true;
         }
-        crate::profile::process::Command::new("ps")
+        let zombie = crate::profile::process::Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .env("LC_ALL", "C")
             .stdin(std::process::Stdio::null())
@@ -144,7 +154,8 @@ mod platform {
                 String::from_utf8_lossy(&listed.stdout)
                     .trim_start()
                     .starts_with('Z')
-            })
+            });
+        zombie || gone()
     }
 
     /// The id of exactly one process: positive, and within what `kill` takes,

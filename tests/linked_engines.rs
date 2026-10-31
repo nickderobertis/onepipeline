@@ -2718,6 +2718,7 @@ fn every_onetaskgraph_crate_in_the_lock_is_the_one_release_the_manifest_names() 
         "onetaskgraph-core",
         "onetaskgraph-plugin-api",
         "onetaskgraph-local-md",
+        "onetaskgraph-linear",
     ];
     let pinned: std::collections::BTreeSet<String> =
         direct.iter().map(|name| required(name)).collect();

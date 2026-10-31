@@ -1259,9 +1259,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.29"
+version = "1.1.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
 dependencies = [
  "cc",
  "libc",
@@ -1464,9 +1464,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneagentgraph"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7db515a67382ea487127d94d519d912f0ef3e22c2011ec1e1243426d9659170a"
+checksum = "22a84d2b435f00db085cc68caf12f9bf99c685f5bfe4a40629585601317b6b03"
 dependencies = [
  "clap",
  "libc",
@@ -1540,9 +1540,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15745c3de19c092b82bcdc691675eae1bdfa7375e2b2583597037e51e9f4373c"
+checksum = "04fa448faccc8b6f088e5b954d9c6e2581f3a9faef24cfa613673d09fe85af94"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "onepipeline"
-version = "0.95.4"
+version = "0.96.2"
 dependencies = [
  "async-trait",
  "clap",
@@ -1594,6 +1594,7 @@ dependencies = [
  "onemessagebus",
  "onepipeline-testfakes",
  "onetaskgraph-core",
+ "onetaskgraph-linear",
  "onetaskgraph-local-md",
  "onetaskgraph-plugin-api",
  "onevcs",
@@ -1635,9 +1636,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-core"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "695e641ed906a5840ab44bd3ca6bfc3d88b9c725ec65ef0c4b493f15753a0dac"
+checksum = "d8d73eec75ee2f48eda2865ac544944fbe05b9841369a81e5cacc4f7a576137f"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1658,13 +1659,14 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tokio",
+ "url",
 ]
 
 [[package]]
 name = "onetaskgraph-github-projects"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d14a2e70f0604a4f95fd00f23c92f94bb8cef7ce6967382c0dda54caf48acafe"
+checksum = "733fbeeb4bd171f0e40bae149328f909b4e4e646098c4534b1bb999c9c51f771"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1680,9 +1682,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-in-memory"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab69808848f4e8a354083d01d53a21e9fd8fc31c647d7216375337bd395a7e83"
+checksum = "4925bc2684bc54723ad689e633fe01e498893bac7a686c07b350f6cac8ac80ff"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1694,9 +1696,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-linear"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac88161b424b5701fbb269f57ffc67064bf7903e7cf2a34becfe10d7a6896ae4"
+checksum = "31ab3fd33fb318803feedad7b703e7b7df2243cf88a2d817a0cc2551809257d3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1710,9 +1712,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-local-md"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6d8d6a97bb8200eee437e382d831f005af203bb3b2dbbb72c33e792e96d0866"
+checksum = "d405d4f546f550ddd3510af36617504336c93369a8006bd1973be5e6778d0f9a"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1727,9 +1729,9 @@ dependencies = [
 
 [[package]]
 name = "onetaskgraph-plugin-api"
-version = "0.12.9"
+version = "0.12.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee39cc372fd667f27afb49b861eb88e57c928884ceeb38bd15b4e5931c480fad"
+checksum = "5eeb50bdde30126ed657eea179562eb77c6abacbfdc2d946d4d34cd48ca58d4f"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1746,9 +1748,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs"
-version = "0.57.0"
+version = "0.57.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2734b0551712aa61541390f72633ab6ffecf9d29252e522049113473a812ec2e"
+checksum = "3ac7bb4fba94f981f9364709e8dbb806b9ad15a96d6aba963dc9e08784cf8740"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1778,9 +1780,9 @@ dependencies = [
 
 [[package]]
 name = "onevcs-testing"
-version = "0.19.22"
+version = "0.19.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3fccaa1e8e2ca5a119f880c0004d23099f01def44ad30abc968522760d09963e"
+checksum = "7000bd8a56e9995ffa2f917f4a56571a4c9df972a406167bc6c612f768a2c472"
 dependencies = [
  "onevcs",
  "serde",

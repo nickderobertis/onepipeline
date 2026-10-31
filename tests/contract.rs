@@ -1777,6 +1777,12 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
     // Every optional field set, so the serialized shape names all of them: an
     // omitted one would read here as a field the schema does not have.
     let node = serde_json::to_value(Node {
+        human_item: Some(onepipeline::human_items::HumanItemMetadata {
+            kind: onepipeline::human_items::HumanItemKind::Task,
+            priority: onepipeline::human_items::Priority::Low,
+            title: "Review".into(),
+            body: "Confirm.".into(),
+        }),
         id: "n".into(),
         kind: NodeKind::Human,
         task: Some("t".into()),
@@ -1821,6 +1827,7 @@ fn every_reserved_metadata_key_the_contract_names_is_a_field_of_this_schema() {
                 "github.com/owner/name".into(),
                 "github.com/owner/other".into(),
             ],
+            priority: None,
         }),
         assets_from: Some("plans:author".parse().expect("a qualified task")),
         classification: onetaskgraph_plugin_api::Classification::Private,
@@ -11931,4 +11938,321 @@ fn the_transcript_resolver_and_the_watch_record_it_feeds_are_what_the_contract_s
         resolved >= 1 && unavailable >= 1,
         "the example shows {resolved} resolved and {unavailable} unavailable forms, not both"
     );
+}
+
+/// The four priority definitions and the authoring guidance are stated once, in the
+/// engine, and the contract, the README and every shipped human node carry them.
+#[test]
+fn human_item_priorities_and_guidance_read_as_the_engine_states_them() {
+    use onepipeline::human_items::{
+        priority_label, Priority, AUTHORING_GUIDANCE, PRIORITY_DEFINITIONS,
+    };
+    let readme = include_str!("../README.md");
+    let labels: Vec<&str> = PRIORITY_DEFINITIONS
+        .iter()
+        .map(|(label, _)| *label)
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            Priority::Urgent,
+            Priority::High,
+            Priority::Medium,
+            Priority::Low
+        ]
+        .map(priority_label)
+    );
+    for (label, meaning) in PRIORITY_DEFINITIONS {
+        let sentence = if label == "Low" {
+            format!("Low means {meaning}.")
+        } else if label == "Medium" {
+            format!("Medium means {meaning};")
+        } else {
+            format!("{label} means {meaning}.")
+        };
+        let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat(CONTRACT).contains(&sentence),
+            "the contract lacks {sentence:?}"
+        );
+        assert!(
+            flat(readme).contains(&sentence),
+            "the README lacks {sentence:?}"
+        );
+    }
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(flat(CONTRACT).contains(AUTHORING_GUIDANCE));
+    assert!(flat(readme).contains(AUTHORING_GUIDANCE));
+    // The shipped example plan states every human node's item, priority included.
+    let tasks = repo_root().join("examples/plan-store/tasks/tracked-release");
+    for entry in std::fs::read_dir(tasks).unwrap() {
+        let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+        if text.contains("\"onepipeline.kind\": \"human\"") {
+            assert!(text.contains("\"onepipeline.human_item\""), "{text}");
+            assert!(text.contains("\"priority\":"), "{text}");
+        }
+    }
+}
+
+/// The configuration shape the contract documents is the public types' own: every
+/// key of `HumanItemsConfig` and of a hook is named where the contract states the
+/// `human_items` mapping, and nothing else is.
+#[test]
+fn the_documented_human_items_configuration_is_the_public_shape() {
+    use onepipeline::human_items::config::{HumanItemHook, HumanItemsConfig};
+    let flat = CONTRACT.split_whitespace().collect::<Vec<_>>().join(" ");
+    let start = flat
+        .find("Each holds one `human_items` mapping:")
+        .expect("the mapping is stated");
+    let stated = &flat[start..start + flat[start..].find("Hooks are validated").expect("its end")];
+    let keys = |schema: schemars::Schema| -> Vec<String> {
+        schema.as_value()["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let config = keys(schemars::schema_for!(HumanItemsConfig));
+    assert_eq!(
+        config,
+        ["enabled", "task_source", "hooks", "approval_adapters"]
+    );
+    for key in &config {
+        assert!(
+            stated.contains(&format!("`{key}:")) || stated.contains(&format!(" {key}:")),
+            "{key}: {stated}"
+        );
+    }
+    let hook_start = stated.find("`hooks: [{").expect("the hook shape");
+    let hook = &stated[hook_start..hook_start + stated[hook_start..].find("}]`").unwrap()];
+    for key in keys(schemars::schema_for!(HumanItemHook)) {
+        assert!(hook.contains(&key), "the hook shape lacks {key}: {hook}");
+    }
+}
+
+#[test]
+fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
+    let exported = onepipeline::human_items::schemas();
+    let published: Value =
+        serde_json::from_str(include_str!("../schemas/human-items.schema.json")).unwrap();
+    assert!(
+        exported == published,
+        "regenerate with cargo run --example human_items_schema"
+    );
+    let mut drifted = published.clone();
+    drifted["HumanItem"]["properties"]["priority"]["enum"] = json!(["P1"]);
+    assert_ne!(exported, drifted, "a copied schema must not hide drift");
+    assert!(CONTRACT.contains("src/human_items.rs"));
+    assert!(CONTRACT.contains("human-items --sample FILE"));
+    assert!(CONTRACT.contains("detail.nodes is grouped by blocked.plans in that order"));
+}
+
+#[test]
+fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations() {
+    use onepipeline::human_items::*;
+    let schema = schemas();
+    assert_eq!(
+        schema["priority_labels"],
+        json!({"urgent":"Critical","high":"High","medium":"Medium","low":"Low"})
+    );
+    let fixture = fenced_blocks("human-items-json");
+    assert_eq!(fixture.len(), 1);
+    let sample: Value = serde_json::from_str(&fixture[0]).unwrap();
+    assert_eq!(
+        sample,
+        serde_json::from_str::<Value>(include_str!("fixtures/human-items.json")).unwrap(),
+        "CLI fixture drifted from the contract"
+    );
+    let parsed: HumanItemSample = serde_json::from_value(sample.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), sample);
+    jsonschema::validator_for(&schema["HumanItemSample"])
+        .unwrap()
+        .validate(&sample)
+        .unwrap();
+    let item = sample["items"][0]["item"].clone();
+    for priority in ["urgent", "high", "medium", "low"] {
+        let mut value = item.clone();
+        value["priority"] = json!(priority);
+        let parsed: HumanItem = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        jsonschema::validator_for(&schema["HumanItem"])
+            .unwrap()
+            .validate(&value)
+            .unwrap();
+    }
+    for (field, bad) in [
+        ("priority", json!("none")),
+        ("priority", json!("Critical")),
+        ("priority", json!("P1")),
+        ("title", json!(" ")),
+        ("body", json!("")),
+        ("schema_version", json!(2)),
+        ("state", json!("answered")),
+        ("owner_ended", json!(true)),
+    ] {
+        let mut value = item.clone();
+        value[field] = bad;
+        assert!(
+            serde_json::from_value::<HumanItem>(value.clone()).is_err(),
+            "{field}: {value}"
+        );
+        assert!(
+            !jsonschema::validator_for(&schema["HumanItem"])
+                .unwrap()
+                .is_valid(&value),
+            "schema accepted {value}"
+        );
+    }
+    let mut input = item.clone();
+    for field in [
+        "id",
+        "state",
+        "resolution",
+        "tracker",
+        "created_at",
+        "updated_at",
+    ] {
+        input.as_object_mut().unwrap().remove(field);
+    }
+    let parsed_input: HumanItemInput = serde_json::from_value(input.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&parsed_input).unwrap(), input);
+    jsonschema::validator_for(&schema["HumanItemInput"])
+        .unwrap()
+        .validate(&input)
+        .unwrap();
+    let mut raise = input.clone();
+    raise["action"] = json!("raise");
+    let mut actions = vec![
+        raise,
+        json!({"action":"answer","id":"q","text":"Yes","actor":"manager","on_behalf_of":"user"}),
+        json!({"action":"complete","id":"t","actor":"user","on_behalf_of":null}),
+    ];
+    for reason in [
+        None,
+        Some(Value::Null),
+        Some(json!("")),
+        Some(json!("Later")),
+    ] {
+        let mut dismiss = json!({"action":"dismiss","id":"t","actor":"user","on_behalf_of":null});
+        if let Some(reason) = reason {
+            dismiss["reason"] = reason;
+        }
+        actions.push(dismiss);
+    }
+    for value in actions {
+        let parsed: HumanItemAction = serde_json::from_value(value.clone()).unwrap();
+        let roundtrip = serde_json::to_value(parsed).unwrap();
+        let _: HumanItemAction = serde_json::from_value(roundtrip.clone()).unwrap();
+        jsonschema::validator_for(&schema["HumanItemAction"])
+            .unwrap()
+            .validate(&value)
+            .unwrap();
+        jsonschema::validator_for(&schema["HumanItemAction"])
+            .unwrap()
+            .validate(&roundtrip)
+            .unwrap();
+    }
+    for value in [
+        json!({"action":"approve","id":"t"}),
+        json!({"action":"answer","id":"q","text":" ","actor":"user","on_behalf_of":null}),
+        json!({"action":"complete","id":"t","actor":"user","on_behalf_of":null,"key":"untrusted"}),
+    ] {
+        assert!(serde_json::from_value::<HumanItemAction>(value.clone()).is_err());
+        assert!(!jsonschema::validator_for(&schema["HumanItemAction"])
+            .unwrap()
+            .is_valid(&value));
+    }
+    for kind in EVENT_KINDS {
+        let mut event_item = if kind == "human-item-answered" || kind == "human-item-auto-resolved"
+        {
+            sample["items"][1]["item"].clone()
+        } else {
+            item.clone()
+        };
+        let state = match kind {
+            "human-item-raised" => "open",
+            "human-item-answered" => "answered",
+            "human-item-completed" => "completed",
+            _ => "dismissed",
+        };
+        event_item["state"] = json!(state);
+        event_item["resolution"] = if state == "open" {
+            Value::Null
+        } else {
+            json!({"actor":"user","on_behalf_of":null,"text":if state == "answered" { json!("Yes") } else { Value::Null },"reason":if state == "dismissed" { json!("the run ended") } else { Value::Null }})
+        };
+        let payload = json!({"schema_version":1,"item_id":event_item["id"],"owner":event_item["owner"],"action":kind,"item":event_item,"resolution":event_item["resolution"]});
+        for field in ["item_id", "owner", "resolution"] {
+            let mut inconsistent = payload.clone();
+            inconsistent[field] = match field {
+                "item_id" => json!("another-item"),
+                "owner" => json!({"session":"another-session","run":null,"plan":null}),
+                _ => {
+                    if state == "open" {
+                        json!({"actor":"other","on_behalf_of":null,"text":null,"reason":null})
+                    } else {
+                        Value::Null
+                    }
+                }
+            };
+            assert!(serde_json::from_value::<HumanItemEventPayload>(inconsistent).is_err());
+        }
+        let mut wrong_action = payload.clone();
+        wrong_action["action"] = json!(if state == "open" {
+            "human-item-completed"
+        } else {
+            "human-item-raised"
+        });
+        assert!(serde_json::from_value::<HumanItemEventPayload>(wrong_action.clone()).is_err());
+        assert!(!jsonschema::validator_for(&schema["HumanItemEventPayload"])
+            .unwrap()
+            .is_valid(&wrong_action));
+        let mut invalid = payload.clone();
+        invalid["action"] = json!("human-item-unknown");
+        assert!(serde_json::from_value::<HumanItemEventPayload>(invalid.clone()).is_err());
+        assert!(!jsonschema::validator_for(&schema["HumanItemEventPayload"])
+            .unwrap()
+            .is_valid(&invalid));
+        let parsed: HumanItemEventPayload = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), payload);
+        jsonschema::validator_for(&schema["HumanItemEventPayload"])
+            .unwrap()
+            .validate(&payload)
+            .unwrap();
+        // The bus transports these as generic kind/payload, without new bus types.
+        let envelope = json!({"v":ENVELOPE_VERSION,"ts":"2026-10-29T00:00:00Z","stream":"human-sample","seq":1,"source":"pipeline","kind":kind,"payload":payload,"labels":{},"artifacts":[]});
+        let transported: Envelope = serde_json::from_value(envelope.clone()).unwrap();
+        assert_eq!(serde_json::to_value(transported).unwrap(), envelope);
+    }
+    let host = parsed
+        .items
+        .iter()
+        .find(|d| d.item.block == HumanItemBlock::Host)
+        .unwrap();
+    assert!(host.item.is_blocking());
+    assert!(!parsed
+        .query(&HumanItemFilter {
+            blocking: Some(false),
+            ..Default::default()
+        })
+        .iter()
+        .any(|v| v.item.id == host.item.id));
+    let filter = json!({"kind":"task","blocking":true,"priority":"urgent","state":"open","session":"manager","run":"run-1","plan":"plan-1","host":true});
+    let parsed_filter: HumanItemFilter = serde_json::from_value(filter.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed_filter).unwrap(), filter);
+    jsonschema::validator_for(&schema["HumanItemFilter"])
+        .unwrap()
+        .validate(&filter)
+        .unwrap();
+    for value in [
+        json!({"scope":"host"}),
+        json!({"owner_ended":true}),
+        json!({"priority":"none"}),
+    ] {
+        assert!(serde_json::from_value::<HumanItemFilter>(value.clone()).is_err());
+        assert!(!jsonschema::validator_for(&schema["HumanItemFilter"])
+            .unwrap()
+            .is_valid(&value));
+    }
 }

@@ -134,6 +134,13 @@ mod filter;
 mod flow;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod holds;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the human-item journeys
+// drive the reconcile loop, the driver, the channel and the human-item store together — code
+// any change under `src/` can move — so the narrowest edge they can honestly sit behind is the
+// crate's, which is this target's. Their waits are the behaviour under test (a hold that does
+// not release, a probe's interval) and are seconds each.
+mod human_items;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
 // 100-run root's ~260 MB of journals by this suite's debug build, two of them the budget
@@ -221,6 +228,8 @@ mod linear_writeback;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod node_validator;
 mod older_launch_record;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey reads a plan out of a private GitHub board and writes a live addition back through the linked `github-projects` plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod linear_writeback` above.
+mod private_github_home;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys
 // exercise is `land`, `lifecycle`'s drafter and `destination`'s resolution together, against
 // the linked `onevcs` over a real origin — so the narrowest edge they can honestly sit

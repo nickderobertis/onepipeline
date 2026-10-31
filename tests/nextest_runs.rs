@@ -312,6 +312,7 @@ fn scheduling_fixture(case: &str, config: &str) -> Fixture {
             ("tests/e2e.rs", SCHEDULING_E2E),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             (
                 "tests/oneagentgraph_liveness.rs",
                 SCHEDULING_OUTSIDE_THE_GROUP,
@@ -342,7 +343,7 @@ fn a_test_needing_the_whole_group_never_strands_the_tests_queued_behind_it() {
         "under .config/nextest.toml, nextest left tests unrun:\n{log}"
     );
     assert!(
-        log.contains("11 tests run: 11 passed"),
+        log.contains("12 tests run: 12 passed"),
         "every test of the fixture ran and passed:\n{log}"
     );
 }
@@ -446,6 +447,7 @@ fn leaking_fixture(case: &str) -> Fixture {
             ("tests/e2e.rs", LEAKING_E2E),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -620,6 +622,7 @@ fn long_journey_fixture(name: &str, config: &str) -> Fixture {
             ("tests/e2e.rs", &journeys),
             ("tests/note.rs", &journeys),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     )
@@ -877,6 +880,7 @@ fn rerun_fixture(case: &str) -> Fixture {
 fn recipe_line(recipe: &str, containing: &str) -> String {
     let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
     justfile
+        .replace("\\\n", " ")
         .split(&format!("\n{recipe}:\n"))
         .nth(1)
         .unwrap_or_else(|| panic!("the justfile has a `{recipe}` recipe"))
@@ -1724,6 +1728,79 @@ fn a_split_leg_runs_every_test_in_exactly_one_shard_and_refuses_a_share_nothing_
     }
 }
 
+/// A one-test tier has an empty second shard. That share is valid, but an
+/// empty filter is a missing journey even when a partition was supplied.
+#[test]
+fn a_single_test_tier_accepts_its_empty_shard_but_refuses_an_empty_filter() {
+    let fixture = Fixture::new(
+        "empty-tier",
+        "[package]\nname = \"empty-tier\"\nversion = \"0.0.0\"\nedition = \"2021\"\n[workspace]\n",
+        &[
+            ("tests/pooled_slot.rs", "#[test] fn journey() {}\n"),
+            (
+                "scripts/test-partition.sh",
+                include_str!("../scripts/test-partition.sh"),
+            ),
+            (
+                "scripts/nextest-run.sh",
+                include_str!("../scripts/nextest-run.sh"),
+            ),
+        ],
+    );
+    let locked = fixture
+        .command("cargo")
+        .args(["generate-lockfile", "--offline"])
+        .output()
+        .expect("cargo writes the fixture lock");
+    assert!(locked.status.success(), "the fixture lock is written");
+    let run = |partition: Option<&str>, empty: bool| {
+        let mut command = fixture.command("just");
+        command
+            .arg("--justfile")
+            .arg(repo_root().join("justfile"))
+            .arg("--working-directory")
+            .arg(&fixture.0);
+        if empty {
+            command.args([
+                "--set",
+                "pooled-slot-tier",
+                "binary(pooled_slot) and test(absent)",
+            ]);
+        }
+        if let Some(partition) = partition {
+            command.env("ONEPIPELINE_TEST_PARTITION", partition);
+        }
+        command
+            .arg("_pooled_slot-test-quick")
+            .output()
+            .expect("just runs the real pooled-slot tier recipe")
+    };
+    let empty_shard = run(Some("count:2/2"), false);
+    assert!(
+        empty_shard.status.success(),
+        "an empty shard passes: {}",
+        String::from_utf8_lossy(&empty_shard.stderr)
+    );
+    assert!(String::from_utf8_lossy(&empty_shard.stderr).contains("0 tests run"));
+    for partition in [None, Some("count:2/2")] {
+        let missing = run(partition, true);
+        assert_eq!(
+            missing.status.code(),
+            Some(4),
+            "an empty filter fails: {}",
+            String::from_utf8_lossy(&missing.stderr)
+        );
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("no tests to run"));
+    }
+    let whole = run(None, false);
+    assert!(
+        whole.status.success(),
+        "the unsplit tier passes: {}",
+        String::from_utf8_lossy(&whole.stderr)
+    );
+    assert!(String::from_utf8_lossy(&whole.stderr).contains("1 passed"));
+}
+
 /// A `ci.yml` splitting its Windows leg three ways, as the repository's own does
 /// two: a `cross` job with a `shard` axis and the partition it hands each shard.
 const SHARDS_CI: &str = "jobs:\n  cross:\n    strategy:\n      matrix:\n        os: [windows-latest]\n        shard: [1, 2, 3]\n    env:\n      ONEPIPELINE_TEST_PARTITION: count:${{ matrix.shard }}/3\n";
@@ -2270,6 +2347,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
             ),
             ("tests/note.rs", "#[test]\nfn one() {}\n"),
             ("tests/release_channel.rs", "#[test]\nfn one() {}\n"),
+            ("tests/pooled_slot.rs", "#[test]\nfn one() {}\n"),
             ("tests/oneagentgraph_liveness.rs", "#[test]\nfn one() {}\n"),
         ],
     );
@@ -2295,7 +2373,7 @@ fn the_windows_inventory_reads_what_nextest_itself_reports() {
         .filter_map(|line| line.split_once(' '))
         .map(|(binary, test)| format!("{binary}\t{test}"))
         .collect();
-    assert_eq!(tests.len(), 6, "{}", stdout(&listed));
+    assert_eq!(tests.len(), 7, "{}", stdout(&listed));
 
     let mut log = String::new();
     for (_, project, _) in INVENTORY_PROJECTS {

@@ -12989,3 +12989,48 @@ names (`tests/channel_layout.rs`, `tests/e2e/recorded_channel.rs`).
 **Ruling:** the planner ruled the 0.9.4 link and these contract edits (correlation
 `c-82fe4a181e152433729ebea43a33067d`), and that a read may create the core's derived cursor
 files (correlation `c-ac162df8dd377e864a0238c2006a76ee`).
+
+## 144. The live human-item surface names what its task did not — OPEN
+
+**Proposal, for the planner who owns the contract.** The manager ruled on node
+`item-runtime` (correlation `c-3012f5f639768f99ac429e40c0f9bb4a`) that `docs/contract.md`'s
+Human items section is rewritten to describe the live surface the task specifies, and that
+anything this build adds beyond that task is proposed here rather than written there. The
+section names some of these because the live surface cannot be described without them;
+each is a proposal until ruled.
+
+1. **`human-items watch [--session ID] [--timeout SECONDS]`** is how an owning session's
+   watch reads its item events: one `onemessagebus` local-transport queue per owning
+   session under `human-items/bus/`, consumer `watch`, the cursor committed after printing,
+   exit 5 when nothing was pending. The run-scoped `onepipeline watch` is unchanged; a
+   session with no run has no run to watch, which is why this is its own verb.
+2. **`human-items config [--json]`** prints the effective configuration and its source
+   files — the effective-config read the task asks for, as a verb.
+3. **`raise --phase PHASE --context FILE`** is the phase CLI form, and the context is
+   `{owner, dedup_key, node?, vars?, approval?, tickets?}`, unknown keys refused; titles and
+   bodies are minijinja templates over `vars`, `session`, `run`, `plan` and `node`, an
+   undefined variable refusing the raise.
+4. **`human_items.approval_adapters: {NAME: {command: [...]}}`** is where the trusted
+   commands live, a hook naming one as `approval: {adapter: NAME}`, and a hook selects the
+   ticket review as `aggregate: ticket_review`. A hook's `block` is the scope alone; the run,
+   node and plan come from the context's owner and node. The phase a completion consults
+   is read off the item's `phase:PHASE:` dedup-key prefix.
+5. **`task_record.priority`** carries a `kind: human` node's store priority into the run, so
+   the item a legacy node raises uses it. Optional and omitted when absent on the wire; a
+   Rust literal of `TaskRecord` gains the field.
+6. **Item ids are `hi-` and a digest of the dedup key**, and raising an open item's key
+   again with new title, body or priority updates it in place under `human-item-raised`.
+7. **Actor attribution is read from the environment**: `session:<ONEPIPELINE_LAUNCHER_SESSION>`
+   on behalf of `user:<login>`, or `user:<login>` alone. No flag names either.
+8. **`ONEPIPELINE_HUMAN_ITEMS_TELEMETRY`** names a file each read appends its cost to —
+   mode, records and bytes replayed, runs rederived, index I/O, discovery, replay,
+   blocked-work and render milliseconds — which the budget target reads.
+9. **A human-item hold is not a `node-held` reason.** A held node is paused like a release
+   hold, but `node-held` names no `human-item` kind: adding one changes that record's
+   registered payload, which is not this task's to version.
+10. **Beside the journal the store keeps `probes.json`** — how each open host condition is
+    probed — and **`projected.json`**, each task's last projected state and the content it
+    was first projected with. A lost or unreadable projection record costs a replay the
+    store answers without a second ticket; a lost or unreadable probe record is said, and
+    the outage it described is not probed again until it is raised again — a person may
+    dismiss its item meanwhile.

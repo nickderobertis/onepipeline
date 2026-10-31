@@ -928,6 +928,17 @@ impl Reader {
                 ),
             );
         }
+        // A human action's own store priority, which the item raised for it carries:
+        // recorded only for a `kind: human` node with one, so every other record is
+        // written exactly as before.
+        if node.get("kind").and_then(Value::as_str) == Some("human")
+            && task.item.priority != onetaskgraph_plugin_api::Priority::None
+        {
+            record.insert(
+                "priority".to_owned(),
+                Value::String(task.item.priority.as_str().to_owned()),
+            );
+        }
         node.insert("task_record".to_owned(), Value::Object(record));
         // The task's own visibility, as the store answers it: a task is classified by its
         // own declaration and its own repositories, never by the project it is filed under,
@@ -3226,5 +3237,87 @@ mod tests {
                 ("unreset".to_owned(), Some(Cause::RateLimited), None),
             ]
         );
+    }
+    #[test]
+    fn human_item_metadata_loads_and_legacy_nodes_retain_store_priority() {
+        use crate::human_items::{HumanItemKind, Priority};
+        let read_one = |metadata, rest| {
+            load(store(
+                json!({}),
+                vec![task("t-human", metadata, rest)],
+                vec![],
+            ))
+        };
+        let legacy = json!({"onepipeline.id":"human", "onepipeline.kind":"human"});
+        for priority in ["urgent", "high", "medium", "low", "none"] {
+            let read = read_one(legacy.clone(), json!({"title":"Review the release", "content":"Confirm the release.", "priority":priority}))
+                .unwrap_or_else(|_| panic!("legacy human node loads"));
+            let loaded = &read.plan.tasks[0];
+            assert!(
+                loaded.human_item.is_none(),
+                "legacy load must leave metadata absent"
+            );
+            let derived = crate::human_items::derive_legacy(
+                &loaded.id,
+                &loaded.task_record.as_ref().unwrap().title,
+                loaded.task.as_deref().unwrap(),
+                Some(priority.parse().unwrap()),
+            );
+            assert_eq!(derived.kind, HumanItemKind::Task);
+            assert_eq!(derived.title, "Review the release");
+            assert_eq!(derived.body, "Confirm the release.");
+            assert_eq!(
+                derived.priority.as_str(),
+                if priority == "none" { "low" } else { priority }
+            );
+        }
+        let read = read_one(
+            legacy.clone(),
+            json!({"title":"", "content":"Confirm the release."}),
+        )
+        .unwrap_or_else(|_| panic!("legacy blank title remains loadable"));
+        let loaded = &read.plan.tasks[0];
+        assert!(loaded.human_item.is_none());
+        let derived = crate::human_items::derive_legacy(
+            &loaded.id,
+            &loaded.task_record.as_ref().unwrap().title,
+            loaded.task.as_deref().unwrap(),
+            None,
+        );
+        assert_eq!(derived.title, "Confirm the release.");
+        assert_eq!(derived.priority, Priority::Low);
+        assert_eq!(
+            crate::human_items::derive_legacy("fallback-node", " ", " ", None).title,
+            "fallback-node"
+        );
+        let metadata = json!({"kind":"question", "priority":"high", "title":"Which release?", "body":"Choose stable or preview."});
+        let explicit = |human_item| {
+            let mut node = legacy.clone();
+            node["onepipeline.human_item"] = human_item;
+            read_one(node, json!({}))
+        };
+        let read = explicit(metadata.clone()).unwrap_or_else(|_| panic!("explicit metadata loads"));
+        assert_eq!(
+            serde_json::to_value(read.plan.tasks[0].human_item.as_ref().unwrap()).unwrap(),
+            metadata
+        );
+        for field in ["kind", "priority", "title", "body"] {
+            let mut invalid = metadata.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(explicit(invalid).is_err(), "missing {field}");
+        }
+        for (field, value) in [
+            ("title", json!(" ")),
+            ("body", json!("")),
+            ("priority", json!("none")),
+            ("extra", json!(true)),
+        ] {
+            let mut invalid = metadata.clone();
+            invalid[field] = value;
+            assert!(explicit(invalid).is_err(), "invalid {field}");
+        }
+        let read =
+            read_one(node("agent"), json!({})).unwrap_or_else(|_| panic!("agent loads unchanged"));
+        assert!(read.plan.tasks[0].human_item.is_none());
     }
 }

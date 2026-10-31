@@ -542,6 +542,10 @@ impl Watch {
 /// a verdict is held to the gaps across a whole bound rather than to one look.
 #[cfg(unix)]
 fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch {
+    // A successful spawn-time probe can be followed by an unreadable startup
+    // sample on macOS. Synchronize here and retain that reading: judging starts
+    // with evidence of a tree, rather than another probe racing its startup.
+    let mut first = Some(tree.visible_work());
     let started = Instant::now();
     let mut stall = oneagentgraph::member::Stall::new(bound, started);
     let mut watch = Watch {
@@ -551,8 +555,10 @@ fn watch(tree: &Tree, bound: Duration, enough: impl Fn(&Watch) -> bool) -> Watch
     let mut before: Option<(Instant, oneagentgraph::scratch::Work)> = None;
     while started.elapsed() < BACKSTOP {
         let now = Instant::now();
-        let work = oneagentgraph::scratch::work(&tree.scratch)
-            .expect("the spawned tree remains visible to the activity rule");
+        let work = first.take().unwrap_or_else(|| {
+            oneagentgraph::scratch::work(&tree.scratch)
+                .expect("the spawned tree remains visible to the activity rule")
+        });
         let working = match before {
             Some((taken, before)) => before.worked(work, now.duration_since(taken)),
             None => false,
@@ -613,21 +619,22 @@ impl Tree {
             .spawn()
             .map_err(|error| format!("cannot start the member's tree {argv:?}: {error}"))?;
         let tree = Self { scratch, child };
-        // The stamp is fixed at `exec`, so a look taken before the child has
-        // reached it finds no tree — and the rule reads that as "nothing to ask"
-        // rather than as an idle one. Wait for the tree to exist before handing
-        // it to the rule, so what is under test is the verdict and not the race.
+        tree.visible_work();
+        Ok(tree)
+    }
+
+    fn visible_work(&self) -> oneagentgraph::scratch::Work {
         let waiting = Instant::now();
-        while oneagentgraph::scratch::work(&tree.scratch).is_none() {
-            if waiting.elapsed() >= BACKSTOP {
-                return Err(format!(
-                    "the tree {argv:?} never became visible to the sibling's own stamp, over {:?}",
-                    waiting.elapsed()
-                ));
+        loop {
+            if let Some(work) = oneagentgraph::scratch::work(&self.scratch) {
+                return work;
             }
+            assert!(
+                waiting.elapsed() < BACKSTOP,
+                "the spawned tree never became visible to the activity rule"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(tree)
     }
 }
 

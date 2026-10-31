@@ -524,9 +524,19 @@ fn passed_in_round(world: &World, run: &str, output: &crate::harness::Run, what:
 /// host lengthens it without failing it, while one that goes silent for a step fails.
 fn round_command(
     world: &World,
+    command: onepipeline_testfakes::profile::process::Command,
+    input: Option<&str>,
+    clock: &dyn crate::harness::Clock,
+) -> crate::harness::Run {
+    round_command_capturing(world, command, input, clock, None)
+}
+
+fn round_command_capturing(
+    world: &World,
     mut command: onepipeline_testfakes::profile::process::Command,
     input: Option<&str>,
     clock: &dyn crate::harness::Clock,
+    mut stderr_release: Option<std::sync::mpsc::Receiver<()>>,
 ) -> crate::harness::Run {
     use std::fs::File;
     use std::process::Stdio;
@@ -549,9 +559,18 @@ fn round_command(
         .join(" ");
     let stdout = world.root.join("round-command.stdout");
     let stderr = world.root.join("round-command.stderr");
-    command
-        .stdout(File::create(&stdout).expect("the stdout capture opens"))
-        .stderr(File::create(&stderr).expect("the stderr capture opens"));
+    let errors = File::create(&stderr).expect("the stderr capture opens");
+    command.stdout(File::create(&stdout).expect("the stdout capture opens"));
+    // A withheld pipe reader can fill the Windows pipe before the second store
+    // hold releases it; joining its copier can also wait on inherited write handles.
+    // A regular-file spool has neither dependency: only publication is delayed.
+    // Copying its current EOF never waits for inherited writers to close.
+    let spool = world.root.join("round-command.stderr-spool");
+    command.stderr(if stderr_release.is_some() {
+        File::create(&spool).expect("the stderr spool opens")
+    } else {
+        errors.try_clone().expect("the stderr capture is cloned")
+    });
     if let Some(input) = input {
         let path = world.root.join("round-command.stdin");
         std::fs::write(&path, input).expect("the command's input is written");
@@ -559,6 +578,25 @@ fn round_command(
     }
     eprintln!("busy round: starting {args}");
     let mut child = Child(command.spawn().expect("the round's command starts"));
+    let mut spooled = stderr_release
+        .as_ref()
+        .map(|_| File::open(&spool).expect("the stderr spool is readable"));
+    let mut errors = errors;
+    let mut publish = || {
+        if stderr_release.as_ref().is_some_and(|release| {
+            !matches!(
+                release.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            )
+        }) {
+            stderr_release = None;
+        }
+        if stderr_release.is_none() {
+            if let Some(spooled) = &mut spooled {
+                std::io::copy(spooled, &mut errors).expect("the command's stderr is captured");
+            }
+        }
+    };
     let written = || {
         [&stdout, &stderr]
             .map(|capture| std::fs::metadata(capture).map_or(0, |capture| capture.len()))
@@ -566,6 +604,7 @@ fn round_command(
     let mut seen = written();
     let mut deadline = clock.elapsed().saturating_add(crate::harness::ONE_STEP);
     let status = loop {
+        publish();
         if let Some(status) = child.0.try_wait().expect("the command can be observed") {
             break status;
         }
@@ -586,6 +625,7 @@ fn round_command(
         );
         clock.pause(std::time::Duration::from_millis(20));
     };
+    publish();
     eprintln!("busy round: finished {args}: {status}");
     crate::harness::Run {
         code: status.code().unwrap_or(-1),
@@ -665,6 +705,21 @@ fn a_blocked_round_command_names_its_wait_and_last_observation() {
 /// progress that keeps it alive, and it then exits on its own.
 #[test]
 fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
+    progressing_round(false);
+}
+
+/// Store progress does not promise that a caller has observed the command's stderr.
+/// A file spool stages a delayed pipe reader without pipe capacity or EOF dependencies.
+/// At the second store hold, publication is still withheld; the journey must wait
+/// for captured progress after release before advancing its diagnostic clock.
+/// The zero-byte capture at the second hold reproduces the original immediate
+/// assertion failure even when the real child has already written to the spool.
+#[test]
+fn a_round_command_waits_for_output_when_the_pipe_reader_is_delayed() {
+    progressing_round(true);
+}
+
+fn progressing_round(delay_reader: bool) {
     let world = World::new("round-command-progress").through_scripted_source();
     let project = world.plan(
         "progressing-round",
@@ -676,12 +731,16 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
     let almost = crate::harness::ONE_STEP - std::time::Duration::from_secs(1);
     let finished = std::thread::scope(|scope| {
         let _expires = clock.expiring();
-        let waiting = scope.spawn(|| {
-            round_command(
-                &world,
+        let (release, released) = std::sync::mpsc::channel();
+        let world = &world;
+        let clock = &clock;
+        let waiting = scope.spawn(move || {
+            round_command_capturing(
+                world,
                 world.cmd(&["start", &project, "--attach"]),
                 None,
-                &clock,
+                clock,
+                delay_reader.then_some(released),
             )
         });
         let held = first.arrived();
@@ -695,10 +754,25 @@ fn a_round_command_that_keeps_writing_outlives_a_step_of_wall_time() {
         clock.advance(almost);
         held.release();
         let held = later.arrived();
-        assert!(
-            written("round-command.stderr") > before,
-            "the command wrote nothing between the two held calls"
-        );
+        if delay_reader {
+            assert_eq!(
+                written("round-command.stderr"),
+                before,
+                "stderr was captured before its pipe reader was released"
+            );
+            world.until("the child to write while its output is unobserved", |_| {
+                written("round-command.stderr-spool") > before
+            });
+            assert_eq!(written("round-command.stderr"), before);
+            release.send(()).expect("the output observer is released");
+        }
+        // The attached driver's engine thread can reach update_task while its rendering
+        // loop is still asleep (driver::attach, ATTACH_POLL) or has not been scheduled.
+        // Neither a store arrival nor a child's write promises its output was observed.
+        // Wait for the capture before spending the next interval of diagnostic time.
+        world.until("the command to write between the two held calls", |_| {
+            written("round-command.stderr") > before
+        });
         // Restart the count so two reads mean a whole look that came after what it wrote.
         clock.advance(std::time::Duration::ZERO);
         world.until("the command's progress to be seen", |_| clock.read_again());

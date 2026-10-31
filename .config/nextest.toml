@@ -68,6 +68,13 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 # with the one report a hang produces kept.
 status-level = "slow"
 
+# The examples the build compiled beside the suite. `tests/human_items.rs` runs
+# the documented schema exporter's own executable rather than compiling it while
+# the test runs, and nextest archives only the package's binaries unless told, so
+# a re-run from the archive would otherwise not find it.
+[profile.default.archive]
+include = [{ path = "debug/examples", relative-to = "target", depth = 1 }]
+
 # What CI's cross-platform legs run under, and the only difference is that every
 # test reports as it finishes.
 #
@@ -212,7 +219,7 @@ priority = 100
 # cross-platform legs too. Asked of the runner rather than assumed: `cargo nextest
 # show-config test-groups --profile ci` reports `group: e2e (max threads = 4)`.
 [[profile.default.overrides]]
-filter = 'binary(e2e) or binary(note) or binary(release_channel)'
+filter = 'binary(e2e) or binary(pooled_slot) or binary(note) or binary(release_channel)'
 test-group = 'e2e'
 
 # Show the non-gating liveness timings in passing local and CI runs.

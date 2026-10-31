@@ -1212,8 +1212,24 @@ fn driving(
         None => state.readjust.due = Some(crate::payload::ReadjustTrigger::Continuation),
     }
 
+    // A human step its item resolved and nothing released is queued for this
+    // driver's first pass, before the loop starts.
+    if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
+        let statuses = state.statuses();
+        gate.queue_owed(&ChannelState::of_run(paths, &launch), &state, &statuses);
+    }
     let mut outcome = converge(paths, &mut journal, &mut state, &launch)?;
     record_result(paths, &state, outcome)?;
+    // A human action the last pass readied is raised before the driver lets go,
+    // and a run that settled — rather than one waiting on a person — retires the
+    // items holding its work.
+    if let Some(mut gate) = crate::human_items::runtime::Gate::for_launch(paths, &launch) {
+        let statuses = state.statuses();
+        gate.pass(paths, &state, &statuses);
+        if outcome != GraphState::Waiting {
+            gate.run_ended();
+        }
+    }
     // The **last** claim on the command queue, after everything this driver owed
     // the run is written. Claimed until the queue is empty, and the result
     // written again whenever a claim moved the graph — this is the run's last
@@ -1622,6 +1638,10 @@ fn converge(
     // fresh driver reads rather than inherits, and `report_holds` diffs the
     // answer against what the record already says.
     let mut workspaces = crate::pool::Workspaces::new();
+    // The human items that concern this run, where its launch enables them: the
+    // item each human node gets as it becomes eligible, and the nodes an open
+    // block holds from starting.
+    let mut human = crate::human_items::runtime::Gate::for_launch(paths, launch);
     // The nodes the launch's read could not ask a private source about, seeded from the
     // record because no driver repeats that read, and re-read on a paced timer until the
     // source answers.
@@ -1810,6 +1830,9 @@ fn converge(
         }
         sources.read_again(|| state.graph.iter().cloned().collect());
         paused.extend(sources.held().keys().cloned());
+        if let Some(gate) = human.as_mut() {
+            paused.extend(gate.pass(paths, state, &statuses));
+        }
 
         // The releases this pass cares about: every node ready to start, where a
         // `published` hold applies and where a `fast` node's reference block is
@@ -2314,6 +2337,14 @@ fn converge(
                 if releases.take_up_answers() {
                     return true;
                 }
+                // A human item recorded since the last pass may hold or release
+                // what this run may start.
+                if human
+                    .as_ref()
+                    .is_some_and(crate::human_items::runtime::Gate::moved)
+                {
+                    return true;
+                }
                 if writeback
                     .as_ref()
                     .is_some_and(|writeback| writeback.has_unprojected() || writeback.has_closed())
@@ -2608,6 +2639,9 @@ fn converge(
                 // dispatch goes on to settle as, and changing none of it.
                 Message::ChainStopped(stopped) => {
                     raise(paths, journal, chain_stopped_finding(&stopped))?;
+                    if let Some(gate) = human.as_ref() {
+                        gate.chain_exhausted(&launch.dir, &stopped);
+                    }
                 }
                 Message::Maintained(swept) => maintenance.record(paths, journal, &swept)?,
                 Message::Retired(retirements) => {
@@ -10148,6 +10182,7 @@ pub(crate) fn attempt(
             }
             Err(error) => {
                 conflicted = crate::vcs::session_open_conflicted(&error);
+                crate::human_items::runtime::dispatch_refused(&error);
                 Drained {
                     settlement: Settlement {
                         detail: Some(error.to_string()),

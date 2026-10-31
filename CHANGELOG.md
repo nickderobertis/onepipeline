@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.96.2](https://github.com/nickderobertis/onepipeline/compare/v0.96.1...v0.96.2) - 2026-10-30
+
+### Fixed
+
+- *(deps)* link the plan store that sends no write when an unchanged plan is copied again ([#1302](https://github.com/nickderobertis/onepipeline/pull/1302))
+
+## [0.96.1](https://github.com/nickderobertis/onepipeline/compare/v0.96.0...v0.96.1) - 2026-10-30
+
+### Fixed
+
+- *(deps)* link the onejudge that keeps a stopped observer's turn from reading as lost ([#1300](https://github.com/nickderobertis/onepipeline/pull/1300))
+
+## [0.96.0](https://github.com/nickderobertis/onepipeline/compare/v0.95.7...v0.96.0) - 2026-10-30
+
+### Added
+
+- declare additive human action item contracts ([#1297](https://github.com/nickderobertis/onepipeline/pull/1297))
+
+### Fixed
+
+- *(deps)* link the onevcs whose public boundary check never refuses a removal ([#1301](https://github.com/nickderobertis/onepipeline/pull/1301))
+- prove the human items schema exporter without compiling inside a test ([#1304](https://github.com/nickderobertis/onepipeline/pull/1304))
+- *(deps)* link the store that lets a private GitHub home hold public tasks ([#1299](https://github.com/nickderobertis/onepipeline/pull/1299))
+- *(test)* keep the pooled-slot tier green on Windows, where its tests do not apply ([#1295](https://github.com/nickderobertis/onepipeline/pull/1295))
+- *(npm)* keep the Windows node_modules/.bin launch's output the engine's own ([#1291](https://github.com/nickderobertis/onepipeline/pull/1291))
+
+## [0.95.7](https://github.com/nickderobertis/onepipeline/compare/v0.95.6...v0.95.7) - 2026-10-29
+
+### Fixed
+
+- *(test)* make the post-adoption driver panic journey reliable on a loaded runner ([#1285](https://github.com/nickderobertis/onepipeline/pull/1285))
+
+## [0.95.6](https://github.com/nickderobertis/onepipeline/compare/v0.95.5...v0.95.6) - 2026-10-29
+
+### Fixed
+
+- *(tests)* make the busy review-round journey wait for the write it judges ([#1274](https://github.com/nickderobertis/onepipeline/pull/1274))
+- *(test)* make the restack-before-checks journey reliable on a loaded runner ([#1261](https://github.com/nickderobertis/onepipeline/pull/1261))
+- *(dispatch)* end an unsignallable settled observer's judge deterministically ([#1283](https://github.com/nickderobertis/onepipeline/pull/1283))
+
+## [0.95.5](https://github.com/nickderobertis/onepipeline/compare/v0.95.4...v0.95.5) - 2026-10-29
+
+### Added
+
+- *(deps)* link the plan store that routes by organization and classification together ([#1262](https://github.com/nickderobertis/onepipeline/pull/1262))
+
+### Fixed
+
+- *(test)* make the pooled-slot hand-back journey reliable on a loaded runner ([#1279](https://github.com/nickderobertis/onepipeline/pull/1279))
+- *(tests)* make the activity-rule liveness test wait for the spawned tree to exit ([#1268](https://github.com/nickderobertis/onepipeline/pull/1268))
+- *(tests)* make the live-judge note journey wait for the worker's presentation record ([#1273](https://github.com/nickderobertis/onepipeline/pull/1273))
+- *(npm)* run the npm launcher journeys on Windows ([#1259](https://github.com/nickderobertis/onepipeline/pull/1259))
+- *(deps)* link the plan store that keeps a private Linear home's public projections ([#1256](https://github.com/nickderobertis/onepipeline/pull/1256))
+
 ## [0.95.4](https://github.com/nickderobertis/onepipeline/compare/v0.95.3...v0.95.4) - 2026-10-28
 
 ### Fixed

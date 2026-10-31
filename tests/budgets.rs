@@ -845,9 +845,13 @@ fn the_host_view_measurement_counts_the_journals_a_traced_read_opened() {
         .status()
         .expect("mkfifo runs");
     assert!(made.success());
+    // Killed once the reader is blocked in the open itself, rather than after a fixed
+    // pause a loaded runner can outlast before `cat` reaches it.
     let killed = traced_opens(
         &dir,
-        "cat live-1/events.jsonl & sleep 0.3; kill -9 $!; true",
+        "cat live-1/events.jsonl & p=$!; i=0; \
+         until grep -qE 'partner|fifo' /proc/$p/wchan 2>/dev/null || [ $i -ge 3000 ]; \
+         do i=$((i+1)); sleep 0.01; done; kill -9 $p; true",
         &[],
     );
     assert!(

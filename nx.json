@@ -176,6 +176,21 @@
       "{workspaceRoot}/rustfmt.toml",
       "{workspaceRoot}/clippy.toml",
       "sharedGlobals"
+    ],
+    "pooledSlotSource": [
+      "rustBuild",
+      "{workspaceRoot}/tests/pooled_slot/**/*",
+      "{workspaceRoot}/tests/e2e/harness.rs",
+      "{workspaceRoot}/tests/e2e/hook.*",
+      "{workspaceRoot}/tests/e2e/probe.*",
+      "{workspaceRoot}/graphs/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/justfile",
+      "{workspaceRoot}/clippy.toml",
+      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/tests/e2e/pool_support.rs",
+      "{workspaceRoot}/tests/e2e/pool_hand_back.rs"
     ]
   },
   "targetDefaults": {

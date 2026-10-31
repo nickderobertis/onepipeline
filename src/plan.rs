@@ -1309,6 +1309,9 @@ impl<'de> Deserialize<'de> for Publish {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Node {
+    /// Optional human-item description; absent nodes retain existing scheduling behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub human_item: Option<crate::human_items::HumanItemMetadata>,
     /// Unique within the plan.
     pub id: String,
     /// Defaults to [`NodeKind::Agent`], and is omitted when it is that, so a
@@ -1596,6 +1599,11 @@ pub struct TaskRecord {
     /// in the run's term scope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repositories: Vec<String>,
+    /// A `kind: human` node's store priority, which the human item raised for it
+    /// carries. Absent for every other node and for a task with none, so a record
+    /// written before it existed reads exactly as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<onetaskgraph_plugin_api::Priority>,
 }
 
 /// Whether a repository is one person's or a team's — the vocabulary a schema-3

@@ -107,7 +107,8 @@
         "tests/e2e/closures.rs",
         "tests/e2e/public_id.rs",
         "tests/recorded/run-root/run-labels",
-        "tests/recorded/run-root/run-labels/**"
+        "tests/recorded/run-root/run-labels/**",
+        "tests/e2e/pool_support.rs"
       ],
       "crates": [
         "onepipeline"
@@ -151,6 +152,10 @@
         "clippy.toml",
         "rustfmt.toml",
         "tests/e2e/store.rs",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/e2e/review.rs",
+        "tests/e2e/review_reply.rs",
+        "tests/golden/review-results-v2.json",
         "tests/e2e/writeback_budget.rs",
         "tests/e2e/writeback_cost.rs",
         "tests/e2e/writeback_projections.rs",
@@ -158,6 +163,7 @@
         "tests/e2e/multi_source.rs",
         "tests/e2e/linear_writeback.rs",
         "tests/e2e/holds.rs",
+        "tests/e2e/human_items.rs",
         "tests/e2e/continuation.rs",
         "tests/e2e/crossdag.rs",
         "tests/e2e/plan.rs",
@@ -188,7 +194,13 @@
         "tests/e2e/linear_launch.rs",
         "tests/e2e/withdrawn.rs",
         "tests/recorded/run-root",
-        "tests/recorded/run-root/source-hold-before-cause/**"
+        "tests/recorded/run-root/source-hold-before-cause/**",
+        "tests/e2e/review_reply.rs",
+        "tests/e2e/review.rs",
+        "tests/e2e/stacked_drafts.rs",
+        "tests/golden/review-results-v2.json",
+        "tests/e2e/private_github_home.rs",
+        "tests/e2e/github_world.py"
       ],
       "crates": [
         "onepipeline"
@@ -202,6 +214,7 @@
         "multi_source",
         "linear_writeback",
         "holds",
+        "human_items",
         "continuation",
         "crossdag",
         "plan",
@@ -214,7 +227,8 @@
         "filter",
         "linear_loopback",
         "linear_launch",
-        "withdrawn"
+        "withdrawn",
+        "private_github_home"
       ]
     },
     "e2e-views": {

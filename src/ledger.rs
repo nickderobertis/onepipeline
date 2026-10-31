@@ -520,6 +520,11 @@ pub fn all_runs(root: &Path) -> RunIndex {
         if name == crate::flow::FLOWS_DIR {
             continue;
         }
+        // Nor is the host's human-item store, which sits beside the runs it
+        // reads rather than being one of them.
+        if Some(name.as_str()) == crate::human_items::JOURNAL_PATH.split('/').next() {
+            continue;
+        }
         let paths = RunPaths::under(root, &name);
         let launch = paths.launch();
         let named = launch
@@ -1901,6 +1906,17 @@ fn append_line_locked(path: &Path, line: &str) -> (Option<TornTail>, Result<()>)
     };
     let appended = write_record(path, &mut file, line);
     (torn, appended)
+}
+
+/// [`open_healed`] for a caller that holds the handle across a read and its
+/// append — the human-item writer, which judges an action against the journal
+/// it is about to extend — reporting what it healed as every appender does.
+pub(crate) fn open_healed_for_append(path: &Path) -> Result<fs::File> {
+    let (healed, opened) = open_healed(path);
+    if let Some(torn) = &healed {
+        report_torn_tail(path, torn);
+    }
+    opened
 }
 
 /// Open an append-only file as its only appender, healed of any fragment a dead
