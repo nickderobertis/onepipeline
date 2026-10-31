@@ -25,6 +25,12 @@ cd "$ROOT"
 archive="$ROOT/target/warm-archive.tar.zst"
 trap 'rm -f -- "$archive"' EXIT
 
+[ "$#" -eq 1 ] || {
+  echo "warm-rust-cache: takes exactly one argument, the job family, not $#" >&2
+  echo "ACTION: run 'scripts/warm-rust-cache.sh linux|cross'" >&2
+  exit 2
+}
+
 # llmlint: ignore-block[changed_behavior_has_e2e] each mode is the justfile's own build recipes, compiling the workspace;
 # rust-cache-warm.yml runs them for real on every push to main, and a pull request
 # restoring what they saved is what shows the keys agree (.github/ci-shape holds

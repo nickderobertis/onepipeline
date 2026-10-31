@@ -22,6 +22,12 @@ describe("the install proofs' refusals", () => {
     assert.match(log, /^ACTION: /m);
   });
 
+  it("refuses anything beside the one proof it is asked for", () => {
+    const { status, log } = run(root, "bash", ["scripts/install-proof.sh", "path", "--release"]);
+    assert.equal(status, 2, log);
+    assert.match(log, /takes exactly one argument, the proof, not 2/);
+  });
+
   it("refuses a README that no longer gives the documented one-liner", (t) => {
     const dir = scratchWorkspace(t);
     const readme = readFileSync(join(dir, "README.md"), "utf8");
@@ -74,5 +80,11 @@ describe("the warm build's refusals", () => {
     const { status, log } = run(root, "bash", ["scripts/warm-rust-cache.sh", "release"]);
     assert.equal(status, 2, log);
     assert.match(log, /name the job family: linux or cross/);
+  });
+
+  it("refuses anything beside the one job family it is asked for", () => {
+    const { status, log } = run(root, "bash", ["scripts/warm-rust-cache.sh", "linux", "cross"]);
+    assert.equal(status, 2, log);
+    assert.match(log, /takes exactly one argument, the job family, not 2/);
   });
 });

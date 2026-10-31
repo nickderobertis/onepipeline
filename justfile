@@ -207,6 +207,10 @@ check-cross: fmt-check lint test-quick
 # invocation. All four are scoped to the projects this branch's diff can reach,
 # failing closed as `check-affected` does; `--plan` prints the selection and runs
 # nothing, which is how a Linux host reads what the Windows and macOS jobs select.
+# llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the plan that made the four jobs places
+# the pinned-wheel channel journeys in `lint` and the credentialled smoke in `test-linux`, and
+# both stay their projects' own uncached targets that no `check` reaches. The `release-compat`
+# and `smoke` jobs ran them on `changes.outputs.crate`, which is the same affected answer.
 # The platform-independent checks: formatting, lints, MSRV, audit, the pinned-wheel journeys.
 ci-lint *args:
     @bash scripts/ci-job.sh lint "$@"
@@ -214,6 +218,7 @@ ci-lint *args:
 # The Linux test job: `check`'s tiers under coverage, the live smoke, the install proofs and the x86_64 wheel.
 ci-test-linux *args:
     @bash scripts/ci-job.sh test-linux "$@"
+# llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
 # The Windows test job: clippy, the uninstrumented suite, the npm launcher, the install proofs.
 ci-test-windows *args:

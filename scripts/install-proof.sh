@@ -54,6 +54,12 @@ fresh_root() {
   printf '%s' "$root"
 }
 
+[ "$#" -eq 1 ] || {
+  echo "install-proof: takes exactly one argument, the proof, not $#" >&2
+  echo "ACTION: run 'scripts/install-proof.sh path|documented|wheel'" >&2
+  exit 2
+}
+
 # llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: the test
 # jobs run all three for real on every pull request that reaches the crate, which
 # is their end-to-end proof, and an offline journey would either compile the release
