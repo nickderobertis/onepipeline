@@ -688,6 +688,8 @@ function manifestOf(value) {
     });
   }
   for (const key of ["live_runs", "ended", "settled"]) names(value[key], key);
+  // Each live run is rebound to its own processes; a repeat would rebind one twice.
+  if (new Set(value.live_runs).size !== value.live_runs.length) refuse("live_runs must not name a run twice");
   names(value.expected.skipped, "expected.skipped");
   runName(value.sparse_run, "sparse_run");
   count(value.sparse_record_bytes, "sparse_record_bytes");

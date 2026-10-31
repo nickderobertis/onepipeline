@@ -392,6 +392,9 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
     invalid_task["tasks"][1]["id"] = json!("../outside");
     let mut wrong_shape = original_manifest.clone();
     wrong_shape["live_runs"] = json!(["live-0", "live-1"]);
+    let mut repeated_live = original_manifest.clone();
+    let first_live = repeated_live["live_runs"][0].clone();
+    repeated_live["live_runs"][1] = first_live;
     let extra_plan = cache.join("runs/live-0/plan.json");
     for (nth, (file, bad, message)) in [
         (&launch, json!(null), "cached launch must be an object"),
@@ -423,6 +426,11 @@ fn shared_fixtures_rebind_live_processes_and_keep_independent_journals() {
             &manifest,
             wrong_shape,
             "the template's live runs differ from the process shape",
+        ),
+        (
+            &manifest,
+            repeated_live,
+            "live_runs must not name a run twice",
         ),
     ]
     .into_iter()
