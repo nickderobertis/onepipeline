@@ -34,6 +34,7 @@
         "{workspaceRoot}/scripts/warm-rust-cache.sh",
         "{workspaceRoot}/screenshots/ci-capture.sh",
         "{workspaceRoot}/.github/workflows/visual-docs.yml",
+        "{workspaceRoot}/.github/workflows/ci.yml",
         "{workspaceRoot}/README.md",
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/biome.json",

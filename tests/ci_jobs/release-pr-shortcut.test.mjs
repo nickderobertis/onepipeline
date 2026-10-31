@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { git, root } from "./support.mjs";
@@ -431,6 +432,25 @@ describe("the release pull request's shortcut", () => {
       assert.match(result.stderr, refusal);
     });
   }
+
+  it("asks for exactly the checks of the jobs that ask it", () => {
+    // The checks a merged head must have passed are the jobs ci.yml has ask
+    // this script first: a job left out would be skipped on a release pull
+    // request without main ever having passed it.
+    const { parse } = createRequire(join(root, ".github", "package.json"))("yaml");
+    const ci = parse(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8"));
+    const asking = Object.entries(ci.jobs)
+      .filter(([, job]) =>
+        (job.steps ?? []).some((step) =>
+          String(step.run ?? "").startsWith("node scripts/release-pr-shortcut.mjs "),
+        ),
+      )
+      .map(([id]) => id)
+      .sort();
+    const script = readFileSync(join(root, "scripts/release-pr-shortcut.mjs"), "utf8");
+    const listed = JSON.parse(/^const TEST_JOBS = (\[[^\]]*\]);$/m.exec(script)[1]).sort();
+    assert.deepEqual(listed, asking);
+  });
 
   it("refuses a repository that is not an owner/name", () => {
     const result = spawnSync(
