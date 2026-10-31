@@ -40,6 +40,12 @@ native() {
   if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
 }
 
+# A directory as PATH holds it, which on Windows is Git Bash's own spelling: a
+# root this script reached as `E:/...` would otherwise split at its drive colon.
+on_path() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi
+}
+
 export RUSTFLAGS="-D warnings"
 CARGO_TARGET_DIR="$(native "$ROOT/target")"
 export CARGO_TARGET_DIR
@@ -82,7 +88,7 @@ case "${1:-}" in
     # documented `cargo install onepipeline`, less the registry fetch.
     cargo install --path . --locked --root "$(native "$root")"
     installed_into "$root"
-    PATH="$root/bin:$PATH" bash scripts/smoke-published.sh --label "cargo install on $platform"
+    PATH="$(on_path "$root/bin"):$PATH" bash scripts/smoke-published.sh --label "cargo install on $platform"
     # The `host-view-time` budget times the binary users run, and this is the
     # build of it from this revision, so it is measured against that very binary
     # and adds no build of its own. Linux only, where the fixture's live
@@ -133,7 +139,7 @@ case "${1:-}" in
       echo "ACTION: check that origin is the repository README.md's one-liner installs from and that it serves $installed, then re-run" >&2
       exit 1
     }
-    PATH="$root/bin:$PATH" bash "$smoke" --label "cargo install --git on $platform"
+    PATH="$(on_path "$root/bin"):$PATH" bash "$smoke" --label "cargo install --git on $platform"
     ;;
   wheel)
     [ "$(uname -s)" = Linux ] || {
@@ -149,7 +155,7 @@ case "${1:-}" in
     just wheel-linux x86_64-unknown-linux-gnu "${root#"$ROOT"/}/dist"
     python3 -m venv "$root/venv"
     "$root/venv/bin/python" -m pip install --quiet --no-index --find-links "$root/dist" onepipeline-cli
-    PATH="$root/venv/bin:$PATH" bash scripts/smoke-published.sh --label "the wheel built from this revision"
+    PATH="$(on_path "$root/venv/bin"):$PATH" bash scripts/smoke-published.sh --label "the wheel built from this revision"
     ;;
   *)
     echo "install-proof: name the proof: path, documented or wheel" >&2
