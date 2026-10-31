@@ -169,6 +169,62 @@ describe("the visual docs", () => {
     }
   });
 
+  it("are judged with the inputs visual-docs.yml's reusable workflow gives its one lane", () => {
+    // The lane branch protection names, `(<arch>, <current>, <verify>, <title>)`,
+    // and the inputs visual-docs.yml sets over the reusable workflow's defaults
+    // (the snapshot in fixtures/, pinned with it): what the composite steps
+    // pass must be what that workflow would, so the two paths judge alike.
+    const lane = REQUIRED.find((context) => context.startsWith("visual-docs / report ("));
+    const [arch, current, verify, title] = /\((.+)\)$/.exec(lane)[1].split(", ");
+    const reusable = parse(
+      readFileSync(join(github, "fixtures", "visual-docs-reusable.yml"), "utf8"),
+    );
+    const defaults = (reusable.on ?? reusable[true]).workflow_call.inputs;
+    const caller = workflows["visual-docs.yml"].jobs["visual-docs"].with;
+    const effective = (input) => String(caller[input] ?? defaults[input].default);
+    const lint = steps(ci.jobs.lint);
+    const classify = lint.find((step) =>
+      uses(step).startsWith("nickderobertis/screencomp/visual-docs@"),
+    ).with;
+    assert.deepEqual(
+      {
+        arch: classify.arch,
+        current: classify.current,
+        verify: classify["verify-second"],
+        title: classify["gallery-title"],
+        pages: classify.pages,
+        drift: classify["fail-on-drift"],
+        manifest: classify["update-manifest"],
+      },
+      {
+        arch,
+        current,
+        verify,
+        title,
+        pages: effective("pages"),
+        drift: effective("fail-on-drift"),
+        manifest: effective("update-manifest"),
+      },
+    );
+    const aggregate = lint.find((step) =>
+      uses(step).startsWith("nickderobertis/screencomp/visual-docs-aggregate@"),
+    ).with;
+    assert.deepEqual(JSON.parse(aggregate.matrix), [
+      {
+        arch,
+        project: classify.project,
+        current,
+        verify,
+        manifest: classify.manifest,
+        gallery_title: title,
+      },
+    ]);
+    const capture = lint.find((step) => runs(step).includes("screenshots/ci-capture.sh"));
+    for (const out of [`${current}/${arch}`, `${verify}/${arch}`]) {
+      assert.ok(runs(capture).includes(`SHOTS_OUT=${out} `), `the capture does not write ${out}`);
+    }
+  });
+
   it("are judged by the screencomp release visual-docs.yml pins", () => {
     const pinned = workflows["visual-docs.yml"].jobs["visual-docs"].with["screencomp-version"];
     const installed = steps(ci.jobs.lint).find((step) =>

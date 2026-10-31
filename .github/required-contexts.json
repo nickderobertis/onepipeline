@@ -1,5 +1,6 @@
 {
-  "//": "The status-check contexts branch protection on main requires, by rendered name: the union of what GitHub held when ci.yml's four jobs were added and what the plan that added them named. GitHub holds the set and nothing offline can read it, so this is the tree's one copy of it, which tests/ci_workflows.rs and .github/ci-shape/ci-shape.test.mjs both read; `setup_github_governance.py --verify` is its drift gate against GitHub. A change here is a governance change, never an edit to match a renamed job.",
+  "//": "llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] the source of this list is GitHub's branch protection, which no offline check can read, and its drift gate is `setup_github_governance.py --verify`, which governance runs rather than this suite; tests/ci_workflows.rs carried the same list under the same suppression before it moved here. What this file adds is that the tree now holds one copy rather than two.",
+  "//about": "The status-check contexts branch protection on main requires, by rendered name: the union of what GitHub held when ci.yml's four jobs were added and what the plan that added them named. GitHub holds the set and nothing offline can read it, so this is the tree's one copy of it, which tests/ci_workflows.rs and .github/ci-shape/ci-shape.test.mjs both read; `setup_github_governance.py --verify` is its drift gate against GitHub. A change here is a governance change, never an edit to match a renamed job.",
   "contexts": [
     "gate",
     "pr-title",

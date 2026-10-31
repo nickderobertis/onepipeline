@@ -25,7 +25,6 @@ import { execFileSync } from "node:child_process";
 
 const TEST_JOBS = ["test-linux", "test-windows", "test-macos"];
 const CI_WORKFLOW = ".github/workflows/ci.yml";
-// The files release-plz edits, and the only edit each may carry.
 const VERSIONED = new Set(["Cargo.toml", "Cargo.lock"]);
 const CHANGELOG = "CHANGELOG.md";
 
@@ -37,11 +36,16 @@ function refuse(message) {
   process.exit(2);
 }
 
+// llmlint: ignore-block[tool_output_is_signal] the answer is two streams, one
+// line each: stdout is the machine answer `$GITHUB_OUTPUT` takes as it is, and
+// stderr the one line a reader of the job's log needs to know why its tests ran
+// or were skipped, which no other output of the job says.
 function answer(skip, why) {
   process.stderr.write(`release-pr-shortcut: ${why}\n`);
   process.stdout.write(`skip=${skip}\n`);
   process.exit(0);
 }
+// llmlint: ignore-end[tool_output_is_signal]
 
 const options = { baseRef: "main", head: "HEAD", repo: process.env.GITHUB_REPOSITORY ?? "" };
 const argv = process.argv.slice(2);
@@ -148,10 +152,33 @@ function tableOf(path, lineNumber) {
   return { header, body: lines.slice(start + 1, end) };
 }
 
-// The packages this workspace builds, by name: a lock entry release-plz bumps
-// is one of these, never a registry or git dependency.
-function ownPackage({ header, body }) {
-  return header === "package" && !body.some((line) => /^source = /.test(line));
+// The packages this tree's own manifests declare, by name: a lock entry
+// release-plz bumps is one of these, never a registry, git or outside-path
+// dependency.
+const workspacePackages = new Set(
+  git("ls-tree", "-r", "--name-only", base)
+    .split("\n")
+    .filter((path) => /(^|\/)Cargo\.toml$/.test(path))
+    .map((path) => {
+      const lines = baseLines(path);
+      const start = lines.findIndex((line) => line.trim() === "[package]");
+      if (start < 0) return null;
+      for (const line of lines.slice(start + 1)) {
+        if (/^\s*\[/.test(line)) break;
+        const name = /^name = "([^"]+)"$/.exec(line.trim());
+        if (name) return name[1];
+      }
+      return null;
+    })
+    .filter(Boolean),
+);
+function isWorkspacePackage({ header, body }) {
+  const name = body.map((line) => /^name = "([^"]+)"$/.exec(line)?.[1]).find(Boolean);
+  return (
+    header === "package" &&
+    !body.some((line) => /^source = /.test(line)) &&
+    workspacePackages.has(name)
+  );
 }
 
 for (const path of VERSIONED) {
@@ -166,7 +193,7 @@ for (const path of VERSIONED) {
       const table = tableOf(path, line.at);
       const allowed =
         path === "Cargo.lock"
-          ? ownPackage(table)
+          ? isWorkspacePackage(table)
           : table.header === "package" || table.header === "workspace.package";
       if (!allowed) {
         answer(

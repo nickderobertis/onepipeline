@@ -28,7 +28,6 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # One build-only job per OS whose pull-request test job compiles Rust.
   linux:
     runs-on: ubuntu-latest
     timeout-minutes: 60

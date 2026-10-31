@@ -33,7 +33,7 @@ key="$(printf '%s' "$4" | tr -c 'A-Za-z0-9' '_')"
 cat "$FAKE_GH_DIR/$key.json"
 `;
 
-function scratch(t) {
+function scratch(t, files = {}) {
   const dir = mkdtempSync(join(tmpdir(), "release-pr-shortcut-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const origin = join(dir, "origin.git");
@@ -50,6 +50,7 @@ function scratch(t) {
     "Cargo.lock": LOCK("0.1.0"),
     "CHANGELOG.md": CHANGELOG,
     "src/lib.rs": "pub fn answer() -> u8 { 42 }\n",
+    ...files,
   });
   git(work, "add", "--all");
   git(work, "commit", "--quiet", "--message", "feat: the crate");
@@ -99,7 +100,7 @@ const noRuns = (base) => ({
   },
 });
 
-function shortcut({ work, fake }, args = ["--repo", REPO, "--base-ref", "main"]) {
+function shortcut({ work, fake }, args = ["--repo", REPO, "--base-ref", "main"], env = {}) {
   const result = spawnSync("node", [join(root, "scripts/release-pr-shortcut.mjs"), ...args], {
     cwd: work,
     encoding: "utf8",
@@ -108,6 +109,7 @@ function shortcut({ work, fake }, args = ["--repo", REPO, "--base-ref", "main"])
       CI: "",
       PATH: `${join(fake, "bin")}:${process.env.PATH}`,
       FAKE_GH_DIR: fake,
+      ...env,
     },
   });
   assert.equal(result.error, undefined);
@@ -233,6 +235,32 @@ describe("the release pull request's shortcut", () => {
     assert.equal(result.status, 0);
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /GitHub did not answer/);
+  });
+
+  it("skips them for a release that versions the workspace's shared package version", (t) => {
+    const workspace = (version) =>
+      `[workspace]\nmembers = ["."]\n\n[workspace.package]\nversion = "${version}"\n\n[package]\nname = "crate"\nversion.workspace = true\nedition = "2021"\n`;
+    const repo = scratch(t, { "Cargo.toml": workspace("0.1.0") });
+    commitAll(repo.work, { ...RELEASE, "Cargo.toml": workspace("0.2.0") }, "chore: release v0.2.0");
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=true\n", result.stderr);
+  });
+
+  it("refreshes the base branch from origin in CI, and answers from what it has when it cannot", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    answers(repo.fake, pushRunPassed(repo.base));
+    git(repo.work, "update-ref", "-d", "refs/remotes/origin/main");
+    const args = ["--repo", REPO, "--base-ref", "main"];
+    const local = shortcut(repo, args);
+    assert.equal(local.stdout, "skip=false\n", local.stderr);
+    assert.match(local.stderr, /no merge base with origin\/main/);
+    const fetched = shortcut(repo, args, { CI: "true" });
+    assert.equal(fetched.stdout, "skip=true\n", fetched.stderr);
+    git(repo.work, "remote", "set-url", "origin", join(repo.work, "..", "no-such-origin.git"));
+    const unreachable = shortcut(repo, args, { CI: "true" });
+    assert.equal(unreachable.stdout, "skip=true\n", unreachable.stderr);
   });
 
   // Each a release pull request carrying one edit release-plz never makes, with

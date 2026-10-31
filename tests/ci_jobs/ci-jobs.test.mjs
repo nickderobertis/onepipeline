@@ -25,7 +25,6 @@ const CHANGED_FILE = "pool-maintenance/measure.sh";
 // A file of a project no job tests: the judged lint's project holds
 // `lint-llm-diff` alone, which none of the four jobs' recipes selects.
 const UNTESTED_FILE = "lint-llm/NOTES.md";
-// Projects the change to pool-maintenance does not reach.
 const UNREACHED = ["onepipeline", "onepipeline-e2e", "onepipeline-npm", "github-workflows"];
 
 const JOBS = {
