@@ -77,7 +77,7 @@
           "target": "test"
         }
       ],
-      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]"
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
     },
     "test-quick-archive": {
       "command": "just _crate-test-quick-archive"
@@ -123,7 +123,7 @@
           "target": "test"
         }
       ],
-      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]",
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]",
       "inputs": [
         "e2eSource",
         "{workspaceRoot}/budgets.yaml",
