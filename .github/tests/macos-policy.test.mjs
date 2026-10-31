@@ -225,13 +225,9 @@ test("the workload models every trigger the workflows declare and every event th
       .sort(),
   );
 });
-const required = [
-  ...readFileSync("tests/ci_workflows.rs", "utf8")
-    .match(/const REQUIRED: &\[&str\] = &\[([\s\S]*?)\];/)[1]
-    .matchAll(/"([^"]+)"/g),
-].map((found) => found[1]);
-test("the required contexts are the list tests/ci_workflows.rs holds", () => {
-  assert.ok(required.length > 0, "tests/ci_workflows.rs declares no REQUIRED contexts");
+const required = JSON.parse(readFileSync(".github/required-contexts.json", "utf8")).contexts;
+test("the required contexts are the list .github/required-contexts.json holds", () => {
+  assert.ok(required.length > 0, ".github/required-contexts.json lists no required contexts");
   assert.ok(required.includes("install (ubuntu-latest)"));
   assert.ok(required.includes("install (windows-latest)"));
   assert.equal(new Set(required).size, required.length);
@@ -244,6 +240,12 @@ function scenario(id, eventName, action, kind, fork, opt, branch = "release-plz-
     payload.workflow_run = { name: "Release", head_sha: heads[kind], conclusion: "success" };
   if (eventName === "release")
     payload.release = { tag_name: "v1.2.4", target_commitish: heads[kind] };
+  // A push names the commit it brought; merging release-plz's pull request brings
+  // a commit titled as that pull request is.
+  if (eventName === "push")
+    payload.head_commit = {
+      message: id === "release-pr-merge" ? "chore: release v1.2.4" : "feat: a source change",
+    };
   return {
     id,
     eventName,
@@ -306,9 +308,13 @@ test("actual workflow graph routes all events, preserves contexts and records li
                   .map((j) => ({ workflow: r.workflow, ...j })),
               );
               if (eventName === "pull_request") {
+                // `test-macos`, one of ci.yml's four jobs, runs on every pull
+                // request beside the `macos` lane today's required contexts are
+                // carried from, until branch protection moves to the four and
+                // the lane is retired.
                 assert.deepEqual(
                   mac.map((j) => j.job),
-                  s.classification.macosRequired ? ["macos"] : [],
+                  s.classification.macosRequired ? ["test-macos", "macos"] : ["test-macos"],
                 );
                 for (const name of required)
                   assert.equal(
@@ -323,7 +329,14 @@ test("actual workflow graph routes all events, preserves contexts and records li
                 );
                 // Intel macOS is discontinued: the one Mac job builds Apple silicon only.
                 assert.deepEqual(mac[0].targets, ["aarch64-apple-darwin"]);
-              } else if (id === "manual-opt-in")
+              } else if (id === "base-push")
+                // rust-cache-warm.yml builds what `test-macos` compiles on every
+                // push to main but the one that merges a release pull request.
+                assert.deepEqual(
+                  mac.map((j) => `${j.workflow}:${j.job}`),
+                  ["rust-cache-warm.yml:macos"],
+                );
+              else if (id === "manual-opt-in")
                 assert.deepEqual(
                   mac.map((j) => j.job),
                   ["macos-diagnostic"],
@@ -625,7 +638,7 @@ test("unknown PR metadata and ordinary version edits route through the actual Ma
     const jobs = runGraph(all["ci.yml"], s);
     assert.deepEqual(
       jobs.filter((j) => j.selected && j.macos).map((j) => j.job),
-      ["macos"],
+      ["test-macos", "macos"],
     );
   }
 });
