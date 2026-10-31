@@ -31,6 +31,7 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
+import { GATE_DEBUG_BUILD } from "./install-support.mjs";
 import { Registry } from "./registry-support.mjs";
 import { spawnable } from "./spawn-support.mjs";
 
@@ -159,8 +160,11 @@ describe("the npm publish order", () => {
       // The real binary the host's package carries. Debug rather than release,
       // for the reason `launcher.test.mjs` builds debug: this proves the
       // packaging and the publish order, and a release build would cost the gate
-      // minutes.
-      await run("cargo", ["build", "--locked", "--quiet"]);
+      // minutes. Built as `GATE_DEBUG_BUILD` says, so it is the tree the gate's
+      // other debug builds already made rather than a second one.
+      await run("cargo", GATE_DEBUG_BUILD.args, {
+        env: { ...process.env, ...GATE_DEBUG_BUILD.env },
+      });
       work = mkdtempSync(join(tmpdir(), "onepipeline-publish-"));
       hostBinary = await payload(
         join("target", "debug", process.platform === "win32" ? "onepipeline.exe" : "onepipeline"),

@@ -2,10 +2,11 @@
 // stage without contending with the rest of the gate, and the pack-then-install a
 // user's `npm install` amounts to.
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { spawnable } from "./spawn-support.mjs";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -32,15 +33,36 @@ export function hostTarget() {
 // keeps them out of that lock and still reuses its build on the next run.
 export const STAGED_TARGET_DIR = join(REPO_ROOT, "target", "npm-staged");
 
+// The debug build `publish-gate.test.mjs` packs, under the flags of every other
+// debug build the gate makes (`just _crate-build`, the stop-verdict tier). Cargo
+// keys a build on its flags, so an unflagged one compiled the crate and every
+// dependency into a second tree; `workspace-nx.test.mjs` holds this one to the
+// tree `_crate-build` leaves.
+export const GATE_DEBUG_BUILD = {
+  args: ["build", "--locked", "--quiet"],
+  env: { RUSTFLAGS: "-D warnings" },
+};
+
+function spawnOptions(options) {
+  return {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    ...options,
+    env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
+  };
+}
+
 export function run(command, args, options = {}) {
-  return execFileSync(
-    ...spawnable(command, args, {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      ...options,
-      env: { ...process.env, CARGO_TARGET_DIR: STAGED_TARGET_DIR, ...options.env },
-    }),
-  );
+  return execFileSync(...spawnable(command, args, spawnOptions(options)));
+}
+
+const execFileAsync = promisify(execFile);
+
+/// `run` without blocking the event loop, for the cases a suite runs at once.
+/// Resolves to stdout; a failed command rejects with its `code` and `stderr`.
+export async function runAsync(command, args, options = {}) {
+  const { stdout } = await execFileAsync(...spawnable(command, args, spawnOptions(options)));
+  return stdout;
 }
 
 /// Pack a package directory into the tarball the registry would serve.

@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { assertSbomShape } from "./sbom-support.mjs";
-import { REPO_ROOT, hostTarget, installInto, pack, run } from "./install-support.mjs";
+import { REPO_ROOT, hostTarget, installInto, pack, run, runAsync } from "./install-support.mjs";
 
 /// Invoke the installed launcher, returning its exit code, stdout, and stderr.
 function launch(project, args) {
@@ -137,105 +137,118 @@ describe("the npm distribution", () => {
     );
   });
 
-  for (const [mutation, reason] of [
-    ...Array.from({ length: 6 }, (_, i) => [`version-invalid-${i}`, "invalid staged version"]),
-    ["wheel-primary", "omitted the primary executable"],
-    ["npm-missing", "omitted required members"],
-    ["hash-syntax", "invalid payload hash"],
-    ["inventory-empty", "invalid executable inventory"],
-    ["inventory-type", "invalid executable inventory"],
-    ["inventory-unsafe", "invalid executable inventory"],
-    ["wheel-encrypted-flagged", "encrypted"],
-    ["archive-truncated", "Compressed file ended"],
-    ["wheel-duplicate", "unsafe wheel member: duplicate.data"],
-    ["wheel-path", "invalid wheel executable inventory"],
-    ["sbom-object", "invalid SBOM"],
-    ["npm-object", "invalid npm manifest object"],
-    ["npm-directory", "unexpected npm archive member"],
-    ["npm-name", "npm target identity mismatch"],
-    ["npm-os", "npm target identity mismatch"],
-    ["npm-cpu", "npm target identity mismatch"],
-    ["npm-unsafe", "unsafe or duplicate"],
-    ["npm-duplicate", "unsafe or duplicate"],
-    ["npm-link", "unexpected npm archive member"],
-    ["npm-unexpected", "unexpected npm archive member"],
-    ["npm-executable", "unexpected executable npm archive member"],
-    ["npm-mode", "npm executable lacks execute permission"],
-    ["archive-mode", "archive executable lacks execute permission"],
-    ["wheel-extra-tag", "wheel architecture tag mismatch"],
-    ["archive-doc-directory", "not a regular file"],
-    ["archive-doc-symlink", "not a regular file"],
-    ["archive-doc-hardlink", "not a regular file"],
-    ["archive-directory", "not a regular file"],
-    ["schema", "unsupported staged record schema"],
-    ["unknown", "missing or unknown fields"],
-    ["missing", "missing or unknown fields"],
-    ["field-type", "invalid staged record field"],
-    ["target", "unsupported target"],
-    ["tag", "tag/version mismatch"],
-    ["inventory", "inventory differs"],
-    ["wheel-version", "wheel name/version mismatch"],
-    ["wheel-arch", "wheel architecture tag mismatch"],
-    ["sbom", "invalid SBOM"],
-    ["no-sbom", "missing SBOM"],
-    ["no-metadata", "wheel is missing its .dist-info/METADATA"],
-    ["no-wheel-tags", "wheel is missing its .dist-info/WHEEL"],
-    ["wheel-traversal", "unsafe wheel member: ../escape"],
-    ["wheel-symlink", "wheel member is not a regular file"],
-    ["wheel-dist-info", "exactly one .dist-info directory"],
-    ["wheel-data-scheme", "unsafe wheel member"],
-    ["wheel-filename", "wheel filename tags differ from its WHEEL tags"],
-    ["wheel-filename-version", "wheel filename name/version mismatch"],
-    ["wheel-repeat", "wheel repeats a member"],
-    ["macho", "Mach-O architecture mismatch"],
-    ["archive-layout", "archive layout mismatch"],
-    ["archive-payload", "archive executable differs"],
-    ["npm-payload", "npm executable differs"],
-    ["npm-version", "npm version mismatch"],
-    ["archive-name", "archive name mismatch"],
-    ["checksum", "archive checksum mismatch"],
-    ...[
-      ["npm-no-sbom", "omitted sboms/onepipeline.cyclonedx.json"],
-      [
-        "npm-sbom-object",
-        "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
-      ],
-      ["npm-sbom", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
-      ["npm-sbom-json", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
-      ["npm-sbom-link", "carries sboms/onepipeline.cyclonedx.json as something other than a file"],
-    ].map(([mutation, reason]) => [
-      mutation,
-      `npm package onepipeline-cli-${process.platform}-${process.arch} ${reason}`,
-    ]),
-    ["npm-sbom-differs", "npm SBOM differs from the wheel's"],
-    [
-      "wheel-sbom-extra",
-      "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json",
-    ],
-    ["wheel-sbom-name", "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json"],
-    ["npm-sbom-extra", "unexpected npm archive member"],
-  ])
-    it(`rejects real staged artifact corruption: ${mutation}`, () => {
-      const python = process.platform === "win32" ? "python" : "python3";
-      const bad = run(python, [
-        "npm/test/staged-mutation.py",
-        join(dist, `${hostTarget()}.json`),
+  // Each case mutates its own copy of the staged bundles and verifies it, so the
+  // cases share nothing but the build `before` made; each is a single-threaded
+  // inflate and hash, so four, the cores of CI's Linux runner, run at once.
+  describe("the staged verifier", { concurrency: 4 }, () => {
+    for (const [mutation, reason] of [
+      ...Array.from({ length: 6 }, (_, i) => [`version-invalid-${i}`, "invalid staged version"]),
+      ["wheel-primary", "omitted the primary executable"],
+      ["npm-missing", "omitted required members"],
+      ["hash-syntax", "invalid payload hash"],
+      ["inventory-empty", "invalid executable inventory"],
+      ["inventory-type", "invalid executable inventory"],
+      ["inventory-unsafe", "invalid executable inventory"],
+      ["wheel-encrypted-flagged", "encrypted"],
+      ["archive-truncated", "Compressed file ended"],
+      ["wheel-duplicate", "unsafe wheel member: duplicate.data"],
+      ["wheel-path", "invalid wheel executable inventory"],
+      ["sbom-object", "invalid SBOM"],
+      ["npm-object", "invalid npm manifest object"],
+      ["npm-directory", "unexpected npm archive member"],
+      ["npm-name", "npm target identity mismatch"],
+      ["npm-os", "npm target identity mismatch"],
+      ["npm-cpu", "npm target identity mismatch"],
+      ["npm-unsafe", "unsafe or duplicate"],
+      ["npm-duplicate", "unsafe or duplicate"],
+      ["npm-link", "unexpected npm archive member"],
+      ["npm-unexpected", "unexpected npm archive member"],
+      ["npm-executable", "unexpected executable npm archive member"],
+      ["npm-mode", "npm executable lacks execute permission"],
+      ["archive-mode", "archive executable lacks execute permission"],
+      ["wheel-extra-tag", "wheel architecture tag mismatch"],
+      ["archive-doc-directory", "not a regular file"],
+      ["archive-doc-symlink", "not a regular file"],
+      ["archive-doc-hardlink", "not a regular file"],
+      ["archive-directory", "not a regular file"],
+      ["schema", "unsupported staged record schema"],
+      ["unknown", "missing or unknown fields"],
+      ["missing", "missing or unknown fields"],
+      ["field-type", "invalid staged record field"],
+      ["target", "unsupported target"],
+      ["tag", "tag/version mismatch"],
+      ["inventory", "inventory differs"],
+      ["wheel-version", "wheel name/version mismatch"],
+      ["wheel-arch", "wheel architecture tag mismatch"],
+      ["sbom", "invalid SBOM"],
+      ["no-sbom", "missing SBOM"],
+      ["no-metadata", "wheel is missing its .dist-info/METADATA"],
+      ["no-wheel-tags", "wheel is missing its .dist-info/WHEEL"],
+      ["wheel-traversal", "unsafe wheel member: ../escape"],
+      ["wheel-symlink", "wheel member is not a regular file"],
+      ["wheel-dist-info", "exactly one .dist-info directory"],
+      ["wheel-data-scheme", "unsafe wheel member"],
+      ["wheel-filename", "wheel filename tags differ from its WHEEL tags"],
+      ["wheel-filename-version", "wheel filename name/version mismatch"],
+      ["wheel-repeat", "wheel repeats a member"],
+      ["macho", "Mach-O architecture mismatch"],
+      ["archive-layout", "archive layout mismatch"],
+      ["archive-payload", "archive executable differs"],
+      ["npm-payload", "npm executable differs"],
+      ["npm-version", "npm version mismatch"],
+      ["archive-name", "archive name mismatch"],
+      ["checksum", "archive checksum mismatch"],
+      ...[
+        ["npm-no-sbom", "omitted sboms/onepipeline.cyclonedx.json"],
+        [
+          "npm-sbom-object",
+          "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+        ],
+        ["npm-sbom", "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object"],
+        [
+          "npm-sbom-json",
+          "carries sboms/onepipeline.cyclonedx.json that is not a CycloneDX object",
+        ],
+        [
+          "npm-sbom-link",
+          "carries sboms/onepipeline.cyclonedx.json as something other than a file",
+        ],
+      ].map(([mutation, reason]) => [
         mutation,
-        join(work, `mutation-${mutation}`),
-      ]).trim();
-      assert.throws(
-        () =>
-          run(python, ["scripts/build-staged-release.py", "--verify", bad], {
-            stdio: ["ignore", "pipe", "pipe"],
-          }),
-        (error) => {
-          assert.equal(error.status, 1);
-          assert.ok(error.stderr.includes(reason), error.stderr);
-          assert.match(error.stderr, /next:.*regenerate/);
-          return true;
-        },
-      );
-    });
+        `npm package onepipeline-cli-${process.platform}-${process.arch} ${reason}`,
+      ]),
+      ["npm-sbom-differs", "npm SBOM differs from the wheel's"],
+      [
+        "wheel-sbom-extra",
+        "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json",
+      ],
+      [
+        "wheel-sbom-name",
+        "wheel must carry exactly one .dist-info/sboms/onepipeline.cyclonedx.json",
+      ],
+      ["npm-sbom-extra", "unexpected npm archive member"],
+    ])
+      it(`rejects real staged artifact corruption: ${mutation}`, async () => {
+        const python = process.platform === "win32" ? "python" : "python3";
+        const bad = (
+          await runAsync(python, [
+            "npm/test/staged-mutation.py",
+            join(dist, `${hostTarget()}.json`),
+            mutation,
+            join(work, `mutation-${mutation}`),
+          ])
+        ).trim();
+        await assert.rejects(
+          runAsync(python, ["scripts/build-staged-release.py", "--verify", bad]),
+          (error) => {
+            assert.equal(error.code, 1);
+            assert.ok(error.stderr.includes(reason), error.stderr);
+            assert.match(error.stderr, /next:.*regenerate/);
+            return true;
+          },
+        );
+      });
+  });
 
   it("packs the binary's SBOM, the wheel's own, as the one file under sboms/", () => {
     const record = JSON.parse(readFileSync(join(dist, `${hostTarget()}.json`), "utf8"));

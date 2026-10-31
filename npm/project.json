@@ -30,6 +30,13 @@
     },
     "test": {
       "command": "node --test npm/test/*.test.mjs",
+      "//": "The crate's debug build (`just _crate-build`) runs first, as its own task: the publish journey packs that build and workspace-nx drives the same recipe, and a suite that compiled it itself held the tree's lock past the publish journey's 900-second setup.",
+      "dependsOn": [
+        {
+          "projects": ["onepipeline"],
+          "target": "build"
+        }
+      ],
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",

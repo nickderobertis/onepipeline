@@ -13,6 +13,12 @@ record = json.loads(Path(record_path).read_text())
 out = Path(destination)
 out.mkdir(parents=True, exist_ok=True)
 
+# Every rewritten bundle recompresses the real engine binary, and at the default
+# levels (gzip 9, deflate 6) that alone took 10-22 s a case. The verifier
+# inflates what it reads and never sees the level, so the fastest one proves the
+# same rejection.
+FAST = 1
+
 if case.startswith('version-invalid-'):
     versions = ['01.2.3', '1.2.3-.', '1.2.3+.', '1.2.3-a..b', '1.2.3-01', '1.2.3\n']
     record['version'] = versions[int(case.removeprefix('version-invalid-'))]
@@ -23,14 +29,14 @@ elif case == 'installed-wheel-version':
         for entry in original.infolist():
             payload = original.read(entry)
             if entry.filename.endswith('/METADATA'): payload = payload.replace(f'Version: {previous}'.encode(), b'Version: 0.0.0')
-            entry.filename = entry.filename.replace(previous, '0.0.0'); changed.writestr(entry, payload)
+            entry.filename = entry.filename.replace(previous, '0.0.0'); changed.writestr(entry, payload, compresslevel=FAST)
     record['wheel'] = str(wheel)
     archive = out / f"onepipeline-v0.0.0-{record['target']}.tar.gz"
     shutil.copyfile(record['archive'], archive); record['archive'] = str(archive)
     import hashlib
     (out / f"onepipeline-v0.0.0-{record['target']}.sha256").write_text(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n')
     tgz = out / Path(record['npm']).name
-    with tarfile.open(record['npm']) as original, tarfile.open(tgz, 'w:gz') as changed:
+    with tarfile.open(record['npm']) as original, tarfile.open(tgz, 'w:gz', compresslevel=FAST) as changed:
         for entry in original.getmembers():
             payload = original.extractfile(entry).read() if entry.isfile() else None
             if entry.name == 'package/package.json':
@@ -82,7 +88,7 @@ elif case in ['wheel-version', 'wheel-arch', 'sbom', 'sbom-object', 'no-sbom', '
                 entry.filename = entry.filename.replace('/onepipeline', '/other-helper')
             if case == 'wheel-path' and '.data/scripts/' in entry.filename:
                 entry.filename = entry.filename.replace('/scripts/', '/scripts/nested/')
-            changed.writestr(entry, payload)
+            changed.writestr(entry, payload, compresslevel=FAST)
             if case == 'wheel-traversal' and entry.filename.endswith('.dist-info/WHEEL'):
                 changed.writestr('../escape', b'outside the install prefix')
             if case == 'wheel-symlink' and entry.filename.endswith('.dist-info/WHEEL'):
@@ -110,7 +116,7 @@ elif case in ['archive-layout', 'archive-payload', 'npm-payload', 'npm-version',
     key = 'npm' if case.startswith('npm-') else 'archive'
     source = record[key]
     target = out / Path(source).name
-    with tarfile.open(source) as original, tarfile.open(target, 'w:gz') as changed:
+    with tarfile.open(source) as original, tarfile.open(target, 'w:gz', compresslevel=FAST) as changed:
         for entry in original.getmembers():
             if case == 'npm-missing' and entry.name == 'package/README.md': continue
             if case == 'npm-no-sbom' and entry.name.startswith('package/sboms'): continue

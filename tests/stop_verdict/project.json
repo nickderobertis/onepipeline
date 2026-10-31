@@ -48,6 +48,21 @@
         "{workspaceRoot}/rustfmt.toml"
       ]
     },
+    "test-build": {
+      "command": "just _stop-verdict-build",
+      "//": "The release binary `test` times, built ahead of it and beside the rest of the gate: `test` admits nothing beside it because it times that binary, and compiling it needs no such quiet. Keyed on exactly `test`'s inputs, so the two replay or run together: a warm cache builds nothing, and a `test` that runs finds the binary fresh. The debug test binaries `test` runs come from `onepipeline:build`, the other edge `test` declares.",
+      "cache": true,
+      "inputs": [
+        "rustBuild",
+        "{workspaceRoot}/tests/stop_verdict/**/*",
+        "{workspaceRoot}/tests/golden/**/*",
+        "{workspaceRoot}/tests/recorded/registry/**/*",
+        "{workspaceRoot}/tests/recorded/run-root/onemessagebus-repair-2/**/*",
+        "{workspaceRoot}/scripts/stop-guard-unpublished-*",
+        "{workspaceRoot}/clippy.toml",
+        "{workspaceRoot}/rustfmt.toml"
+      ]
+    },
     "test": {
       "command": "just stop-verdict-journeys",
       "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this tier times the release binary, so its inputs are what that binary is built from and nothing narrower: the budget reader refuses a record whose build fingerprint (scripts/stop-guard-unpublished-build-inputs.json, the same set) differs from the tree, so an input left out here would replay a record the reader then refuses as stale, and a module left out of both would let a changed binary be judged by an old one's timings.",
@@ -66,6 +81,15 @@
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished.json",
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished-invocation.json",
         "{workspaceRoot}/target/budget-records/stop-guard-unpublished-onepipeline"
+      ],
+      "dependsOn": [
+        "test-build",
+        {
+          "projects": [
+            "onepipeline"
+          ],
+          "target": "build"
+        }
       ],
       "parallelism": false
     },
