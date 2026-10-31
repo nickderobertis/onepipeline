@@ -28,7 +28,8 @@ dir="$2"
 
 case "$mode" in
   start)
-    [ -n "${SHOTS_LANES:-}" ] || refuse "SHOTS_LANES names no lane to capture"
+    read -r -a lanes <<<"${SHOTS_LANES:-}"
+    [ "${#lanes[@]}" -gt 0 ] || refuse "SHOTS_LANES names no lane to capture"
     rm -f -- "$dir/capture.exit"
     # One status for the whole set: the first lane that fails stops the rest,
     # because a reproducibility lane after a failed capture compares nothing.
@@ -46,6 +47,11 @@ case "$mode" in
     until [ -f "$dir/capture.exit" ]; do sleep 5; done
     cat "$dir/capture.log"
     status="$(cat "$dir/capture.exit")"
+    [[ $status =~ ^[0-9]{1,3}$ ]] && [ "$status" -le 255 ] || {
+      echo "ci-capture-lanes: $dir/capture.exit holds '$status', not an exit status" >&2
+      echo "ACTION: start the capture again; nothing but this script's start writes that file" >&2
+      exit 1
+    }
     if [ "$status" != 0 ]; then
       echo "ci-capture-lanes: the capture failed (exit $status); its output is above" >&2
       echo "ACTION: fix what it reports, then re-run 'SHOTS_OUT=<lane> bash screenshots/ci-capture.sh' for the lane that failed" >&2

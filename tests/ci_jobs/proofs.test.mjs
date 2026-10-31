@@ -69,6 +69,37 @@ describe("the visual-docs capture's refusals", () => {
     });
   }
 
+  it("captures every lane in order in the background and waits for them to succeed", (t) => {
+    // The lanes' orchestration is what is under test; each lane's capture is a
+    // stand-in that records it, because a real one builds release binaries in
+    // a container, which `lint` runs on every pull request.
+    const dir = scratchWorkspace(t);
+    commit(
+      dir,
+      "screenshots/ci-capture.sh",
+      'printf "%s\\n" "$SHOTS_OUT" >> "$CAPTURED"\necho "captured $SHOTS_OUT"\n',
+    );
+    const out = join(dir, "target");
+    run(dir, "mkdir", ["-p", out]);
+    const captured = join(out, "captured");
+    const lanes = { SHOTS_LANES: "shots/current/x86_64 shots/verify/x86_64", CAPTURED: captured };
+    const started = run(dir, "bash", ["screenshots/ci-capture-lanes.sh", "start", out], lanes);
+    assert.equal(started.status, 0, started.log);
+    const waited = run(dir, "bash", ["screenshots/ci-capture-lanes.sh", "wait", out]);
+    assert.equal(waited.status, 0, waited.log);
+    assert.match(waited.log, /captured shots\/current\/x86_64\ncaptured shots\/verify\/x86_64/);
+    assert.equal(readFileSync(captured, "utf8"), "shots/current/x86_64\nshots/verify/x86_64\n");
+  });
+
+  it("refuses a status file that holds no exit status", (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "ci-capture-lanes-"));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    run(dir, "bash", ["-c", 'echo said > capture.log && echo "-1x" > capture.exit']);
+    const { status, log } = run(root, "bash", ["screenshots/ci-capture-lanes.sh", "wait", dir]);
+    assert.equal(status, 1, log);
+    assert.match(log, /holds '-1x', not an exit status/);
+  });
+
   it("fails the wait for a capture it started in the background when a lane fails", (t) => {
     const dir = mkdtempSync(join(tmpdir(), "ci-capture-lanes-"));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -87,6 +118,12 @@ describe("the visual-docs capture's refusals", () => {
   for (const [what, args, env, refusal] of [
     ["a wait for a capture never started", ["wait"], {}, /no capture was started/],
     ["a start that names no lane", ["start"], { SHOTS_LANES: "" }, /SHOTS_LANES names no lane/],
+    [
+      "a start whose lanes are only spaces",
+      ["start"],
+      { SHOTS_LANES: "   " },
+      /SHOTS_LANES names no lane/,
+    ],
     ["a mode it does not have", ["resume"], {}, /is not a mode/],
   ]) {
     it(`refuses ${what}`, (t) => {
