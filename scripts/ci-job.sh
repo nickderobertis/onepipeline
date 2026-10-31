@@ -67,7 +67,6 @@ case "$job" in
 esac
 # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
 
-# The selection, as Nx's own task graph rather than a reading of its output.
 nx_run() {
   bash scripts/nx-affected.sh -t "$targets" "$@"
 }

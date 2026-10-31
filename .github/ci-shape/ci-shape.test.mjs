@@ -126,7 +126,7 @@ describe("ci.yml's four jobs", () => {
 });
 
 describe("the visual docs", () => {
-  it("are captured, judged and published as steps of `lint`", () => {
+  it("are captured, judged and given every publishing step as steps of `lint`", () => {
     const lint = steps(ci.jobs.lint);
     const captures = lint.filter((step) => runs(step).includes("screenshots/ci-capture.sh"));
     assert.equal(captures.length, 1, "`lint` does not start the capture exactly once");
