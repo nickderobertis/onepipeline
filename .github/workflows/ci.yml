@@ -639,7 +639,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
@@ -713,7 +712,6 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: ./.github/actions/setup-just
@@ -745,7 +743,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
@@ -816,7 +813,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@v2
@@ -873,7 +869,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # On a PR the change is not on the registry yet, so `--path .` is the only
@@ -936,7 +931,6 @@ jobs:
       # itself resolves everything it builds from the remote, which is the point.
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install (the command the README gives users)
@@ -1224,7 +1218,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4

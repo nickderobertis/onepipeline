@@ -41,7 +41,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
@@ -88,7 +87,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
-        # Restored on a pull request, saved only from main.
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4

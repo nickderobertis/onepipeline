@@ -182,24 +182,46 @@ function tableOf(path, lineNumber) {
   return { header, body: lines.slice(start + 1, end) };
 }
 
-// The packages this tree's own manifests declare, by name: a lock entry
-// release-plz bumps is one of these, never a registry, git or outside-path
-// dependency.
+// The packages of this workspace, by name: the root manifest's own package and
+// the members its `[workspace]` names (a `*` matching one path segment), less
+// what it excludes. A lock entry release-plz bumps is one of these, never a
+// registry, git, outside-path or excluded package.
+function packageName(path) {
+  const lines = baseLines(path);
+  const start = lines.findIndex((line) => line.trim() === "[package]");
+  if (start < 0) return null;
+  for (const line of lines.slice(start + 1)) {
+    if (/^\s*\[/.test(line)) break;
+    const name = /^name = "([^"]+)"$/.exec(line.trim());
+    if (name) return name[1];
+  }
+  return null;
+}
+function workspaceList(key) {
+  const text = baseLines("Cargo.toml").join("\n");
+  const table = /^\[workspace\]\s*$([\s\S]*?)(?=^\[|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+  const list = new RegExp(`^${key}\\s*=\\s*\\[([^\\]]*)\\]`, "m").exec(table)?.[1] ?? "";
+  return [...list.matchAll(/"([^"]+)"/g)].map((m) => m[1].replace(/\/$/, ""));
+}
+const asPattern = (glob) =>
+  new RegExp(
+    `^${glob
+      .split("*")
+      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+      .join("[^/]+")}$`,
+  );
+const members = workspaceList("members").map(asPattern);
+const excluded = workspaceList("exclude").map(asPattern);
 const workspacePackages = new Set(
   git("ls-tree", "-r", "--name-only", base)
     .split("\n")
     .filter((path) => /(^|\/)Cargo\.toml$/.test(path))
-    .map((path) => {
-      const lines = baseLines(path);
-      const start = lines.findIndex((line) => line.trim() === "[package]");
-      if (start < 0) return null;
-      for (const line of lines.slice(start + 1)) {
-        if (/^\s*\[/.test(line)) break;
-        const name = /^name = "([^"]+)"$/.exec(line.trim());
-        if (name) return name[1];
-      }
-      return null;
+    .filter((path) => {
+      const dir = path === "Cargo.toml" ? "." : path.slice(0, -"/Cargo.toml".length);
+      if (dir === ".") return true;
+      return members.some((m) => m.test(dir)) && !excluded.some((m) => m.test(dir));
     })
+    .map(packageName)
     .filter(Boolean),
 );
 function isWorkspacePackage({ header, body }) {

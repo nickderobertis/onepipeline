@@ -448,6 +448,30 @@ describe("the release pull request's shortcut", () => {
     );
   });
 
+  it("runs them for a manifest the workspace excludes, and skips them for a member's", (t) => {
+    const manifest = (version) =>
+      `[workspace]\nmembers = [".", "crates/*"]\nexclude = ["crates/apart"]\n\n${MANIFEST(version)}`;
+    const crate = (name, version) => `[package]\nname = "${name}"\nversion = "${version}"\n`;
+    const lock = (inner, apart) =>
+      `${LOCK("0.1.0")}\n[[package]]\nname = "inner"\nversion = "${inner}"\n\n[[package]]\nname = "apart"\nversion = "${apart}"\n`;
+    const base = {
+      "Cargo.toml": manifest("0.1.0"),
+      "Cargo.lock": lock("0.1.0", "0.1.0"),
+      "crates/inner/Cargo.toml": crate("inner", "0.1.0"),
+      "crates/apart/Cargo.toml": crate("apart", "0.1.0"),
+    };
+    const member = scratch(t, base);
+    commitAll(member.work, { "Cargo.lock": lock("0.2.0", "0.1.0") }, "chore: release inner");
+    answers(member.fake, pushRunPassed(member.base));
+    assert.equal(shortcut(member).stdout, "skip=true\n");
+    const apart = scratch(t, base);
+    commitAll(apart.work, { "Cargo.lock": lock("0.1.0", "0.2.0") }, "chore: release apart");
+    answers(apart.fake, pushRunPassed(apart.base));
+    const result = shortcut(apart);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /not this workspace's own package/);
+  });
+
   it("passes no base on a CI run of another workflow, commit or conclusion", (t) => {
     const repo = scratch(t);
     commitAll(repo.work, RELEASE, "chore: release v0.2.0");

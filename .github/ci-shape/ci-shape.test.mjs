@@ -39,7 +39,6 @@ const FOUR = {
 // each test job at its measured hosted duration with headroom, as ruled.
 const TIMEOUT = { lint: 30, "test-linux": 180, "test-windows": 270, "test-macos": 210 };
 const ON_PULL_REQUESTS = "github.event_name == 'pull_request'";
-// test-macos alone also skips release-plz's own release pull request.
 const CONDITION = {
   lint: ON_PULL_REQUESTS,
   "test-linux": ON_PULL_REQUESTS,
