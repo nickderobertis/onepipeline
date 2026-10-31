@@ -45,14 +45,18 @@ case "$mode" in
   wait)
     [ -e "$dir/capture.log" ] || refuse "no capture was started into '$dir'"
     until [ -f "$dir/capture.exit" ]; do sleep 5; done
-    cat "$dir/capture.log"
     status="$(cat "$dir/capture.exit")"
     [[ $status =~ ^[0-9]{1,3}$ ]] && [ "$status" -le 255 ] || {
       echo "ci-capture-lanes: $dir/capture.exit holds '$status', not an exit status" >&2
       echo "ACTION: start the capture again; nothing but this script's start writes that file" >&2
       exit 1
     }
-    if [ "$status" != 0 ]; then
+    # The log holds both of the capture's streams: replayed as its result on
+    # success, and as the failure's diagnostics on stderr otherwise.
+    if [ "$status" = 0 ]; then
+      cat "$dir/capture.log"
+    else
+      cat "$dir/capture.log" >&2
       echo "ci-capture-lanes: the capture failed (exit $status); its output is above" >&2
       echo "ACTION: fix what it reports, then re-run 'SHOTS_OUT=<lane> bash screenshots/ci-capture.sh' for the lane that failed" >&2
     fi
