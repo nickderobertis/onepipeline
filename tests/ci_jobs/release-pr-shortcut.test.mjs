@@ -18,7 +18,7 @@ import { git, root } from "./support.mjs";
 
 const REPO = "owner/crate";
 
-const MANIFEST = (version, serde = "1") =>
+const MANIFEST = (version, serde = "1.0.0") =>
   `[package]\nname = "crate"\nversion = "${version}"\nedition = "2021"\n\n[dependencies.serde]\nversion = "${serde}"\n`;
 const LOCK = (version) =>
   `version = 4\n\n[[package]]\nname = "crate"\nversion = "${version}"\n\n[[package]]\nname = "serde"\nversion = "1.0.0"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n`;
@@ -174,7 +174,7 @@ describe("the release pull request's shortcut", () => {
     const repo = scratch(t);
     commitAll(
       repo.work,
-      { ...RELEASE, "Cargo.toml": MANIFEST("0.2.0", "2") },
+      { ...RELEASE, "Cargo.toml": MANIFEST("0.2.0", "2.0.0") },
       "chore: release v0.2.0",
     );
     answers(repo.fake, pushRunPassed(repo.base));
@@ -313,6 +313,10 @@ describe("the release pull request's shortcut", () => {
     "a file added beside the release": [
       { ...RELEASE, "NOTES.md": "a note\n" },
       /NOTES\.md \(A\) is not one of release-plz's/,
+    ],
+    "a package version that is not a Cargo version": [
+      { ...RELEASE, "Cargo.toml": MANIFEST("invalid") },
+      /Cargo\.toml changes more than a version line/,
     ],
     "a manifest line that is not a version": [
       {

@@ -182,6 +182,49 @@ describe("the jobs' target lists", () => {
   });
 });
 
+// rust-cache-warm.yml saves what scripts/warm-rust-cache.sh builds, so its
+// recipes are held to the build recipes the jobs' own targets run: a build a
+// job compiles that the warm build leaves out is compiled cold on every pull
+// request, and nothing else would say so.
+describe("the warm build", () => {
+  const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
+  const recipes = (mode) => {
+    const body = new RegExp(`^  ${mode}\\)\\n([\\s\\S]*?)\\n    ;;`, "m").exec(warm)?.[1];
+    assert.ok(body, `scripts/warm-rust-cache.sh has no ${mode} mode`);
+    return new Set([...body.matchAll(/\bjust ([^\n]+)/g)].flatMap((m) => m[1].trim().split(/\s+/)));
+  };
+  const project = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
+  const recipeOf = (path, target) => {
+    const command = project(path).targets[target]?.command ?? "";
+    return /^just (_[\w-]+)$/.exec(command)?.[1];
+  };
+  for (const [mode, builds] of Object.entries({
+    // test-linux's instrumented archive, debug build, docs and the stop-verdict
+    // tier's release build; lint's clippy, which restores the same key.
+    linux: [
+      ["project.json", "test-archive"],
+      ["project.json", "build"],
+      ["project.json", "doc"],
+      ["project.json", "lint"],
+      ["tests/stop_verdict/project.json", "test-build"],
+    ],
+    // test-windows' and test-macos' uninstrumented archive and clippy.
+    cross: [
+      ["project.json", "test-quick-archive"],
+      ["project.json", "lint"],
+    ],
+  })) {
+    it(`builds, in its ${mode} mode, every build recipe those jobs' targets run`, () => {
+      const warmed = recipes(mode);
+      for (const [path, target] of builds) {
+        const recipe = recipeOf(path, target);
+        assert.ok(recipe, `${path}'s ${target} runs no recipe this can name`);
+        assert.ok(warmed.has(recipe), `the ${mode} warm build leaves out ${target}'s ${recipe}`);
+      }
+    });
+  }
+});
+
 describe("the task-graph reader", () => {
   for (const [what, input, reason] of [
     ["no JSON at all", "nx: something went wrong\n", /answered no JSON task graph/],
