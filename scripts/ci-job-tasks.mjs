@@ -7,7 +7,16 @@
 // Usage: <nx ... --graph=stdout> | node scripts/ci-job-tasks.mjs
 import { readFileSync } from "node:fs";
 
-const text = readFileSync(0, "utf8");
+let text;
+try {
+  text = readFileSync(0, "utf8");
+} catch (error) {
+  process.stderr.write(
+    `could not read the task graph from standard input: ${error.message}\n` +
+      "ACTION: pipe an Nx command's --graph=stdout output into this script\n",
+  );
+  process.exit(1);
+}
 let graph;
 try {
   graph = JSON.parse(text.slice(text.indexOf("{")));

@@ -3,7 +3,7 @@
 // scratch repository: a bare `origin` whose `main` holds a small crate, and a
 // head commit on top of it carrying release-plz's edits, or more than them.
 //
-// GitHub is the one thing stood in for: a `gh` on PATH that answers the three
+// GitHub is the one thing stood in for: a `gh` on PATH that answers the
 // read-only API paths the script asks with the verdicts each case gives `main`,
 // and records every call so a case can say what was asked. Git, the diff and
 // the script are the real ones.

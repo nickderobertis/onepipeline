@@ -306,7 +306,7 @@ const CACHE_INPUTS = [
   },
 ];
 
-function cacheSteps() {
+function workflowSteps() {
   const found = [];
   for (const [file, workflow] of Object.entries(workflows)) {
     for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
@@ -318,7 +318,7 @@ function cacheSteps() {
 
 describe("the caches", () => {
   it("are each keyed on everything that produced them", () => {
-    for (const { file, id, step } of cacheSteps()) {
+    for (const { file, id, step } of workflowSteps()) {
       if (!uses(step).startsWith("actions/cache")) continue;
       const path = String(step.with?.path ?? "").trim();
       const inputs = CACHE_INPUTS.find((entry) => entry.path.test(path));
@@ -336,7 +336,7 @@ describe("the caches", () => {
     // rust-cache's key is the OS, every installed toolchain's version and a hash
     // of every Cargo manifest and lockfile, in v2.9.2; a floating ref can change
     // what its key hashes underneath this check.
-    for (const { file, id, step } of cacheSteps()) {
+    for (const { file, id, step } of workflowSteps()) {
       if (!uses(step).startsWith("Swatinem/rust-cache@")) continue;
       // A workflow no pull request runs restores nothing a pull request waits
       // on; these are what a pull request restores and what main saves for it.
@@ -349,7 +349,7 @@ describe("the caches", () => {
   });
 
   it("are never saved by a pull-request run", () => {
-    for (const { file, id, job, step } of cacheSteps()) {
+    for (const { file, id, job, step } of workflowSteps()) {
       const workflow = workflows[file];
       if (pullRequestTrigger(workflow) === undefined) continue;
       if (uses(step).startsWith("Swatinem/rust-cache@")) {

@@ -70,16 +70,23 @@ if (options.repo !== "" && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(options.re
   refuse(`'${options.repo}' is not an owner/name`);
 }
 
-function git(...args) {
-  return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
-
 function tryGit(...args) {
   try {
-    return git(...args);
+    return execFileSync("git", args, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   } catch {
     return null;
   }
+}
+
+// A read the answer depends on: a git that cannot give it leaves a diff nobody
+// read, which is never one to skip the tests for.
+function git(...args) {
+  const out = tryGit(...args);
+  if (out === null) answer(false, `git ${args.join(" ")} failed, so the tests run`);
+  return out;
 }
 
 // The base is the commit the head forked from on the base branch: the tree the
