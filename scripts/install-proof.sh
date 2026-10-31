@@ -115,9 +115,13 @@ case "${1:-}" in
       echo "ACTION: check that README.md's one-liner installs onepipeline from a git URL" >&2
       exit 1
     }
-    git fetch --quiet --depth=1 origin "$installed"
     smoke="$root/smoke-published.sh"
-    git show "$installed:scripts/smoke-published.sh" >"$smoke"
+    git fetch --quiet --depth=1 origin "$installed" \
+      && git show "$installed:scripts/smoke-published.sh" >"$smoke" || {
+      echo "install-proof: could not read scripts/smoke-published.sh at the installed revision $installed from origin (git's reason is above)" >&2
+      echo "ACTION: check that origin is the repository README.md's one-liner installs from and that it serves $installed, then re-run" >&2
+      exit 1
+    }
     PATH="$root/bin:$PATH" bash "$smoke" --label "cargo install --git on $platform"
     ;;
   wheel)

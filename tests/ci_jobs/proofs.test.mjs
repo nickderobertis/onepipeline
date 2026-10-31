@@ -60,6 +60,14 @@ describe("the visual-docs capture's refusals", () => {
     assert.match(log, /SHOTS_OUT is not set/);
   });
 
+  for (const out of ["../escape", "/tmp/shots", "shots/../escape", "shots", "current/x86_64"]) {
+    it(`refuses to write its capture to ${out}`, () => {
+      const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], { SHOTS_OUT: out });
+      assert.equal(status, 2, log);
+      assert.match(log, /is not a directory under shots\//);
+    });
+  }
+
   it("refuses a visual-docs workflow that gives no capture-command", (t) => {
     const dir = scratchWorkspace(t);
     const workflow = ".github/workflows/visual-docs.yml";

@@ -28,6 +28,18 @@ cd "$ROOT"
   echo "ACTION: run it as 'SHOTS_OUT=shots/current/x86_64 bash screenshots/ci-capture.sh'" >&2
   exit 2
 }
+# The container writes there, through the one directory mounted back: a path
+# that leaves `shots/` would be written where the host never looks, or above it.
+case "/$SHOTS_OUT/" in
+  */../* | */./* | *//*) bad=1 ;;
+  /shots/?*) bad="" ;;
+  *) bad=1 ;;
+esac
+[ -z "$bad" ] && [[ $SHOTS_OUT =~ ^[A-Za-z0-9._/-]+$ ]] || {
+  echo "ci-capture: SHOTS_OUT='$SHOTS_OUT' is not a directory under shots/" >&2
+  echo "ACTION: name a relative directory under shots/, e.g. shots/current/x86_64" >&2
+  exit 2
+}
 command -v docker >/dev/null || {
   echo "ci-capture: docker not found; the capture runs in the image visual-docs.yml names" >&2
   echo "ACTION: install Docker, then re-run" >&2
@@ -82,5 +94,10 @@ docker run --rm \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
   -e INSIDE="$inside" \
   "$image" sh -e -c 'trap "chown -R \"\$HOST_OWNER\" \"\$INSIDE\"" EXIT
-'"$command"
+'"$command" || {
+  status=$?
+  echo "ci-capture: the capture-command failed in $image (exit $status); its output is above" >&2
+  echo "ACTION: fix what it reports, then re-run 'SHOTS_OUT=$SHOTS_OUT bash screenshots/ci-capture.sh'; with no output, check 'docker info' answers and 'docker pull $image' succeeds" >&2
+  exit "$status"
+}
 # llmlint: ignore-end[changed_behavior_has_e2e]
