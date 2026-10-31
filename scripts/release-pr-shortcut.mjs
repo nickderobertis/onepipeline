@@ -136,10 +136,14 @@ function hunksOf(path) {
 }
 
 const baseLines = (path) => git("show", `${base}:${path}`).split("\n");
-// A Cargo version: semver's three numbers, with an optional pre-release and
+// A Cargo version: SemVer 2.0's three numbers, then an optional pre-release of
+// dot-separated identifiers (numeric ones without a leading zero) and optional
 // build metadata.
-const VERSION =
-  /^version = "(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?"$/;
+const IDENTIFIER = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)";
+const VERSION = new RegExp(
+  `^version = "(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)` +
+    `(?:-${IDENTIFIER}(?:\\.${IDENTIFIER})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?"$`,
+);
 
 // The table a line of the base's file sits in — its header and every line of
 // it — so a dependency's own `version = ...` key (a `[dependencies.<name>]`

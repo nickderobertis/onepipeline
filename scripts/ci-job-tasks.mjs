@@ -26,4 +26,23 @@ if (!tasks || typeof tasks !== "object" || Array.isArray(tasks)) {
   );
   process.exit(1);
 }
+// Each id is `<project>:<target>[:<configuration>]`, naming the task its entry
+// describes: the ids are printed space-separated and read back as words, so one
+// of any other shape would be read as some other selection.
+const ID = /^[A-Za-z0-9@._/-]+:[A-Za-z0-9._-]+(?::[A-Za-z0-9._-]+)?$/;
+for (const [id, task] of Object.entries(tasks)) {
+  const target = task?.target;
+  if (
+    !ID.test(id) ||
+    typeof target?.project !== "string" ||
+    typeof target?.target !== "string" ||
+    !id.startsWith(`${target.project}:${target.target}`)
+  ) {
+    process.stderr.write(
+      `Nx answered a task map whose entry ${JSON.stringify(id)} is not a project:target task\n` +
+        "ACTION: run the same Nx command with --graph=stdout and check its tasks.tasks entries\n",
+    );
+    process.exit(1);
+  }
+}
 process.stdout.write(Object.keys(tasks).sort().join(" "));

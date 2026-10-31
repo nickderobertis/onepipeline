@@ -229,6 +229,16 @@ describe("the task-graph reader", () => {
   for (const [what, input, reason] of [
     ["no JSON at all", "nx: something went wrong\n", /answered no JSON task graph/],
     ["a graph with no task map", '{"graph":{"nodes":{}}}', /a graph with no task map/],
+    [
+      "a task id that is not a project:target",
+      '{"tasks":{"tasks":{"two words:test":{"target":{"project":"two words","target":"test"}}}}}',
+      /is not a project:target task/,
+    ],
+    [
+      "a task entry naming another task",
+      '{"tasks":{"tasks":{"a:test":{"target":{"project":"b","target":"lint"}}}}}',
+      /is not a project:target task/,
+    ],
   ]) {
     it(`refuses ${what} rather than reading it as an empty selection`, () => {
       const result = spawnSync("node", [join(root, "scripts/ci-job-tasks.mjs")], {
@@ -244,6 +254,23 @@ describe("the task-graph reader", () => {
 });
 
 describe("the recipes' refusals", () => {
+  it("reads a well-formed task map as its sorted ids", () => {
+    const graph = {
+      tasks: {
+        tasks: {
+          "b:test": { target: { project: "b", target: "test" } },
+          "a:lint": { target: { project: "a", target: "lint" } },
+        },
+      },
+    };
+    const result = spawnSync("node", [join(root, "scripts/ci-job-tasks.mjs")], {
+      input: `nx's own preamble\n${JSON.stringify(graph)}`,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "a:lint b:test");
+  });
+
   it("refuses a job ci.yml does not have", () => {
     const { status, log } = run(root, "bash", ["scripts/ci-job.sh", "deploy"]);
     assert.equal(status, 2, log);

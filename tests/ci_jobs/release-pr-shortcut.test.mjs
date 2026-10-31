@@ -257,6 +257,22 @@ describe("the release pull request's shortcut", () => {
     });
   }
 
+  it("skips them for a pre-release version", (t) => {
+    const repo = scratch(t);
+    commitAll(
+      repo.work,
+      {
+        ...RELEASE,
+        "Cargo.toml": MANIFEST("0.2.0-rc.1+build.5"),
+        "Cargo.lock": LOCK("0.2.0-rc.1+build.5"),
+      },
+      "chore: release v0.2.0-rc.1",
+    );
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=true\n", result.stderr);
+  });
+
   it("skips them for a head that is the tree main passed", (t) => {
     const repo = scratch(t);
     answers(repo.fake, pushRunPassed(repo.base));
@@ -316,6 +332,14 @@ describe("the release pull request's shortcut", () => {
     ],
     "a package version that is not a Cargo version": [
       { ...RELEASE, "Cargo.toml": MANIFEST("invalid") },
+      /Cargo\.toml changes more than a version line/,
+    ],
+    "a pre-release with a leading zero": [
+      { ...RELEASE, "Cargo.toml": MANIFEST("0.2.0-01") },
+      /Cargo\.toml changes more than a version line/,
+    ],
+    "a pre-release with empty identifiers": [
+      { ...RELEASE, "Cargo.toml": MANIFEST("0.2.0-..") },
       /Cargo\.toml changes more than a version line/,
     ],
     "a manifest line that is not a version": [
