@@ -125,6 +125,20 @@ describe("ci.yml's four jobs", () => {
   });
 });
 
+describe("the judged lint", () => {
+  it("installs in `lint` exactly the harnesses the `llmlint` job pins", () => {
+    // The two run one judge until the old job is retired; the harness pins are
+    // what an upstream release has broken a required check through before.
+    const installs = (job) =>
+      steps(job)
+        .map(runs)
+        .filter((run) => /^npm install -g /.test(run))
+        .sort();
+    assert.ok(installs(ci.jobs.llmlint).length > 0, "the llmlint job installs no harness");
+    assert.deepEqual(installs(ci.jobs.lint), installs(ci.jobs.llmlint));
+  });
+});
+
 describe("the visual docs", () => {
   it("are captured, judged and given every publishing step as steps of `lint`", () => {
     const lint = steps(ci.jobs.lint);

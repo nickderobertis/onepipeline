@@ -117,7 +117,7 @@ jobs:
           tool: just,nextest,cargo-deny,cargo-machete
       # The pinned-wheel channel journeys resolve uv and the wheel first.
       - uses: astral-sh/setup-uv@v6
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential] the
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential, no_second_broader_sweep_over_an_already_gated_commit] the
       # pinned-wheel channel journeys are placed in `lint` by the plan that made these
       # four jobs, and they stay what they were: their project's own uncached
       # `release-compat` target, reached by no `check`. The `release-compat` job ran
@@ -125,9 +125,11 @@ jobs:
       # no credential to require — what they reach is PyPI's public copy of one pinned
       # wheel, read anonymously — and they resolve uv and the wheel first, failing
       # naming whichever is missing, so this step cannot pass having run none of them.
+      # The old jobs it repeats stay, passing, until protection moves to the four and
+      # `onepipeline-ci-budgets` retires them.
       - name: Formatting, lints, MSRV, audit and the pinned-wheel journeys (affected projects)
         run: just ci-lint
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential, no_second_broader_sweep_over_an_already_gated_commit]
       # engine-currency.yml's check: whether the lock still resolves the sibling
       # engines the manifest permits. Advisory here as it is there — its answer
       # moves when the registry does, not when this tree does, so a release
@@ -312,7 +314,9 @@ jobs:
       # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
       # cannot turn a failed run green); the archive is the instrumented test
       # build, kept for that step to re-run without compiling.
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, no_second_broader_sweep_over_an_already_gated_commit] the
+      # old jobs this repeats stay, passing, until protection moves to the four and
+      # `onepipeline-ci-budgets` retires them. The
       # credentialled smoke is placed in `test-linux` by the plan that made these four
       # jobs, and it stays what it was: `onepipeline-real-smoke`'s own uncached `smoke`
       # target, reached by no `check`, its credential required above. The `smoke` job
@@ -328,7 +332,7 @@ jobs:
           # llmlint: ignore-end[least_privilege_grants]
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, no_second_broader_sweep_over_an_already_gated_commit]
       - name: Keep the per-test profile records
         if: always() && steps.shortcut.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -427,11 +431,17 @@ jobs:
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just bootstrap
+      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] transitional by the plan that made the four
+      # jobs: the jobs behind today's required contexts stay, passing, until branch
+      # protection moves to the four (`onepipeline-required-checks`) and
+      # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
+      # request; neither feeds the other.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
       # On Windows there are no process groups to make a leaked process visible
       # afterwards, so what was still running is read while it is still true.
       - name: What was still running when it stopped
@@ -512,10 +522,16 @@ jobs:
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
+      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] transitional by the plan that made the four
+      # jobs: the jobs behind today's required contexts stay, passing, until branch
+      # protection moves to the four (`onepipeline-required-checks`) and
+      # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
+      # request; neither feeds the other.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
       - name: What was still running when it stopped
         if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
         continue-on-error: true
