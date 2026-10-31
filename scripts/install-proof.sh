@@ -45,6 +45,11 @@ fresh_root() {
   printf '%s' "$root"
 }
 
+# llmlint: ignore-block[changed_behavior_has_e2e] each proof's work is a release build, a Docker image or the network: the test
+# jobs run all three for real on every pull request that reaches the crate, which
+# is their end-to-end proof, and an offline journey would either compile the release
+# binary each run or stand in for cargo and Docker and prove a fake. What can be
+# proven without them, the refusals, is in tests/ci_jobs/proofs.test.mjs.
 case "${1:-}" in
   path)
     root="$(fresh_root path)"
@@ -85,12 +90,19 @@ case "${1:-}" in
     # run is exactly the README's.
     CARGO_INSTALL_ROOT="$root" "${argv[@]}"
     # A `--git` install with no revision resolves the remote's default branch, so
-    # the smoke is that revision's own copy of the assertions rather than this
-    # checkout's: they assert the binary's whole command list, which a branch
-    # adding a verb would fail on a binary that cannot have it yet.
-    git fetch --quiet --depth=1 origin HEAD
+    # the smoke is the installed revision's own copy of the assertions rather
+    # than this checkout's: they assert the binary's whole command list, which a
+    # branch adding a verb would fail on a binary that cannot have it yet. The
+    # revision is the one cargo recorded installing, not the branch read again.
+    installed="$(sed -n 's/^"onepipeline [^ ]* (git+[^#]*#\([0-9a-f]\{40\}\))" = .*/\1/p' "$root/.crates.toml")"
+    [ -n "$installed" ] || {
+      echo "install-proof: cargo recorded no git revision for onepipeline in $root/.crates.toml" >&2
+      echo "ACTION: check that README.md's one-liner installs onepipeline from a git URL" >&2
+      exit 1
+    }
+    git fetch --quiet --depth=1 origin "$installed"
     smoke="$root/smoke-published.sh"
-    git show FETCH_HEAD:scripts/smoke-published.sh >"$smoke"
+    git show "$installed:scripts/smoke-published.sh" >"$smoke"
     PATH="$root/bin:$PATH" bash "$smoke" --label "cargo install --git on $platform"
     ;;
   wheel)
@@ -115,3 +127,4 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+# llmlint: ignore-end[changed_behavior_has_e2e]

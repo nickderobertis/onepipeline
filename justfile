@@ -223,13 +223,6 @@ ci-test-windows *args:
 ci-test-macos *args:
     @bash scripts/ci-job.sh test-macos "$@"
 
-# Whether a release pull request's tests are already proven: its tree is a tree
-# `main` passed plus only release-plz's version and changelog edits. The three
-# test jobs ask it first; `lint` never does.
-# Answer `skip=true` when HEAD only versions a tree main already passed, else `skip=false`.
-release-pr-shortcut *args:
-    @node scripts/release-pr-shortcut.mjs "$@"
-
 # CI's Windows leg runs `check-cross` split across jobs (`ci.yml`'s `cross`), and
 # this is what says the split drops and repeats nothing. Outside `check`, because
 # it lists the uninstrumented build the cross legs run, which `check` never builds.

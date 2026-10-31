@@ -36,24 +36,10 @@ const FOUR = {
 };
 const TESTS = ["test-linux", "test-windows", "test-macos"];
 
-// The contexts branch protection requires as this change is made; the jobs
+// The contexts branch protection requires, from the tree's one copy of them
+// (`required-contexts.json`, which tests/ci_workflows.rs reads too); the jobs
 // behind them stay until protection moves to the four.
-const REQUIRED = [
-  "gate",
-  "pr-title",
-  "llmlint",
-  "msrv",
-  "deny",
-  "wheel",
-  "cross (windows-latest)",
-  "install (ubuntu-latest)",
-  "install (windows-latest)",
-  "install-documented (ubuntu-latest)",
-  "install-documented (windows-latest)",
-  "smoke",
-  "release-compat",
-  "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)",
-];
+const REQUIRED = JSON.parse(readFileSync(join(github, "required-contexts.json"), "utf8")).contexts;
 const REUSABLE_VISUAL_DOCS = "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml";
 const COMPOSITES = [
   "nickderobertis/screencomp@",
@@ -143,10 +129,21 @@ describe("the visual docs", () => {
   it("are captured, judged and published as steps of `lint`", () => {
     const lint = steps(ci.jobs.lint);
     const captures = lint.filter((step) => runs(step).includes("screenshots/ci-capture.sh"));
-    assert.deepEqual(
-      captures.map((step) => step.env?.SHOTS_OUT),
-      ["shots/current/x86_64", "shots/verify/x86_64"],
-      "`lint` does not capture the x86_64 lane twice, for the reproducibility gate",
+    assert.equal(captures.length, 1, "`lint` does not start the capture exactly once");
+    for (const lane of ["SHOTS_OUT=shots/current/x86_64", "SHOTS_OUT=shots/verify/x86_64"]) {
+      assert.ok(
+        runs(captures[0]).includes(lane),
+        `\`lint\` does not capture ${lane}, which the reproducibility gate compares`,
+      );
+    }
+    const started = lint.indexOf(captures[0]);
+    const judged = lint.findIndex((step) =>
+      uses(step).startsWith("nickderobertis/screencomp/visual-docs@"),
+    );
+    const waited = lint.findIndex((step) => /until \[ -f "\$RUNNER_TEMP\/capture\.exit" \]/.test(runs(step)));
+    assert.ok(
+      started < waited && waited < judged,
+      "`lint` judges the capture before waiting for it",
     );
     for (const action of COMPOSITES) {
       assert.ok(
@@ -188,8 +185,15 @@ describe("the release pull request's shortcut", () => {
       const at = all.findIndex((step) => step.id === "shortcut");
       assert.ok(at >= 0, `\`${id}\` does not ask the shortcut`);
       assert.match(runs(all[at]), /^node scripts\/release-pr-shortcut\.mjs /);
+      // Only the checkout, and a check that a credential is present, which a
+      // shortcut must not let a run pass without.
+      const before = all.slice(0, at);
       assert.ok(
-        all.slice(0, at).every((step) => uses(step).startsWith("actions/checkout@")),
+        before.every(
+          (step) =>
+            uses(step).startsWith("actions/checkout@") ||
+            (uses(step) === "" && Object.keys(step.env ?? {}).every((name) => name.startsWith("HAS_"))),
+        ),
         `\`${id}\` does work before asking whether it is owed`,
       );
       for (const step of all.slice(at + 1)) {
@@ -236,7 +240,7 @@ describe("today's required contexts", () => {
 // not listed here is a cache nobody has said the inputs of.
 const CACHE_INPUTS = [
   {
-    path: /(^|\/)target\/tools$/,
+    path: /(^|\/)target\/tools\n~\/\.cargo\/bin\/cargo-prune-superseded\*$/,
     key: ["runner.os", "runner.arch", "steps.pins.outputs.tools", "hashFiles('rust-toolchain.toml')"],
   },
   // Anything else cargo builds or fetches: the lockfile and the toolchain.
@@ -278,8 +282,8 @@ describe("the caches", () => {
     // what its key hashes underneath this check.
     for (const { file, id, step } of cacheSteps()) {
       if (!uses(step).startsWith("Swatinem/rust-cache@")) continue;
-      // The release workflows are the CD reshape's; these are what a pull
-      // request restores and what main saves for it.
+      // A workflow no pull request runs restores nothing a pull request waits
+      // on; these are what a pull request restores and what main saves for it.
       if (pullRequestTrigger(workflows[file]) === undefined && file !== "rust-cache-warm.yml") {
         continue;
       }

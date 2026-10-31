@@ -50,18 +50,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# What each job owes, as Nx targets. One list per job and no other copy: the
-# workflow names the recipe, never these.
-#   lint          what does not depend on the platform it runs on: formatting,
-#                 lints, the JS syntax check, the MSRV floor, the dependency
-#                 audit and the pinned-wheel channel journeys (Linux, network).
-#   test-linux    `check`'s remaining tiers (every test tier under coverage, the
-#                 floor, docs, budgets), the live smoke, the workflow-shape test,
-#                 and the install, documented-install and x86_64 wheel proofs.
-#   test-windows  the platform-sensitive tiers (`check-cross` less formatting:
-#                 clippy and the uninstrumented suite), the npm launcher's
-#                 process-tree journeys and the two install proofs.
-#   test-macos    the same as Windows.
+# What each job owes, as Nx targets, and the one copy of it: the workflow names
+# the recipe, never these. Between them `lint` and `test-linux` hold every target
+# a project's `check` reaches, and `lint` and each of the other two every target
+# `just check-cross` runs (tests/ci_jobs holds both); formatting and the
+# platform-independent lints run once, in `lint`.
 case "$job" in
   lint) targets="format-check,lint,syntax-check,msrv,deps-check,release-compat" ;;
   test-linux) targets="test,doc,budgets,test-ci-shape,smoke,install-smoke,install-documented,wheel-smoke" ;;
@@ -98,6 +91,7 @@ if [ "$count" -gt 0 ]; then
   ONEPIPELINE_NX_SHOW_OUTPUT=1 nx_run --outputStyle=stream-without-prefixes || {
     status=$?
     echo "ci-job: $job failed (Nx exit $status); the failing task's output is above" >&2
+    echo "ACTION: fix what that task reports, then re-run 'just ci-$job'" >&2
     exit "$status"
   }
 fi
@@ -112,4 +106,3 @@ if [ "$job" = "test-linux" ]; then
     exit 1
   }
 fi
-echo "ci-job: $job: ok"

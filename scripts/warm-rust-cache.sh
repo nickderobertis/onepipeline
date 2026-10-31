@@ -6,40 +6,37 @@
 #                               build every coverage tier runs, the debug build
 #                               the stop-verdict tier and the npm suite run, the
 #                               release build the stop-verdict tier times and the
-#                               install proof installs, and the docs.
+#                               install proof installs, and the docs; and
+#                               clippy's build, for `lint`, which restores this
+#                               key too.
 #   warm-rust-cache.sh cross    what `test-windows` and `test-macos` build: the
 #                               uninstrumented test build, clippy's, and the
 #                               release build the install proof installs.
 #
-# Each command is the one the job's own target runs, under the same flags,
-# because a unit built under other flags is a different unit and the job would
-# compile it again. The gate's builds deny warnings through RUSTFLAGS; the
-# uninstrumented suite and clippy set none (`_tier-test-quick`, `_crate-lint`),
-# so neither does their warm build; the instrumented one is cargo-llvm-cov's own.
+# Each build is the justfile recipe the job's own target runs, so it is compiled
+# under the flags the job compiles it under: a unit built under other flags is a
+# different unit, and the job would build it again.
 #
-# Exit: cargo's, or 2 for a refused call.
+# Exit: the recipe's, or 2 for a refused call.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+archive="$ROOT/target/warm-archive.tar.zst"
+trap 'rm -f -- "$archive"' EXIT
+
+# llmlint: ignore-block[changed_behavior_has_e2e] each mode is the justfile's own build recipes, compiling the workspace;
+# rust-cache-warm.yml runs them for real on every push to main, and a pull request
+# restoring what they saved is what shows the keys agree (.github/ci-shape holds
+# the keys equal). Its refusal is in tests/ci_jobs/proofs.test.mjs.
 case "${1:-}" in
   linux)
-    export RUSTFLAGS="-D warnings"
-    # `_crate-test-archive`'s build, archived nowhere: the tiers' `cargo llvm-cov
-    # nextest` runs find it fresh.
-    cargo llvm-cov --no-report nextest-archive --locked --archive-file "$ROOT/target/warm-instrumented.tar.zst"
-    rm -f -- "$ROOT/target/warm-instrumented.tar.zst"
-    cargo build --locked --all-targets --quiet
-    cargo build --release --locked --quiet --bin onepipeline
-    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --quiet
+    ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-archive
+    just _crate-build _stop-verdict-build _crate-doc _crate-lint
     ;;
   cross)
-    unset RUSTFLAGS
-    cargo nextest archive --locked --archive-file "$ROOT/target/warm-tests.tar.zst"
-    rm -f -- "$ROOT/target/warm-tests.tar.zst"
-    cargo clippy --all-targets --locked --quiet -- -D warnings
-    # scripts/install-proof.sh's build, which denies warnings.
-    RUSTFLAGS="-D warnings" cargo build --release --locked --quiet
+    ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-quick-archive
+    just _crate-lint _stop-verdict-build
     ;;
   *)
     echo "warm-rust-cache: name the job family: linux or cross" >&2
@@ -47,3 +44,4 @@ case "${1:-}" in
     exit 2
     ;;
 esac
+# llmlint: ignore-end[changed_behavior_has_e2e]

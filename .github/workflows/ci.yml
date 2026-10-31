@@ -79,6 +79,27 @@ jobs:
           # This job's token can write, and the judge runs harness agents over
           # the checkout: no credential is left in it for them to find.
           persist-credentials: false
+      # The capture builds release binaries in a container for most of this
+      # job's length, so it starts first and runs beside the checks below, from
+      # its own clone of HEAD (screenshots/ci-capture.sh); the step that judges
+      # it waits for it. Both lanes, one after the other: the second reuses the
+      # first's build, for the reproducibility gate.
+      - name: Start the visual docs capture beside the checks
+        run: |
+          nohup bash -c '
+            { SHOTS_OUT=shots/current/x86_64 bash screenshots/ci-capture.sh \
+              && SHOTS_OUT=shots/verify/x86_64 bash screenshots/ci-capture.sh; } > "$RUNNER_TEMP/capture.log" 2>&1
+            echo $? > "$RUNNER_TEMP/capture.exit"
+          ' > /dev/null 2>&1 &
+      # rust-cache keys on the OS, every installed toolchain and every Cargo
+      # manifest and lockfile; restored only. Before the MSRV toolchain is
+      # installed, so the key is the one `rust-cache-warm.yml` saves from main
+      # for `test-linux`, whose build is a superset of this job's clippy and
+      # pinned-wheel-journey builds.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
       - name: Read the MSRV from Cargo.toml
         id: msrv
         run: |
@@ -88,12 +109,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-      # rust-cache keys on the OS, every installed toolchain and every Cargo
-      # manifest and lockfile; restored only, from main's warm run.
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: lint
-          save-if: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -102,8 +117,14 @@ jobs:
           tool: just,nextest,cargo-deny,cargo-machete
       # The pinned-wheel channel journeys resolve uv and the wheel first.
       - uses: astral-sh/setup-uv@v6
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # pinned-wheel channel journeys are placed in `lint` by the plan that made these
+      # four jobs, and they stay what they were: their project's own uncached
+      # `release-compat` target, reached by no `check`. The `release-compat` job ran
+      # them on `changes.outputs.crate`, which is this same affected answer.
       - name: Formatting, lints, MSRV, audit and the pinned-wheel journeys (affected projects)
         run: just ci-lint
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       # engine-currency.yml's check: whether the lock still resolves the sibling
       # engines the manifest permits. Advisory here as it is there — its answer
       # moves when the registry does, not when this tree does, so a release
@@ -146,17 +167,13 @@ jobs:
       # job rather than its reusable workflow, which would add five jobs. The
       # capture is visual-docs.yml's own `capture-command`, read out of that file
       # and run in the image it names (`screenshots/ci-capture.sh`), so there is
-      # one capture command; twice, for the reproducibility gate.
-      - name: Capture the visual docs
+      # one capture command; started at the top of this job.
+      - name: Wait for the visual docs capture
         if: ${{ !cancelled() }}
-        env:
-          SHOTS_OUT: shots/current/x86_64
-        run: bash screenshots/ci-capture.sh
-      - name: Capture again for the reproducibility gate
-        if: ${{ !cancelled() }}
-        env:
-          SHOTS_OUT: shots/verify/x86_64
-        run: bash screenshots/ci-capture.sh
+        run: |
+          until [ -f "$RUNNER_TEMP/capture.exit" ]; do sleep 5; done
+          cat "$RUNNER_TEMP/capture.log"
+          exit "$(cat "$RUNNER_TEMP/capture.exit")"
       - uses: nickderobertis/screencomp@v0
         if: ${{ !cancelled() }}
         with:
@@ -226,6 +243,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Asked before the shortcut, so a run the shortcut ends still cannot pass
+      # without the live tier's credential.
+      - name: The smoke's credential and scratch repository are present
+        env:
+          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
+          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
+        run: |
+          if [ "$HAS_CREDENTIAL" != "true" ]; then
+            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. This job never skips it and never falls back to a fake." >&2
+            exit 1
+          fi
+          if [ "$HAS_SMOKE_REPO" != "true" ]; then
+            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke." >&2
+            exit 1
+          fi
       # On a release pull request whose tree main already passed, plus only
       # release-plz's version and changelog edits, every step below is skipped
       # and the job succeeds having proven it already had (scripts/
@@ -254,40 +286,34 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@v6
         if: steps.shortcut.outputs.skip != 'true'
-      # The released tools `just bootstrap` installs into `target/tools`, keyed
-      # on the versions the justfile pins and the toolchain that compiles them.
+      # The released tools `just bootstrap` compiles — two into `target/tools`,
+      # the pool pruner onto cargo's PATH — keyed on the versions the justfile
+      # pins and the toolchain that compiles them.
       - name: What the bootstrap tools are built from
         id: pins
         if: steps.shortcut.outputs.skip != 'true'
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       # Also provisions `strace` and the unprivileged user namespace, which the
       # Linux-only e2e journeys refuse without.
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
-      - name: The smoke's credential and scratch repository are present
-        if: steps.shortcut.outputs.skip != 'true'
-        env:
-          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
-          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
-        run: |
-          if [ "$HAS_CREDENTIAL" != "true" ]; then
-            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. This job never skips it and never falls back to a fake." >&2
-            exit 1
-          fi
-          if [ "$HAS_SMOKE_REPO" != "true" ]; then
-            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke." >&2
-            exit 1
-          fi
       # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
       # cannot turn a failed run green); the archive is the instrumented test
       # build, kept for that step to re-run without compiling.
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # credentialled smoke is placed in `test-linux` by the plan that made these four
+      # jobs, and it stays what it was: `onepipeline-real-smoke`'s own uncached `smoke`
+      # target, reached by no `check`, its credential required above. The `smoke` job
+      # ran it on `changes.outputs.crate`, which is this same affected answer.
       - name: Tiers, smoke, install proofs and wheel (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
@@ -299,6 +325,7 @@ jobs:
           # llmlint: ignore-end[least_privilege_grants]
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       - name: Keep the per-test profile records
         if: always() && steps.shortcut.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -384,12 +411,14 @@ jobs:
         id: pins
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          path: |
+            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'
@@ -468,12 +497,14 @@ jobs:
       - name: What the bootstrap tools are built from
         id: pins
         if: steps.shortcut.outputs.skip != 'true'
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         if: steps.shortcut.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'

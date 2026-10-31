@@ -45,22 +45,26 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - name: What the bootstrap tools are built from
         id: pins
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         id: tools
         uses: actions/cache/restore@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Install the bootstrap tools
-        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec _ensure-prune-superseded
       - name: Save the bootstrap tools
         if: steps.tools.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
-      - name: Build what test-linux builds
+      - name: Build what test-linux and lint build
         run: bash scripts/warm-rust-cache.sh linux
 
   windows:
@@ -98,21 +102,25 @@ jobs:
       - name: What the bootstrap tools are built from
         id: pins
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         id: tools
         uses: actions/cache/restore@v4
         with:
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          path: |
+            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Install the bootstrap tools
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
-        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec _ensure-prune-superseded
       - name: Save the bootstrap tools
         if: steps.tools.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+          path: |
+            ${{ env.DEV_DRIVE_WORKSPACE }}/target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Build what test-windows builds
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
@@ -138,20 +146,24 @@ jobs:
           tool: just,nextest
       - name: What the bootstrap tools are built from
         id: pins
-        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)" >> "$GITHUB_OUTPUT"
+        run: echo "tools=$(just --evaluate onetaskgraph-version)-$(just --evaluate onebudgetspec-version)-$(just --evaluate prune-superseded-version)" >> "$GITHUB_OUTPUT"
       - name: Restore the bootstrap tools
         id: tools
         uses: actions/cache/restore@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Install the bootstrap tools
-        run: just _ensure-onetaskgraph _ensure-onebudgetspec
+        run: just _ensure-onetaskgraph _ensure-onebudgetspec _ensure-prune-superseded
       - name: Save the bootstrap tools
         if: steps.tools.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: target/tools
+          path: |
+            target/tools
+            ~/.cargo/bin/cargo-prune-superseded*
           key: bootstrap-tools-${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.tools }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Build what test-macos builds
         run: bash scripts/warm-rust-cache.sh cross

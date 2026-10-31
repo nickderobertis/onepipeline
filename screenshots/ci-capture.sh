@@ -7,9 +7,15 @@
 # under the same `sh -e`, because a step of a job on the runner cannot itself
 # run in a container.
 #
+# It captures HEAD, from a clone of it under `target/ci-capture`, with only
+# `shots/` mounted back into this checkout: the capture builds its release
+# binaries into its tree's own `target/release`, and `lint` runs it beside its
+# own builds, which must not meet that build's lock or its files. The clone is
+# kept for the second capture of the same commit, which then builds nothing.
+#
 # The image runs as root, as the reusable workflow's container does, because it
-# installs the pinned toolchain into the image's own rustup; what it writes into
-# the checkout is handed back to the runner's user whatever the capture did.
+# installs the pinned toolchain into the image's own rustup; what it writes is
+# handed back to the runner's user whatever the capture did.
 #
 # Exit: the capture's own, or 1 when the workflow cannot be read.
 set -euo pipefail
@@ -39,7 +45,10 @@ read_with() {
     const value = parse(readFileSync(".github/workflows/visual-docs.yml", "utf8"))
       ?.jobs?.["visual-docs"]?.with?.[process.argv[1]];
     if (typeof value !== "string" || value.trim() === "") {
-      process.stderr.write(`visual-docs.yml gives the visual-docs job no ${process.argv[1]}\n`);
+      process.stderr.write(
+        `visual-docs.yml gives the visual-docs job no ${process.argv[1]}\n` +
+          `ACTION: restore jobs.visual-docs.with.${process.argv[1]} in .github/workflows/visual-docs.yml\n`,
+      );
       process.exit(1);
     }
     process.stdout.write(value);
@@ -48,11 +57,25 @@ read_with() {
 image="$(read_with container)" || exit 1
 command="$(read_with capture-command)" || exit 1
 
+# llmlint: ignore-block[changed_behavior_has_e2e] the capture runs a Rust image and builds the release binaries inside it;
+# `lint` runs it for real on every pull request, against the committed baseline,
+# which is its end-to-end proof. Its refusals are in tests/ci_jobs/proofs.test.mjs,
+# and the command it runs is held under dash by tests/visual_docs.rs.
+copy="$ROOT/target/ci-capture"
+head="$(git rev-parse HEAD)"
+if [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ]; then
+  rm -rf -- "$copy"
+  git clone --quiet --no-checkout "$ROOT" "$copy"
+  git -C "$copy" checkout --quiet --detach "$head"
+fi
+mkdir -p shots
+
 echo "ci-capture: running visual-docs.yml's capture-command in $image into $SHOTS_OUT"
 docker run --rm \
-  -v "$ROOT":/w -w /w \
+  -v "$copy":/w -v "$ROOT/shots":/w/shots -w /w \
   -e SHOTS_OUT \
   -e HOST_OWNER="$(id -u):$(id -g)" \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
   "$image" sh -e -c 'trap "chown -R \"\$HOST_OWNER\" /w" EXIT
 '"$command"
+# llmlint: ignore-end[changed_behavior_has_e2e]

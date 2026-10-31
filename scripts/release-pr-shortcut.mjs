@@ -106,74 +106,100 @@ for (const line of changes.split("\n").filter(Boolean)) {
   }
 }
 
-function hunkLines(path) {
+// Each hunk of one file's diff: where it sits in the base, and the lines it
+// removes (with their base line numbers) and adds.
+function hunksOf(path) {
   const diff = git("diff", "--unified=0", "--no-color", base, head, "--", path);
-  const removed = [];
-  const added = [];
-  let oldAt = 0;
+  const hunks = [];
   for (const line of diff.split("\n")) {
-    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
-    if (hunk) {
-      oldAt = Number(hunk[1]);
+    const header = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+    if (header) {
+      hunks.push({
+        oldStart: Number(header[1]),
+        oldCount: Number(header[2] ?? 1),
+        removed: [],
+        added: [],
+      });
       continue;
     }
-    if (line.startsWith("---") || line.startsWith("+++")) continue;
-    if (line.startsWith("-")) removed.push({ text: line.slice(1), at: oldAt++ });
-    else if (line.startsWith("+")) added.push(line.slice(1));
+    const hunk = hunks.at(-1);
+    if (!hunk || line.startsWith("---") || line.startsWith("+++")) continue;
+    if (line.startsWith("-")) {
+      hunk.removed.push({ text: line.slice(1), at: hunk.oldStart + hunk.removed.length });
+    } else if (line.startsWith("+")) hunk.added.push(line.slice(1));
   }
-  return { removed, added };
+  return hunks;
 }
 
+const baseLines = (path) => git("show", `${base}:${path}`).split("\n");
 const VERSION = /^version = "[^"\s]+"$/;
-// The section a line of the base's manifest sits in, so a dependency's own
-// `version = ...` key (a `[dependencies.<name>]` table) is not taken for the
-// package's.
-function sectionOf(path, lineNumber) {
-  const lines = git("show", `${base}:${path}`)
-    .split("\n")
-    .slice(0, lineNumber - 1);
-  for (let index = lines.length - 1; index >= 0; index--) {
-    const header = /^\s*\[\[?([^\]]+)\]\]?\s*$/.exec(lines[index]);
-    if (header) return header[1].trim();
-  }
-  return "";
+
+// The table a line of the base's file sits in — its header and every line of
+// it — so a dependency's own `version = ...` key (a `[dependencies.<name>]`
+// table, a registry package's lock entry) is not taken for the package's.
+function tableOf(path, lineNumber) {
+  const lines = baseLines(path);
+  const isHeader = (text) => /^\s*\[\[?[^\]]+\]\]?\s*$/.test(text);
+  let start = lineNumber - 1;
+  while (start >= 0 && !isHeader(lines[start])) start--;
+  let end = lineNumber;
+  while (end < lines.length && !isHeader(lines[end])) end++;
+  const header = start >= 0 ? /^\s*\[\[?([^\]]+)\]\]?/.exec(lines[start])[1].trim() : "";
+  return { header, body: lines.slice(start + 1, end) };
+}
+
+// The packages this workspace builds, by name: a lock entry release-plz bumps
+// is one of these, never a registry or git dependency.
+function ownPackage({ header, body }) {
+  return header === "package" && !body.some((line) => /^source = /.test(line));
 }
 
 for (const path of VERSIONED) {
   if (!changes.split("\n").some((line) => line.endsWith(`\t${path}`))) continue;
-  const { removed, added } = hunkLines(path);
-  const replaced =
-    removed.length === added.length &&
-    removed.every((line) => VERSION.test(line.text)) &&
-    added.every((line) => VERSION.test(line));
-  if (!replaced) answer(false, `${path} changes more than a version line`);
-  for (const line of removed) {
-    const section = sectionOf(path, line.at);
-    const allowed =
-      path === "Cargo.lock"
-        ? section === "package"
-        : section === "package" || section === "workspace.package";
-    if (!allowed) {
-      answer(
-        false,
-        `${path} line ${line.at} is a version under [${section}], not the package's own`,
-      );
+  for (const hunk of hunksOf(path)) {
+    const replaced =
+      hunk.removed.length === hunk.added.length &&
+      hunk.removed.every((line) => VERSION.test(line.text)) &&
+      hunk.added.every((line) => VERSION.test(line));
+    if (!replaced) answer(false, `${path} changes more than a version line`);
+    for (const line of hunk.removed) {
+      const table = tableOf(path, line.at);
+      const allowed =
+        path === "Cargo.lock"
+          ? ownPackage(table)
+          : table.header === "package" || table.header === "workspace.package";
+      if (!allowed) {
+        answer(
+          false,
+          `${path} line ${line.at} is a version under [${table.header}], not this workspace's own package`,
+        );
+      }
     }
   }
 }
+// A release adds one section at the head of the changelog, ahead of every
+// release already there, and touches nothing else in it.
 if (changes.split("\n").some((line) => line.endsWith(`\t${CHANGELOG}`))) {
-  if (hunkLines(CHANGELOG).removed.length > 0) {
+  const hunks = hunksOf(CHANGELOG);
+  if (hunks.some((hunk) => hunk.removed.length > 0)) {
     answer(false, `${CHANGELOG} rewrites existing lines rather than adding a release's`);
+  }
+  const firstRelease = baseLines(CHANGELOG).findIndex((line) => line.startsWith("## ")) + 1;
+  // A pure insertion's header names the base line it follows.
+  if (hunks.length !== 1 || (firstRelease > 0 && hunks[0].oldStart >= firstRelease)) {
+    answer(false, `${CHANGELOG} adds lines other than one new section above its releases`);
   }
 }
 
-// The base's own verdict, read-only. A GitHub that does not answer is a base
-// nobody can say passed.
-if (options.repo === "")
+// The base's own verdict, read-only. A GitHub that does not answer, or answers
+// in a shape this does not read, is a base nobody can say passed.
+if (options.repo === "") {
   answer(false, "no repository to ask whether main passed, so the tests run");
-function gh(path) {
+}
+function gh(path, shaped) {
+  let body;
   try {
-    return JSON.parse(
+    body = JSON.parse(
       execFileSync("gh", ["api", "--method", "GET", path], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
@@ -185,11 +211,20 @@ function gh(path) {
       `GitHub did not answer ${path} (${error.message.split("\n")[0]}), so the tests run`,
     );
   }
+  if (!shaped(body))
+    answer(false, `GitHub answered ${path} in a shape this does not read, so the tests run`);
+  return body;
 }
+const isObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const listOf = (value, key) =>
+  isObject(value) && Array.isArray(value[key]) && value[key].every(isObject);
 
-const runs = gh(`repos/${options.repo}/actions/runs?head_sha=${base}&status=success&per_page=100`);
+const runs = gh(
+  `repos/${options.repo}/actions/runs?head_sha=${base}&status=success&per_page=100`,
+  (body) => listOf(body, "workflow_runs"),
+);
 if (
-  (runs.workflow_runs ?? []).some(
+  runs.workflow_runs.some(
     (run) => run.path === CI_WORKFLOW && run.conclusion === "success" && run.head_sha === base,
   )
 ) {
@@ -199,13 +234,24 @@ if (
   );
 }
 const baseTree = git("rev-parse", `${base}^{tree}`);
-for (const pull of gh(`repos/${options.repo}/commits/${base}/pulls`)) {
-  if (pull.merge_commit_sha !== base || !pull.head?.sha) continue;
-  const tested = pull.head.sha;
-  const commit = gh(`repos/${options.repo}/git/commits/${tested}`);
-  if (commit.tree?.sha !== baseTree) continue;
-  const checks =
-    gh(`repos/${options.repo}/commits/${tested}/check-runs?per_page=100`).check_runs ?? [];
+const pulls = gh(
+  `repos/${options.repo}/commits/${base}/pulls`,
+  (body) => Array.isArray(body) && body.every(isObject),
+);
+for (const pull of pulls) {
+  const tested = pull.head?.sha;
+  if (
+    pull.merge_commit_sha !== base ||
+    typeof tested !== "string" ||
+    !/^[0-9a-f]{40}$/.test(tested)
+  ) {
+    continue;
+  }
+  const commit = gh(`repos/${options.repo}/git/commits/${tested}`, (body) => isObject(body?.tree));
+  if (commit.tree.sha !== baseTree) continue;
+  const checks = gh(`repos/${options.repo}/commits/${tested}/check-runs?per_page=100`, (body) =>
+    listOf(body, "check_runs"),
+  ).check_runs;
   const green = TEST_JOBS.every((job) =>
     checks.some((check) => check.name === job && check.conclusion === "success"),
   );

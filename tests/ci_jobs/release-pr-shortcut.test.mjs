@@ -99,21 +99,17 @@ const noRuns = (base) => ({
   },
 });
 
-function shortcut({ work, fake }) {
-  const result = spawnSync(
-    "node",
-    [join(root, "scripts/release-pr-shortcut.mjs"), "--repo", REPO, "--base-ref", "main"],
-    {
-      cwd: work,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        CI: "",
-        PATH: `${join(fake, "bin")}:${process.env.PATH}`,
-        FAKE_GH_DIR: fake,
-      },
+function shortcut({ work, fake }, args = ["--repo", REPO, "--base-ref", "main"]) {
+  const result = spawnSync("node", [join(root, "scripts/release-pr-shortcut.mjs"), ...args], {
+    cwd: work,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      CI: "",
+      PATH: `${join(fake, "bin")}:${process.env.PATH}`,
+      FAKE_GH_DIR: fake,
     },
-  );
+  });
   assert.equal(result.error, undefined);
   return {
     status: result.status,
@@ -238,6 +234,132 @@ describe("the release pull request's shortcut", () => {
     assert.equal(result.stdout, "skip=false\n", result.stderr);
     assert.match(result.stderr, /GitHub did not answer/);
   });
+
+  // Each a release pull request carrying one edit release-plz never makes, with
+  // main's verdict a pass, so only the diff can be why the tests run.
+  const NOT_RELEASE_PLZ = {
+    "a file added beside the release": [
+      { ...RELEASE, "NOTES.md": "a note\n" },
+      /NOTES\.md \(A\) is not one of release-plz's/,
+    ],
+    "a manifest line that is not a version": [
+      {
+        ...RELEASE,
+        "Cargo.toml": MANIFEST("0.2.0").replace('edition = "2021"', 'edition = "2024"'),
+      },
+      /Cargo\.toml changes more than a version line/,
+    ],
+    "a registry dependency's lock entry re-versioned": [
+      { ...RELEASE, "Cargo.lock": LOCK("0.2.0").replace('"1.0.0"', '"1.0.1"') },
+      /Cargo\.lock line \d+ is a version under \[package\], not this workspace's own package/,
+    ],
+    "a changelog line added below the released entries": [
+      { ...RELEASE, "CHANGELOG.md": `${RELEASE["CHANGELOG.md"]}- slipped in later\n` },
+      /CHANGELOG\.md adds lines other than one new section above its releases/,
+    ],
+  };
+  for (const [what, [files, reason]] of Object.entries(NOT_RELEASE_PLZ)) {
+    it(`runs them for ${what}`, (t) => {
+      const repo = scratch(t);
+      commitAll(repo.work, files, "chore: release v0.2.0");
+      answers(repo.fake, pushRunPassed(repo.base));
+      const result = shortcut(repo);
+      assert.equal(result.stdout, "skip=false\n", result.stderr);
+      assert.match(result.stderr, reason);
+    });
+  }
+
+  it("runs them for a release file deleted", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    git(repo.work, "rm", "--quiet", "CHANGELOG.md");
+    git(repo.work, "commit", "--quiet", "--message", "chore: drop the changelog");
+    answers(repo.fake, pushRunPassed(repo.base));
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /CHANGELOG\.md \(D\) is not one of release-plz's/);
+  });
+
+  it("runs them when the merged pull request is another commit's, or its head had another tree", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    const green = (sha) => ({
+      [`repos/${REPO}/commits/${sha}/check-runs?per_page=100`]: {
+        check_runs: ["test-linux", "test-windows", "test-macos"].map((name) => ({
+          name,
+          conclusion: "success",
+        })),
+      },
+    });
+    answers(repo.fake, {
+      ...noRuns(repo.base),
+      [`repos/${REPO}/commits/${repo.base}/pulls`]: [
+        { number: 9, merge_commit_sha: "a".repeat(40), head: { sha: "b".repeat(40) } },
+        { number: 10, merge_commit_sha: repo.base, head: { sha: "c".repeat(40) } },
+        { number: 11, merge_commit_sha: repo.base, head: {} },
+      ],
+      [`repos/${REPO}/git/commits/${"c".repeat(40)}`]: { tree: { sha: "d".repeat(40) } },
+      ...green("b".repeat(40)),
+      ...green("c".repeat(40)),
+    });
+    const result = shortcut(repo);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.ok(
+      !result.calls.some((call) => call.includes("b".repeat(40))),
+      "it read the checks of a pull request that did not merge the base",
+    );
+  });
+
+  it("runs them when GitHub answers in a shape it does not read", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    answers(repo.fake, {
+      [`repos/${REPO}/actions/runs?head_sha=${repo.base}&status=success&per_page=100`]: {
+        workflow_runs: "not a list",
+      },
+    });
+    const result = shortcut(repo);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /in a shape this does not read/);
+  });
+
+  it("runs them, asking nothing, with no repository to ask", (t) => {
+    const repo = scratch(t);
+    commitAll(repo.work, RELEASE, "chore: release v0.2.0");
+    const result = shortcut(repo, ["--base-ref", "main"]);
+    assert.equal(result.stdout, "skip=false\n", result.stderr);
+    assert.match(result.stderr, /no repository to ask/);
+    assert.deepEqual(result.calls, []);
+  });
+
+  it("runs them when the head does not resolve, or shares no base with the branch", (t) => {
+    const repo = scratch(t);
+    const unresolved = shortcut(repo, ["--repo", REPO, "--head", "no-such-branch"]);
+    assert.equal(unresolved.stdout, "skip=false\n", unresolved.stderr);
+    assert.match(unresolved.stderr, /does not resolve to a commit/);
+    git(repo.work, "checkout", "--quiet", "--orphan", "unrelated");
+    commitAll(repo.work, { "other.txt": "unrelated\n" }, "an unrelated root");
+    const unrelated = shortcut(repo);
+    assert.equal(unrelated.stdout, "skip=false\n", unrelated.stderr);
+    assert.match(unrelated.stderr, /no merge base with origin\/main/);
+  });
+
+  for (const [args, refusal] of [
+    [["--repo"], /--repo needs a value/],
+    [["--bogus", "x"], /unknown argument '--bogus'/],
+    [["--base-ref", "-not-a-branch"], /is not a branch name/],
+    [["--head", "a b"], /is not a revision/],
+  ]) {
+    it(`refuses ${args.join(" ")}`, () => {
+      const result = spawnSync("node", [join(root, "scripts/release-pr-shortcut.mjs"), ...args], {
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 2, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, refusal);
+    });
+  }
 
   it("refuses a repository that is not an owner/name", () => {
     const result = spawnSync(

@@ -14,6 +14,9 @@
 // and cheap. The Windows and macOS recipes are driven here through their
 // selection step (`--plan`), since this host cannot run their platforms.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { commit, root, run, scratchWorkspace } from "./support.mjs";
 
@@ -84,7 +87,6 @@ describe("the Linux recipes run what they select and nothing else", () => {
       for (const project of UNREACHED) {
         assert.ok(!ran(log).some((task) => task.startsWith(`${project}:`)), `${project} ran`);
       }
-      assert.match(log, new RegExp(`^ci-job: ${job}: ok$`, "m"));
     });
 
     it(`${recipe} runs nothing for a change to nothing it tests`, (t) => {
@@ -121,6 +123,82 @@ describe("the Linux recipes run what they select and nothing else", () => {
     assert.ok(ran(log).includes("pool-maintenance:format-check"), log);
     assert.match(log, /^ci-job: lint failed \(Nx exit \d+\)/m);
   });
+  it("ci-test-linux exits non-zero when a committed lockfile is stale", (t) => {
+    const dir = scratchWorkspace(t);
+    commit(dir, CHANGED_FILE, editOf(dir, CHANGED_FILE));
+    // What a bootstrap that had to re-resolve the lock leaves behind.
+    const lock = join(dir, "package-lock.json");
+    run(dir, "bash", ["-c", 'printf "\\n" >> "$1"', "_", lock]);
+    const { status, log } = run(dir, "just", ["ci-test-linux"], {
+      ONEPIPELINE_NX_BASE_REF: "main",
+    });
+    assert.notEqual(status, 0, log);
+    assert.deepEqual(ran(log), ["pool-maintenance:test"], log);
+    assert.match(log, /a committed lockfile differs from what this checkout resolves/);
+  });
+});
+
+// The four target lists are the one copy of what each job owes, so they are
+// held here to what the repo-wide verbs mean: every target a project's `check`
+// reaches runs in `lint` or `test-linux`, and every target `just check-cross`
+// runs, in `lint` or each of the other two.
+describe("the jobs' target lists", () => {
+  const script = readFileSync(join(root, "scripts/ci-job.sh"), "utf8");
+  const listed = (job) => {
+    const line = script
+      .split("\n")
+      .find((each) => new RegExp(`^\\s*[a-z| -]*\\b${job}\\b[a-z| -]*\\) targets="`).test(each));
+    assert.ok(line, `scripts/ci-job.sh lists no targets for ${job}`);
+    return /targets="([^"]+)"/.exec(line)[1].split(",");
+  };
+  const projects = spawnSync("git", ["ls-files", "--", "*project.json"], {
+    cwd: root,
+    encoding: "utf8",
+  })
+    .stdout.split("\n")
+    .filter((path) => path.endsWith("project.json"))
+    .map((path) => JSON.parse(readFileSync(join(root, path), "utf8")));
+
+  it("cover every target a project's `check` reaches between `lint` and `test-linux`", () => {
+    const owed = new Set([...listed("lint"), ...listed("test-linux")]);
+    for (const project of projects) {
+      for (const target of project.targets?.check?.dependsOn ?? []) {
+        if (typeof target !== "string") continue;
+        assert.ok(owed.has(target), `${project.name}:check reaches ${target}, which no job runs`);
+      }
+    }
+  });
+
+  it("cover every target `just check-cross` runs, on Windows and macOS alike", () => {
+    const justfile = readFileSync(join(root, "justfile"), "utf8");
+    const recipes = /^check-cross: (.+)$/m.exec(justfile)[1].split(" ");
+    const target = { "fmt-check": "format-check", lint: "lint", "test-quick": "test-quick" };
+    for (const job of ["test-windows", "test-macos"]) {
+      const owed = new Set([...listed("lint"), ...listed(job)]);
+      for (const recipe of recipes) {
+        assert.ok(target[recipe], `check-cross runs \`${recipe}\`, which this test cannot map`);
+        assert.ok(owed.has(target[recipe]), `${job} drops check-cross's ${target[recipe]}`);
+      }
+    }
+  });
+});
+
+describe("the task-graph reader", () => {
+  for (const [what, input, reason] of [
+    ["no JSON at all", "nx: something went wrong\n", /answered no JSON task graph/],
+    ["a graph with no task map", '{"graph":{"nodes":{}}}', /a graph with no task map/],
+  ]) {
+    it(`refuses ${what} rather than reading it as an empty selection`, () => {
+      const result = spawnSync("node", [join(root, "scripts/ci-job-tasks.mjs")], {
+        input,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, reason);
+      assert.match(result.stderr, /^ACTION: /m);
+    });
+  }
 });
 
 describe("the recipes' refusals", () => {

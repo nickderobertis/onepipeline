@@ -47,37 +47,26 @@ fn workflows() -> BTreeMap<String, Value> {
         .collect()
 }
 
-/// The contexts branch protection requires, as read at plan time. A change to
-/// this list is a governance change, applied by `setup_github_governance.py`
-/// and never by editing this test to match a renamed job.
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the source is
-// GitHub's branch protection, which no offline test can read, and its drift gate
-// is `setup_github_governance.py --verify`, run by governance rather than by this
-// suite. What this list holds is the other side of that contract — that the
-// committed workflows still report every one of these names on a pull request —
-// which only the tree can answer. The visual-docs context is listed because the
-// protection read at plan time requires it, whatever AGENTS.md calls advisory;
-// reconciling the two is that same governance verification's.
-const REQUIRED: &[&str] = &[
-    "gate",
-    "pr-title",
-    "llmlint",
-    "msrv",
-    "deny",
-    "wheel",
-    "cross (macos-latest)",
-    "cross (windows-latest)",
-    "install (ubuntu-latest)",
-    "install (macos-latest)",
-    "install (windows-latest)",
-    "install-documented (ubuntu-latest)",
-    "install-documented (macos-latest)",
-    "install-documented (windows-latest)",
-    "smoke",
-    "release-compat",
-    "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)",
-];
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+/// The contexts branch protection requires, read from `.github/required-contexts.json`,
+/// the tree's one copy of them, which `.github/ci-shape/` reads too. A change to that
+/// list is a governance change, applied by `setup_github_governance.py`, and never an
+/// edit to match a renamed job.
+fn required_contexts() -> Vec<String> {
+    let path = repo_root().join(".github/required-contexts.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    let parsed: Value = serde_json::from_str(&text).expect("required-contexts.json parses");
+    parsed["contexts"]
+        .as_array()
+        .expect("required-contexts.json lists its contexts")
+        .iter()
+        .map(|context| context.as_str().expect("a context is a name").to_owned())
+        .collect()
+}
+
+fn is_required(name: &str) -> bool {
+    required_contexts().iter().any(|context| context == name)
+}
 
 /// The one context reported by a job of a reusable workflow defined in another
 /// repository. At the pinned release below its `report` job renders one leg per
@@ -261,9 +250,9 @@ fn every_required_context_is_reported_on_every_pull_request() {
         }
     }
 
-    for context in REQUIRED.iter().filter(|c| **c != VISUAL_DOCS) {
+    for context in required_contexts().iter().filter(|c| *c != VISUAL_DOCS) {
         let (file, key) = reporters
-            .get(*context)
+            .get(context.as_str())
             .unwrap_or_else(|| panic!("no job reports `{context}` on a pull request"));
         let jobs = &all[file]["jobs"];
         let job = &jobs[key.as_str()];
@@ -279,7 +268,7 @@ fn every_required_context_is_reported_on_every_pull_request() {
             assert!(
                 rendered(&upstream[1], &jobs[upstream[1].as_str()])
                     .iter()
-                    .all(|name| !REQUIRED.contains(&name.as_str())),
+                    .all(|name| !is_required(name)),
                 "`{context}`'s proof reports a required name itself, so it would report twice"
             );
             continue;
@@ -376,7 +365,7 @@ fn no_required_job_waits_on_an_advisory_one() {
         assert!(!job.is_null(), "{file} has no `{key}` job");
         for name in rendered(key, job) {
             assert!(
-                !REQUIRED.contains(&name.as_str()),
+                !is_required(&name),
                 "{file}'s `{key}` reports `{name}`, a required context"
             );
         }
@@ -386,16 +375,13 @@ fn no_required_job_waits_on_an_advisory_one() {
     for (file, parsed) in &all {
         let jobs = parsed["jobs"].as_object().expect("the workflow has jobs");
         for (key, job) in jobs {
-            if rendered(key, job)
-                .iter()
-                .any(|name| REQUIRED.contains(&name.as_str()))
-            {
+            if rendered(key, job).iter().any(|name| is_required(name)) {
                 for upstream in needs(job) {
                     let upstream_names = rendered(&upstream, &parsed["jobs"][upstream.as_str()]);
                     assert!(
                         upstream == "changes"
                             || (carrier_run(job).is_some() && needs(job)[1] == upstream)
-                            || upstream_names.iter().any(|name| REQUIRED.contains(&name.as_str())),
+                            || upstream_names.iter().any(|name| is_required(name)),
                         "{file}'s required `{key}` waits on `{upstream}`, which is not itself required"
                     );
                 }
@@ -1021,7 +1007,7 @@ fn the_windows_leg_is_split_into_shards_that_each_report_and_pass_only_together(
         "two shards report under one name: {names:?}"
     );
     assert!(
-        names.iter().all(|name| !REQUIRED.contains(&name.as_str())),
+        names.iter().all(|name| !is_required(name)),
         "a shard reports a required context itself: {names:?}"
     );
     let steps = cross["steps"].as_array().expect("`cross` has steps");

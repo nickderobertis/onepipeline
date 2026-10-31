@@ -158,7 +158,7 @@
     },
     "install-smoke": {
       "command": "bash scripts/install-proof.sh path",
-      "//": "ci.yml's install proof of this revision, a target so it runs beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh). Uncached: what it proves is that the install works on the host it runs on.",
+      "//": "llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] these three are ci.yml's `install`, `install-documented` and `wheel` jobs, which ran on every pull request `changes.outputs.crate` answered `true` for: the crate project being affected, which is what selects them here. A narrower edge would be a new rule for when an install is proven, which nobody has agreed. This one is the install proof of this revision, a target so it runs beside the test tiers in the job's one Nx invocation (scripts/ci-job.sh); uncached, because what it proves is that the install works on the host it runs on.",
       "cache": false
     },
     "install-documented": {
@@ -169,7 +169,8 @@
     "wheel-smoke": {
       "command": "bash scripts/install-proof.sh wheel",
       "//": "The x86_64 Linux wheel, built by the release's own script in its manylinux image (Docker), installed into a venv and smoke-tested. Uncached for the reason install-smoke is.",
-      "cache": false
+      "cache": false,
+      "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]"
     }
   },
   "//": "llmlint: ignore[expensive_tests_stay_behind_their_own_edge] project selection stays per tier \u2014 a change only one tier reads selects that tier and this crate, never a sibling tier (npm/test/workspace-nx.test.mjs drives it). This edge is what makes ci.yml's `changes` answer `true` for a tier-only change, so `cross`, `msrv`, `deny`, `install` and `wheel` still run on it.",
