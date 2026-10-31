@@ -71,6 +71,11 @@
         "{workspaceRoot}/release/release.py"
       ]
     },
+    "test-launcher": {
+      "command": "just npm-launcher",
+      "//": "The launcher's process-tree journeys alone, for the Windows and macOS test jobs, where `test` never runs and the launcher takes paths Linux cannot reach (`just npm-launcher` says why). Linux runs them inside `test`. Uncached: the engine it builds is the crate's, which this project's inputs do not hash.",
+      "cache": false
+    },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test"]

@@ -35,6 +35,13 @@
     },
     "release-compat": {
       "command": "just _release-compat-run",
+      "//": "After the crate's debug build, which compiles this binary under the same flags, so the journeys find it built rather than compiling it beside the job's other builds.",
+      "dependsOn": [
+        {
+          "projects": ["onepipeline"],
+          "target": "build"
+        }
+      ],
       "inputs": [
         "releaseCompatSource"
       ],

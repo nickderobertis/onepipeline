@@ -140,9 +140,9 @@ rather than a gate, and it skips fork pull requests, so a required context there
 would never report for them. `launcher.yml` is not required either: it runs the
 npm launcher's process-tree journeys on Windows when a change reaches the npm
 project, and requiring it is a branch-protection change only the owner approves.
-The same journeys are **enforced** on macOS and Linux: on macOS as a step of
-`ci.yml`'s Mac lane (the one Mac job a pull request may spend), which needs no
-new context, and on Linux in `just check`.
+The same journeys are **enforced** on macOS and Linux: on macOS in `ci.yml`'s
+`test-macos` (the one Mac job a pull request may spend, through the npm
+project's `test-launcher` target), and on Linux in `just check`.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `install-documented` installs the remote's default branch — README's `cargo

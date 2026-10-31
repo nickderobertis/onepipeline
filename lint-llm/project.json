@@ -1,0 +1,16 @@
+{
+  "name": "onepipeline-lint-llm",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "lint-llm",
+  "tags": ["scope:judge"],
+  "//": "The judged diff lint's own project, holding `lint-llm-diff` and nothing else. That target hashes the whole workspace, and Nx counts a target's inputs when it decides what a change affects, so whichever project owns it is affected by every change: on the crate's own project it reached every Rust tier through the crate's `test`, whatever a pull request touched. Exempt from the uniform target set for that reason (npm/test/workspace-nx.test.mjs): a `test` here would run on every pull request and check nothing.",
+  "targets": {
+    "lint-llm-diff": {
+      "command": "llmlint --diff --diff-base \"$LLMLINT_DIFF_BASE_SHA\"",
+      "options": {
+        "cwd": "."
+      }
+    }
+  }
+}

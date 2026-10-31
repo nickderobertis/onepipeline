@@ -3,8 +3,9 @@ name: npm launcher
 # What the npm-installed `onepipeline` runs as on Windows, where the engine runs
 # under a keeper with the console's interrupts and an orphan's cleanup to get
 # right. Linux runs the same journeys in `just check`, with the npm project's
-# other tests; macOS runs them in `ci.yml`'s Mac lane, which is the one Mac job a
-# pull request may spend (`.github/tests/macos-policy.test.mjs`).
+# other tests; macOS and Windows run them in `ci.yml`'s `test-macos` and
+# `test-windows` (`onepipeline-npm:test-launcher`), `test-macos` being the one Mac
+# job a pull request may spend (`.github/tests/macos-policy.test.mjs`).
 #
 # **Advisory.** No branch protection requires it: making it required is a
 # branch-protection change only the repository owner approves. It runs where
@@ -60,7 +61,9 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

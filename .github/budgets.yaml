@@ -18,8 +18,11 @@ budgets:
     command: [bash, -c, "cd .. && exec node .github/macos-budget.mjs --metric runs-per-change --telemetry .github/.telemetry/macos-policy.json"]
     unit: runs
     direction: max
-    threshold: 2
+    threshold: 3
     description: >-
+      Raised from 2 to 3 for one run: rust-cache-warm.yml's build-only macOS job on the push
+      that merges an ordinary change, which keeps test-macos's Rust cache warm. The user approved
+      that leg on 2026-10-17; it is skipped on the push that merges a release pull request.
       Maximum distinct Mac-spending workflow runs over one ordinary PR push, its base merge,
       optional semantic release PR and merge, release build and downstream smoke triggers.
       Twelve event classes, three diff classes, same-repository/fork ownership and all publish
