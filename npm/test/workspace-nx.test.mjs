@@ -1207,7 +1207,16 @@ describe("the build targets", () => {
       {
         cwd: root,
         encoding: "utf8",
-        env: { ...process.env, ...GATE_DEBUG_BUILD.env, CARGO_TERM_QUIET: "false" },
+        // CI sets `CARGO_TERM_COLOR=always`, which wraps each status word in
+        // escape codes the line matches below would never see past — the
+        // `Compiling` check would pass on anything. Colour does not enter
+        // cargo's fingerprint, so this reads the same tree.
+        env: {
+          ...process.env,
+          ...GATE_DEBUG_BUILD.env,
+          CARGO_TERM_QUIET: "false",
+          CARGO_TERM_COLOR: "never",
+        },
       },
     );
     assert.equal(result.status, 0, result.stderr);
