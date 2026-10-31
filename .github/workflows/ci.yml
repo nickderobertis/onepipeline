@@ -138,6 +138,11 @@ jobs:
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: just engines-current
+      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the judge, the visual-docs gates and the
+      # title lint below repeat the retained `llmlint`, visual-docs.yml and `pr-title`
+      # checks for the transitional window the plan prescribes: those stay, passing,
+      # until branch protection moves to the four jobs and `onepipeline-ci-budgets`
+      # retires them; neither feeds the other.
       # The judged tier, as the `llmlint` job below runs it and for its reasons:
       # pinned harnesses, the fallback installed and credentialled, and a missing
       # credential failing rather than reporting unlinted files as clean.
@@ -221,6 +226,7 @@ jobs:
         uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
       # notignored.yml's comment, for the reason that file gives. A fork's token
       # cannot upsert a comment, so a fork's pull request skips it there and here.
       - name: Comment the suppressions this change adds
