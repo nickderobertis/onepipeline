@@ -235,6 +235,11 @@ describe("the task-graph reader", () => {
       /is not a project:target task/,
     ],
     [
+      "a task id extending its entry's target",
+      '{"tasks":{"tasks":{"a:test-other":{"target":{"project":"a","target":"test"}}}}}',
+      /is not a project:target task/,
+    ],
+    [
       "a task entry naming another task",
       '{"tasks":{"tasks":{"a:test":{"target":{"project":"b","target":"lint"}}}}}',
       /is not a project:target task/,
@@ -260,6 +265,9 @@ describe("the recipes' refusals", () => {
         tasks: {
           "b:test": { target: { project: "b", target: "test" } },
           "a:lint": { target: { project: "a", target: "lint" } },
+          "a:build:production": {
+            target: { project: "a", target: "build", configuration: "production" },
+          },
         },
       },
     };
@@ -268,7 +276,7 @@ describe("the recipes' refusals", () => {
       encoding: "utf8",
     });
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "a:lint b:test");
+    assert.equal(result.stdout, "a:build:production a:lint b:test");
   });
 
   it("refuses a job ci.yml does not have", () => {

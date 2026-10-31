@@ -36,7 +36,10 @@ for (const [id, task] of Object.entries(tasks)) {
     !ID.test(id) ||
     typeof target?.project !== "string" ||
     typeof target?.target !== "string" ||
-    !id.startsWith(`${target.project}:${target.target}`)
+    id !==
+      [target.project, target.target, target.configuration]
+        .filter((part) => part !== undefined)
+        .join(":")
   ) {
     process.stderr.write(
       `Nx answered a task map whose entry ${JSON.stringify(id)} is not a project:target task\n` +

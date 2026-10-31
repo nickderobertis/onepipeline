@@ -32,8 +32,17 @@ cd "$ROOT" || {
   exit 1
 }
 
+# A path cargo reads, which on Windows is cargo's own spelling of it: Git Bash
+# rewrites a POSIX path it passes as an argument but not one it passes through
+# the environment, and native cargo reads `/d/a/...` as `\d\a\...` on the
+# current drive. Everywhere else the path is already cargo's.
+native() {
+  if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 export RUSTFLAGS="-D warnings"
-export CARGO_TARGET_DIR="$ROOT/target"
+CARGO_TARGET_DIR="$(native "$ROOT/target")"
+export CARGO_TARGET_DIR
 platform="$(uname -s)/$(uname -m)"
 
 # The root an install writes into, emptied first so the smoke can only find what
@@ -56,7 +65,7 @@ case "${1:-}" in
     # On a pull request the change is not on the registry yet, so `--path .` is
     # the only way to install *this* revision; it is the code path of the
     # documented `cargo install onepipeline`, less the registry fetch.
-    cargo install --path . --locked --quiet --root "$root"
+    cargo install --path . --locked --quiet --root "$(native "$root")"
     PATH="$root/bin:$PATH" bash scripts/smoke-published.sh --label "cargo install on $platform"
     # The `host-view-time` budget times the binary users run, and this is the
     # build of it from this revision, so it is measured against that very binary
@@ -88,7 +97,7 @@ case "${1:-}" in
     echo "install-proof: running README.md's command: ${argv[*]}"
     # The root is cargo's environment rather than an added argument, so the argv
     # run is exactly the README's.
-    CARGO_INSTALL_ROOT="$root" "${argv[@]}"
+    CARGO_INSTALL_ROOT="$(native "$root")" "${argv[@]}"
     # A `--git` install with no revision resolves the remote's default branch, so
     # the smoke is the installed revision's own copy of the assertions rather
     # than this checkout's: they assert the binary's whole command list, which a
