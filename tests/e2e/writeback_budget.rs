@@ -406,8 +406,9 @@ fn an_update_held_past_a_tiny_budget_is_cancelled_and_the_refusal_names_the_arit
 /// A creating copy held past what a deliberately tiny budget allows is cancelled, and the
 /// refusal names its arithmetic — the floor, and one second for each of the two items it
 /// creates, which is what makes a copy's deadline differ from an update's. Nothing the
-/// cancelled copy was holding lands after the refusal, and once the store answers again the
-/// next attempt creates both items.
+/// cancelled copy was holding lands after the refusal. The cancelled copy's intent to create
+/// stands under its lease, so an attempt before that lease ends is told the create is another
+/// copy's and is retried, and the attempt after it creates both items.
 #[test]
 fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it() {
     let floor = number("floor_seconds");
@@ -487,6 +488,19 @@ fn a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_cre
             board_status(world, &project, &format!("added{nth}")).as_deref() == Some("queued")
         })
     });
+    let records: Vec<Value> =
+        std::fs::read_to_string(world.run_file(run, onepipeline::cli::WRITEBACK_PROJECTIONS_FILE))
+            .expect("projection records")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect();
+    assert!(
+        records
+            .iter()
+            .any(|record| record["kind"] == "create-in-progress" && record["class"] == "transient"),
+        "an attempt inside the cancelled copy's lease was told the create is held, and retried: \
+         {records:#?}"
+    );
     world.release("work.go");
     world.until("the run to settle", |world| {
         world.run_file(run, "result.json").is_file()

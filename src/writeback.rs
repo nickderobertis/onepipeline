@@ -542,13 +542,18 @@ impl Classified {
     }
 
     /// An engine error, classed by the source error it wraps — or, where it wraps none, as
-    /// the failure the engine decided on its own, which no retry changes.
+    /// the failure the engine decided on its own, which no retry changes. A create another
+    /// attempt holds is the one decided failure a later retry does change: the store's own next
+    /// step is to copy again once that attempt's lease has run out, which [`engine_wait`] waits
+    /// for.
     fn of_engine(error: &EngineError) -> Self {
         let (kind, cause) = cause_of(error);
-        Self {
-            class: classify(cause).into(),
-            kind,
-        }
+        let class = if matches!(error, EngineError::CreateInProgress { .. }) {
+            FailureClass::Transient
+        } else {
+            classify(cause).into()
+        };
+        Self { class, kind }
     }
 
     /// A configuration the store will not run on, which no retry changes.
@@ -663,9 +668,11 @@ fn cause_of(error: &EngineError) -> (String, Option<&SourceError>) {
         EngineError::DestinationStatus { .. } => decided("destination-status"),
         EngineError::CreationOwner { .. } => decided("creation-owner"),
         // llmlint: ignore-end[changed_behavior_has_e2e]
-        // A create another attempt holds under a live lease, or settled, and one whose key more
-        // than one destination item carries: the store wrote nothing more for either, and the
-        // words are its own kinds, which `writeback::tests` holds.
+        // A create another attempt holds under a live lease, or settled — a write-back's copy
+        // cancelled at its deadline leaves its lease standing — and one whose key more than one
+        // destination item carries: the store wrote nothing more for either, and the words are
+        // its own kinds, which `writeback::tests` holds. [`Classified::of_engine`] retries the
+        // first once its lease ends (`writeback_budget::a_creating_copy_held_past_a_tiny_budget_is_cancelled_and_the_next_attempt_creates_it`).
         EngineError::CreateInProgress { .. } => decided("create-in-progress"),
         EngineError::CreateDuplicated { .. } => decided("create-duplicated"),
         EngineError::NotWritable { .. }
@@ -2366,6 +2373,20 @@ fn retry_after(failures: u32) -> Duration {
 
 /// The wait the source behind an engine failure asked for, where it named one.
 pub(crate) fn engine_wait(error: &EngineError) -> Option<Duration> {
+    if let EngineError::CreateInProgress {
+        by: onetaskgraph_core::CreateHolder::Lease { until },
+        ..
+    } = error
+    {
+        // Asked sooner, the store answers the same: the other attempt still holds the create.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+            });
+        let left = until.timestamp_millis().saturating_sub(now);
+        return Some(Duration::from_millis(u64::try_from(left).unwrap_or(0)));
+    }
     cause_of(error).1.and_then(asked_to_wait)
 }
 
@@ -3829,6 +3850,35 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
     })
 }
 
+/// Write one lineage's shadow task document at `path`, keeping the store's record of a create
+/// in flight from the document it replaces.
+///
+/// A create an earlier attempt began and never saw answered is recorded on this shadow, and
+/// only there (`onetaskgraph.creating`): the store finds the item that create made by the key it
+/// records. So every rewrite of the shadow keeps it, and the retried create reaches that item
+/// rather than filing a second; the store removes it in the write that links the item.
+fn task_shadow(path: &Path, mut front: Value, content: &str) -> Result<(), String> {
+    if let Some(intent) = shadow_intent(path) {
+        front["metadata"][MetadataKey::CREATING_KEY] = intent;
+    }
+    document(path, &front, content)
+}
+
+/// The store's record, on the shadow document at `path`, of a create in flight from it
+/// (`onetaskgraph.creating`), when the document is there and holds one. A document that is not
+/// there, or that cannot be read as a shadow, records none: [`shadow_origin`] says why on its
+/// read of the same document, and the rewrite then writes exactly what it did before.
+fn shadow_intent(path: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let (front, _) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
+    let mut front = crate::yaml::from_str::<Value>(front).ok()?;
+    front
+        .get_mut("metadata")?
+        .as_object_mut()?
+        .remove(MetadataKey::CREATING_KEY)
+        .filter(|intent| !intent.is_null())
+}
+
 /// One lineage as the snapshot alone renders it: the half of its shadow task the landed
 /// baseline keeps, and the body a targeted update sends where its digest moved.
 struct Rendering {
@@ -4349,7 +4399,7 @@ fn write_shadow(
     for root in created {
         let (front, content) = task_document(snapshot, &lineages, root, ends)?;
         let path = tasks.join(format!("{}.md", task_file(root)));
-        document(&path, &front, &content)?;
+        task_shadow(&path, front, &content)?;
         written.insert(path);
     }
     // Only what this copy creates is a member: a document anything earlier left here — an
@@ -4568,9 +4618,9 @@ fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String
     let lineages = snapshot.lineages();
     for root in lineages.roots() {
         let (front, content) = task_document(snapshot, &lineages, root, &ends)?;
-        document(
+        task_shadow(
             &tasks.join(format!("{}.md", task_file(root))),
-            &front,
+            front,
             &content,
         )?;
     }
@@ -6643,12 +6693,56 @@ mod tests {
             let classified = Classified::of_engine(failure);
             let store = onetaskgraph_core::Failure::from(failure);
             assert_eq!(classified.kind, store.kind(), "{failure:?}");
+            // The one deliberate difference: a create another attempt holds is retried, as the
+            // store's own next step says, once that attempt's lease has run out.
+            let expected = if matches!(failure, EngineError::CreateInProgress { .. }) {
+                FailureClass::Transient
+            } else {
+                store.class().into()
+            };
             assert_eq!(
-                classified.class,
-                store.class().into(),
+                classified.class, expected,
                 "{failure:?} is classed otherwise than the store classes it"
             );
         }
+    }
+
+    /// A create another attempt holds under a live lease is asked again once the lease ends, one
+    /// whose lease has already ended at once, and one another attempt released on the schedule.
+    #[test]
+    fn a_create_held_under_a_lease_waits_for_the_lease_to_end() {
+        let item = || {
+            "onepipeline-writeback:plan/task"
+                .parse::<GlobalId>()
+                .expect("an id")
+        };
+        let held = |until: &str| EngineError::CreateInProgress {
+            item: item(),
+            by: onetaskgraph_core::CreateHolder::Lease {
+                until: serde_json::from_value(json!(until)).expect("an RFC 3339 instant"),
+            },
+        };
+        let wait =
+            super::engine_wait(&held("2999-01-01T00:00:00Z")).expect("a live lease is waited for");
+        assert!(wait > Duration::from_secs(365 * 24 * 3600), "{wait:?}");
+        assert_eq!(
+            super::engine_wait(&held("2000-01-01T00:00:00Z")),
+            Some(Duration::ZERO),
+            "a lease already ended is waited for no longer"
+        );
+        let released = EngineError::CreateInProgress {
+            item: item(),
+            by: onetaskgraph_core::CreateHolder::Released,
+        };
+        assert_eq!(super::engine_wait(&released), None);
+        assert_eq!(
+            Classified::of_engine(&released).class,
+            FailureClass::Transient
+        );
+        assert_eq!(
+            Classified::of_engine(&held("2999-01-01T00:00:00Z")).class,
+            FailureClass::Transient
+        );
     }
 
     /// A build thread that ends without sending — which only a panic does — is its own
@@ -7748,6 +7842,45 @@ mod tests {
             .join("tasks")
             .join(super::project_file(&fixture.snapshot.project))
             .join(format!("{}.md", super::task_file(node)))
+    }
+
+    /// A create the store began from a shadow and never saw answered is recorded on that
+    /// shadow alone, so both rewrites of it — the creating copy's and the one before a targeted
+    /// update — keep the record, and a shadow that holds none is written as it always was.
+    #[test]
+    fn a_shadow_rewrite_keeps_the_store_s_create_in_flight() {
+        let fixture = Fixture::new("create-in-flight");
+        let created = std::collections::BTreeSet::from(["design".to_owned()]);
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
+        let path = shadow_task(&fixture, "design");
+        let (plain, _) = written(&path);
+        assert!(
+            plain["metadata"].get(MetadataKey::CREATING_KEY).is_none(),
+            "a shadow no create began from records none: {plain:#}"
+        );
+        let intent = json!({"board": {
+            "key": "5127a680-f375-53c3-9348-5aba538809b5", "at": "2026-10-31T17:09:38Z",
+            "attempt": "d83d14dc-4bb4-4611-bf60-1667a5162a23",
+            "lease_until": "2026-10-31T17:09:38Z",
+        }});
+        let (mut front, body) = written(&path);
+        front["metadata"][MetadataKey::CREATING_KEY] = intent.clone();
+        super::document(&path, &front, &body).expect("the store's intent is recorded");
+
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is rewritten");
+        let (rewritten, _) = written(&path);
+        assert_eq!(rewritten["metadata"][MetadataKey::CREATING_KEY], intent);
+        let mut expected = plain.clone();
+        expected["metadata"][MetadataKey::CREATING_KEY] = intent.clone();
+        assert_eq!(rewritten, expected, "nothing else of the shadow changes");
+
+        let baseline = super::Baseline {
+            path: fixture.dir.join("landed.json"),
+            landed: super::LandedBaseline::empty(&fixture.snapshot.project),
+        };
+        super::refresh_shadow(&fixture.snapshot, &baseline).expect("the shadow is refreshed");
+        let (refreshed, _) = written(&path);
+        assert_eq!(refreshed["metadata"][MetadataKey::CREATING_KEY], intent);
     }
 
     /// The image-carrying step's rewrite of a created task's shadow document — `local-md`'s

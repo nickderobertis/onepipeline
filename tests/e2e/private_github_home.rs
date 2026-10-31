@@ -71,6 +71,27 @@ impl GitHub {
         format!("{}/board/{number}/graphql", self.url)
     }
 
+    /// Have the next `createIssue` whose title contains `title` run and then go unanswered, as
+    /// `github_world.py`'s `/drop-create` does.
+    pub(crate) fn drop_create(&self, title: &str) {
+        use std::io::{Read, Write};
+        let address = self.url.strip_prefix("http://").expect("a loopback URL");
+        let mut socket = std::net::TcpStream::connect(address).expect("the loopback listens");
+        let body = json!({ "title": title }).to_string();
+        write!(
+            socket,
+            "POST /drop-create HTTP/1.0\r\nHost: {address}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("the drop request");
+        let mut response = String::new();
+        socket
+            .read_to_string(&mut response)
+            .expect("the drop answer");
+        assert!(response.starts_with("HTTP/1.0 200 "), "{response}");
+    }
+
     /// The whole model and every request it was sent.
     pub(crate) fn state(&self) -> Value {
         use std::io::{Read, Write};
