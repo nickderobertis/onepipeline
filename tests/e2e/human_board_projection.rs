@@ -229,15 +229,20 @@ fn on_board(state: &Value, number: u64) -> Vec<String> {
 
 /// The one open item plan `name`'s run raised, read from the host's human-item store.
 fn item_of(world: &World, launch: &std::path::Path, name: &str) -> Value {
+    item_of_key(world, launch, &format!("run:{name}#approve"))
+}
+
+/// The one item raised under `dedup_key`, read from the host's human-item store.
+fn item_of_key(world: &World, launch: &std::path::Path, dedup_key: &str) -> Value {
     let list = from_the_launch_directory(world, launch, &["human-items", "list", "--json"]);
     let listed = world.run_on(list, "human-items list");
     listed.exited(0).err_lacks("its projection into");
     let all: Vec<Value> = serde_json::from_str(&listed.stdout).expect("a JSON listing");
     let mine: Vec<&Value> = all
         .iter()
-        .filter(|view| view["item"]["dedup_key"] == format!("run:{name}#approve"))
+        .filter(|view| view["item"]["dedup_key"] == dedup_key)
         .collect();
-    assert_eq!(mine.len(), 1, "run {name} raised one item: {all:#?}");
+    assert_eq!(mine.len(), 1, "one item is raised as {dedup_key}: {all:#?}");
     mine[0]["item"].clone()
 }
 
@@ -528,6 +533,75 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
             "[plans:private-plan](https://github.com/{PLANS_REPOSITORY}/issues/{plan_number})"
         )),
         "{issue:#}"
+    );
+    let recovered_id = id.clone();
+
+    // The record of what was projected is lost: completing the recovered item rebuilds its
+    // content — its plan's link and repositories read again — and the store's intent answers
+    // the task it filed, closing it rather than filing a second.
+    std::fs::remove_file(world.runs.join("human-items/projected.json"))
+        .expect("the projection record");
+    let recovered_item = item_of_key(&world, &launch, "recovered");
+    let complete = from_the_launch_directory(
+        &world,
+        &launch,
+        &[
+            "human-items",
+            "complete",
+            recovered_item["id"].as_str().unwrap(),
+        ],
+    );
+    world
+        .run_on(complete, "complete the recovered item")
+        .exited(0)
+        .err_lacks("its projection into");
+    let state = github.state();
+    assert_eq!(
+        state["issues"][&recovered_id]["state"], "CLOSED",
+        "{:#}",
+        state["issues"][&recovered_id]
+    );
+    assert_eq!(
+        filed_on(&state).len(),
+        filed_count + 1,
+        "{:#}",
+        state["issues"]
+    );
+
+    // An owner plan that is no qualified id is refused before anything is read or filed, and
+    // the item is held as recorded.
+    std::fs::write(
+        &raised,
+        json!({
+            "schema_version": 1, "dedup_key": "unqualified", "kind": "task",
+            "title": "Decide unqualified", "body": "What it needs from a person.",
+            "priority": "high",
+            "owner": {"session": "mgr", "run": null, "plan": "no-source"},
+            "block": {"scope": "nothing"}, "approval": null,
+        })
+        .to_string(),
+    )
+    .expect("the raised item");
+    raise(true)
+        .exited(0)
+        .err_has("its plan no-source is not one to read");
+    let held = item_of_key(&world, &launch, "unqualified");
+    assert_eq!(held["state"], "open", "{held:#}");
+    assert!(held["tracker"].is_null(), "{held:#}");
+    let state = github.state();
+    assert_eq!(
+        filed_on(&state).len(),
+        filed_count + 1,
+        "{:#}",
+        state["issues"]
+    );
+    assert!(
+        linear
+            .issues()
+            .iter()
+            .all(|(_, title, _)| title != "Decide unqualified"),
+        "{:#?}",
+        linear.issues()
     );
 }
 
