@@ -178,4 +178,40 @@ describe("the warm build's refusals", () => {
     assert.equal(status, 2, log);
     assert.match(log, /takes exactly one argument, the job family, not 2/);
   });
+
+  it("refuses a doubles build it does not have", () => {
+    const { status, log } = run(root, "just", ["_e2e-doubles-build", "release"]);
+    assert.equal(status, 2, log);
+    assert.match(log, /name the build: instrumented or plain, not 'release'/);
+  });
+});
+
+describe("the warm build's test doubles", () => {
+  // What the harness asks cargo for, read out of tests/e2e/harness.rs: every
+  // `build(&[...])` selection, so the recipe the warm build runs cannot build
+  // other doubles than the suite does and leave main's cache without them.
+  const harness = readFileSync(join(root, "tests/e2e/harness.rs"), "utf8");
+  const asked = [...harness.matchAll(/\bbuild\(&\[([^\]]*)\]\)/g)]
+    .map((m) => [...m[1].matchAll(/"([^"]+)"/g)].map((arg) => arg[1]).join(" "))
+    .sort();
+  const justfile = readFileSync(join(root, "justfile"), "utf8");
+  const recipe = justfile.split("\n_e2e-doubles-build mode:\n")[1]?.split("\n\n")[0] ?? "";
+
+  it("are every selection the e2e harness builds, and no other", () => {
+    assert.equal(asked.length, 4, harness.match(/\bbuild\(&\[[^\]]*\]\)/g)?.join("\n"));
+    const built = [...recipe.matchAll(/^\s+"(--package [^"]+)"/gm)].map((m) => m[1]).sort();
+    assert.deepEqual(built, asked);
+    assert.match(recipe, /cargo build --offline \$selection --target-dir "\$target"/);
+  });
+
+  it("are built by both families of the warm build", () => {
+    const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
+    for (const [family, mode] of [
+      ["linux", "instrumented"],
+      ["cross", "plain"],
+    ]) {
+      const arm = warm.split(`\n  ${family})\n`)[1]?.split(";;")[0] ?? "";
+      assert.match(arm, new RegExp(`^    just _e2e-doubles-build ${mode}$`, "m"), family);
+    }
+  });
 });

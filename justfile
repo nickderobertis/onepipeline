@@ -504,6 +504,27 @@ _pooled_slot-test-quick: (_tier-test-quick pooled-slot-tier)
 
 _note-test-quick: (_tier-test-quick note-tier)
 
+# The doubles the e2e harness compiles when a test first needs them
+# (tests/e2e/harness.rs `build`), with its cargo arguments into the target
+# directory the suite runs from: `instrumented` under cargo-llvm-cov's environment
+# into its tree, as `test-linux`'s coverage tiers run, or `plain` into `target`, as
+# the cross-platform `test-quick` tiers do. `scripts/warm-rust-cache.sh` builds
+# them so main's saved cache carries them, and a pull request's test-time build is
+# a freshness check rather than a compile inside whichever journey asks first.
+_e2e-doubles-build mode:
+    @case "$1" in \
+      instrumented) eval "$(RUSTFLAGS='-D warnings' cargo llvm-cov show-env --export-prefix)"; target="{{llvm-cov-target-dir}}" ;; \
+      plain) target="{{justfile_directory()}}/target" ;; \
+      *) echo "_e2e-doubles-build: name the build: instrumented or plain, not '$1'" >&2; exit 2 ;; \
+    esac; \
+    for selection in \
+      "--package onepipeline-testfakes" \
+      "--package oneagentgraph --bin oneagentgraph --locked" \
+      "--package oneharness --bin oneharness --locked" \
+      "--package onevcs --bin onevcs --locked"; do \
+      cargo build --offline $selection --target-dir "$target"; \
+    done
+
 # The uninstrumented build every project's `test-quick` runs, archived once,
 # ahead of them all (the `onepipeline:test-quick-archive` target).
 _crate-test-quick-archive:
