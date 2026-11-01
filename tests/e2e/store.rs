@@ -4752,6 +4752,39 @@ fn assert_diagram(world: &World, project: &str, node: &str) {
         .contains_key("onepipeline.assets_from"));
 }
 
+/// Whether `node`'s task is on the board holding its images. The store writes a task's file
+/// before its asset directory, so a task present without its images is one still landing.
+fn holds_its_images(world: &World, project: &str, node: &str) -> bool {
+    let Some(task) = world
+        .store_tasks(project)
+        .into_iter()
+        .find(|t| t["item"]["metadata"]["onepipeline.id"] == node)
+    else {
+        return false;
+    };
+    let id: onetaskgraph_core::GlobalId = task["id"].as_str().unwrap().parse().unwrap();
+    !world
+        .store_call(|engine| async move { engine.task_assets(&id).await.unwrap() })
+        .is_empty()
+}
+
+/// A task whose file has landed and whose images have not — the gap a slow filesystem holds
+/// open on Windows — is not yet on the board holding them; once its images land, it is.
+#[test]
+fn a_task_whose_images_are_still_landing_does_not_hold_them_yet() {
+    let run = "assets-landing";
+    let world = World::new(run);
+    let mut drawn = agent("drawn", &[]);
+    drawn["task"] = json!(format!(
+        "{}\n\n![flow](./diagram.png)",
+        drawn["task"].as_str().unwrap()
+    ));
+    let project = world.plan(run, &plan_of(run, vec![drawn]));
+    assert!(!holds_its_images(&world, &project, "drawn"));
+    hold_diagram(&world.store(), &format!("{}/000-drawn", project_id(run)));
+    assert!(holds_its_images(&world, &project, "drawn"));
+}
+
 /// Adding a member never reads or writes the destination project a person edited.
 #[test]
 fn a_live_add_leaves_the_edited_board_project_untouched() {
@@ -5269,10 +5302,7 @@ fn an_authoring_task_lost_after_compilation_refuses_and_recovers_after_repair() 
     std::fs::rename(saved, path).unwrap();
     noted(&world, run, "drawn", "the authoring task is readable again");
     world.until_store("the repaired author image to reach the board", |world| {
-        world
-            .store_tasks(&project)
-            .iter()
-            .any(|task| task["item"]["metadata"]["onepipeline.id"] == "drawn")
+        holds_its_images(world, &project, "drawn")
     });
     assert_diagram(&world, &project, "drawn");
     world.release("work.go");
