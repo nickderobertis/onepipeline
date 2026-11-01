@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::harness::World;
-use crate::linear_writeback::{from_the_launch_directory, projection_records};
+use crate::linear_writeback::{
+    from_the_launch_directory, projection_completed_after, projection_records,
+};
 use crate::private_github_home::{described, metadata_of, GitHub};
 
 /// The repository the board files into.
@@ -232,7 +234,20 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         metadata.get("onetaskgraph.creating").is_none(),
         "the shadow holds no create in flight: {metadata:#}"
     );
+
+    // A later attempt that updates only another lineage rewrites every shadow first, and the
+    // shadow still links that issue after it.
+    let before = projection_records(&world, name).len();
     world.release("anchor.go");
+    world.until("the anchor's own update to land", |world| {
+        projection_completed_after(world, name, before, "anchor")
+    });
+    let after = shadow_metadata(&shadow_of(&world, name, ADDED));
+    assert_eq!(
+        after["onetaskgraph.copies"]["board"],
+        json!(format!("board:{issue_id}")),
+        "the shadow links the one issue after a later attempt: {after:#}"
+    );
 }
 
 /// A shadow document's origin is the one the write-back records whichever separator the host's
