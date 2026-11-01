@@ -1,5 +1,5 @@
-// What ci.yml's four jobs promise, read off the workflow files and nothing else
-// (this target's inputs are `.github/` alone):
+// What ci.yml's four jobs promise, read off the workflow files and the
+// screencomp.toml the visual-docs lane is resolved from (this target's inputs):
 //
 // - `lint`, `test-linux`, `test-windows` and `test-macos`, by those ids, unnamed,
 //   on the runners their names say, each bounded at its ruled timeout, each
@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { runGraph } from "../workflow-graph.mjs";
 
 const github = join(dirname(fileURLToPath(import.meta.url)), "..");
 const workflows = Object.fromEntries(
@@ -51,9 +52,18 @@ const TESTS = ["test-linux", "test-windows", "test-macos"];
 // (`required-contexts.json`, which tests/ci_workflows.rs reads too).
 const REQUIRED = JSON.parse(readFileSync(join(github, "required-contexts.json"), "utf8")).contexts;
 // The one lane visual-docs.yml's reusable workflow renders for this repository,
-// `report (<arch>, <current>, <verify>, <title>)`: what `lint`'s composite steps
-// judge must be what that workflow judges on a push to main.
-const VISUAL_DOCS_LANE = "report (x86_64, shots/current, shots/verify, Visual docs)";
+// `report (<arch>, <current>, <verify>, <title>)`, resolved by the workflow-graph
+// interpreter from the pinned reusable workflow's own matrix and screencomp.toml:
+// what `lint`'s composite steps judge must be what that workflow judges on a push
+// to main.
+const lanes = runGraph(workflows["visual-docs.yml"], {
+  eventName: "push",
+  ref: "refs/heads/main",
+  head: "0".repeat(40),
+  event: { head_commit: { message: "feat: a change" } },
+}).filter((row) => row.job === "visual-docs / report");
+assert.equal(lanes.length, 1, "visual-docs.yml renders other than one report lane");
+const VISUAL_DOCS_LANE = lanes[0].name;
 const REUSABLE_VISUAL_DOCS = "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml";
 const COMPOSITES = [
   "nickderobertis/screencomp@",

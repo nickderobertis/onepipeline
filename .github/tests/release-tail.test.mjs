@@ -725,6 +725,27 @@ process.stdout.write(text);
       kind,
     );
   }
+  // A sidecar naming anything but a REST path of this repository is refused before gh is asked,
+  // in a copy of the script and its recordings so the committed ones are never touched.
+  const copy = join(dir, "copy");
+  mkdirSync(join(copy, "recordings"), { recursive: true });
+  copyFileSync(
+    fileURLToPath(new URL("./fixtures/release-tail/reconcile.mjs", import.meta.url)),
+    join(copy, "reconcile.mjs"),
+  );
+  for (const name of readdirSync(FIXTURES))
+    copyFileSync(new URL(name, FIXTURES), join(copy, "recordings", name));
+  const sidecar = join(copy, "recordings", "runs-at-release-commit.http.source.json");
+  for (const path of ["repos/someone/else/actions/runs", "--hostname=example.com", ""]) {
+    writeFileSync(sidecar, JSON.stringify({ ...JSON.parse(readFileSync(sidecar, "utf8")), path }));
+    const refused = spawnSync(process.execPath, [join(copy, "reconcile.mjs")], {
+      env: { ...process.env, PATH: `${join(dir, "bin")}:${process.env.PATH}`, ANSWER: "same" },
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    assert.equal(refused.status, 2, `${path}: ${refused.stderr}`);
+    assert.match(refused.stderr, /not a REST path of this repository/, path);
+  }
   for (const [kind, says] of [
     ["none", /holds no response/],
     ["no-separator", /holds no response/],

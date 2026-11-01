@@ -14,6 +14,9 @@ import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 
 const RECORDINGS = new URL("./recordings/", import.meta.url);
+// The one shape a recorded path takes: a REST path of this repository and its query, so a
+// sidecar can never send gh anywhere else or hand it an option.
+const PATH = /^repos\/nickderobertis\/onepipeline\/[A-Za-z0-9_.\/-]+(\?[A-Za-z0-9_.=&-]+)?$/;
 const IGNORED_HEADERS = /^(date|etag|last-modified|x-ratelimit-.*|x-github-request-id)$/;
 const IGNORED_FIELDS = new Set(["download_count", "updated_at"]);
 const INVALID_TOKEN = "ghp_invalidreplaytoken000000000000000000000";
@@ -73,6 +76,8 @@ try {
   for (const name of names) {
     const recorded = parse(readFileSync(new URL(name, RECORDINGS), "utf8"), name);
     const { path } = JSON.parse(readFileSync(new URL(`${name}.source.json`, RECORDINGS), "utf8"));
+    if (typeof path !== "string" || !PATH.test(path))
+      throw Error(`${name}.source.json names ${JSON.stringify(path)}, not a REST path of this repository`);
     const fetched = fetch(path, recorded.status !== 200);
     const found = [
       ...(recorded.status === fetched.status

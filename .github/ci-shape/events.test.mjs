@@ -29,7 +29,6 @@ const load = () =>
   );
 
 const FOUR = ["lint", "test-linux", "test-macos", "test-windows"];
-// Every workflow, and the events each one is started by.
 const TRIGGERS = {
   "ci.yml": ["pull_request"],
   "engine-currency.yml": ["workflow_dispatch"],
@@ -154,7 +153,7 @@ export function eventProblems(all) {
 }
 
 describe("the events each workflow runs on", () => {
-  it("start exactly the four on a pull request's push and release-plz alone on the release commit", () => {
+  it("start exactly the four on a pull request's push, and release-plz and the Linux and Windows cache warmers on the release commit", () => {
     assert.deepEqual(eventProblems(load()), []);
   });
 

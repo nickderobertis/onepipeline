@@ -32,7 +32,7 @@ const scratchRoot = mkdtempSync(
 after(() => rmSync(scratchRoot, { recursive: true, force: true }));
 let trees = 0;
 
-function tree() {
+function tree({ tools = true } = {}) {
   const dir = join(scratchRoot, String(trees++));
   mkdirSync(join(dir, "scripts"), { recursive: true });
   for (const file of [
@@ -45,7 +45,7 @@ function tree() {
     copyFileSync(join(root, file), join(dir, file));
   symlinkSync(join(root, "node_modules"), join(dir, "node_modules"), "dir");
   mkdirSync(join(dir, "target"));
-  symlinkSync(join(root, "target", "tools"), join(dir, "target", "tools"), "dir");
+  if (tools) symlinkSync(join(root, "target", "tools"), join(dir, "target", "tools"), "dir");
   return dir;
 }
 const recordPath = (dir) => join(dir, ".gate-time.json");
@@ -161,6 +161,15 @@ test("a recorded gate over the threshold warns naming the budget and still passe
   assert.equal(ran.status, 0, ran.out);
   assert.match(ran.out, /budget onepipeline-gate-time: actual 2400 seconds.* over/);
   assert.match(ran.out, WARNING);
+});
+
+test("a gate with no pinned checker installed fails, naming how to install it", () => {
+  const dir = tree({ tools: false });
+  seed(dir, 100);
+  const ran = gate(dir, "--check");
+  assert.equal(ran.status, 3, ran.out);
+  assert.match(ran.out, /the repository-pinned onebudgetspec is missing.*run `just bootstrap`/);
+  assert.doesNotMatch(ran.out, /budget onepipeline-gate-time/);
 });
 
 test("a missing record fails the gate", () => {

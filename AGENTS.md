@@ -128,51 +128,34 @@ job is added or renamed** — GitHub holds the required set, nothing reconciles 
 against the workflow, and a job nobody required is advisory, which auto-merge
 lands straight past.
 
-`ci.yml`'s four jobs are the whole of that set, and the only jobs a pull
-request's push runs: every other workflow starts on no `opened`, `synchronize`
-or `reopened` event (`.github/ci-shape/events.test.mjs` holds it). What used to
-be workflows of their own are steps of `lint`: the engine-currency check, the
-judged lint, the PR-title lint, the suppressions comment, and the visual docs'
-capture, drift gate, sticky comment and preview. The engine-currency step is
-advisory (`continue-on-error`): what it asks is whether the registry has moved
-past this lock, so its answer changes without this tree changing and a release
-nobody here made must not block an unrelated merge. Red there is closed by one
-`cargo update -p <spec>` on any branch. `engine-currency.yml` and `launcher.yml`
-remain, run by hand alone (`workflow_dispatch`): the first asks the same
-question, and the second re-runs the npm launcher's process-tree journeys on
-Windows, which `test-windows` and `test-macos` already run on every pull request
-the change reaches (the npm project's `test-launcher` target), as `just check`
-does on Linux. `visual-docs.yml` is **not** required: it runs when a pull request
-closes (deleting its preview), on a push to `main` (publishing the canonical
-gallery, skipped on the release commit), on its monthly schedule (pruning the
-gallery's history) and by hand. Local capture and review are manual; no
-screenshot step is reachable from `check` or from `gate`.
+`ci.yml`'s four jobs are the whole of that set and the only jobs a pull
+request's push runs, because every job slot is one of the 20 the account shares
+(`.github/ci-shape/events.test.mjs` holds it): a check another workflow used to
+run becomes a step of one of the four. The engine-currency step stays advisory —
+its answer moves when the registry does, not when this tree does, so a release
+nobody here made must not block an unrelated merge; red there is closed by one
+`cargo update -p <spec>` on any branch. `visual-docs.yml` is **not** required:
+a stale gallery is a thing to refresh, not a reason to hold a correct change out
+of `main`.
 
 **Eight budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
-telemetry the run already produced and never measured afresh:
+telemetry the run already produced, never measured afresh:
 
-- `onepipeline-ci-check-time` (longest PR check), `onepipeline-cd-job-time`
-  (longest CD job, 1800 s), `onepipeline-release-cycle-time` (a PR's checks plus
-  its merge to release, 5400 s), `onepipeline-ci-job-count` (jobs one PR's last
-  commit runs, 4), `onepipeline-cd-job-count` (jobs one release's CD runs, 6),
-  `onepipeline-release-read-requests` (6) and `onepipeline-pr-read-requests` (2)
-  carry the label `release-tail`. They are checked **after the release, reporting
-  only**: the last step of `release.yml`'s `publish` runs
-  `onebudgetspec check budgets.yaml --label release-tail` with the onevcs CLI a
-  step before it installs, and turns red with each figure's breakdown when one is
-  over; nothing reads its result, so it never blocks, demotes or reverts a
-  release. The figures come from `scripts/actions-budget-figures.sh`, a copy of
-  dero-skills' create-repo source edited only there. At PR time a check that runs
-  long is failed by its own `timeout-minutes`.
-- `onepipeline-gate-time` (one `just gate`'s wall clock, 1800 s) carries
-  `host-variable` and is checked **on a development machine, as a warning**:
-  `just gate` runs its whole body inside `scripts/gate-time.sh`, which records its
-  start and end to the gitignored `.gate-time.json` and checks it — over warns
-  naming the budget and the gate still passes; a missing record or an invalid
-  `budgets.yaml` fails it. No pre-push hook runs it: CI owns the gate.
+- The seven labelled `release-tail` — `onepipeline-ci-check-time`,
+  `onepipeline-cd-job-time`, `onepipeline-release-cycle-time`,
+  `onepipeline-ci-job-count`, `onepipeline-cd-job-count`,
+  `onepipeline-release-read-requests` and `onepipeline-pr-read-requests` — are
+  checked **after the release, reporting only**, by the last step of
+  `release.yml`'s `publish`. Nothing reads that step's result, so an over figure
+  never blocks, demotes or reverts a release. `scripts/actions-budget-figures.sh`
+  is dero-skills' create-repo copy: change it there, never here. At PR time a
+  check that runs long is failed by its own `timeout-minutes`.
+- `onepipeline-gate-time`, labelled `host-variable`, is checked **by `just gate`
+  on a development machine, as a warning**: over warns and still passes, since a
+  laptop's timing varies too much to refuse on. No pre-push hook runs it; CI owns
+  the gate.
 
-Every other check of the root `budgets.yaml` (`just budgets`,
-`just host-view-budget`) excludes both labels.
+Every other check of the root `budgets.yaml` excludes both labels.
 
 **A job's assertions and the artifact it installs come from one revision.**
 `onepipeline:install-documented`, which the three test jobs run, installs the
@@ -203,15 +186,12 @@ follows them (`release/release.py`'s `publish` says how); verify reports a
 platform its registries serve as more than one build.
 
 **Where each tier runs follows from that release model.** Every pull request,
-release-plz's release PR included, runs its affected tier against its merge
-base in the four jobs (`scripts/ci-job.sh`); with no derivable base it falls
-back to every project. On the release PR, whose tree is a `main` commit that
-already passed plus only release-plz's version and changelog edits, the three
-test jobs prove that from the trees and succeed without re-running
-(`scripts/release-pr-shortcut.mjs`), and `test-macos` does not start at all.
-Nothing re-sweeps at release time or on a push to `main`. A Release made by
-hand — the documented fallback — is refused when its tag does not name
-`Cargo.toml`'s version, and is otherwise trusted to name a commit `main` gated.
+the release PR included, runs its affected tier against its merge base, and with
+no derivable base every project; affected selection is a speed optimisation, so
+it fails closed. Nothing re-sweeps at release time or on a push to `main`. A
+Release made by hand — the documented fallback — is refused when its tag does not
+name `Cargo.toml`'s version, and is otherwise trusted to name a commit `main`
+gated.
 
 **What this repository publishes is declared once**, in `release-targets.toml`
 at the root, at the canonical release-target schema `onevcs`'s `docs/contract.md`
