@@ -27,7 +27,7 @@
         "{workspaceRoot}/**/project.json",
         "{workspaceRoot}/justfile",
         "{workspaceRoot}/rust-toolchain.toml",
-        "{workspaceRoot}/.github/workflows/release-sweep.yml",
+        "{workspaceRoot}/.github/workflows/*.yml",
         "sharedGlobals"
       ]
     },

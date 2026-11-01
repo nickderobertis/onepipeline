@@ -20,6 +20,17 @@ files:
     - "screenshots/images/**"
     - "screenshots/fonts/**"
     - "shots/baseline/**"
+    # GitHub's own responses, recorded byte for byte as `gh api --include` printed them, which
+    # the release-tail journey replays: about 5 MB that nobody wrote, two of them alone past the
+    # judge's prompt bound. Each one's sidecar (`*.http.source.json`) and the README beside
+    # them, which say what each is, stay judged.
+    - ".github/tests/fixtures/release-tail/recordings/*.http"
+    # dero-skills' create-repo figures script, copied byte for byte and edited only there: its
+    # header says so, create-repo's check_repo_baseline.py compares the copy with the source,
+    # and .github/tests/release-tail.test.mjs refuses a copy whose body no longer matches its
+    # own `sha256` line. It is judged where it is written; a finding here could only be answered
+    # by editing a copy the contract forbids editing.
+    - "scripts/actions-budget-figures.sh"
 rationales: true
 # No `agents` block: the harness/model are NOT pinned here. `oneharness.toml`
 # (composed alongside this file) selects them in fallback mode — codex + gpt-6.1-sol

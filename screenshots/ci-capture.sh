@@ -85,7 +85,13 @@ command="$(read_with capture-command)" || exit 1
 # and the command it runs is held under dash by tests/visual_docs.rs.
 copy="$ROOT/target/ci-capture"
 head="$(git rev-parse HEAD)"
-if [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ]; then
+# A kept clone is reused only when it is its own repository, at HEAD, with no
+# file missing: main's warm run captures too, so the `target/` rust-cache
+# restores can hold this directory pruned to a skeleton, and inside that git
+# finds this checkout's repository instead, whose HEAD matches.
+if [ "$(git -C "$copy" rev-parse --absolute-git-dir 2>/dev/null)" != "$(cd "$copy" 2>/dev/null && pwd -P)/.git" ] ||
+  [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ] ||
+  ! git -C "$copy" diff --quiet HEAD 2>/dev/null; then
   rm -rf -- "$copy"
   git clone --quiet --no-checkout "$ROOT" "$copy"
   git -C "$copy" checkout --quiet --detach "$head"

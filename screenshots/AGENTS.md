@@ -2,8 +2,8 @@
 
 The README's images: deterministic SVGs of the real CLI's real output, gated on
 their content hash by [screencomp](https://github.com/nickderobertis/screencomp),
-plus one animated GIF that is not. Informational, like `deps-check` — never in
-`just check`, `just gate`, or `ci.yml`'s `gate` job.
+plus one animated GIF that is not. Never in `just check` or `just gate`; a pull
+request's capture and judgement are steps of `ci.yml`'s `lint`.
 
 > `CLAUDE.md` is a symlink to this file — edit `AGENTS.md` only.
 

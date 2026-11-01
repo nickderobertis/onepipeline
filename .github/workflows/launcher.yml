@@ -7,16 +7,13 @@ name: npm launcher
 # `test-windows` (`onepipeline-npm:test-launcher`), `test-macos` being the one Mac
 # job a pull request may spend (`.github/tests/macos-policy.test.mjs`).
 #
-# **Advisory.** No branch protection requires it: making it required is a
-# branch-protection change only the repository owner approves. It runs where
-# the change reaches the `onepipeline-npm` project — the launcher and its
-# packaging, or the engine it starts — selected the way `ci.yml` selects its
-# matrices, and like them it fails closed to running.
+# **By hand only.** `test-windows` runs these journeys on every pull request the
+# change reaches, so this workflow spends no job slot of its own on a pull
+# request or a push; it is for re-running them alone on Windows. No branch
+# protection requires it. Dispatched, it has no merge base, so its selection
+# fails closed to running.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -42,8 +39,6 @@ jobs:
           node-version: "22"
       - name: Whether the diff reaches the npm distribution
         id: affected
-        env:
-          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "npm=$(bash scripts/nx-affected.sh --affects onepipeline-npm)" >> "$GITHUB_OUTPUT"
 
   launcher:
@@ -63,7 +58,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2.9.2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

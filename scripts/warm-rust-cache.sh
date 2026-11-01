@@ -8,10 +8,14 @@
 #                               release build the stop-verdict tier times and the
 #                               install proof installs, and the docs; and
 #                               clippy's build, for `lint`, which restores this
-#                               key too.
+#                               key too; and the e2e harness's test doubles in
+#                               each build `test-linux` asks for: instrumented
+#                               for the coverage tiers, plain for smoke, and
+#                               plain under denied warnings for release-compat.
 #   warm-rust-cache.sh cross    what `test-windows` and `test-macos` build: the
-#                               uninstrumented test build, clippy's, and the
-#                               release build the install proof installs.
+#                               uninstrumented test build, clippy's, the
+#                               release build the install proof installs, and
+#                               the e2e harness's test doubles.
 #
 # Each build is the justfile recipe the job's own target runs, so it is compiled
 # under the flags the job compiles it under: a unit built under other flags is a
@@ -39,10 +43,14 @@ case "${1:-}" in
   linux)
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-archive
     just _crate-build _stop-verdict-build _crate-doc _crate-lint
+    just _e2e-doubles-build instrumented
+    just _e2e-doubles-build plain
+    just _e2e-doubles-build plain-deny-warnings
     ;;
   cross)
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-quick-archive
     just _crate-lint _stop-verdict-build
+    just _e2e-doubles-build plain
     ;;
   *)
     echo "warm-rust-cache: name the job family: linux or cross" >&2

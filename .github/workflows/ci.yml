@@ -1,26 +1,20 @@
 name: CI
 
+# Pull requests only. No push to main re-runs these: branch protection does not
+# require a branch to be up to date, and `rust-cache-warm.yml`'s build on each
+# push to main is what fails when a merge leaves main not building (AGENTS.md
+# "Commits, releases, and merging").
 on:
-  push:
-    branches: [main]
   pull_request:
-  workflow_dispatch:
-    inputs:
-      diagnostic:
-        description: Run the sequential Mac proofs manually
-        type: boolean
-        default: false
 
 # Least privilege: most jobs only need to read the repo.
 permissions:
   contents: read
 
-# A pull request's newer push supersedes its older one. A push to main does not:
-# each one's gate is scoped to the commits that push brought, so cancelling it
-# would leave those commits gated by nothing on main.
+# A pull request's newer push supersedes its older one.
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -36,8 +30,8 @@ jobs:
   # account-wide limit all repositories share. `.github/ci-shape/` holds the
   # four to this shape.
   #
-  # The jobs below the four are what branch protection still names; they stay,
-  # passing, until protection moves to these.
+  # These four are the whole workflow and exactly what branch protection on
+  # `main` requires.
   #
   # Rust caches: each test job restores the build `rust-cache-warm.yml` saves on
   # `main` under the job's own key, and no pull-request run saves one, so the
@@ -63,12 +57,16 @@ jobs:
     # llmlint: ignore-end[least_privilege_grants]
     env:
       # The one switch for the visual docs' side effects: the sticky comment and
-      # the /pr-<n>/ preview deploy. Off while visual-docs.yml still captures,
-      # comments and deploys on pull requests, because two deploys per push race
-      # the Pages build screencomp gates on. The change that removes that
-      # workflow's pull_request trigger turns it on. The capture, the
-      # reproducibility gate, classify and the gallery build run either way.
-      VISUAL_DOCS_PUBLISH: "false"
+      # the /pr-<n>/ preview deploy. This job is the one place a pull request's
+      # visual docs are captured, commented and deployed: visual-docs.yml runs
+      # on a pull request only when it closes, to delete its preview. The
+      # capture, the reproducibility gate, classify and the gallery build run
+      # either way. No offline test drives the publication: its effects are a
+      # comment on a live pull request and a Pages deploy, so its integration
+      # proof is this job on every pull request, the change turning it on
+      # included; ci-shape.test.mjs holds only that the switch and its steps
+      # stay wired.
+      VISUAL_DOCS_PUBLISH: "true"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,8 +76,18 @@ jobs:
           # This job's token can write, and the judge runs harness agents over
           # the checkout: no credential is left in it for them to find.
           persist-credentials: false
+      # rust-cache keys on the OS, every installed toolchain and every Cargo
+      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
+      # saves from main for `test-linux`, whose warm build includes this job's
+      # clippy build. Before the capture starts: on a restore that is not a
+      # full key match rust-cache prunes files under `target/`, where the
+      # capture's clone of HEAD lives.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
       # The capture builds release binaries in a container for most of this
-      # job's length, so it starts first and runs beside the checks below, from
+      # job's length, so it starts early and runs beside the checks below, from
       # its own clone of HEAD (screenshots/ci-capture-lanes.sh); the step that
       # judges it waits for it. Both lanes, one after the other: the second reuses
       # the first's build, for the reproducibility gate.
@@ -94,14 +102,6 @@ jobs:
         env:
           SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
         run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
-      # rust-cache keys on the OS, every installed toolchain and every Cargo
-      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
-      # saves from main for `test-linux`, whose warm build includes this job's
-      # clippy build.
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-linux
-          save-if: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -110,27 +110,19 @@ jobs:
           tool: just,cargo-deny,cargo-machete
       # The judged lint's toolchain installs through uv.
       - uses: astral-sh/setup-uv@v6
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the old jobs this repeats stay, passing, until
-      # protection moves to the four and `onepipeline-ci-budgets` retires them.
       - name: Formatting, lints and audit (affected projects)
         run: just ci-lint
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
-      # engine-currency.yml's check: whether the lock still resolves the sibling
-      # engines the manifest permits. Advisory here as it is there — its answer
-      # moves when the registry does, not when this tree does, so a release
-      # nobody here made must not fail an unrelated pull request (AGENTS.md).
+      # Whether the lock still resolves the sibling engines the manifest permits
+      # (engine-currency.yml asks the same by hand). Advisory: its answer moves
+      # when the registry does, not when this tree does, so a release nobody here
+      # made must not fail an unrelated pull request (AGENTS.md).
       - name: Engine currency (advisory)
         if: ${{ !cancelled() }}
         continue-on-error: true
         run: just engines-current
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] the judge, the visual-docs gates and the
-      # title lint below repeat the retained `llmlint`, visual-docs.yml and `pr-title`
-      # checks for the transitional window the plan prescribes: those stay, passing,
-      # until branch protection moves to the four jobs and `onepipeline-ci-budgets`
-      # retires them; neither feeds the other.
-      # The judged tier, as the `llmlint` job below runs it and for its reasons:
-      # pinned harnesses, the fallback installed and credentialled, and a missing
-      # credential failing rather than reporting unlinted files as clean.
+      # The judged tier over the diff: pinned harnesses, the fallback installed and
+      # credentialled, and a missing credential failing rather than reporting
+      # unlinted files as clean.
       - name: Install the Codex harness
         if: ${{ !cancelled() }}
         run: npm install -g @openai/codex@0.145.0
@@ -208,9 +200,10 @@ jobs:
         uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit]
-      # notignored.yml's comment, for the reason that file gives. A fork's token
-      # cannot upsert a comment, so a fork's pull request skips it there and here.
+      # One sticky comment listing the lint and type-check suppressions this
+      # change adds, so a reviewer sees each with its reason: a review artifact,
+      # not a gate. A fork's token cannot upsert a comment, so a fork's pull
+      # request skips it.
       - name: Comment the suppressions this change adds
         if: github.event.pull_request.head.repo.full_name == github.repository && !cancelled()
         uses: nickderobertis/notignored@v0
@@ -322,28 +315,26 @@ jobs:
       # Teed for the re-run step below (`shell: bash` is pipefail, so the tee
       # cannot turn a failed run green); the archive is the instrumented test
       # build, kept for that step to re-run without compiling.
-      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential, no_second_broader_sweep_over_an_already_gated_commit] the
-      # old jobs this repeats stay, passing, until protection moves to the four and
-      # `onepipeline-ci-budgets` retires them. The pinned-wheel channel journeys have
-      # no credential to require — what they reach is PyPI's public copy of one pinned
-      # wheel, read anonymously — and resolve uv and the wheel first, failing naming
-      # whichever is missing. The
-      # credentialled smoke is placed in `test-linux` by the plan that made these four
-      # jobs, and it stays what it was: `onepipeline-real-smoke`'s own uncached `smoke`
-      # target, reached by no `check`, its credential required above. The `smoke` job
-      # ran it on `changes.outputs.crate`, which is this same affected answer.
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential] the
+      # pinned-wheel channel journeys have no credential to require — what they reach
+      # is PyPI's public copy of one pinned wheel, read anonymously — and resolve uv
+      # and the wheel first, failing naming whichever is missing. The credentialled
+      # smoke is placed in `test-linux` by the plan that made these four jobs, and it
+      # stays what it was: `onepipeline-real-smoke`'s own uncached `smoke` target,
+      # reached by no `check`, its credential required above, selected by the same
+      # affected answer as the rest of this job.
       - name: Tiers, MSRV, smoke, pinned-wheel journeys, install proofs and wheel (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         env:
-          # llmlint: ignore-block[least_privilege_grants] the `smoke` job's PAT,
-          # for the reason that job gives: the journey publishes to a scratch
+          # llmlint: ignore-block[least_privilege_grants] the live smoke's PAT:
+          # the journey pushes to, opens a pull request on and merges in a scratch
           # repository the default token cannot reach.
           GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           # llmlint: ignore-end[least_privilege_grants]
           ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-linux 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential, no_second_broader_sweep_over_an_already_gated_commit]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier, live_tier_compiles_and_requires_credential]
       - name: Keep the per-test profile records
         if: always() && steps.shortcut.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
@@ -373,10 +364,6 @@ jobs:
       actions: read
       checks: read
       pull-requests: read
-    # The verdict the `cross (windows-latest)` carrier reads, recorded only when
-    # every step before it passed (the shortcut included).
-    outputs:
-      windows-latest: ${{ steps.proved.outputs.windows-latest }}
     env:
       NEXTEST_PROFILE: ci
     defaults:
@@ -449,19 +436,16 @@ jobs:
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just bootstrap
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier] transitional by the plan that made the four
-      # jobs: the jobs behind today's required contexts stay, passing, until branch
-      # protection moves to the four (`onepipeline-required-checks`) and
-      # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
-      # request; neither feeds the other. The documented install it runs reaches the
-      # remote default branch, as the required `install-documented` jobs did on every
-      # pull request.
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # documented install it runs reaches the remote default branch, because
+      # README's one-liner names no ref: that is the install a user runs, so it is
+      # proven on every pull request this job's affected answer selects.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-windows 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       # On Windows there are no process groups to make a leaked process visible
       # afterwards, so what was still running is read while it is still true.
       - name: What was still running when it stopped
@@ -483,15 +467,12 @@ jobs:
         timeout-minutes: 25
         working-directory: ${{ env.DEV_DRIVE_WORKSPACE }}
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-      - name: Record this job's verdict
-        id: proved
-        run: echo "windows-latest=success" >> "$GITHUB_OUTPUT"
 
   # The macOS test job (Apple silicon): the same as Windows.
   test-macos:
     # Not on release-plz's own release pull request, whose tree only versions one
-    # main already passed: a Mac slot is the account's scarcest, and the macOS
-    # carriers below read the classifier's authorized omission for exactly it.
+    # main already passed: a Mac slot is the account's scarcest. Its required
+    # context then reports skipped, which branch protection accepts.
     if: github.event_name == 'pull_request' && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: macos-latest
     # From the Mac PR lane's hosted durations (5,775-8,873 s), the same work, plus
@@ -550,18 +531,15 @@ jobs:
       - name: Bootstrap
         if: steps.shortcut.outputs.skip != 'true'
         run: just bootstrap
-      # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier] transitional by the plan that made the four
-      # jobs: the jobs behind today's required contexts stay, passing, until branch
-      # protection moves to the four (`onepipeline-required-checks`) and
-      # `onepipeline-ci-budgets` retires them, so for that window both run on a pull
-      # request; neither feeds the other. The documented install it runs reaches the
-      # remote default branch, as the required `install-documented` jobs did on every
-      # pull request.
+      # llmlint: ignore-block[external_service_suite_stays_out_of_the_affected_tier] the
+      # documented install it runs reaches the remote default branch, because
+      # README's one-liner names no ref: that is the install a user runs, so it is
+      # proven on every pull request this job's affected answer selects.
       - name: Clippy, suite, launcher and install proofs (affected projects)
         id: gate
         if: steps.shortcut.outputs.skip != 'true'
         run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just ci-test-macos 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # llmlint: ignore-end[no_second_broader_sweep_over_an_already_gated_commit, external_service_suite_stays_out_of_the_affected_tier]
+      # llmlint: ignore-end[external_service_suite_stays_out_of_the_affected_tier]
       - name: What was still running when it stopped
         if: (failure() || cancelled()) && steps.shortcut.outputs.skip != 'true'
         continue-on-error: true
@@ -579,711 +557,3 @@ jobs:
         continue-on-error: true
         timeout-minutes: 25
         run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-
-  # Which projects this change can reach, derived once so every Rust-artifact
-  # job below can skip on a packaging-only change instead of paying the full
-  # matrix. A pull request is scoped against its merge base, and a push to main
-  # against the commit main pointed at before the push. The crate's project
-  # depends on every test-tier project, so a change to any of them answers
-  # `true` here too.
-  #
-  # `nx-affected.sh` fails closed: with no derivable base — a shallow clone, a
-  # missing base branch, a first push, a pre-push commit no fetch brought in — it
-  # says the crate is affected and the matrices run. Affected selection is a
-  # speed optimisation, and one that can silently skip a check is a correctness
-  # hole.
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      crate: ${{ steps.affected.outputs.crate }}
-      npm: ${{ steps.npm-affected.outputs.npm }}
-      macos: ${{ steps.macos.outputs.required }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # `nx affected` needs the merge base, which a shallow checkout does not
-          # have.
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Which projects the diff reaches
-        id: affected
-        env:
-          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: echo "crate=$(bash scripts/nx-affected.sh --affects onepipeline)" >> "$GITHUB_OUTPUT"
-      - name: Whether the diff reaches the npm distribution
-        id: npm-affected
-        env:
-          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: echo "npm=$(bash scripts/nx-affected.sh --affects onepipeline-npm)" >> "$GITHUB_OUTPUT"
-
-      - name: Classify Mac coverage
-        id: macos
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          classification=$(node .github/macos-policy.mjs classify --event "$GITHUB_EVENT_PATH" --base "$BASE" --head "$HEAD")
-          echo "$classification"
-          # String() and a plain write: console.log colours a boolean whenever
-          # FORCE_COLOR is set (Nx sets it), which would corrupt the output.
-          echo "required=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).macosRequired))' "$classification")" >> "$GITHUB_OUTPUT"
-
-  # The gate on a clean checkout: bootstrap from scratch, then the deterministic
-  # gate (format, clippy, tests incl. the contract and binary e2e with the
-  # coverage threshold, docs) over the projects the change can reach — the
-  # affected tier, on a pull request and on a push to main alike. The broader
-  # tier runs on the release PR instead (`release-sweep.yml`); AGENTS.md
-  # "Commits, releases, and merging" says why.
-  #
-  # Linux-only because coverage is measured here; macOS/Windows prove the
-  # artifact via the `cross` job below.
-  gate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,nextest,cargo-llvm-cov
-      # Also provisions `strace` and the unprivileged user namespace, which the
-      # Linux-only e2e journeys refuse without (`_ensure-strace` and
-      # `_ensure-userns` in the justfile).
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - name: Bootstrap
-        run: just bootstrap
-      # Tees its output for the re-run step below, under `shell: bash` for
-      # pipefail, so the tee cannot turn a failed gate green, and names the
-      # archive its instrumented test build is kept in for that step to re-run.
-      # A push names the commit before it as the base; a pull request derives
-      # its merge base from GITHUB_BASE_REF.
-      - name: Quality gate (affected projects)
-        id: affected
-        shell: bash
-        env:
-          ONEPIPELINE_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-affected 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      # Every test writes a record of where its wall clock went
-      # (`crates/testfakes/src/profile.rs`), green or not, and this leg's are kept
-      # for `scripts/test-profile-report.mjs`.
-      - name: Keep the per-test profile records
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-profile-gate
-          path: target/test-profile/
-          if-no-files-found: warn
-          retention-days: 30
-      # Whether each test the gate failed fails again on the same instrumented
-      # build, re-run from its archive so nothing can be compiled: a new flake or
-      # a regression. It cannot change the verdict. The gate step has already
-      # failed the job, and `continue-on-error` keeps this step's own exit out of
-      # it. 25 minutes is `just rerun-failed`'s bound, and the justfile says why.
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.affected.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 25
-        run: just rerun-failed-coverage "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-      # A committed lockfile that `just bootstrap`/`just check` had to change is
-      # a stale generated file; fail rather than let it drift.
-      - name: Committed generated files are up to date
-        run: git diff --exit-code -- Cargo.lock package-lock.json
-
-  # The declared MSRV is a promise to consumers, so prove it rather than document
-  # it: a floor that only lives in Cargo.toml drifts the first time a dependency
-  # raises its own.
-  msrv:
-    needs: changes
-    if: needs.changes.outputs.crate == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Read the MSRV from Cargo.toml
-        id: msrv
-        run: |
-          version="$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)"
-          [ -n "$version" ] || { echo "::error::Cargo.toml declares no rust-version"; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.msrv.outputs.version }}
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: ./.github/actions/setup-just
-      # `just msrv` runs the crate's `msrv` Nx target, and the project graph
-      # needs Node.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      # `just msrv` reads the same `rust-version` field, so the recipe and the
-      # job can never disagree about which floor was proven.
-      - run: just msrv
-
-  # The one tier that is not offline: the real `onevcs`, real git against a real
-  # remote, and the real GitHub API opening and merging a pull request on a
-  # scratch repository. Every other job here would pass against a sibling that
-  # refuses every invocation — R0 did — so this is the job that proves the
-  # composition against the world.
-  #
-  # It calls `just smoke-real`, which is the same entry point a person runs
-  # locally — the `onepipeline-real-smoke` project's uncached `smoke` target: the
-  # journey is defined once, in the test binary, and never reimplemented as
-  # workflow steps. The credential is named rather than
-  # embedded, and the journey refuses loudly rather than skipping when it is
-  # absent — a smoke that can pass without talking to GitHub proves nothing.
-  smoke:
-    needs: changes
-    if: needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,nextest
-      # `just smoke-real` runs the `onepipeline-real-smoke` project's Nx target.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      # The journey's own refusal names GH_TOKEN, the variable; a red job needs
-      # the name of the secret to go set. Given a presence signal rather than the
-      # PAT itself — nothing here needs the value.
-      - name: The smoke's credential and scratch repository are present
-        env:
-          HAS_CREDENTIAL: ${{ secrets.RELEASE_PLZ_TOKEN != '' }}
-          HAS_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO != '' }}
-        run: |
-          if [ "$HAS_CREDENTIAL" != "true" ]; then
-            echo "::error::the real-everything smoke needs the RELEASE_PLZ_TOKEN secret, passed as GH_TOKEN. Set it to a PAT that can push to, open a pull request on, and merge in the scratch repository. This job never skips and never falls back to a fake." >&2
-            exit 1
-          fi
-          if [ "$HAS_SMOKE_REPO" != "true" ]; then
-            echo "::error::the real-everything smoke needs the ONEPIPELINE_SMOKE_REPO secret: the scratch repository it publishes to, as owner/name with a name ending in -smoke. This job never skips and never guesses a repository." >&2
-            exit 1
-          fi
-      - name: Real onevcs, real git, real GitHub
-        run: just smoke-real
-        env:
-          # llmlint: ignore-block[least_privilege_grants] this grant is wider than
-          # the job needs, and that is the operator's deliberate call rather than an
-          # oversight. The default GITHUB_TOKEN cannot do the work — it is scoped to
-          # the repository the workflow runs in and this job publishes to another —
-          # so the credential has to be a PAT, and the decision is that it is the one
-          # this repository already provisions rather than a second, scratch-only
-          # secret to keep alive. The residual exposure is that a job running a pull
-          # request's own code holds a token that can cut a release; it is accepted,
-          # because this is a single-owner repository with no external contributors,
-          # and GitHub withholds secrets from fork-originated `pull_request` runs in
-          # any case. Absent, this job fails naming the secret — which is the
-          # intended behaviour, because the alternative is a smoke that passes
-          # without talking to GitHub.
-          GH_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
-          # llmlint: ignore-end[least_privilege_grants]
-          # The scratch repository the journey publishes to: configuration,
-          # never a default in the tree, and a secret rather than a variable so
-          # its name is masked in the log. Unset, the journey fails naming it.
-          ONEPIPELINE_SMOKE_REPO: ${{ secrets.ONEPIPELINE_SMOKE_REPO }}
-
-  # The 0.28.2 channel compatibility tier: a channel this build writes, read by
-  # the pinned `onepipeline-cli` 0.28.2 wheel, and the other way round. Its own job
-  # because uv fetches that wheel from a package registry, which the offline gate
-  # above never reaches — `just test` excludes the `release_channel` binary by
-  # name, and `just release-compat` runs it and nothing else. The binary itself
-  # is still compiled and linted by the gate (`--all-targets`). It needs no
-  # credential; what it needs is uv and the wheel, and the journeys' first act is
-  # to resolve both, failing fast naming whichever is missing, so this job never
-  # passes without running them.
-  # llmlint: ignore-block[live_tier_compiles_and_requires_credential] this tier has no
-  # credential to require: what it reaches is PyPI's public copy of one pinned wheel,
-  # read anonymously. The two things the rule protects still hold — the binary is
-  # compiled and linted by `gate` through `--all-targets`, and the job cannot pass
-  # having run nothing, because the journeys `just release-compat` runs resolve uv and
-  # the wheel first and fail naming whichever is missing.
-  release-compat:
-    needs: changes
-    if: needs.changes.outputs.crate == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,nextest
-      - uses: astral-sh/setup-uv@v6
-      # `just release-compat` runs the `onepipeline-release-compat` project's Nx
-      # target.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: The 0.28.2 wheel against this build
-        run: just release-compat
-  # llmlint: ignore-end[live_tier_compiles_and_requires_credential]
-
-  # Advisory + license audit and unused-dependency check. Its own Linux-only job:
-  # it needs a network advisory DB and must not be duplicated across the matrix.
-  deny:
-    needs: changes
-    if: needs.changes.outputs.crate == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,cargo-deny,cargo-machete
-      # `just deps-check` runs the crate's `deps-check` Nx target.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - run: just deps-check
-
-  # Prove the end-user install path on every platform: install the binary the
-  # documented way and smoke-test the real artifact through scripts/
-  # smoke-published.sh — the same assertions the release build jobs' verify steps run
-  # against PyPI and npm, so what a release checks cannot drift from what a pull
-  # request checks. `cargo install --path .` is the same code path as the
-  # documented `cargo install onepipeline`, minus the registry fetch.
-  install:
-    name: install proof (${{ matrix.os }})
-    needs: [changes, gate]
-    if: needs.changes.outputs.crate == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    outputs:
-      ubuntu-latest: ${{ steps.proved.outputs.ubuntu-latest }}
-      windows-latest: ${{ steps.proved.outputs.windows-latest }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      # On a PR the change is not on the registry yet, so `--path .` is the only
-      # way to install *this* revision.
-      - name: Install (this revision)
-        run: cargo install --path . --locked
-      - name: Smoke-test the installed binary
-        run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
-      # The `host-view-time` budget times the binary users run, and this is the job
-      # that builds it from this revision, so it is measured here against that very
-      # binary and adds no build of its own: the fixture, the reads and the check,
-      # through the prebuilt checker the recipe installs. Linux only, where the
-      # fixture's live dispatches prove their procfs start tokens.
-      - if: matrix.os == 'ubuntu-latest'
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - if: matrix.os == 'ubuntu-latest'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - name: Measure and check host-view-time against the installed binary
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          just host-view-budget "$(command -v onepipeline)" "ci.yml install job ($RUNNER_OS/$RUNNER_ARCH): cargo install --path . --locked"
-      - name: Record this leg's verdict
-        id: proved
-        env:
-          LEG: ${{ matrix.os }}
-        run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
-
-  # The README's from-source one-liner, read out of README.md and run verbatim.
-  # The command is not spelled again here: the README is its one source, so this
-  # job cannot end up proving a command nobody is told to type.
-  #
-  # It runs on pull requests too, and is required. What it resolves is still the
-  # remote's default branch rather than the branch under review — inherent to a
-  # `--git` install with no revision, and the `install` job above is what proves
-  # this revision — but a check that can only report after the merge gates
-  # nothing, which is how the documented command stayed broken through a release.
-  #
-  # So the smoke below runs the *default branch's* copy of
-  # `scripts/smoke-published.sh`, not this checkout's: that script asserts the
-  # binary's whole command list, which `tests/contract.rs` holds to the binary
-  # its own revision compiles, so a branch adding a verb would fail here on a
-  # verb the installed binary cannot have yet. Do not point the smoke step back
-  # at the checkout — the checkout is here for README.md, and repointing it
-  # reinstates that mismatch for every pull request that adds a subcommand.
-  install-documented:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      # For README.md, which is the one source of the command below. The install
-      # itself resolves everything it builds from the remote, which is the point.
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install (the command the README gives users)
-        run: |
-          documented=$(grep -m1 '^cargo install --git ' README.md || true)
-          if [[ -z $documented ]]; then
-            echo "README.md's Install section no longer gives a 'cargo install --git' one-liner, so there is nothing for this job to prove — restore it or drop this job" >&2
-            exit 1
-          fi
-          # README.md is committed, but it is still file-derived input: accept
-          # only a plain argv of unambiguous characters, then run it as an argv.
-          # Nothing in that file is ever handed to the shell to interpret.
-          if [[ $documented =~ [^A-Za-z0-9._:/@=+[:space:]-] ]]; then
-            echo "README.md's install one-liner carries characters this job will not run: $documented" >&2
-            exit 1
-          fi
-          read -r -a argv <<<"$documented"
-          echo "running README.md's command: ${argv[*]}"
-          "${argv[@]}"
-      - name: Smoke-test the installed binary
-        run: |
-          # `origin/HEAD` is the remote's default branch — the same revision the
-          # `--git` install with no revision above just resolved — so this is
-          # that binary's own copy of the assertions rather than the branch's.
-          git fetch --depth=1 origin HEAD
-          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
-          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
-
-  # The other end-user install path: the maturin wheel `pip install
-  # onepipeline-cli` serves. Built and installed from this revision so the
-  # packaging is proven on every pull request rather than first at a release,
-  # where a broken wheel is already public. Built by `just wheel-linux`, the
-  # script release.yml's `build-linux` job builds with, for its one target on the
-  # same runner. The `wheel-x86_64` carrier below reports the x86_64 leg under
-  # the bare `wheel` name branch protection requires.
-  wheel:
-    name: wheel proof (${{ matrix.target }})
-    needs: changes
-    if: needs.changes.outputs.crate == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-    runs-on: ${{ matrix.os }}
-    outputs:
-      x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build the wheel
-        env:
-          TARGET: ${{ matrix.target }}
-        run: just wheel-linux "$TARGET"
-      - name: Install it and smoke-test what it put on PATH
-        run: |
-          pip install --no-index --find-links dist onepipeline-cli
-          bash scripts/smoke-published.sh --label "the wheel built from this revision"
-      - name: Record this leg's verdict
-        id: proved
-        env:
-          LEG: ${{ matrix.target }}
-        run: echo "$LEG=success" >> "$GITHUB_OUTPUT"
-
-  # The required contexts of the path-selected matrix proofs above. A matrix job
-  # skipped by its `if:` reports only under its bare key, never a leg's name, so
-  # each protected leg name is reported by an always-running Linux job instead:
-  # it passes when its leg recorded success, or when affected-project selection
-  # skipped the proof, and fails on a failed, cancelled or missing prerequisite
-  # or proof. One job per name keeps each verdict that leg's own.
-  cross-windows:
-    name: cross (windows-latest)
-    needs: [changes, test-windows]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the proof or authorized path omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          # test-windows runs on every pull request, selecting its own work, so
-          # its success is the leg's verdict whatever the change reaches.
-          CRATE_AFFECTED: "true"
-          PROOF_RESULT: ${{ needs.test-windows.result }}
-          LEG: windows-latest
-          LEG_VERDICT: ${{ needs.test-windows.outputs['windows-latest'] }}
-        run: node .github/macos-policy.mjs path-carrier
-
-  install-ubuntu:
-    name: install (ubuntu-latest)
-    needs: [changes, install]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the proof or authorized path omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF_RESULT: ${{ needs.install.result }}
-          LEG: ubuntu-latest
-          LEG_VERDICT: ${{ needs.install.outputs['ubuntu-latest'] }}
-        run: node .github/macos-policy.mjs path-carrier
-
-  install-windows:
-    name: install (windows-latest)
-    needs: [changes, install]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the proof or authorized path omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF_RESULT: ${{ needs.install.result }}
-          LEG: windows-latest
-          LEG_VERDICT: ${{ needs.install.outputs['windows-latest'] }}
-        run: node .github/macos-policy.mjs path-carrier
-
-  wheel-x86_64:
-    name: wheel
-    needs: [changes, wheel]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the proof or authorized path omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF_RESULT: ${{ needs.wheel.result }}
-          LEG: x86_64-unknown-linux-gnu
-          LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}
-        run: node .github/macos-policy.mjs path-carrier
-
-  # Lint the PR title: under squash-merge it becomes the release-driving commit.
-  pr-title:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    steps:
-      - uses: amannn/action-semantic-pull-request@v5
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # The LLM-judge tier: a blocking PR check, separate from the deterministic
-  # `check` gate. It requires its harness credential and fails fast without it —
-  # a credential-less no-op would report unlinted files as clean. Fork PRs are
-  # gated by the repo's require-approval-for-fork-workflows setting.
-  llmlint:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-just
-      - uses: astral-sh/setup-uv@v6
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      # oneharness.toml's primary harness. Without a harness binary on PATH,
-      # llmlint has nothing to drive and the job would fail with no findings —
-      # which reads like a clean run. Pinned rather than floating: an upstream
-      # release has taken this required check down for every pull request before.
-      - name: Install the Codex harness
-        run: npm install -g @openai/codex@0.145.0
-      # oneharness only falls through to a harness it can actually spawn, so the
-      # secondary in the chain is a resilience claim the runner cannot honour
-      # unless `claude` is on PATH too.
-      - name: Install the Claude Code harness (oneharness fallback)
-        run: npm install -g @anthropic-ai/claude-code@2.1.220
-      - name: Install llmlint toolchain
-        run: just setup-llmlint
-      - name: Validate llmlint config
-        run: just lint-llm-validate --diff-base origin/main
-      - name: Lint changed files
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: |
-          if [ -z "${OPENAI_API_KEY:-}" ]; then
-            echo "::error::llmlint needs OPENAI_API_KEY for the Codex harness" >&2
-            exit 1
-          fi
-          # The fallback is only real if its credential arrived too: without it
-          # claude-code is rejected at auth and falls through, leaving the chain
-          # nowhere to degrade to — silently, because an installed-yet-
-          # uncredentialled harness looks fine.
-          if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-            echo "::error::llmlint needs CLAUDE_CODE_OAUTH_TOKEN for the claude-code fallback harness" >&2
-            exit 1
-          fi
-          just lint-llm-diff origin/main
-
-
-  cross-macos:
-    name: cross (macos-latest)
-    needs: [changes, test-macos]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the Mac proof or authorized omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          MACOS_RESULT: ${{ needs.test-macos.result }}
-          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF: cross
-        run: node .github/macos-policy.mjs carrier
-
-  install-macos:
-    name: install (macos-latest)
-    needs: [changes, test-macos]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the Mac proof or authorized omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          MACOS_RESULT: ${{ needs.test-macos.result }}
-          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF: install
-        run: node .github/macos-policy.mjs carrier
-
-  install-documented-macos:
-    name: install-documented (macos-latest)
-    needs: [changes, test-macos]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Report the Mac proof or authorized omission
-        env:
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          MACOS_RESULT: ${{ needs.test-macos.result }}
-          MACOS_REQUIRED: ${{ needs.changes.outputs.macos }}
-          CRATE_AFFECTED: ${{ needs.changes.outputs.crate }}
-          PROOF: install-documented
-        run: node .github/macos-policy.mjs carrier
-
-
-  macos-diagnostic:
-    name: Manual Mac diagnostic
-    if: github.event_name == 'workflow_dispatch' && inputs.diagnostic
-    runs-on: macos-latest
-    timeout-minutes: 240
-    env:
-      NEXTEST_PROFILE: ci
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: just,nextest
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v6
-      - name: Bootstrap
-        run: just bootstrap
-      # Teed for the re-run step below; `shell: bash` above is pipefail, so the
-      # tee cannot turn a failed leg green. The archive is the test build, kept
-      # for that step to re-run without compiling.
-      - name: Quality gate (cross-platform legs)
-        id: gate
-        timeout-minutes: 180
-        run: ONEPIPELINE_TEST_ARCHIVE="$RUNNER_TEMP/tests.tar.zst" just check-cross 2>&1 | tee "$RUNNER_TEMP/quality-gate.log"
-      - name: What was still running when it stopped
-        if: failure() || cancelled()
-        continue-on-error: true
-        run: ps -ef
-      # Capture the stopped processes before diagnostic re-runs change them.
-      - name: Does each failed test fail again on this build
-        if: failure() && steps.gate.outcome == 'failure'
-        continue-on-error: true
-        timeout-minutes: 25
-        run: just rerun-failed "$RUNNER_TEMP/quality-gate.log" "$RUNNER_TEMP/tests.tar.zst"
-      - name: Install (this revision)
-        # llmlint: ignore[diagnostics_error_or_absent] This reproduces an end-user install, which does not deny warnings; compiler-warning enforcement stays with the existing check jobs.
-        run: cargo install --path . --locked
-      - name: Smoke-test the installed binary
-        run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
-
-      - name: Install (the command the README gives users)
-        run: |
-          documented=$(grep -m1 '^cargo install --git ' README.md || true)
-          if [[ -z $documented ]]; then
-            echo "README.md's Install section no longer gives a 'cargo install --git' one-liner, so there is nothing for this job to prove — restore it or drop this job" >&2
-            exit 1
-          fi
-          # README.md is committed, but it is still file-derived input: accept
-          # only a plain argv of unambiguous characters, then run it as an argv.
-          # Nothing in that file is ever handed to the shell to interpret.
-          if [[ $documented =~ [^A-Za-z0-9._:/@=+[:space:]-] ]]; then
-            echo "README.md's install one-liner carries characters this job will not run: $documented" >&2
-            exit 1
-          fi
-          read -r -a argv <<<"$documented"
-          echo "running README.md's command: ${argv[*]}"
-          "${argv[@]}"
-      - name: Smoke-test the installed binary
-        run: |
-          # `origin/HEAD` is the remote's default branch — the same revision the
-          # `--git` install with no revision above just resolved — so this is
-          # that binary's own copy of the assertions rather than the branch's.
-          git fetch --depth=1 origin HEAD
-          git show FETCH_HEAD:scripts/smoke-published.sh >"$RUNNER_TEMP/smoke-published.sh"
-          bash "$RUNNER_TEMP/smoke-published.sh" --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
