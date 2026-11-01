@@ -1118,7 +1118,6 @@ fn submit(
     let mut advice = Vec::new();
     let outcome = match driver::submit_envelope(paths, correlation, envelope)? {
         Submitted::Answered { reply } => ReplyOutcome::Answered { reply, verdict },
-        // This process applied them itself, under the id it recorded them by.
         Submitted::AppliedHere { reply, .. } => ReplyOutcome::AppliedHere { reply, verdict },
         Submitted::AppliedByRun { reply } => ReplyOutcome::AppliedByRun { reply, verdict },
         // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares are

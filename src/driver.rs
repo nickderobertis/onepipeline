@@ -4656,6 +4656,12 @@ pub(crate) fn submit_envelope(
                     lock.release();
                     return Err(error);
                 }
+                // Where a journey ends this process with the envelope answered and
+                // nothing of it journalled yet.
+                if let Err(error) = crate::review::failpoint("applied-here-answered") {
+                    lock.release();
+                    return Err(error);
+                }
                 // And only then journal, so a refusal in either phase leaves the
                 // record exactly as it was.
                 for (command, operations) in envelope.commands.iter().zip(&pending) {

@@ -8780,3 +8780,85 @@ fn an_envelope_applied_with_nothing_driving_is_applied_once_after_the_run_is_ado
         1
     );
 }
+
+/// A `reply` that ends after answering the envelope it applied itself, and before
+/// journalling any of it, leaves that envelope answered in the run's command
+/// record: a driver that then adopts the run claims nothing of it and answers it
+/// no second time, so nothing of it is applied twice.
+///
+/// The `reply` is held there by the debug build's own crash seam, and ended there.
+#[cfg(unix)]
+#[test]
+fn an_envelope_whose_reply_ended_before_journalling_it_is_not_applied_by_the_adopter() {
+    let world = World::new("note-applied-here-ended");
+    let run = "appliedhereended";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    end_the_holder(&world, run);
+    let seam = world.root.join("applied-here-seam");
+    std::fs::create_dir_all(&seam).expect("the seam's directory");
+    std::fs::write(seam.join("applied-here-answered"), "").expect("the seam is armed");
+    let mut reply = world.agentgraph_cmd(&["reply", run]);
+    reply
+        .env("ONEPIPELINE_REVIEW_FAILPOINT", &seam)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut applying = reply.spawn().expect("the binary starts");
+    {
+        use std::io::Write;
+        applying
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(envelope(note_op_with("later", NOTE, "next", true)).as_bytes())
+            .expect("the envelope is written");
+    }
+    world.until("the reply to answer its envelope and be held", |_| {
+        seam.join("applied-here-answered.reached").is_file()
+    });
+    applying.kill().expect("the held reply is ended");
+    applying.wait().expect("the ended reply is reaped");
+    let sent = queued_id_of(&world, run, NOTE);
+    assert_eq!(
+        outcome_of(&world, run, sent).expect("answered")["applied"],
+        json!(true)
+    );
+    let journalled = |world: &World| {
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| is_record_of(event, sent, 0))
+            .count()
+    };
+    assert_eq!(
+        journalled(&world),
+        0,
+        "the reply journalled the note before it was ended"
+    );
+
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+    assert_eq!(
+        outcomes_for(&world, run, sent),
+        1,
+        "the adopting driver answered the envelope its reply had answered"
+    );
+    assert_eq!(
+        journalled(&world),
+        0,
+        "the adopting driver applied the envelope its reply had answered"
+    );
+}
