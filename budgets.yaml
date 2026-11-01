@@ -194,6 +194,11 @@ budgets:
   #
   # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
   # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  #
+  # Threshold: the longest job this change's own hosted run measured, test-windows at 8,905 s
+  # (run 41298787095, 2026-11-01), with 1,895 s (21%) of headroom: 3 hours, test-linux's
+  # timeout-minutes, which every test job's timeout meets or exceeds while the user pursues the
+  # 30-minute line (ruled 2026-10-31).
   - id: onepipeline-ci-check-time
     description: >-
       The longest counted job of each pull request's last-commit CI runs, over the pull requests
@@ -204,7 +209,7 @@ budgets:
     command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, pr]
     unit: seconds
     direction: max
-    threshold: 1800
+    threshold: 10800
     timeout_seconds: 300
   # Workload: one release's 6 CD jobs — release-plz, build-linux, build-linux-arm64, build-macos,
   # build-windows and publish, publish timed up to the tail's moment; 80 releases and 224 merged
