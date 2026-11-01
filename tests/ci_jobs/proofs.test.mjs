@@ -115,7 +115,7 @@ describe("the visual-docs capture's refusals", () => {
     const seen = join(dir, "target", "docker-saw");
     writeFileSync(
       join(bin, "docker"),
-      '#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in -v) src="${2%%:*}"; [ -f "$src/rust-toolchain.toml" ] && echo "toolchain in $src" >> "$SEEN"; shift 2 ;; *) shift ;; esac\ndone\n',
+      '#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in -v) src="$(printf %s "$2" | cut -d: -f1)"; [ -f "$src/rust-toolchain.toml" ] && echo "toolchain in $src" >> "$SEEN"; shift 2 ;; *) shift ;; esac\ndone\n',
     );
     chmodSync(join(bin, "docker"), 0o755);
     const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
