@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.97.3](https://github.com/nickderobertis/onepipeline/compare/v0.97.2...v0.97.3) - 2026-11-01
+
+### Fixed
+
+- make the retry-safe create and authoring recovery journeys pass on Windows ([#1333](https://github.com/nickderobertis/onepipeline/pull/1333))
+- *(test)* let the library tests compile on Windows again ([#1330](https://github.com/nickderobertis/onepipeline/pull/1330))
+
 ## [0.97.2](https://github.com/nickderobertis/onepipeline/compare/v0.97.1...v0.97.2) - 2026-10-31
 
 ### Added
