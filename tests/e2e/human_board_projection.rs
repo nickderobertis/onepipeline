@@ -617,3 +617,130 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
 fn id_of<'a>(one: &[(&'a String, &Value)]) -> &'a String {
     one[0].0
 }
+
+/// A plan held where its source answers no address — `local-md` answers a path, not a link a
+/// reader can follow — is linked from its filed human task by its qualified id instead.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] one raise through the compiled CLI, the linked store and the `github-projects` plugin against the loopback, beside the journey above and behind the same edge for the same reason; it runs in about a second.
+#[test]
+fn a_plan_whose_source_answers_no_address_is_linked_by_its_qualified_id() {
+    let onevcs = crate::harness::onevcs_binary()
+        .to_string_lossy()
+        .into_owned();
+    let world = World::new("human-board-unaddressed-plan")
+        .with_env("HOSTNAME", HOST)
+        .with_env("ONETASKGRAPH_HOST", HOST)
+        .with_env(TOKEN_ENV, "loopback-token")
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__CHECK_COMMAND",
+            &format!("{onevcs},boundary,check,--destination,public,--input,-"),
+        )
+        .with_env(
+            "ONETASKGRAPH_WRITE_POLICY__VISIBILITY_COMMAND",
+            &format!("{onevcs},boundary,inspect,--input,-,--json"),
+        );
+    std::fs::create_dir_all(world.onevcs_home()).expect("the onevcs home");
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 4\nrules:\n  - match: {owner: owner, name: app}\n    visibility: public\n\
+         default:\n  publication: local-direct\n  approvals: none\n",
+    )
+    .expect("the visibility rules");
+    // The repository the plan's work names is registered on this host, so its visibility is
+    // what `onevcs` answers.
+    world.extra_repository("app");
+    let host_config = world.root.join("xdg/onepipeline");
+    std::fs::create_dir_all(&host_config).expect("the host configuration's directory");
+    std::fs::write(
+        host_config.join("config.yaml"),
+        "human_items:\n  enabled: true\n  task_source: human-public\n",
+    )
+    .expect("the host's human-item configuration");
+
+    // The plan, held in a `local-md` plans source, with one task naming the public repository.
+    let plan = world.plan(
+        "unaddressed-plan",
+        &json!({"name": "unaddressed-plan", "tasks": [
+            {"id": "work", "title": "chore: work", "repo": format!("github.com/{PUBLIC_REPOSITORY}")},
+        ]}),
+    );
+    let home = json!({"id": "public-home", "repository": PUBLIC_REPOSITORY,
+                      "title": "Human work", "board": PUBLIC_BOARD, "status": "Todo",
+                      "parent": null,
+                      "body": described("## Plan\n- Work for people.", &json!({}))});
+    let github = GitHub::serve(
+        &world,
+        &json!({
+            "owner": "owner",
+            "repositories": {PUBLIC_REPOSITORY: "public"},
+            "boards": {PUBLIC_BOARD.to_string(): {"public": true, "priority": true}},
+            "issues": [home],
+        }),
+    );
+    let launch = world.root.join("launch-directory");
+    let intents = world.root.join("intents");
+    for dir in [&launch, &intents] {
+        std::fs::create_dir_all(dir).expect("a directory");
+    }
+    let authority = format!(
+        "    task_projection:\n      host: {HOST}\n      directory: {}\n      project: public-home\n",
+        intents.join("public").display()
+    );
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        format!(
+            "sources:\n  plans:\n    plugin: local-md\n    config:\n      root: {}\n{}",
+            world.store().display(),
+            board_source(
+                &github,
+                "human-public",
+                "public",
+                PUBLIC_BOARD,
+                PUBLIC_REPOSITORY,
+                &authority
+            ),
+        ),
+    )
+    .expect("the store configuration");
+
+    let raised = world.root.join("raised.json");
+    std::fs::write(
+        &raised,
+        json!({
+            "schema_version": 1, "dedup_key": "unaddressed", "kind": "task",
+            "title": "Decide unaddressed", "body": "What the plan needs from a person.",
+            "priority": "high",
+            "owner": {"session": "mgr", "run": null, "plan": plan},
+            "block": {"scope": "nothing"}, "approval": null,
+        })
+        .to_string(),
+    )
+    .expect("the raised item");
+    let raise = from_the_launch_directory(
+        &world,
+        &launch,
+        &["human-items", "raise", "--input", raised.to_str().unwrap()],
+    );
+    world
+        .run_on(raise, "raise an item of an unaddressed plan")
+        .exited(0)
+        .err_lacks("its projection into");
+
+    let state = github.state();
+    let filed: Vec<&Value> = state["issues"]
+        .as_object()
+        .expect("the model's issues")
+        .values()
+        .filter(|issue| issue["title"] == "Decide unaddressed")
+        .collect();
+    assert_eq!(filed.len(), 1, "{:#}", state["issues"]);
+    let issue = filed[0];
+    assert_eq!(issue["repository"], PUBLIC_REPOSITORY, "{issue:#}");
+    let body = issue["body"].as_str().expect("a body");
+    assert!(
+        body.contains(&format!(
+            "What the plan needs from a person.\n\nPlan: `{plan}`"
+        )),
+        "the task does not name its plan {plan} by its qualified id:\n{body}"
+    );
+    assert!(!body.contains(&format!("[{plan}](")), "{body}");
+}

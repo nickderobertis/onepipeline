@@ -409,7 +409,6 @@ impl Store {
         }
         repositories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(PlanReach {
-            // llmlint: ignore[changed_behavior_has_e2e] every tracker a plan is held in answers its project's address as absolute HTTPS — GitHub and Linear both do, which `human_board_projection` drives — and `local-md` answers a path rather than a URL; anything else names its plan by its qualified id instead, the fallback `a_plan_link_follows_the_body_and_names_the_plan_by_its_address_or_its_id` holds.
             url: held
                 .item
                 .url
