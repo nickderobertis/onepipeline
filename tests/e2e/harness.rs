@@ -876,7 +876,7 @@ impl World {
     pub fn at(root: &Path, name: &str) -> Self {
         let _fixture = profile::span(profile::Category::Fixture);
         onepipeline_testfakes::containment::enrol();
-        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *live() += 1;
         let root = root.to_path_buf();
         let _ = profile::fs::remove_dir_all(&root);
         // Created before it is resolved, because resolving a path asks the
@@ -902,7 +902,7 @@ impl World {
 
     /// The same world seen by another planner's session.
     pub fn as_session(&self, session: &str) -> Self {
-        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *live() += 1;
         Self {
             root: self.root.clone(),
             runs: self.runs.clone(),
@@ -927,7 +927,7 @@ impl World {
     /// it when it is dropped, so the world it was made from is whole until that one goes.
     pub fn on_host(&self, host: &str) -> Self {
         let _fixture = profile::span(profile::Category::Fixture);
-        LIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        *live() += 1;
         let at = self.root.join("hosts").join(host);
         let home = at.join("onevcs-home");
         let runs = at.join("runs");
@@ -4622,7 +4622,23 @@ fn a_move_nothing_ever_lets_go_of_fails_under_the_caller_s_own_words() {
 /// The doubles this process linked are shared by all of them, so they are
 /// released when the last one goes — never on the first, which
 /// [`as_session`](World::as_session) makes a real case.
-static LIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+///
+/// A lock rather than a counter, because the last world's teardown is not one
+/// step: it ends every descendant this process has, over several walks of the
+/// process table. A world made on another thread while that runs would have its
+/// first child — a nested `cargo build` of the doubles, in
+/// `profiling::a_process_running_several_journeys_writes_no_record` — killed
+/// silently by a teardown that had already decided it was the last. So the last
+/// world holds this from its count until its teardown is over, and a new world
+/// waits for it.
+static LIVE: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+/// The world count, held. A test that panicked holding it has still counted
+/// right, so a poisoned lock is read through rather than failing every world after.
+fn live() -> std::sync::MutexGuard<'static, usize> {
+    LIVE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 // The same environment lock covers repository registration and native cleanup.
 static POINTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -4717,7 +4733,9 @@ impl World {
 impl Drop for World {
     fn drop(&mut self) {
         self.stop_the_runs_it_can();
-        let last = LIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1;
+        let mut live = live();
+        *live -= 1;
+        let last = *live == 0;
         // Then whatever that left — what `stop` had no run to reach it through, or
         // no longer found under the run's driver — once no world is left that
         // could still want it. `containment` says why and what each platform
@@ -4743,6 +4761,7 @@ impl Drop for World {
         if last {
             let _ = profile::fs::remove_dir_all(held_dir());
         }
+        drop(live);
         // Said last, so a teardown that fails still removes what it made; and not
         // while the test is already failing: a second panic during the first
         // aborts, and loses the message that says why.
@@ -4754,6 +4773,51 @@ impl Drop for World {
         }
     }
 }
+
+/// A world made on one thread while another thread's last world tears down keeps
+/// the child it starts. Both threads are released together, many times over, so
+/// the new world's child is spawned inside the teardown's walks of the process
+/// table whenever the count let that teardown think it was the last.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the harness's own
+// teardown, which no journey built on it can assert about itself: the race is between
+// two worlds in one process, an interval no command of the binary can be held inside.
+// The journey that met it is `profiling::a_process_running_several_journeys_writes_no_record`,
+// whose nested `cargo build` this teardown killed; the child here stands in for that build.
+#[cfg(unix)]
+#[test]
+fn a_world_made_while_the_last_one_tears_down_keeps_its_child() {
+    for round in 0..20 {
+        let ending = World::new("teardown-ending");
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let released = std::sync::Arc::clone(&gate);
+        let teardown = std::thread::spawn(move || {
+            released.wait();
+            drop(ending);
+        });
+        gate.wait();
+        let world = World::new("teardown-starting");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("a child starts");
+        teardown.join().expect("the teardown finishes");
+        assert_eq!(
+            child.try_wait().expect("the child's state is readable"),
+            None,
+            "round {round}: another world's teardown ended this world's child"
+        );
+        drop(world);
+        assert!(
+            child
+                .try_wait()
+                .expect("the child's state is readable")
+                .is_some(),
+            "round {round}: the last world's teardown ends its child"
+        );
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
 /// tree, signalled every process in it, and then watched them go — which

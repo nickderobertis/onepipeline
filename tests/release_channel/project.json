@@ -35,6 +35,14 @@
     },
     "release-compat": {
       "command": "just _release-compat-run",
+      "//": "After the crate's debug build, which compiles this binary under the same flags, so the journeys find it built rather than compiling it beside the job's other builds; and alone, as its own job ran it: beside test-linux's instrumented tiers its three journeys ran past nextest's 360-second bound (run 41259782580) and pass in seconds re-run alone.",
+      "parallelism": false,
+      "dependsOn": [
+        {
+          "projects": ["onepipeline"],
+          "target": "build"
+        }
+      ],
       "inputs": [
         "releaseCompatSource"
       ],

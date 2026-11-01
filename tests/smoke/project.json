@@ -35,6 +35,8 @@
     },
     "smoke": {
       "command": "just _smoke-run",
+      "//": "Alone, as the `smoke` job ran it: the journey drives the real GitHub API under nextest's 360-second bound, and beside the instrumented tiers on one runner it ran past that bound.",
+      "parallelism": false,
       "inputs": [
         "smokeSource"
       ],

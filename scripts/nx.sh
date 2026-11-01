@@ -78,6 +78,9 @@ NX_BIN="node_modules/.bin/nx"
 # that ask for this parse stdout, so nothing may be added to it — not even a
 # summary line.
 if [ "${ONEPIPELINE_NX_SHOW_OUTPUT:-}" = "1" ]; then
+  # The switch is this wrapper's own: Nx's tasks must not inherit it, or a task
+  # that calls this wrapper again (a suite driving Nx) is switched with it.
+  unset ONEPIPELINE_NX_SHOW_OUTPUT
   exec "$NX_BIN" "$@"
 fi
 

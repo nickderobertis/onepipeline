@@ -26,11 +26,17 @@
       ],
       "outputs": ["{projectRoot}/.telemetry/macos-policy.json"]
     },
+    "test-ci-shape": {
+      "command": "node --test .github/ci-shape/*.test.mjs",
+      "//": "What ci.yml's four jobs promise, read off the workflow files alone: its inputs are this directory and nothing else, so a change anywhere else never re-runs it and one here always does.",
+      "cache": true,
+      "inputs": ["{projectRoot}/**/*"]
+    },
     "lint": {
       "command": "node node_modules/@biomejs/biome/bin/biome lint .github"
     },
     "syntax-check": {
-      "command": "bash -c 'for file in .github/*.mjs .github/tests/*.mjs; do node --check \"$file\" || exit; done'"
+      "command": "bash -c 'for file in .github/*.mjs .github/tests/*.mjs .github/ci-shape/*.mjs; do node --check \"$file\" || exit; done'"
     },
     "budgets": {
       "command": "bash .github/check-budgets.sh",
@@ -39,7 +45,7 @@
     },
     "check": {
       "executor": "nx:noop",
-      "dependsOn": ["format-check", "lint", "syntax-check", "budgets"]
+      "dependsOn": ["format-check", "lint", "syntax-check", "budgets", "test-ci-shape"]
     },
     "format-check": {
       "command": "node node_modules/@biomejs/biome/bin/biome format .github"

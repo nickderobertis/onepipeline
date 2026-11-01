@@ -1418,8 +1418,8 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    // `ci.yml` holds gate, Windows cross, PR Mac and manual Mac diagnostics;
-    // `release-sweep.yml` holds the full
+    // `ci.yml` holds gate, the manual Mac diagnostic and the three test jobs
+    // (`test-linux`, `test-windows`, `test-macos`) that run their recipes; `release-sweep.yml` holds the full
     // sweep on the release pull request, which re-runs its failures the same way.
     let workflow = [
         ".github/workflows/ci.yml",
@@ -1444,18 +1444,16 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
     let archive = "\"$RUNNER_TEMP/tests.tar.zst\"";
     let archived_runs = workflow
         .lines()
-        // The Windows shards name their recipe in `GATE`: `check-cross` for the
-        // first, `test-quick` for the rest.
         .filter(|line| {
-            ["just check", "just \"$GATE\""].iter().any(|recipe| {
+            ["just check", "just ci-test-"].iter().any(|recipe| {
                 line.trim()
                     .starts_with(&format!("run: ONEPIPELINE_TEST_ARCHIVE={archive} {recipe}"))
             })
         })
         .count();
     assert_eq!(
-        archived_runs, 5,
-        "gate, Windows cross, PR Mac, manual Mac and release sweep archive their build"
+        archived_runs, 6,
+        "gate, manual Mac, the three test jobs and release sweep archive their build"
     );
 
     let steps: Vec<&str> = workflow
@@ -1464,8 +1462,8 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
         .collect();
     assert_eq!(
         steps.len(),
-        5,
-        "one rerun step each in gate, Windows cross, PR Mac, manual Mac and release sweep"
+        6,
+        "one rerun step each in gate, manual Mac, the three test jobs and release sweep"
     );
     for step in steps {
         let field = |key: &str| {

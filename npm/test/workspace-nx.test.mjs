@@ -115,7 +115,14 @@ const UNIFORM_TARGETS = ["bootstrap", "build", "format", "format-check", "lint",
 // able to run. Its `project.json` says the same thing as a file-scoped llmlint
 // directive; this is that exemption spelled where the gate can see it, so a
 // project that declares no targets for any *other* reason still fails below.
-const UNIFORM_EXEMPT = ["onepipeline-visual-docs"];
+// Each exempt project, with the one scope that may opt out of the set: a docs
+// capture with no build or test of its own, and the judged lint, whose target
+// hashes the whole workspace and so would run any `test` beside it on every change.
+const UNIFORM_EXEMPT_SCOPES = {
+  "onepipeline-visual-docs": "scope:docs",
+  "onepipeline-lint-llm": "scope:judge",
+};
+const UNIFORM_EXEMPT = Object.keys(UNIFORM_EXEMPT_SCOPES);
 
 const uniform = projects.filter((declared) => !UNIFORM_EXEMPT.includes(declared.name));
 
@@ -185,8 +192,8 @@ describe("the uniform target set", () => {
         `${name} is exempt from the uniform target set but declares ${carried.join(", ")}, so it runs in some repo-wide verbs and not others`,
       );
       assert.ok(
-        declared.tags?.includes("scope:docs"),
-        `${name} is exempt from the uniform target set, which only a \`scope:docs\` project may be`,
+        declared.tags?.includes(UNIFORM_EXEMPT_SCOPES[name]),
+        `${name} is exempt from the uniform target set, which only a \`${UNIFORM_EXEMPT_SCOPES[name]}\` project may be`,
       );
     });
   }
@@ -712,9 +719,8 @@ describe("affected selection over real commits", () => {
   it("scopes a push build to the commit before the push", (t) => {
     // The push changed nothing the contract tier reads, so a scoped answer is
     // `false`; the same build with no base fails closed to `true` and says why.
-    // (The crate's own project is no witness here: some of its targets —
-    // `lint-llm-diff` among them — hash the whole workspace, so every change
-    // reaches it.)
+    // (The crate's own project is no witness here: its targets hash most of
+    // the tree, the e2e sources among them, so this change reaches it.)
     const repo = scratchRepository(t);
     const before = repo.head();
     repo.change("tests/e2e/adoption.rs");

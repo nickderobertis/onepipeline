@@ -85,6 +85,11 @@ include = [{ path = "debug/examples", relative-to = "target", depth = 1 }]
 # leg say how far it got: the last line names where it stopped.
 [profile.ci]
 status-level = "pass"
+# Every test runs whatever another failed: the cross-platform jobs each run the
+# whole suite once, for hours, so a first failure that cancelled the rest left
+# the failures behind it for another whole run to find (run 41259782580's
+# Windows leg stopped one failure in, with 1,053 of 1,665 e2e tests unrun).
+fail-fast = false
 # A test that returns while a process it started still holds its output fails,
 # naming itself, rather than passing as `LEAK`: `crates/testfakes/src/
 # containment.rs` says why such a process holds the leg. 100ms is nextest's
