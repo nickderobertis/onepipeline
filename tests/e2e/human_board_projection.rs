@@ -24,7 +24,7 @@ use serde_json::{json, Map, Value};
 use crate::harness::World;
 use crate::linear_loopback::Linear;
 use crate::linear_writeback::{from_the_launch_directory, KEY_ENV, STATES, STATUSES};
-use crate::private_github_home::{described, GitHub};
+use crate::private_github_home::{described, metadata_of, GitHub};
 
 /// The environment variable every board source reads its token from.
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
@@ -47,7 +47,11 @@ const ORG_REPOSITORY: &str = "acme/widget";
 const CASES: &[(&str, &[&str])] = &[
     ("public-plan", &[PUBLIC_REPOSITORY]),
     ("private-plan", &[PRIVATE_REPOSITORY]),
-    ("mixed-plan", &[PUBLIC_REPOSITORY, PRIVATE_REPOSITORY]),
+    // Out of order and with a repository twice: the item carries each once, sorted.
+    (
+        "mixed-plan",
+        &[PRIVATE_REPOSITORY, PUBLIC_REPOSITORY, PUBLIC_REPOSITORY],
+    ),
     ("org-plan", &[ORG_REPOSITORY]),
 ];
 
@@ -104,6 +108,16 @@ fn seeded_issues() -> Vec<Value> {
             }));
         }
     }
+    // Work the public plan withdrew names the private repository, and decides nothing.
+    issues.push(json!({
+        "id": "public-plan-withdrawn", "repository": PRIVATE_REPOSITORY,
+        "title": "chore: withdrawn", "board": PLANS_BOARD, "status": "Canceled",
+        "parent": "public-plan",
+        "body": described(
+            "## What\nDo withdrawn.\n\n## Why\nIt was.\n\n## Acceptance criteria\n- none.",
+            &json!({"onepipeline.id": "withdrawn", "onepipeline.persona": "engineer",
+                    "onetaskgraph.classification": "private"})),
+    }));
     issues
 }
 
@@ -130,13 +144,19 @@ fn board_source(
 /// The store the launch directory configures: the plans board, the public human-task source
 /// whose human-task routes send private work to the private board and the organization's work to
 /// Linear, and each destination's host-local projection authority.
-fn configuration(github: &GitHub, linear: &Linear, intents: &std::path::Path) -> String {
+fn configuration(
+    github: &GitHub,
+    linear: &Linear,
+    intents: &std::path::Path,
+    plans_reachable: bool,
+) -> String {
     let authority = |project: &str, directory: &str| {
         format!(
             "    task_projection:\n      host: {HOST}\n      directory: {}\n      project: {project}\n",
             intents.join(directory).display()
         )
     };
+    let plans_endpoint = github.board(PLANS_BOARD);
     let routes = format!(
         "    routes:\n      - classification: private\n        to: human-private\n        \
          purpose: human-task\n      - repositories: [github.com/acme/*]\n        to: org\n        \
@@ -150,7 +170,15 @@ fn configuration(github: &GitHub, linear: &Linear, intents: &std::path::Path) ->
          queued:      {{ task: Queued,          project: Accepted }}\n        in-progress: In Progress\n        \
          unknown:     {{ task: Needs Attention, project: Blocked }}\n        done:        {{ task: Done,            project: Completed }}\n        \
          cancelled:   Canceled\n",
-        board_source(github, "plans", "private", PLANS_BOARD, PLANS_REPOSITORY, ""),
+        board_source(github, "plans", "private", PLANS_BOARD, PLANS_REPOSITORY, "")
+            .replace(
+                &github.board(PLANS_BOARD),
+                if plans_reachable {
+                    &plans_endpoint
+                } else {
+                    "http://127.0.0.1:9/graphql"
+                },
+            ),
         board_source(
             github,
             "human-public",
@@ -174,7 +202,7 @@ fn configuration(github: &GitHub, linear: &Linear, intents: &std::path::Path) ->
 }
 
 /// The issues GitHub holds that no seed put there: what the projections filed, by node id.
-fn filed(state: &Value) -> Map<String, Value> {
+fn filed_on(state: &Value) -> Map<String, Value> {
     let seeded: Vec<String> = seeded_issues()
         .iter()
         .map(|issue| issue["id"].as_str().unwrap().to_owned())
@@ -292,7 +320,7 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     }
     std::fs::write(
         launch.join("onetaskgraph.yaml"),
-        configuration(&github, &linear, &intents),
+        configuration(&github, &linear, &intents, true),
     )
     .expect("the store configuration");
 
@@ -317,7 +345,7 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     }
 
     let state = github.state();
-    let filed = filed(&state);
+    let filed = filed_on(&state);
     let titled = |name: &str| -> Vec<(&String, &Value)> {
         filed
             .iter()
@@ -374,6 +402,13 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
         );
         links_its_plan(name, issue["body"].as_str().unwrap());
     }
+    // The mixed item carries each repository its plan's work names once, in origin order.
+    let (_, mixed) = titled("mixed-plan")[0];
+    assert_eq!(
+        metadata_of(mixed["body"].as_str().unwrap())["onetaskgraph.repositories"],
+        json!(["github.com/owner/app", "github.com/owner/secret"]),
+        "{mixed:#}"
+    );
 
     // The organization's: filed in its tracker alone, linking its plan.
     let org = titled("org-plan");
@@ -408,6 +443,91 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
             .values()
             .all(|issue| issue["repository"] != PLANS_REPOSITORY),
         "a human task was filed among the plans: {filed:#?}"
+    );
+    let public_id = id_of(&public).clone();
+    let filed_count = filed.len();
+
+    // A later state is projected with the content it was first filed with: completing the public
+    // item closes its issue, which the store's intent accepts only for that same content.
+    let item = item_of(&world, &launch, "public-plan");
+    let complete = from_the_launch_directory(
+        &world,
+        &launch,
+        &["human-items", "complete", item["id"].as_str().unwrap()],
+    );
+    world
+        .run_on(complete, "complete the public item")
+        .exited(0)
+        .err_lacks("its projection into");
+    let state = github.state();
+    assert_eq!(
+        state["issues"][&public_id]["state"], "CLOSED",
+        "{:#}",
+        state["issues"][&public_id]
+    );
+    assert_eq!(filed_on(&state).len(), filed_count, "{:#}", state["issues"]);
+
+    // A plan that cannot be read is a refusal: the item is held with nothing filed anywhere, and
+    // the next write, once the plan reads again, files it where its plan routes it.
+    let raised = world.root.join("raised.json");
+    std::fs::write(
+        &raised,
+        json!({
+            "schema_version": 1, "dedup_key": "recovered", "kind": "task",
+            "title": "Decide recovered", "body": "What recovered needs from a person.",
+            "priority": "high",
+            "owner": {"session": "mgr", "run": null, "plan": "plans:private-plan"},
+            "block": {"scope": "nothing"}, "approval": null,
+        })
+        .to_string(),
+    )
+    .expect("the raised item");
+    let raise = |reachable: bool| {
+        std::fs::write(
+            launch.join("onetaskgraph.yaml"),
+            configuration(&github, &linear, &intents, reachable),
+        )
+        .expect("the store configuration");
+        let command = from_the_launch_directory(
+            &world,
+            &launch,
+            &["human-items", "raise", "--input", raised.to_str().unwrap()],
+        );
+        world.run_on(command, "raise a plan-owned item")
+    };
+    raise(false)
+        .exited(0)
+        .err_has("its plan plans:private-plan could not be read");
+    let state = github.state();
+    assert_eq!(filed_on(&state).len(), filed_count, "{:#}", state["issues"]);
+    assert!(
+        linear
+            .issues()
+            .iter()
+            .all(|(_, title, _)| title != "Decide recovered"),
+        "{:#?}",
+        linear.issues()
+    );
+    raise(true).exited(0).err_lacks("its projection into");
+    let state = github.state();
+    let recovered: Vec<(String, Value)> = filed_on(&state)
+        .into_iter()
+        .filter(|(_, issue)| issue["title"] == "Decide recovered")
+        .collect();
+    assert_eq!(recovered.len(), 1, "{:#}", state["issues"]);
+    let (id, issue) = &recovered[0];
+    assert!(
+        on_board(&state, PRIVATE_BOARD).contains(id),
+        "{:#}",
+        state["boards"]
+    );
+    assert_eq!(issue["repository"], PRIVATE_REPOSITORY, "{issue:#}");
+    let plan_number = state["issues"]["private-plan"]["number"].as_u64().unwrap();
+    assert!(
+        issue["body"].as_str().unwrap().contains(&format!(
+            "[plans:private-plan](https://github.com/{PLANS_REPOSITORY}/issues/{plan_number})"
+        )),
+        "{issue:#}"
     );
 }
 

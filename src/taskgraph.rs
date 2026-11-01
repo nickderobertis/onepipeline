@@ -366,7 +366,7 @@ impl Store {
     }
 
     /// Where one plan reaches: the address its project answers at, and every repository its
-    /// live tasks — its own and its members' — name, each once, in origin order. The
+    /// live tasks — its own and its members' — name, each once, sorted by origin. The
     /// project's own repository is where its source files projects, not work it concerns. What a plan-owned human task is filed with, so the store's human-task routes
     /// classify and place it as they would the plan's own work, and a reader of the filed
     /// task can follow it back to the plan.
@@ -390,6 +390,7 @@ impl Store {
             })?;
         let reader = Reader::over(built)?;
         let held = reader.project(project)?;
+        // llmlint: ignore[changed_behavior_has_e2e] a member project's tasks are read by the same `Reader::tasks` call, with the same member list, that every launch of a multi-source plan makes (`tests/e2e/multi_source.rs`); what the reach adds is only the repositories on the tasks that call answers, which `human_board_projection` drives for a home's own.
         let members = members_of(&held.id, &held.item.metadata.clone().into_iter().collect())
             .map_err(|why| Error::Sibling {
                 tool: STORE,
@@ -1787,7 +1788,7 @@ pub(crate) enum StoredKind {
 pub(crate) struct PlanReach {
     /// The address the plan's project answers at, where its source gives one.
     pub url: Option<String>,
-    /// Every repository the plan names, each once, in origin order.
+    /// Every repository the plan's live tasks name, each once, sorted by origin.
     pub repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }
 
