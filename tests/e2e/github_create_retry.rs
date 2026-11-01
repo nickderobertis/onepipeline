@@ -248,8 +248,18 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         json!(format!("board:{issue_id}")),
         "the shadow links the one issue after a later attempt: {after:#}"
     );
+    assert_eq!(
+        after["onetaskgraph.copy_locations"]["board"]["id"],
+        json!(format!("board:{issue_id}")),
+        "the shadow says where that issue is after a later attempt: {after:#}"
+    );
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the code this proves is the journey's own:
+// `shadow_origin` is what the journey above composes its expected origin with, and it was that
+// composition, not the engine, that differed on Windows. A Linux path never separates its parts
+// with `\`, so the journey itself cannot present the Windows form here; this hands the helper
+// the exact path the Windows log shows.
 /// A shadow document's origin is the one the write-back records whichever separator the host's
 /// path puts between its parts: Windows names it `626f6172643a706c616e\6578616d706c6573.md`.
 #[test]
@@ -262,3 +272,4 @@ fn a_shadow_documents_origin_is_the_same_whichever_separator_its_path_carries() 
         assert_eq!(shadow_origin(Path::new(relative)), origin, "{relative}");
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]

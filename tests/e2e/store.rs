@@ -4768,6 +4768,11 @@ fn holds_its_images(world: &World, project: &str, node: &str) -> bool {
         .is_empty()
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the code this proves is the journey's own:
+// `holds_its_images` is the condition the lost-author journey waits on, and it was that wait,
+// not the engine, that let the journey read a task whose images had not landed. The gap it
+// passed is the store's own write order, which no run of the binary holds open on demand; this
+// stages exactly that state in the real local-md store and reads it through the real engine.
 /// A task whose file has landed and whose images have not — the gap a slow filesystem holds
 /// open on Windows — is not yet on the board holding them; once its images land, it is.
 #[test]
@@ -4784,6 +4789,7 @@ fn a_task_whose_images_are_still_landing_does_not_hold_them_yet() {
     hold_diagram(&world.store(), &format!("{}/000-drawn", project_id(run)));
     assert!(holds_its_images(&world, &project, "drawn"));
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Adding a member never reads or writes the destination project a person edited.
 #[test]
