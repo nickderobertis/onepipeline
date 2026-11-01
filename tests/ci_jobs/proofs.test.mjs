@@ -9,7 +9,15 @@
 // a proof does once it gets past them is what the jobs themselves run, on every
 // pull request that reaches the crate.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -89,6 +97,37 @@ describe("the visual-docs capture's refusals", () => {
     assert.equal(waited.status, 0, waited.log);
     assert.match(waited.log, /captured shots\/current\/x86_64\ncaptured shots\/verify\/x86_64/);
     assert.equal(readFileSync(captured, "utf8"), "shots/current/x86_64\nshots/verify/x86_64\n");
+  });
+
+  it("re-clones a restored clone whose repository files are gone", (t) => {
+    // main's warm run captures, so the `target/` rust-cache saves holds
+    // `target/ci-capture` with its files pruned: inside that skeleton git finds
+    // the checkout's own repository, whose HEAD matches, and a capture that took
+    // the skeleton for the clone ran with no `rust-toolchain.toml` (run
+    // 41313240282's `lint`). Docker is the one stand-in: it records whether the
+    // tree it is handed holds the toolchain file, and runs nothing.
+    const dir = scratchWorkspace(t);
+    for (const sub of [".git/refs/heads", ".git/objects/pack", "src", "screenshots"]) {
+      mkdirSync(join(dir, "target", "ci-capture", sub), { recursive: true });
+    }
+    const bin = join(dir, "target", "fake-bin");
+    mkdirSync(bin, { recursive: true });
+    const seen = join(dir, "target", "docker-saw");
+    writeFileSync(
+      join(bin, "docker"),
+      '#!/usr/bin/env bash\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in -v) src="${2%%:*}"; [ -f "$src/rust-toolchain.toml" ] && echo "toolchain in $src" >> "$SEEN"; shift 2 ;; *) shift ;; esac\ndone\n',
+    );
+    chmodSync(join(bin, "docker"), 0o755);
+    const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
+      SHOTS_OUT: "shots/current/x86_64",
+      SEEN: seen,
+      PATH: `${bin}:${process.env.PATH}`,
+    });
+    assert.equal(status, 0, log);
+    assert.equal(
+      existsSync(seen) && readFileSync(seen, "utf8"),
+      `toolchain in ${join(dir, "target", "ci-capture")}\n`,
+    );
   });
 
   it("refuses a status file that holds no exit status", (t) => {
