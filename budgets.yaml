@@ -183,3 +183,138 @@ budgets:
       writes and six claim reads. The 45 it replaces was arithmetic of 2026-10-10 over a design
       without the boundary's visibility probes (#852), the driver's claim (#862), the placement
       read (#916) or the publication fence (#965); the fence's writes alone are over 45.
+  # The CI, CD and local-gate budgets. The seven labelled `release-tail` are measured after a
+  # release, from GitHub's own records of the runs it carried, by the last step of release.yml's
+  # `publish` (`onebudgetspec check budgets.yaml --label release-tail`), reporting only;
+  # `onepipeline-gate-time`, labelled `host-variable`, is checked by `just gate` as a warning.
+  # Every other check of this file excludes both labels. Each reads telemetry and measures
+  # nothing fresh. The CD and release-read figures leave out the main-push Rust cache warmer
+  # (`--exclude-workflow "Rust cache warm"`), which builds caches and delivers nothing to a
+  # release.
+  #
+  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
+  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-ci-check-time
+    description: >-
+      The longest counted job of each pull request's last-commit CI runs, over the pull requests
+      one release carries, from GitHub's job timestamps. It protects every contributor's
+      turnaround, because one slow check holds every change behind it.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, pr]
+    unit: seconds
+    direction: max
+    threshold: 1800
+    timeout_seconds: 300
+  # Workload: one release's 6 CD jobs — release-plz, build-linux, build-linux-arm64, build-macos,
+  # build-windows and publish, publish timed up to the tail's moment; 80 releases and 224 merged
+  # PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-cd-job-time
+    description: >-
+      The longest counted job of one release's CD runs — release-plz's run at the release commit
+      and the Release run, publish included up to the tail's moment. It protects the time a
+      release takes, a slow job being the actionable unit inside the release cycle.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, longest-job, --stage, cd, --exclude-workflow, "Rust cache warm"]
+    unit: seconds
+    direction: max
+    threshold: 1800
+    timeout_seconds: 300
+  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
+  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-release-cycle-time
+    description: >-
+      Per pull request one release carries, its last commit's checks plus its merge to the end of
+      publish; the maximum over the release's pull requests. It protects how soon a merged change
+      reaches the people who install it.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, release-cycle-time]
+    unit: seconds
+    direction: max
+    threshold: 5400
+    timeout_seconds: 300
+  # Workload: one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
+  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-ci-job-count
+    description: >-
+      The most counted jobs any pull request of one release ran at its last commit, over every
+      workflow its pull_request event started. It protects this repository's share of the
+      account-wide 20-job concurrency limit: lint plus one test job per platform.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, pr]
+    unit: jobs
+    direction: max
+    threshold: 4
+    timeout_seconds: 300
+  # Workload: one release's 6 CD jobs — release-plz, build-linux, build-linux-arm64, build-macos,
+  # build-windows and publish, publish itself included as the job running the tail; 80 releases
+  # and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-cd-job-count
+    description: >-
+      The counted jobs of one release's CD runs, publish included as the job running the tail. It
+      protects this repository's CD share of the account-wide 20-job concurrency limit:
+      release-plz, four build jobs and publish.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, job-count, --stage, cd, --exclude-workflow, "Rust cache warm"]
+    unit: jobs
+    direction: max
+    threshold: 6
+    timeout_seconds: 300
+  # Workload: one release of the six-job CD shape, its release commit carrying release-plz's push
+  # run and the Release run, whose pull request heads each run the one CI workflow; one release
+  # carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI jobs; 80 releases and
+  # 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-release-read-requests
+    description: >-
+      The REST requests the release's own reads cost — the releases listing, the comparison, the
+      closed-pull-request page, the runs at the release commit and the jobs of its CD runs —
+      summed from onevcs's answers. It protects the tail's GitHub reads from growing with this
+      repository's CD shape, whatever number of pull requests a release carries.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, release-read-requests, --exclude-workflow, "Rust cache warm"]
+    unit: requests
+    direction: max
+    threshold: 6
+    timeout_seconds: 300
+  # Workload: one release of the six-job CD shape whose pull request heads each run the one CI
+  # workflow; one release carrying 2.6 to 2.8 merged PRs, each PR's last commit running the 4 CI
+  # jobs; 80 releases and 224 merged PRs in 30 days (2026-09-15 to 10-15).
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-pr-read-requests
+    description: >-
+      The most REST requests any one pull request of the release needed — its runs at head and the
+      jobs of each CI run there — from onevcs's answers. It protects the reads each pull request
+      costs from growing with the workflows a pull request starts.
+    labels: [release-tail]
+    measure: reported
+    command: [bash, scripts/actions-budget-figures.sh, pr-read-requests]
+    unit: requests
+    direction: max
+    threshold: 2
+    timeout_seconds: 300
+  # Workload: one `just gate` run on a development host such as a 14-core aarch64 machine, with
+  # the Nx cache as that run finds it.
+  # llmlint: ignore[budgets_track_product_owner_outcomes] The brief requires a 30-minute line per CI check and per CD job beside the 90-minute release cycle that contains them, job counts per PR push and per release, and GitHub reads per release and per pull request; each is the unit the user acts on and is enforced or reported at a different moment.
+  - id: onepipeline-gate-time
+    description: >-
+      The wall clock of one `just gate` run on a development machine, from the start and end the
+      recipe records on that run. It holds the local gate to the line each CI job is held to, as a
+      warning, since a development machine's timing varies too much to refuse on.
+    labels: [host-variable]
+    measure: reported
+    command: [node, scripts/gate-time-budget.mjs]
+    unit: seconds
+    direction: max
+    threshold: 1800
+    timeout_seconds: 30

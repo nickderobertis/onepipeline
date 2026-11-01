@@ -1,0 +1,16 @@
+{
+  "path": "repos/nickderobertis/onepipeline/actions/runs?per_page=100&head_sha=56259ab0e06b3331d08cad31e6ab15567d9c9302&event=pull_request",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "pull_request": 1278,
+    "head": "56259ab0e06b3331d08cad31e6ab15567d9c9302",
+    "read": "the pull_request runs at the pull request's head"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:10 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/actions/runs?per_page=100&head_sha=56259ab0e06b3331d08cad31e6ab15567d9c9302&event=pull_request'",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  }
+}

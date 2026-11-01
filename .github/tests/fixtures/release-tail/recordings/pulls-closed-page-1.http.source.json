@@ -1,0 +1,14 @@
+{
+  "path": "repos/nickderobertis/onepipeline/pulls?state=closed&sort=updated&direction=desc&per_page=100",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "read": "the first page of closed pull requests"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:03 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/pulls?state=closed&sort=updated&direction=desc&per_page=100'",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  }
+}

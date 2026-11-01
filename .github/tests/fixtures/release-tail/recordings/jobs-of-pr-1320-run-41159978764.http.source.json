@@ -1,0 +1,18 @@
+{
+  "path": "repos/nickderobertis/onepipeline/actions/runs/41159978764/jobs?per_page=100&filter=latest",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "run": 41159978764,
+    "workflow": "Visual docs",
+    "event": "pull_request",
+    "pull_request": 1320,
+    "read": "the jobs of a run at the pull request's head"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:08 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/actions/runs/41159978764/jobs?per_page=100&filter=latest'",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  }
+}

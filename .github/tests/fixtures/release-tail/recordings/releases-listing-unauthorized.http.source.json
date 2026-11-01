@@ -1,0 +1,15 @@
+{
+  "path": "repos/nickderobertis/onepipeline/releases?per_page=100",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "read": "the releases listing, answered 401 under an invalid token"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:26 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/releases?per_page=100' under an invalid token",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  },
+  "why": "The error status a GitHub read can answer, recorded from this repository rather than written: the release tail must exit non-zero on it, never report a figure."
+}

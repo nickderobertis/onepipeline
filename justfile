@@ -240,8 +240,16 @@ cross-shards:
 # The complete pre-push bar: the deterministic gate plus the LLM-judge tier
 # scoped to what this branch changed. `check` stays offline and credential-free;
 # this is where the non-deterministic tier joins it.
+# Its whole body runs inside scripts/gate-time.sh, which records the run's start and end to
+# .gate-time.json and checks onepipeline-gate-time (budgets.yaml, `host-variable`) against it:
+# over its 30 minutes warns and still passes, and a failed measurement or an invalid budgets
+# file fails. No CI job runs it: a pull request's four jobs are the gate there.
 # Full gate: `check` plus the diff-scoped llmlint tier.
-gate base="origin/main": check
+gate base="origin/main":
+    @bash scripts/gate-time.sh just _gate-body "{{base}}"
+
+# What `just gate` times: `check`, then the judged lint over the diff.
+_gate-body base="origin/main": check
     @just lint-llm-diff "{{base}}"
     @echo "gate: ok"
 
@@ -616,7 +624,7 @@ _stop-verdict-build:
 # Outside `check` and `gate`: each runs a whole host-shaped workload journey to
 # measure it, which no per-change selection should pay for. Every project's
 # `workload` target is uncached and reached by no `check`, `test`, coverage or
-# `budgets` target; `release-sweep.yml` runs this after its quality gate.
+# `budgets` target, and no workflow runs it: it is run by hand.
 # Run every workload journey and check the budgets each one records.
 workload:
     @bash scripts/nx.sh run-many -t workload
@@ -715,12 +723,13 @@ _crate-deps-check:
 # through the crate's `budgets` Nx target, after the tier that writes the stacked-spikes record. Its command
 # builds the e2e binary through `test-e2e`, so warnings are denied here as every gate build denies them.
 # A budget labelled `release-binary` is left to `host-view-budget`: it times an installed
-# release build, which the gate does not make.
+# release build, which the gate does not make. One labelled `release-tail` is measured after a
+# release by release.yml's `publish`, and `host-variable` by `just gate` itself.
 # Measure every budget in budgets.yaml against its threshold.
 budgets:
     @[ -x "{{onebudgetspec-root}}/bin/onebudgetspec" ] || [ -x "{{onebudgetspec-root}}/bin/onebudgetspec.exe" ] \
       || { echo "onebudgetspec {{onebudgetspec-version}} is not installed: run 'just bootstrap' (or 'just _ensure-onebudgetspec'), then re-run" >&2; exit 1; }
-    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary
+    @RUSTFLAGS="-D warnings" "{{onebudgetspec-root}}/bin/onebudgetspec" check budgets.yaml --exclude-label release-binary --exclude-label release-tail --exclude-label host-variable
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 # CI's `install` job runs this on the binary its `cargo install --path .` has just built,
@@ -736,7 +745,7 @@ host-view-budget binary built_by="":
     @just _ensure-strace
     @just _ensure-node-modules
     @ONEPIPELINE_HOST_VIEW_BUILT_BY="$2" node scripts/host-view-measure.mjs "$1"
-    @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time
+    @node_modules/.bin/onebudgetspec check budgets.yaml --id host-view-time --exclude-label release-tail --exclude-label host-variable
 
 # What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`). `target`
 # is every directory this clone's cargo builds write to: `.cargo/config.toml` sets it, and
@@ -749,7 +758,7 @@ pool-maintenance:
     @cargo-prune-superseded --keep-within 2d target
 
 # Outside `check` and `gate`: the one host budget, `pool-maintenance/budgets.yaml`'s, builds
-# this clone twice to stage what it times. `release-sweep.yml` runs it after its gate.
+# this clone twice to stage what it times. No workflow runs it: it is run by hand.
 # Measure every project's host-labelled budgets against their thresholds.
 budgets-host:
     @bash scripts/nx.sh run-many -t budgets-host

@@ -19,8 +19,8 @@ name: Release
 #
 # `publish` needs all four. It refuses a lock that links an engine twice,
 # records the linked engines in the notes, confirms every registry serves every
-# platform, publishes the crate and the launcher, installs both, and records the
-# outcome. A failed build job leaves the platforms that built published and the
+# platform, publishes the crate and the launcher, installs both, records the
+# outcome, and last reports the release's CI and CD budgets (the release tail). A failed build job leaves the platforms that built published and the
 # platform-independent artifacts unpublished until it is re-run: re-running the
 # failed job and then `publish` finishes the release, and each upload skips what
 # a registry already serves.
@@ -228,8 +228,12 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # `contents: write` publishes; the release tail's reads need the runs, jobs and
+    # pull requests GitHub keeps for this repository, read-only.
     permissions:
       contents: write
+      actions: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -274,3 +278,18 @@ jobs:
           WINDOWS_PUBLISHED: ${{ needs.build-windows.outputs.published }}
           WINDOWS_VERIFIED: ${{ needs.build-windows.outputs.verified }}
         run: just release-outcome
+      # The release tail: the seven `release-tail` budgets of budgets.yaml, measured after
+      # everything above has published, by scripts/actions-budget-figures.sh from onevcs's
+      # read-only answers. Reporting only: an over figure turns this last step red with each
+      # figure's breakdown in its log, and nothing reads its result, so it never blocks, demotes
+      # or reverts a release. onevcs is pinned at the release this repository adopts and
+      # onebudgetspec at the justfile's `onebudgetspec-version`;
+      # .github/tests/release-tail.test.mjs runs both steps as written here over recorded answers.
+      - name: Install onevcs and onebudgetspec for the release tail
+        run: |
+          npm install --no-save --no-package-lock --no-audit --no-fund --prefix "$RUNNER_TEMP/release-tail" onevcs-cli@0.57.4 @onebudgetspec/cli@0.1.5
+          echo "$RUNNER_TEMP/release-tail/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Report the release-tail budgets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: onebudgetspec check budgets.yaml --label release-tail
