@@ -7837,7 +7837,6 @@ mod tests {
     }
 
     /// Where `write_shadow` publishes `node`'s shadow task document.
-    #[cfg(unix)]
     fn shadow_task(fixture: &Fixture, node: &str) -> PathBuf {
         fixture
             .dir
