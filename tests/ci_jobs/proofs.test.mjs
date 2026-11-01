@@ -243,6 +243,23 @@ describe("the warm build's test doubles", () => {
     assert.match(recipe, /cargo build --offline \$selection --target-dir "\$target"/);
   });
 
+  it("are built with the harness's own cargo arguments, into its target directory", () => {
+    // The harness builds into the target directory its test binary sits in:
+    // `target` for the plain build, llvm-cov's for the instrumented one, which
+    // is the directory each of the recipe's two modes names.
+    const fn = harness.split("\nfn build_package(")[1]?.split("\n}\n")[0] ?? "";
+    assert.match(
+      fn,
+      /\.args\(\["build", "--offline"\]\)\s*\.args\(selection\)\s*\.arg\("--target-dir"\)/,
+    );
+    assert.match(fn, /let target = debug\s*\.parent\(\)/);
+    assert.match(
+      recipe,
+      /instrumented\).*cargo llvm-cov show-env.*target="\{\{llvm-cov-target-dir\}\}"/,
+    );
+    assert.match(recipe, /plain\) target="\{\{justfile_directory\(\)\}\}\/target"/);
+  });
+
   it("are built by both families of the warm build", () => {
     const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
     for (const [family, mode] of [
