@@ -2153,7 +2153,55 @@ fn a_restack_its_checks_refuse_is_asked_of_the_draft_s_worker_again() {
 /// keeps its own; no second change request is opened from it.
 #[test]
 fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
-    let world = World::new("rework-takeover")
+    takeover_before_a_reworks_push("rework-takeover", Restack::Free);
+}
+
+/// The same takeover, with the superseded driver's restack still running when the takeover
+/// starts. The takeover need not wait for that restack: it starts once its wait has passed
+/// with no publication of the displaced driver under way, and a withheld restack names
+/// none. So the takeover's answer says nothing about whether the restack has settled. The
+/// restack settles unpublished once it ends, and the superseded driver ends only after it.
+///
+/// The restack is held once it has ended, after the read that withholds it and before its
+/// settlement reaches the driver's loop, until the takeover has answered. That is the
+/// order a slow host gives on its own: the Windows leg once read b's settlement from the
+/// first launch, because the restack had not settled when the takeover answered.
+#[test]
+fn a_takeover_that_starts_before_the_restack_it_withholds_settles_reads_it_unpublished() {
+    takeover_before_a_reworks_push("rework-takeover-restacking", Restack::HeldPastTheTakeover);
+}
+
+/// Whether the superseded driver's restack settles as it ends, or is held until the
+/// takeover has answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Restack {
+    Free,
+    HeldPastTheTakeover,
+}
+
+/// Whether the driver of `run` on this host has ended since it read a takeover.
+///
+/// Read off the journal rather than off `result.json`. An adoption does not remove the
+/// result the run's first launch wrote, so that file is there before the adopted driver
+/// has ended.
+fn superseded_driver_ended(world: &World, run: &str) -> bool {
+    let journal = world.journal(run);
+    let pipeline =
+        |event: &Value, kind: &str| event["source"] == "pipeline" && event["kind"] == kind;
+    journal
+        .iter()
+        .position(|event| pipeline(event, "driver-superseded"))
+        .is_some_and(|at| {
+            journal[at..]
+                .iter()
+                .any(|event| pipeline(event, "driver-exited"))
+        })
+}
+
+/// [`a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished`], with the
+/// restack's settlement as `restack` says.
+fn takeover_before_a_reworks_push(name: &str, restack: Restack) {
+    let world = World::new(name)
         .with_env("ONEVCS_BRANCH_PREFIX", "me/")
         .with_env("ONEPIPELINE_CLAIM_INTERVAL_SECONDS", "10")
         .with_env(crate::harness::CANCEL_GRACE_ENV, "1");
@@ -2182,7 +2230,21 @@ fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
         std::fs::remove_file(marker).expect("the initial publication released its gate");
     }
     reply(&world, run, json!([rework("a", "rework it")])).exited(0);
-    world.run(&["adopt", run, "--detach"]).exited(0);
+    // llmlint: ignore-block[tests_mirror_real_usage] the property is the order of two
+    // processes: the takeover answers while the superseded driver's restack has not yet
+    // settled. No user-facing input can set that order. The failpoint only holds the real
+    // driver in place. The adoption, the takeover and every outcome asserted come from the
+    // binaries themselves.
+    let settling = crate::harness::Rendezvous::failpoint();
+    let mut adopt = world.cmd(&["adopt", run, "--detach"]);
+    if restack == Restack::HeldPastTheTakeover {
+        adopt.env("ONEPIPELINE_TEST_SETTLEMENT_NODE", "b").env(
+            "ONEPIPELINE_TEST_SETTLEMENT_BEFORE_QUEUE_GATE",
+            settling.address(),
+        );
+    }
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    world.run_on(adopt, "adopt --detach").exited(0);
     world.until("the rework's cleared publication to be held", |_| {
         held.holding()
     });
@@ -2204,8 +2266,19 @@ fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
     world.until("the first driver to read the takeover", |world| {
         !world.events_of(run, "driver-superseded").is_empty()
     });
-    world.until("the superseded driver to end", |world| {
-        world.run_file(run, "result.json").is_file()
+    let held_restack = (restack == Restack::HeldPastTheTakeover).then(|| {
+        let at = settling.arrived_within_a_step(&world, "the withheld restack to end");
+        assert!(
+            !world.events_of(run, "node-restack-started").is_empty(),
+            "what reached the held settlement was not b's restack: {:#?}",
+            world.journal(run)
+        );
+        assert!(
+            !superseded_driver_ended(&world, run),
+            "the superseded driver reads as ended with its restack not yet settled: {:#?}",
+            world.journal(run)
+        );
+        at
     });
     let taken = taking.wait_with_output().expect("the takeover answers");
     assert_eq!(
@@ -2214,6 +2287,12 @@ fn a_takeover_before_a_reworks_push_leaves_the_restack_it_owes_unpublished() {
         "{}",
         String::from_utf8_lossy(&taken.stderr)
     );
+    if let Some(at) = held_restack {
+        at.release();
+    }
+    world.until("the superseded driver to end", |world| {
+        superseded_driver_ended(world, run)
+    });
     assert_ne!(
         head_of(&world, &a_branch),
         old_head,
