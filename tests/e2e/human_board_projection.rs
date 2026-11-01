@@ -248,6 +248,7 @@ fn item_of_key(world: &World, launch: &std::path::Path, dedup_key: &str) -> Valu
 
 /// Launch every plan from the launch directory, each raising its human node's item, and project
 /// each onto the human-task source its plan's repositories route it to.
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] one journey launching four plans read out of a GitHub board and projecting their human items through the linked `github-projects` and `linear` plugins: it exercises `taskgraph`, `human_items` and `driver` together through the compiled CLI, so the crate is the narrowest edge it can honestly sit behind, as for `private_github_home`; it runs in about three seconds.
 #[test]
 fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_to() {
     let onevcs = crate::harness::onevcs_binary()
