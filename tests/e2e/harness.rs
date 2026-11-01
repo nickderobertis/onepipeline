@@ -4778,6 +4778,11 @@ impl Drop for World {
 /// the child it starts. Both threads are released together, many times over, so
 /// the new world's child is spawned inside the teardown's walks of the process
 /// table whenever the count let that teardown think it was the last.
+// llmlint: ignore-block[tests_mirror_real_usage] the subject is the harness's own
+// teardown, which no journey built on it can assert about itself: the race is between
+// two worlds in one process, an interval no command of the binary can be held inside.
+// The journey that met it is `profiling::a_process_running_several_journeys_writes_no_record`,
+// whose nested `cargo build` this teardown killed; the child here stands in for that build.
 #[cfg(unix)]
 #[test]
 fn a_world_made_while_the_last_one_tears_down_keeps_its_child() {
@@ -4812,6 +4817,7 @@ fn a_world_made_while_the_last_one_tears_down_keeps_its_child() {
         );
     }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// `teardown: signalled` is the binary's own evidence: `stop` saying it listed a
 /// tree, signalled every process in it, and then watched them go — which
