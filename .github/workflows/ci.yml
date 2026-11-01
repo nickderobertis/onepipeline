@@ -44,9 +44,8 @@ jobs:
   # repository's Actions cache holds main's builds rather than one per branch.
 
   # What does not depend on the platform it runs on: formatting, lints, the JS
-  # syntax check, the MSRV floor, the dependency audit, the pinned-wheel channel
-  # journeys, the judged lint, the engine-currency check, the PR title, the
-  # suppressions comment and the visual docs.
+  # syntax check, the dependency audit, the judged lint, the engine-currency
+  # check, the PR title, the suppressions comment and the visual docs.
   lint:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -217,9 +216,10 @@ jobs:
         uses: nickderobertis/notignored@v0
 
   # The Linux test job: every test tier under coverage with its floor, the docs
-  # and the budgets (`check` less `lint`'s formatting and lints), the live smoke,
-  # the workflow-shape test, the install and documented-install proofs and the
-  # x86_64 wheel, in one Nx run so the proofs build beside the tiers.
+  # and the budgets (`check` less `lint`'s formatting and lints), the MSRV floor,
+  # the live smoke, the pinned-wheel channel journeys, the workflow-shape test,
+  # the install and documented-install proofs and the x86_64 wheel, in one Nx run
+  # so the proofs build beside the tiers.
   test-linux:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
