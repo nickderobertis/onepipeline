@@ -163,13 +163,18 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
     // from — in its body and in its board item's origin field, and it carries the added node.
     let shadow = shadow_of(&world, name, ADDED);
     let metadata = shadow_metadata(&shadow);
+    // The origin is an id, its segments joined by `/` on every platform, not a path
+    // in the host's own spelling.
     let source = format!(
         "{SHADOW_SOURCE}:{}",
         shadow
             .strip_prefix(world.run_file(name, "writeback/tasks"))
             .expect("under the shadow's tasks")
             .with_extension("")
-            .to_string_lossy()
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/")
     );
     let carrying: Vec<(&String, &Value)> = state["issues"]
         .as_object()
