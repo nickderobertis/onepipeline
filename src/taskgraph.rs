@@ -365,6 +365,54 @@ impl Store {
         })
     }
 
+    /// Where one plan reaches: the address its project answers at, and every repository its
+    /// live tasks — its own and its members' — name, each once, in origin order. The
+    /// project's own repository is where its source files projects, not work it concerns. What a plan-owned human task is filed with, so the store's human-task routes
+    /// classify and place it as they would the plan's own work, and a reader of the filed
+    /// task can follow it back to the plan.
+    ///
+    /// Read as the store holds it, not as a plan: the plan schema is the launch's to hold a
+    /// project to, and a human item raised against it is owed whatever that schema says.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Sibling`] for a configuration that does not load, a store that cannot
+    /// answer, and a project the store does not hold.
+    pub(crate) fn plan_reach(&self, project: &QualifiedId) -> Result<PlanReach> {
+        let built = self
+            .engine(&Layer::default())
+            .map_err(|error| Error::Sibling {
+                tool: STORE,
+                message: format!(
+                    "the configuration discovered from {} cannot be read: {error}",
+                    self.dir.display()
+                ),
+            })?;
+        let reader = Reader::over(built)?;
+        let held = reader.project(project)?;
+        let members = members_of(&held.id, &held.item.metadata.clone().into_iter().collect())
+            .map_err(|why| Error::Sibling {
+                tool: STORE,
+                message: why,
+            })?;
+        let tasks = reader.tasks(project, &members)?;
+        let mut repositories: Vec<onetaskgraph_plugin_api::Repository> = Vec::new();
+        let live = tasks
+            .iter()
+            .filter(|task| task.item.status.category != StatusCategory::Cancelled)
+            .flat_map(|task| task.item.repositories.iter());
+        for repository in live {
+            if !repositories.contains(repository) {
+                repositories.push(repository.clone());
+            }
+        }
+        repositories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(PlanReach {
+            url: held.item.url.filter(|url| !url.trim().is_empty()),
+            repositories,
+        })
+    }
+
     /// One project's own metadata, read within `within`: what a driver reads the project's
     /// claim out of, bounded so a store that does not answer cannot hold the reconcile loop.
     ///
@@ -1733,6 +1781,14 @@ pub(crate) enum StoredKind {
     Task,
     Document,
     Project,
+}
+
+/// Where a plan reaches, as [`Store::plan_reach`] reads it.
+pub(crate) struct PlanReach {
+    /// The address the plan's project answers at, where its source gives one.
+    pub url: Option<String>,
+    /// Every repository the plan names, each once, in origin order.
+    pub repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }
 
 pub(crate) struct StoredItem {

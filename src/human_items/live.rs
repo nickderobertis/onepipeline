@@ -583,8 +583,9 @@ impl HumanItems {
             .unwrap_or_default();
         for item in pending {
             match super::projection::project(&self.dir, &journal, &source, &item) {
-                Ok(tracker) => {
-                    super::projection::record(&journal, &item);
+                Ok(bound) => {
+                    let tracker = bound.tracker.clone();
+                    super::projection::record(&journal, &item, bound);
                     if item.state == HumanItemState::Open && item.tracker.as_ref() != Some(&tracker)
                     {
                         // llmlint: ignore[changed_behavior_has_e2e] a binding the journal refuses is a refusal of the append every write makes, which the full-disk journeys drive; the item is then open with no tracker, which `projection::pending` owes again, and the next write's re-projection is answered by the store's intent with this same task — the replay `tasks_project_once_into_the_task_source_and_questions_never_do` drives.
