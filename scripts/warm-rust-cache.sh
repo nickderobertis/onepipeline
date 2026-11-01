@@ -8,8 +8,10 @@
 #                               release build the stop-verdict tier times and the
 #                               install proof installs, and the docs; and
 #                               clippy's build, for `lint`, which restores this
-#                               key too; and the e2e harness's test doubles,
-#                               instrumented as the coverage tiers build them.
+#                               key too; and the e2e harness's test doubles in
+#                               each build `test-linux` asks for: instrumented
+#                               for the coverage tiers, plain for smoke, and
+#                               plain under denied warnings for release-compat.
 #   warm-rust-cache.sh cross    what `test-windows` and `test-macos` build: the
 #                               uninstrumented test build, clippy's, the
 #                               release build the install proof installs, and
@@ -42,6 +44,8 @@ case "${1:-}" in
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-archive
     just _crate-build _stop-verdict-build _crate-doc _crate-lint
     just _e2e-doubles-build instrumented
+    just _e2e-doubles-build plain
+    just _e2e-doubles-build plain-deny-warnings
     ;;
   cross)
     ONEPIPELINE_TEST_ARCHIVE="$archive" just _crate-test-quick-archive

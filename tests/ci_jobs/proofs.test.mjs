@@ -221,7 +221,7 @@ describe("the warm build's refusals", () => {
   it("refuses a doubles build it does not have", () => {
     const { status, log } = run(root, "just", ["_e2e-doubles-build", "release"]);
     assert.equal(status, 2, log);
-    assert.match(log, /name the build: instrumented or plain, not 'release'/);
+    assert.match(log, /name the build: instrumented, plain or plain-deny-warnings, not 'release'/);
   });
 });
 
@@ -257,7 +257,59 @@ describe("the warm build's test doubles", () => {
       recipe,
       /instrumented\).*cargo llvm-cov show-env.*target="\{\{llvm-cov-target-dir\}\}"/,
     );
-    assert.match(recipe, /plain\) target="\{\{justfile_directory\(\)\}\}\/target"/);
+    assert.match(
+      recipe,
+      /plain\) unset RUSTFLAGS; target="\{\{justfile_directory\(\)\}\}\/target"/,
+    );
+    assert.match(
+      recipe,
+      /plain-deny-warnings\) export RUSTFLAGS="-D warnings"; target="\{\{justfile_directory\(\)\}\}\/target"/,
+    );
+  });
+
+  // The doubles inherit RUSTFLAGS from the test that asks for them, and cargo
+  // fingerprints RUSTFLAGS, so each uninstrumented journey's own flags name the
+  // build it needs warm: release-compat's denied warnings, smoke's none (in
+  // run 41298787095 each compiled its doubles cold: 111.8 s and 116.0 s).
+  const project = (path) => JSON.parse(readFileSync(join(root, path), "utf8"));
+  const bodyOf = (name) => {
+    const body = justfile.split(new RegExp(`\n${name}(?: [^:\n]*)?:\n`))[1]?.split("\n\n")[0];
+    assert.ok(body, `the justfile has no ${name} recipe`);
+    return body;
+  };
+  const modeOf = (path, target) => {
+    const name = /^just (_[\w-]+)$/.exec(project(path).targets[target]?.command ?? "")?.[1];
+    assert.ok(name, `${path}'s ${target} runs no recipe this can name`);
+    const body = bodyOf(name);
+    assert.doesNotMatch(body, /llvm-cov/, `${name} is not an uninstrumented journey`);
+    return /RUSTFLAGS="-D warnings"/.test(body) ? "plain-deny-warnings" : "plain";
+  };
+  const doublesOf = (family) => {
+    const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
+    const arm = warm.split(`\n  ${family})\n`)[1]?.split(";;")[0] ?? "";
+    const lines = arm
+      .trim()
+      .split("\n")
+      .map((line) => line.trim());
+    const first = lines.findIndex((line) => line.startsWith("just _e2e-doubles-build "));
+    assert.ok(first >= 0, `the ${family} warm build builds no doubles`);
+    return { lines, tail: lines.slice(first) };
+  };
+
+  it("are built, on Linux, in each variant test-linux's journeys build them in", () => {
+    const owed = new Set([
+      "instrumented",
+      modeOf("tests/release_channel/project.json", "release-compat"),
+      modeOf("tests/smoke/project.json", "smoke"),
+    ]);
+    assert.deepEqual([...owed].sort(), ["instrumented", "plain", "plain-deny-warnings"]);
+    const built = doublesOf("linux").tail.map((line) => line.split(" ").at(-1));
+    assert.deepEqual([...built].sort(), [...owed].sort());
+  });
+
+  it("are built, for Windows and macOS, in the variant their test-quick tiers build them in", () => {
+    assert.doesNotMatch(bodyOf("_tier-test-quick"), /RUSTFLAGS|llvm-cov/);
+    assert.deepEqual(doublesOf("cross").tail, ["just _e2e-doubles-build plain"]);
   });
 
   it("are built by both families of the warm build, last", () => {
@@ -265,17 +317,13 @@ describe("the warm build's test doubles", () => {
     // the instrumented test build, testfakes and onevcs compiled again inside
     // the first journey (90 s and 31 s on a 20-core host); built after it, each
     // journey's build of them took under a second.
-    const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
-    for (const [family, mode] of [
-      ["linux", "instrumented"],
-      ["cross", "plain"],
-    ]) {
-      const arm = warm.split(`\n  ${family})\n`)[1]?.split(";;")[0] ?? "";
-      const lines = arm
-        .trim()
-        .split("\n")
-        .map((line) => line.trim());
-      assert.equal(lines.at(-1), `just _e2e-doubles-build ${mode}`, family);
+    for (const family of ["linux", "cross"]) {
+      const { lines, tail } = doublesOf(family);
+      assert.ok(
+        tail.every((line) => line.startsWith("just _e2e-doubles-build ")),
+        `the ${family} warm build runs another build after its doubles: ${tail.join("; ")}`,
+      );
+      assert.ok(tail.length < lines.length, family);
     }
   });
 });
