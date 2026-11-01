@@ -61,7 +61,11 @@ jobs:
       # visual docs are captured, commented and deployed: visual-docs.yml runs
       # on a pull request only when it closes, to delete its preview. The
       # capture, the reproducibility gate, classify and the gallery build run
-      # either way.
+      # either way. No offline test drives the publication: its effects are a
+      # comment on a live pull request and a Pages deploy, so its integration
+      # proof is this job on every pull request, the change turning it on
+      # included; ci-shape.test.mjs holds only that the switch and its steps
+      # stay wired.
       VISUAL_DOCS_PUBLISH: "true"
     steps:
       - uses: actions/checkout@v4

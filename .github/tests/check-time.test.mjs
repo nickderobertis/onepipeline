@@ -29,7 +29,7 @@ export function checkTimeProblems(budgets, ci) {
   return problems;
 }
 
-test("every CI job's timeout lets it reach onepipeline-ci-check-time's threshold", () => {
+test("lint is bounded at 30 minutes and each test job's timeout reaches onepipeline-ci-check-time's threshold", () => {
   assert.deepEqual(checkTimeProblems(read("budgets.yaml"), read(".github/workflows/ci.yml")), []);
 });
 
