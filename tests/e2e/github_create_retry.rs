@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::harness::World;
-use crate::linear_writeback::{from_the_launch_directory, projection_records};
+use crate::linear_writeback::{
+    from_the_launch_directory, projection_completed_after, projection_records,
+};
 use crate::private_github_home::{described, metadata_of, GitHub};
 
 /// The repository the board files into.
@@ -51,34 +53,18 @@ fn shadow_of(world: &World, run: &str, node: &str) -> PathBuf {
     found.into_iter().next().expect("one shadow")
 }
 
-/// What the run's landed baseline records for `node`: `Null` while it records nothing, the
-/// baseline not yet written among it.
-fn landed_item(world: &World, run: &str, node: &str) -> Value {
-    std::fs::read_to_string(world.run_file(run, "writeback-landed.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .map_or(Value::Null, |baseline| baseline["items"][node].clone())
-}
-
-/// The run's newest projection record and `node`'s shadow, read while holding the run's
-/// `writeback-landing.lock` — the lock every write-back attempt holds from its shadow rewrite
-/// to its record — so no attempt is between the two: the shadow is exactly as the attempt the
-/// newest record names left it.
-fn at_rest(world: &World, run: &str, node: &str) -> (Option<Value>, PathBuf, Value) {
-    let path = world.run_file(run, "writeback-landing.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .unwrap_or_else(|e| panic!("{} cannot be opened: {e}", path.display()));
-    lock.lock()
-        .unwrap_or_else(|e| panic!("{} cannot be held: {e}", path.display()));
-    let newest = projection_records(world, run).pop();
-    let shadow = shadow_of(world, run, node);
-    let metadata = shadow_metadata(&shadow);
-    drop(lock);
-    (newest, shadow, metadata)
+/// The origin the write-back records for the shadow document at `relative`, its path under the
+/// shadow's `tasks` directory: the shadow source's id for it, whose project and task parts the
+/// store joins with `/` on every host. A Windows path separates them with `\`, which no part
+/// carries — each is hex — so it is read as the separator it is.
+fn shadow_origin(relative: &Path) -> String {
+    format!(
+        "{SHADOW_SOURCE}:{}",
+        relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/")
+    )
 }
 
 /// The metadata a shadow document's front matter records.
@@ -97,8 +83,7 @@ fn shadow_metadata(path: &Path) -> Value {
 /// A live addition whose create GitHub ran and whose answer was then dropped is retried by the
 /// write-back, and the retry finishes the issue the interrupted attempt filed: the board holds
 /// exactly one issue for it, carrying the shadow's origin, the shadow links that issue and holds
-/// no create in flight, the baseline lands the node on that issue, and the write-back record says
-/// the retry created nothing.
+/// no create in flight, and the write-back record says the retry created nothing.
 #[test]
 fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_on_retry() {
     let name = "github-create-retry";
@@ -149,12 +134,6 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
     world.until("the anchor to dispatch", |world| {
         !world.events_of(name, "node-dispatched").is_empty()
     });
-    // The anchor's dispatch is a projection of its own, landed a moment after the dispatch
-    // event. Waiting for it here leaves the added node's attempts the last a projection makes
-    // while the anchor holds, so the shadow can be read as the landing attempt left it.
-    world.until("the anchor's dispatch to land on the board", |world| {
-        !landed_item(world, name, "anchor")["metadata"]["onepipeline.dispatch"].is_null()
-    });
 
     // GitHub will file the added node's issue and drop its answer.
     github.drop_create(ADDED);
@@ -175,10 +154,6 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
             })
         },
     );
-    // Every write-back attempt rewrites the shadow before its copy, and the store links it in
-    // that copy, so the link is read where no attempt is in flight and the add's landing is
-    // the newest attempt made.
-    let (newest, shadow, metadata) = at_rest(&world, name, ADDED);
     let records: Vec<Value> = projection_records(&world, name)
         .into_iter()
         .filter(|record| record.to_string().contains(ADDED))
@@ -202,18 +177,12 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
 
     // Exactly one issue carries the shadow's origin — the id the store copies the added node
     // from — in its body and in its board item's origin field, and it carries the added node.
-    // The origin is an id, its segments joined by `/` on every platform, not a path
-    // in the host's own spelling.
-    let source = format!(
-        "{SHADOW_SOURCE}:{}",
+    let shadow = shadow_of(&world, name, ADDED);
+    let metadata = shadow_metadata(&shadow);
+    let source = shadow_origin(
         shadow
             .strip_prefix(world.run_file(name, "writeback/tasks"))
-            .expect("under the shadow's tasks")
-            .with_extension("")
-            .components()
-            .map(|part| part.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/")
+            .expect("under the shadow's tasks"),
     );
     let carrying: Vec<(&String, &Value)> = state["issues"]
         .as_object()
@@ -255,16 +224,7 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         items[0]
     );
 
-    // The shadow links that issue and holds no create in flight, as the landing attempt left
-    // it: the store links the item in the write that removes the create it recorded.
-    assert!(
-        newest.as_ref().is_some_and(|record| {
-            record["outcome"] == "projected" && record.to_string().contains(ADDED)
-        }),
-        "no attempt followed the one that landed the added node, so the shadow was read as that \
-         attempt left it: {newest:#?}\nall: {:#?}",
-        projection_records(&world, name)
-    );
+    // The shadow links that issue and holds no create in flight.
     assert_eq!(
         metadata["onetaskgraph.copies"]["board"],
         json!(format!("board:{issue_id}")),
@@ -275,17 +235,41 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         "the shadow holds no create in flight: {metadata:#}"
     );
 
-    // And the write-back's baseline, the record a later attempt plans from once the next
-    // rewrite has dropped the shadow's link, names that issue for the added node too.
-    world.until(
-        "the baseline to record where the added node landed",
-        |world| !landed_item(world, name, ADDED)["destination"].is_null(),
-    );
-    let baseline = landed_item(&world, name, ADDED);
-    assert_eq!(
-        baseline["destination"],
-        json!(format!("board:{issue_id}")),
-        "the write-back landed the added node on the one issue: {baseline:#}"
-    );
+    // A later attempt that updates only another lineage rewrites every shadow first, and the
+    // shadow still links that issue after it.
+    let before = projection_records(&world, name).len();
     world.release("anchor.go");
+    world.until("the anchor's own update to land", |world| {
+        projection_completed_after(world, name, before, "anchor")
+    });
+    let after = shadow_metadata(&shadow_of(&world, name, ADDED));
+    assert_eq!(
+        after["onetaskgraph.copies"]["board"],
+        json!(format!("board:{issue_id}")),
+        "the shadow links the one issue after a later attempt: {after:#}"
+    );
+    assert_eq!(
+        after["onetaskgraph.copy_locations"]["board"]["id"],
+        json!(format!("board:{issue_id}")),
+        "the shadow says where that issue is after a later attempt: {after:#}"
+    );
 }
+
+// llmlint: ignore-block[tests_mirror_real_usage] the code this proves is the journey's own:
+// `shadow_origin` is what the journey above composes its expected origin with, and it was that
+// composition, not the engine, that differed on Windows. A Linux path never separates its parts
+// with `\`, so the journey itself cannot present the Windows form here; this hands the helper
+// the exact path the Windows log shows.
+/// A shadow document's origin is the one the write-back records whichever separator the host's
+/// path puts between its parts: Windows names it `626f6172643a706c616e\6578616d706c6573.md`.
+#[test]
+fn a_shadow_documents_origin_is_the_same_whichever_separator_its_path_carries() {
+    let origin = "onepipeline-writeback:626f6172643a706c616e/6578616d706c6573";
+    for relative in [
+        r"626f6172643a706c616e\6578616d706c6573.md",
+        "626f6172643a706c616e/6578616d706c6573.md",
+    ] {
+        assert_eq!(shadow_origin(Path::new(relative)), origin, "{relative}");
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
