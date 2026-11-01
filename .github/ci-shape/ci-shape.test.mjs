@@ -9,7 +9,7 @@
 //   composite actions, and never through its reusable workflow from ci.yml;
 // - the release pull request's shortcut asked by the three test jobs, gating
 //   their work, and never by `lint`;
-// - every job behind a context branch protection requires today still defined;
+// - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
 //   from main under exactly the keys the test jobs restore.
@@ -48,9 +48,12 @@ const CONDITION = {
 const TESTS = ["test-linux", "test-windows", "test-macos"];
 
 // The contexts branch protection requires, from the tree's one copy of them
-// (`required-contexts.json`, which tests/ci_workflows.rs reads too); the jobs
-// behind them stay until protection moves to the four.
+// (`required-contexts.json`, which tests/ci_workflows.rs reads too).
 const REQUIRED = JSON.parse(readFileSync(join(github, "required-contexts.json"), "utf8")).contexts;
+// The one lane visual-docs.yml's reusable workflow renders for this repository,
+// `report (<arch>, <current>, <verify>, <title>)`: what `lint`'s composite steps
+// judge must be what that workflow judges on a push to main.
+const VISUAL_DOCS_LANE = "report (x86_64, shots/current, shots/verify, Visual docs)";
 const REUSABLE_VISUAL_DOCS = "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml";
 const COMPOSITES = [
   "nickderobertis/screencomp@",
@@ -138,16 +141,19 @@ describe("ci.yml's four jobs", () => {
 });
 
 describe("the judged lint", () => {
-  it("installs in `lint` exactly the harnesses the `llmlint` job pins", () => {
-    // The two run one judge until the old job is retired; the harness pins are
-    // what an upstream release has broken a required check through before.
-    const installs = (job) =>
-      steps(job)
-        .map(runs)
-        .filter((run) => /^npm install -g /.test(run))
-        .sort();
-    assert.ok(installs(ci.jobs.llmlint).length > 0, "the llmlint job installs no harness");
-    assert.deepEqual(installs(ci.jobs.lint), installs(ci.jobs.llmlint));
+  it("installs in `lint` each harness at an exact release", () => {
+    // The harness pins are what an upstream release has broken a required check
+    // through before, so neither may float.
+    const installs = steps(ci.jobs.lint)
+      .map(runs)
+      .filter((run) => /^npm install -g /.test(run));
+    assert.deepEqual(
+      installs.map((run) => run.replace(/@\d+\.\d+\.\d+$/, "@<pinned>")).sort(),
+      [
+        "npm install -g @anthropic-ai/claude-code@<pinned>",
+        "npm install -g @openai/codex@<pinned>",
+      ],
+    );
   });
 });
 
@@ -199,12 +205,11 @@ describe("the visual docs", () => {
   });
 
   it("are judged with the inputs visual-docs.yml's reusable workflow gives its one lane", () => {
-    // The lane branch protection names, `(<arch>, <current>, <verify>, <title>)`,
-    // and the inputs visual-docs.yml sets over the reusable workflow's defaults
-    // (the snapshot in fixtures/, pinned with it): what the composite steps
-    // pass must be what that workflow would, so the two paths judge alike.
-    const lane = REQUIRED.find((context) => context.startsWith("visual-docs / report ("));
-    const [arch, current, verify, title] = /\((.+)\)$/.exec(lane)[1].split(", ");
+    // The lane the reusable workflow renders, and the inputs visual-docs.yml sets
+    // over its defaults (the snapshot in fixtures/, pinned with it): what the
+    // composite steps pass must be what that workflow would, so the two paths
+    // judge alike.
+    const [arch, current, verify, title] = /\((.+)\)$/.exec(VISUAL_DOCS_LANE)[1].split(", ");
     const reusable = parse(
       readFileSync(join(github, "fixtures", "visual-docs-reusable.yml"), "utf8"),
     );
@@ -283,12 +288,9 @@ describe("the release pull request's shortcut", () => {
         `\`${id}\` does work before asking whether it is owed`,
       );
       for (const step of all.slice(at + 1)) {
-        // The verdict a carrier reads is recorded on a shortcut too: the job
-        // succeeded, having proven its tests already passed.
         const gated =
           String(step.if ?? "").includes("steps.shortcut.outputs.skip != 'true'") ||
-          String(step.if ?? "").includes("steps.gate.outcome == 'failure'") ||
-          (step.id === "proved" && step.if === undefined);
+          String(step.if ?? "").includes("steps.gate.outcome == 'failure'");
         assert.ok(gated, `\`${id}\`'s "${step.name ?? uses(step)}" runs on a shortcut`);
       }
     });
@@ -302,24 +304,14 @@ describe("the release pull request's shortcut", () => {
   });
 });
 
-describe("today's required contexts", () => {
-  it("are each still reported by a job of a workflow that runs on pull requests", () => {
+describe("the required contexts", () => {
+  it("are exactly the four, each reported by ci.yml on a pull request", () => {
+    assert.deepEqual([...REQUIRED].sort(), Object.keys(FOUR).sort());
     const reported = new Set();
-    for (const workflow of Object.values(workflows)) {
-      if (pullRequestTrigger(workflow) === undefined) continue;
-      for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
-        for (const name of rendered(id, job)) reported.add(name);
-      }
+    for (const [id, job] of Object.entries(ci.jobs ?? {})) {
+      for (const name of rendered(id, job)) reported.add(name);
     }
-    const visual = workflows["visual-docs.yml"]?.jobs?.["visual-docs"];
     for (const context of REQUIRED) {
-      if (context.startsWith("visual-docs / ")) {
-        assert.ok(
-          String(visual?.uses ?? "").startsWith(REUSABLE_VISUAL_DOCS),
-          `no visual-docs job reports \`${context}\``,
-        );
-        continue;
-      }
       assert.ok(reported.has(context), `no job reports \`${context}\` on a pull request`);
     }
   });

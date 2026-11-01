@@ -1,8 +1,8 @@
 //! `scripts/build-linux-wheel.sh`, driven as `just wheel-linux` drives it.
 //!
 //! `docker` and the image's tools are doubles because the real build is minutes
-//! of network-bound compile, which ci.yml's `wheel` legs run for real on every
-//! pull request. The two workflows are read rather than restated, so the targets
+//! of network-bound compile, which ci.yml's `test-linux` runs for real on every
+//! pull request the crate's change reaches (`onepipeline:wheel-smoke`). The two workflows are read rather than restated, so the targets
 //! and maturin they name cannot drift from what the script builds.
 
 #![cfg(target_os = "linux")]
@@ -190,25 +190,6 @@ fn job_block(workflow: &str, job: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
-}
-
-/// Each `- target:` in a job's matrix, with the `os:` beside it.
-fn matrix_legs(block: &str) -> Vec<(String, String)> {
-    let mut legs = Vec::new();
-    let mut target = None;
-    for line in block.lines().map(str::trim) {
-        let line = line.trim_start_matches("- ");
-        if let Some(value) = line.strip_prefix("target: ") {
-            if !value.contains("${{") {
-                target = Some(value.to_string());
-            }
-        } else if let Some(os) = line.strip_prefix("os: ") {
-            if let Some(target) = target.take() {
-                legs.push((target, os.to_string()));
-            }
-        }
-    }
-    legs
 }
 
 fn release_linux_targets() -> Vec<String> {
@@ -433,44 +414,28 @@ fn a_hand_back_that_fails_fails_a_build_that_compiled() {
 
 #[test]
 fn the_pull_request_check_builds_the_release_linux_legs_through_the_recipe() {
-    let block = job_block("ci.yml", "wheel");
     // arm64 Linux is proved by its release job alone: pull requests get no arm64
-    // leg, so the proof covers exactly `build-linux`'s x86-64 target.
-    assert_eq!(
-        matrix_legs(&block),
-        job_legs("build-linux", "linux"),
-        "ci.yml's wheel legs build the release's x86-64 Linux target on the release's runner"
-    );
-    assert!(
-        block.contains("run: just wheel-linux \"$TARGET\""),
-        "ci.yml's wheel builds through the recipe"
-    );
-    assert!(
-        block.contains(
-            "x86_64-unknown-linux-gnu: ${{ steps.proved.outputs.x86_64-unknown-linux-gnu }}"
-        ),
-        "ci.yml's wheel proof records the x86_64 leg's verdict"
-    );
-    let carrier = job_block("ci.yml", "wheel-x86_64");
-    assert!(
-        carrier.contains("name: wheel\n")
-            && carrier
-                .contains("LEG_VERDICT: ${{ needs.wheel.outputs['x86_64-unknown-linux-gnu'] }}"),
-        "the bare `wheel` name branch protection requires reports the x86_64 leg"
-    );
-    for (job, recipe) in [
-        ("build-linux", "release-linux"),
-        ("build-linux-arm64", "release-linux-arm64"),
-    ] {
+    // leg, so the proof covers exactly `build-linux`'s x86-64 target, built by
+    // `test-linux` on the release's runner through `onepipeline:wheel-smoke`.
+    let legs = job_legs("build-linux", "linux");
+    let proof = fs::read_to_string(repo_root().join("scripts/install-proof.sh"))
+        .expect("install-proof.sh is readable");
+    for (target, runner) in &legs {
         assert!(
-            job_block("release.yml", job).contains(&format!("run: just {recipe} build\n")),
-            "release.yml's {job} builds through its recipe"
+            proof.contains(&format!("just wheel-linux {target} ")),
+            "install-proof.sh's wheel proof does not build {target} through the recipe"
+        );
+        assert!(
+            job_block("ci.yml", "test-linux").contains(&format!("runs-on: {runner}\n")),
+            "test-linux does not build {target} on the release's runner {runner}"
         );
     }
-    let driver = fs::read_to_string(repo_root().join("release/release.py")).unwrap();
+    let jobs = fs::read_to_string(repo_root().join("scripts/ci-job.sh")).expect("ci-job.sh");
     assert!(
-        driver.contains("'just', 'wheel-linux'"),
-        "the release's Linux recipe builds its wheel with the script `just wheel-linux` runs"
+        jobs.lines()
+            .any(|line| line.trim_start().starts_with("test-linux) targets=")
+                && line.contains("wheel-smoke")),
+        "test-linux does not run the wheel proof"
     );
 }
 
@@ -584,18 +549,12 @@ fn an_absolute_out_directory_is_refused() {
     assert!(!dir.join("docker.log").exists(), "docker was not run");
 }
 
-/// ci.yml's `wheel` legs run only when `changes` reports the crate affected,
-/// and the crate's `test-rest` target — whose tests, this binary among them,
-/// read the wheel build — is what a change to one of its inputs re-runs. A
-/// wheel-build input missing from that target's inputs is a pull request that
-/// changes the build and replays a cached pass from before it.
+/// The crate's `test-rest` target — whose tests, this binary among them, read
+/// the wheel build — is what a change to one of its inputs re-runs. A wheel-build
+/// input missing from that target's inputs is a pull request that changes the
+/// build and replays a cached pass from before it.
 #[test]
 fn the_wheel_check_is_gated_on_inputs_carrying_what_its_build_reads() {
-    let block = job_block("ci.yml", "wheel");
-    assert!(
-        block.contains("if: needs.changes.outputs.crate == 'true'"),
-        "ci.yml's wheel legs are gated on the crate being affected"
-    );
     let read_json = |path: &str| -> serde_json::Value {
         serde_json::from_str(
             &fs::read_to_string(repo_root().join(path)).expect("the file is readable"),

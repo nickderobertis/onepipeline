@@ -125,44 +125,6 @@ export function classify(
     return required(`unreadable classification: ${error.message}`);
   }
 }
-export function carrier({ changes, macos, required, crate, proof }) {
-  if (!["cross", "install", "install-documented"].includes(proof))
-    throw new Error("unknown Mac proof");
-  if (
-    changes !== "success" ||
-    !["true", "false"].includes(required) ||
-    !["true", "false"].includes(crate)
-  )
-    throw new Error("classification prerequisite failed, cancelled, or missing");
-  if (required === "false") {
-    if (macos !== "skipped") throw new Error("authorized omission requires a skipped Mac lane");
-    return "Mac lane intentionally omitted by classifier; no Mac tests claimed";
-  }
-  if (proof === "cross" && crate === "false") {
-    if (macos !== "success")
-      throw new Error("Mac installs must still succeed on a path-sensitive cross skip");
-    return "cross omitted by affected-project selection; Mac install proofs succeeded";
-  }
-  if (macos !== "success")
-    throw new Error("required Mac lane failed, cancelled, skipped, or missing");
-  return `Mac ${proof} proof succeeded`;
-}
-// The verdict a Linux carrier reports for one leg of a path-selected matrix
-// proof: that leg's own recorded success, or an omission the affected-project
-// selection authorized. Anything failed, cancelled or missing fails.
-export function pathCarrier({ changes, crate, proof, leg, verdict }) {
-  if (typeof leg !== "string" || !leg) throw new Error("path carrier names no leg");
-  if (changes !== "success" || !["true", "false"].includes(crate))
-    throw new Error("affected-project prerequisite failed, cancelled, or missing");
-  if (crate === "false") {
-    if (proof !== "skipped" || verdict)
-      throw new Error("an authorized path omission requires a skipped proof");
-    return `${leg} proof omitted by affected-project selection; no tests claimed`;
-  }
-  if (!["success", "failure"].includes(proof) || verdict !== "success")
-    throw new Error(`${leg} proof failed, cancelled, skipped, or missing`);
-  return `${leg} succeeded`;
-}
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const [mode, ...args] = process.argv.slice(2);
@@ -184,29 +146,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         event = {};
       }
       console.log(JSON.stringify(classify(event, options.base, options.head)));
-    } else if (mode === "carrier") {
-      if (args.length) throw new Error("usage: carrier takes no arguments");
-      console.log(
-        carrier({
-          changes: process.env.CHANGES_RESULT,
-          macos: process.env.MACOS_RESULT,
-          required: process.env.MACOS_REQUIRED,
-          crate: process.env.CRATE_AFFECTED,
-          proof: process.env.PROOF,
-        }),
-      );
-    } else if (mode === "path-carrier") {
-      if (args.length) throw new Error("usage: path-carrier takes no arguments");
-      console.log(
-        pathCarrier({
-          changes: process.env.CHANGES_RESULT,
-          crate: process.env.CRATE_AFFECTED,
-          proof: process.env.PROOF_RESULT,
-          leg: process.env.LEG,
-          verdict: process.env.LEG_VERDICT,
-        }),
-      );
-    } else throw new Error("expected classify, carrier or path-carrier");
+    } else throw new Error("expected classify");
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

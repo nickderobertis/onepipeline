@@ -1,20 +1,13 @@
-//! What the committed workflows promise a pull request, read off the workflows
-//! themselves.
+//! What the committed workflows promise a pull request and a push to `main`,
+//! read off the workflows themselves.
 //!
-//! Two promises live in YAML that no other check in this tree parses:
-//!
-//! 1. **The fixed context contract.** Branch protection on `main` requires a set
-//!    of status-check contexts by their rendered names, and GitHub holds that
-//!    set — nothing here can read it. What this tree can hold is the other half:
-//!    a job reporting each of those names, on every pull request, behind no
-//!    condition or `needs` edge that could leave it unreported. A job renamed,
-//!    a matrix leg dropped, or a new `if:` would otherwise land unnoticed, and a
-//!    required context that never reports blocks every merge.
-//! 2. **Where the broader tier runs.** The release-plz release pull request runs
-//!    one full sweep (`release-sweep.yml`), and every other pull request the
-//!    affected tier (`ci.yml`'s `gate`). Which runs is decided by each job's
-//!    `if:`, so the job selection is evaluated here against a synthetic event of
-//!    each kind.
+//! **The fixed context contract.** Branch protection on `main` requires four
+//! status-check contexts by their rendered names — `lint`, `test-linux`,
+//! `test-windows` and `test-macos` — and GitHub holds that set; nothing here can
+//! read it. What this tree can hold is the other half: a job reporting each of
+//! those names on every pull request, behind no condition or `needs` edge that
+//! could leave it unreported. A job renamed or given a new `if:` would otherwise
+//! land unnoticed, and a required context that never reports blocks every merge.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -68,35 +61,14 @@ fn is_required(name: &str) -> bool {
     required_contexts().iter().any(|context| context == name)
 }
 
-/// The one context reported by a job of a reusable workflow defined in another
-/// repository. At the pinned release below its `report` job renders one leg per
-/// `screencomp.toml` arch as `(<arch>, shots/current, shots/verify,
-/// <gallery-title>)`, the last three from defaults of inputs the caller leaves
-/// unset; the test derives the name from those and compares.
-const VISUAL_DOCS: &str = "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)";
-
-/// The release whose `report` job was read to derive the rendering above. A pin
-/// bump fails here until the rendering is read again at the new tag.
-const VISUAL_DOCS_PIN: &str =
-    "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@v0.4.8";
-
-/// The reusable workflow's inputs that change its `report` legs' rendered names.
-const VISUAL_DOCS_LEG_INPUTS: &[&str] = &["arches", "projects", "gallery-title"];
-
 /// The conditions a required job may carry. Each one either always holds on a
 /// pull request or skips the job — and a skipped job reports its context as
 /// passed — so none of them can leave a context unreported. A new condition is
-/// a new way to be unreported, and has to be argued for here.
-///
-/// A skipped *matrix* job is the exception to "reports as passed": it reports
-/// under its bare key, never a leg's rendered name — the shape of run
-/// 38398392919, where a failed gate left `install (<os>)` unreported. So no
-/// required context is reported by a conditional matrix job; carriers report
-/// those names instead (see `carrier_runs`).
+/// a new way to be unreported, and has to be argued for here. The second is
+/// `test-macos`'s: it skips release-plz's own release pull request.
 const ALLOWED_CONDITIONS: &[&str] = &[
-    "needs.changes.outputs.crate == 'true'",
-    "needs.changes.outputs.crate == 'true' && github.event_name == 'pull_request'",
     "github.event_name == 'pull_request'",
+    "github.event_name == 'pull_request' && !(startsWith(github.head_ref, 'release-plz-') && github.event.pull_request.head.repo.full_name == github.repository)",
 ];
 
 fn triggers(parsed: &Value) -> &Value {
@@ -209,20 +181,6 @@ fn needs(job: &Value) -> Vec<String> {
     }
 }
 
-/// The result command a carrier job runs, if this job is one: a Linux job that
-/// reports a required name for a proof that may legitimately not run.
-fn carrier_run(job: &Value) -> Option<&str> {
-    job["steps"].as_array()?.iter().find_map(|step| {
-        step["run"].as_str().filter(|run| {
-            [
-                "node .github/macos-policy.mjs carrier",
-                "node .github/macos-policy.mjs path-carrier",
-            ]
-            .contains(run)
-        })
-    })
-}
-
 fn condition(job: &Value) -> Option<String> {
     job.get("if").map(|c| {
         c.as_str()
@@ -245,479 +203,68 @@ fn every_required_context_is_reported_on_every_pull_request() {
         }
         for (key, job) in parsed["jobs"].as_object().expect("the workflow has jobs") {
             for name in rendered(key, job) {
-                reporters.insert(name, (file.clone(), key.to_owned()));
+                assert!(
+                    reporters
+                        .insert(name.clone(), (file.clone(), key.to_owned()))
+                        .is_none(),
+                    "two jobs report `{name}` on a pull request"
+                );
             }
         }
     }
 
-    for context in required_contexts().iter().filter(|c| *c != VISUAL_DOCS) {
+    let mut required = required_contexts();
+    required.sort();
+    assert_eq!(required, ["lint", "test-linux", "test-macos", "test-windows"]);
+    for context in &required {
         let (file, key) = reporters
             .get(context.as_str())
             .unwrap_or_else(|| panic!("no job reports `{context}` on a pull request"));
-        let jobs = &all[file]["jobs"];
-        let job = &jobs[key.as_str()];
-        if let Some(run) = carrier_run(job) {
-            assert_eq!(condition(job).as_deref(), Some("always()"));
-            assert_eq!(job["runs-on"].as_str(), Some("ubuntu-latest"));
-            let upstream = needs(job);
-            assert_eq!(upstream.len(), 2, "`{context}` carries one proof");
-            assert_eq!(upstream[0], "changes");
-            if run.ends_with(" carrier") {
-                assert_eq!(upstream[1], "test-macos");
-            }
-            assert!(
-                rendered(&upstream[1], &jobs[upstream[1].as_str()])
-                    .iter()
-                    .all(|name| !is_required(name)),
-                "`{context}`'s proof reports a required name itself, so it would report twice"
-            );
-            continue;
-        }
+        assert_eq!(file, "ci.yml", "`{context}` is reported by {file}");
+        let job = &all[file]["jobs"][key.as_str()];
+        assert!(
+            job.get("strategy").is_none(),
+            "`{context}` is a matrix job, whose legs render under other names"
+        );
         if let Some(condition) = condition(job) {
-            assert!(
-                job.get("strategy").is_none(),
-                "`{context}` ({file} job `{key}`) is a conditional matrix job, whose skip reports no leg's name"
-            );
             assert!(
                 ALLOWED_CONDITIONS.contains(&condition.as_str()),
                 "`{context}` ({file} job `{key}`) runs only if `{condition}`, a condition that can leave it unreported"
             );
         }
-        // Each job it waits on has to run on every pull request too, or a
-        // failure upstream would leave this context waiting rather than skipped.
-        for upstream in needs(job) {
-            let upstream_job = &jobs[upstream.as_str()];
-            assert!(
-                !upstream_job.is_null(),
-                "`{context}` needs `{upstream}`, which {file} does not define"
-            );
-            assert_eq!(
-                condition(upstream_job),
-                None,
-                "`{context}` needs `{upstream}`, which runs conditionally"
-            );
-            assert!(
-                needs(upstream_job).is_empty(),
-                "`{context}` needs `{upstream}`, which waits on another job in turn"
-            );
-        }
-    }
-
-    let visual = &all["visual-docs.yml"];
-    assert!(runs_on_every_pull_request("visual-docs.yml", visual));
-    let caller = &visual["jobs"]["visual-docs"];
-    assert_eq!(
-        caller["uses"].as_str(),
-        Some(VISUAL_DOCS_PIN),
-        "`{VISUAL_DOCS}` was read off {VISUAL_DOCS_PIN}'s `report` job; read it again at the new pin"
-    );
-    for input in VISUAL_DOCS_LEG_INPUTS {
         assert!(
-            caller["with"].get(*input).is_none(),
-            "the visual-docs caller sets `{input}`, which renames the `report` legs"
-        );
-    }
-    let screencomp: toml::Value = toml::from_str(
-        &fs::read_to_string(repo_root().join("screencomp.toml"))
-            .expect("screencomp.toml is readable"),
-    )
-    .expect("screencomp.toml is TOML");
-    let arches: Vec<&str> = screencomp["capture"]["arches"]
-        .as_array()
-        .expect("screencomp.toml lists [capture].arches")
-        .iter()
-        .map(|arch| arch.as_str().expect("an arch is a string"))
-        .collect();
-    let derived: Vec<String> = arches
-        .iter()
-        .map(|arch| {
-            format!("visual-docs / report ({arch}, shots/current, shots/verify, Visual docs)")
-        })
-        .collect();
-    assert_eq!(
-        derived,
-        [VISUAL_DOCS],
-        "the visual-docs legs render differently from the required context"
-    );
-    assert_eq!(
-        condition(caller),
-        None,
-        "the visual-docs caller runs conditionally"
-    );
-    assert!(
-        needs(caller).is_empty(),
-        "the visual-docs caller waits on another job"
-    );
-}
-
-/// The jobs that report a context nobody requires, and that no required job may
-/// wait on: the release sweep, the suppressions comment, and the three workflows
-/// AGENTS.md records as advisory.
-#[test]
-fn no_required_job_waits_on_an_advisory_one() {
-    let all = workflows();
-    for (file, key) in [
-        ("release-sweep.yml", "release-sweep"),
-        ("notignored.yml", "suppressions"),
-        ("launcher.yml", "launcher"),
-    ] {
-        let job = &all[file]["jobs"][key];
-        assert!(!job.is_null(), "{file} has no `{key}` job");
-        for name in rendered(key, job) {
-            assert!(
-                !is_required(&name),
-                "{file}'s `{key}` reports `{name}`, a required context"
-            );
-        }
-    }
-    // `needs` only reaches jobs of the same workflow, so a required job waits on
-    // an advisory one only if the two share a file — which none of these do.
-    for (file, parsed) in &all {
-        let jobs = parsed["jobs"].as_object().expect("the workflow has jobs");
-        for (key, job) in jobs {
-            if rendered(key, job).iter().any(|name| is_required(name)) {
-                for upstream in needs(job) {
-                    let upstream_names = rendered(&upstream, &parsed["jobs"][upstream.as_str()]);
-                    assert!(
-                        upstream == "changes"
-                            || (carrier_run(job).is_some() && needs(job)[1] == upstream)
-                            || upstream_names.iter().any(|name| is_required(name)),
-                        "{file}'s required `{key}` waits on `{upstream}`, which is not itself required"
-                    );
-                }
-            }
-        }
-    }
-    for advisory in [
-        "release-sweep.yml",
-        "notignored.yml",
-        "engine-currency.yml",
-        "visual-docs.yml",
-        "launcher.yml",
-    ] {
-        assert!(
-            all.contains_key(advisory),
-            "{advisory} is a workflow of its own"
+            needs(job).is_empty(),
+            "`{context}` waits on {:?}, whose failure would leave it waiting rather than skipped",
+            needs(job)
         );
     }
 }
 
-/// A GitHub Actions expression, evaluated over the handful of forms the job
-/// selection uses: `context.path`, `'literal'`, `==`, `!=`, `&&`, `||`,
-/// `startsWith(a, b)` and parentheses. Anything else panics, so a condition
-/// rewritten past what this reads fails here rather than evaluating wrongly.
-fn evaluate(expression: &str, github: &BTreeMap<&str, &str>) -> bool {
-    #[derive(Debug, Clone, PartialEq)]
-    enum Token {
-        Str(String),
-        Ident(String),
-        Op(&'static str),
-    }
-    let mut tokens = Vec::new();
-    let chars: Vec<char> = expression.chars().collect();
-    let mut at = 0;
-    while at < chars.len() {
-        let c = chars[at];
-        if c.is_whitespace() {
-            at += 1;
-        } else if c == '\'' {
-            let end = chars[at + 1..]
-                .iter()
-                .position(|&q| q == '\'')
-                .expect("a closed string literal")
-                + at
-                + 1;
-            tokens.push(Token::Str(chars[at + 1..end].iter().collect()));
-            at = end + 1;
-        } else if let Some(op) = ["==", "!=", "&&", "||"]
-            .into_iter()
-            .find(|op| chars[at..].iter().take(2).collect::<String>() == *op)
-        {
-            tokens.push(Token::Op(op));
-            at += 2;
-        } else if let Some(op) = ["(", ")", ","].into_iter().find(|op| c.to_string() == *op) {
-            tokens.push(Token::Op(op));
-            at += 1;
-        } else if c.is_alphanumeric() || c == '_' {
-            let end = chars[at..]
-                .iter()
-                .position(|&n| !(n.is_alphanumeric() || n == '_' || n == '.' || n == '-'))
-                .map_or(chars.len(), |n| n + at);
-            tokens.push(Token::Ident(chars[at..end].iter().collect()));
-            at = end;
-        } else {
-            panic!("`{expression}` has a character this evaluator does not read: {c:?}");
-        }
-    }
-
-    struct Parser<'a> {
-        tokens: Vec<Token>,
-        at: usize,
-        github: &'a BTreeMap<&'a str, &'a str>,
-    }
-    #[derive(Debug, PartialEq)]
-    enum Val {
-        Str(String),
-        Bool(bool),
-    }
-    impl Parser<'_> {
-        fn peek(&self) -> Option<&Token> {
-            self.tokens.get(self.at)
-        }
-        fn eat(&mut self, op: &'static str) -> bool {
-            if self.peek() == Some(&Token::Op(op)) {
-                self.at += 1;
-                true
-            } else {
-                false
-            }
-        }
-        fn or(&mut self) -> Val {
-            let mut left = self.and();
-            while self.eat("||") {
-                let right = self.and();
-                left = Val::Bool(truthy(&left) || truthy(&right));
-            }
-            left
-        }
-        fn and(&mut self) -> Val {
-            let mut left = self.compare();
-            while self.eat("&&") {
-                let right = self.compare();
-                left = Val::Bool(truthy(&left) && truthy(&right));
-            }
-            left
-        }
-        fn compare(&mut self) -> Val {
-            let left = self.primary();
-            if self.eat("==") {
-                let right = self.primary();
-                return Val::Bool(left == right);
-            }
-            if self.eat("!=") {
-                let right = self.primary();
-                return Val::Bool(left != right);
-            }
-            left
-        }
-        fn primary(&mut self) -> Val {
-            let token = self.tokens.get(self.at).cloned().expect("an operand");
-            self.at += 1;
-            match token {
-                Token::Str(s) => Val::Str(s),
-                Token::Op("(") => {
-                    let inner = self.or();
-                    assert!(self.eat(")"), "an unclosed parenthesis");
-                    inner
-                }
-                Token::Ident(name) if name == "startsWith" => {
-                    assert!(self.eat("("), "startsWith takes arguments");
-                    let haystack = self.or();
-                    assert!(self.eat(","), "startsWith takes two arguments");
-                    let needle = self.or();
-                    assert!(self.eat(")"), "startsWith takes two arguments");
-                    match (haystack, needle) {
-                        (Val::Str(h), Val::Str(n)) => {
-                            Val::Bool(h.to_lowercase().starts_with(&n.to_lowercase()))
-                        }
-                        other => panic!("startsWith over non-strings: {other:?}"),
-                    }
-                }
-                Token::Ident(path) => {
-                    let field = path
-                        .strip_prefix("github.")
-                        .unwrap_or_else(|| panic!("`{path}` is not a github context field"));
-                    Val::Str(self.github.get(field).copied().unwrap_or("").to_owned())
-                }
-                Token::Op(op) => panic!("an operand was expected, not `{op}`"),
-            }
-        }
-    }
-    fn truthy(value: &Val) -> bool {
-        match value {
-            Val::Bool(b) => *b,
-            Val::Str(s) => !s.is_empty(),
-        }
-    }
-    let mut parser = Parser {
-        tokens,
-        at: 0,
-        github,
-    };
-    let value = parser.or();
-    assert_eq!(
-        parser.at,
-        parser.tokens.len(),
-        "`{expression}` has tokens this evaluator did not read"
-    );
-    truthy(&value)
-}
-
-fn selected(job: &Value, github: &BTreeMap<&str, &str>) -> bool {
-    condition(job).is_none_or(|c| evaluate(&c, github))
-}
-
+/// The workflows that report no required context: each runs on no pull request's
+/// `opened`, `synchronize` or `reopened` event, so none spends a job slot beside
+/// the four, and no required job can wait on one (`needs` only reaches jobs of
+/// the same workflow).
 #[test]
-fn the_release_pull_request_runs_the_full_sweep_and_every_other_pull_request_the_affected_tier() {
-    let sweep_workflow = workflow("release-sweep.yml");
-    assert!(
-        triggers(&sweep_workflow).get("pull_request").is_some(),
-        "the release sweep runs on pull requests"
-    );
-    let sweep = &sweep_workflow["jobs"]["release-sweep"];
-    let gate = &workflow("ci.yml")["jobs"]["gate"];
-    let runs = |job: &Value, step_run: &str| {
-        job["steps"]
-            .as_array()
-            .expect("the job has steps")
-            .iter()
-            .filter_map(|step| step.get("run").and_then(Value::as_str))
-            .any(|run| run.contains(step_run))
-    };
-    assert!(
-        runs(sweep, "just check 2>&1"),
-        "the release sweep runs `just check`"
-    );
-    assert!(
-        runs(gate, "just check-affected 2>&1"),
-        "the gate runs `just check-affected`"
-    );
-    // The workload journeys no `check` reaches run here, after the quality gate.
-    let position = |job: &Value, step_run: &str| {
-        job["steps"]
-            .as_array()
-            .expect("the job has steps")
-            .iter()
-            .position(|step| step.get("run").and_then(Value::as_str) == Some(step_run))
-    };
-    let checked = sweep["steps"]
-        .as_array()
-        .expect("the job has steps")
-        .iter()
-        .position(|step| step["id"].as_str() == Some("every"))
-        .expect("the release sweep names its quality gate `every`");
-    assert!(
-        position(sweep, "just workload").is_some_and(|workload| workload > checked),
-        "the release sweep does not run `just workload` after its quality gate"
-    );
-    assert!(
-        position(gate, "just workload").is_none(),
-        "the gate runs the workload journeys"
-    );
-    assert!(
-        !runs(gate, "just check 2>&1"),
-        "the gate also runs the full sweep"
-    );
-
-    // release-plz opens its release pull request from a `release-plz-<timestamp>`
-    // branch; anything else is an ordinary pull request.
-    let release = BTreeMap::from([
-        ("event_name", "pull_request"),
-        ("head_ref", "release-plz-2026-10-06T12-00-00Z"),
-        ("base_ref", "main"),
-    ]);
-    let ordinary = BTreeMap::from([
-        ("event_name", "pull_request"),
-        ("head_ref", "nick/some-feature"),
-        ("base_ref", "main"),
-    ]);
-    let push = BTreeMap::from([("event_name", "push"), ("ref", "refs/heads/main")]);
-
-    assert!(
-        selected(sweep, &release),
-        "the release PR does not select the sweep"
-    );
-    assert!(
-        !selected(sweep, &ordinary),
-        "an ordinary PR selects the sweep"
-    );
-    assert!(!selected(sweep, &push), "a push selects the sweep");
-    for (what, event) in [
-        ("release PR", &release),
-        ("ordinary PR", &ordinary),
-        ("push", &push),
-    ] {
+fn no_other_workflow_reports_a_required_context() {
+    for (file, parsed) in workflows() {
+        if file == "ci.yml" {
+            continue;
+        }
+        // A pull request's closing is no push to it: visual-docs.yml deletes the
+        // closed pull request's preview then, and nothing else may run.
+        let pull_request = triggers(&parsed).get("pull_request");
         assert!(
-            selected(gate, event),
-            "the affected-tier gate does not run on a {what}"
+            pull_request.is_none_or(|trigger| trigger["types"] == serde_json::json!(["closed"])),
+            "{file} runs on a pull request's push beside ci.yml: {pull_request:?}"
         );
-    }
-}
-
-/// The release sweep re-takes the release workloads and their budgets: after its
-/// quality gate, unconditionally, through the `workload` recipe. No pull
-/// request's affected-tier gate runs them, so the per-change bar never pays for
-/// the 840,000-entry scratch journey.
-#[test]
-fn the_release_sweep_runs_the_workloads_after_its_quality_gate_and_the_gate_never_does() {
-    let steps = |file: &str, job: &str| -> Vec<Value> {
-        workflow(file)["jobs"][job]["steps"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{file}'s {job} job has steps"))
-            .clone()
-    };
-    let position = |steps: &[Value], run: &str| {
-        steps.iter().position(|step| {
-            step.get("run")
-                .and_then(Value::as_str)
-                .is_some_and(|text| text.contains(run))
-        })
-    };
-    let sweep = steps("release-sweep.yml", "release-sweep");
-    let gate = position(&sweep, "just check 2>&1").expect("the sweep runs `just check`");
-    let workload = position(&sweep, "just workload").expect("the sweep runs `just workload`");
-    assert!(workload > gate, "the workloads run before the quality gate");
-    assert!(
-        sweep[workload].get("if").is_none() && sweep[workload].get("continue-on-error").is_none(),
-        "the workload step is conditional or cannot fail the sweep: {:?}",
-        sweep[workload]
-    );
-    assert!(
-        position(&steps("ci.yml", "gate"), "just workload").is_none(),
-        "the per-change gate runs the release workloads"
-    );
-    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile");
-    let recipe: Vec<&str> = justfile
-        .split("\n\n")
-        .find(|block| block.lines().any(|line| line == "workload:"))
-        .expect("a `workload` recipe")
-        .lines()
-        .skip_while(|line| *line != "workload:")
-        .skip(1)
-        .collect();
-    assert_eq!(recipe, ["    @bash scripts/nx.sh run-many -t workload"]);
-}
-
-/// The `just check` the sweep runs reaches every gate-eligible project: each
-/// one's `check` is what `run-many -t check` runs, and the live and network
-/// tiers' `check` stops at format and lint, never their journey.
-#[test]
-fn the_sweep_reaches_every_project_but_the_live_tiers_journeys() {
-    let justfile = fs::read_to_string(repo_root().join("justfile")).expect("the justfile reads");
-    let check = justfile
-        .split("\ncheck: ")
-        .nth(1)
-        .expect("the justfile has `check`");
-    assert!(
-        check
-            .lines()
-            .take(3)
-            .any(|line| line.contains("scripts/nx.sh run-many -t check")),
-        "`check` is not a run-many sweep:\n{check}"
-    );
-    for (path, journey) in [
-        ("tests/smoke/project.json", "smoke"),
-        ("tests/release_channel/project.json", "release-compat"),
-    ] {
-        let project: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(repo_root().join(path)).expect("the project reads"),
-        )
-        .expect("the project parses");
-        let reaches = project["targets"]["check"]["dependsOn"].to_string();
-        assert!(
-            !reaches.contains(&format!("\"{journey}\"")) && !reaches.contains("\"test\""),
-            "{path}'s `check` reaches its live journey: {reaches}"
-        );
+        for (key, job) in parsed["jobs"].as_object().expect("the workflow has jobs") {
+            for name in rendered(key, job) {
+                assert!(
+                    !is_required(&name),
+                    "{file}'s `{key}` reports `{name}`, a required context"
+                );
+            }
+        }
     }
 }
 
@@ -761,26 +308,26 @@ fn scratch_slugs(text: &str) -> Vec<String> {
 fn the_smoke_step_reads_its_scratch_repository_from_the_secret_of_the_same_name() {
     let secret = format!("${{{{ secrets.{SMOKE_REPO_KEY} }}}}");
     let ci = workflow("ci.yml");
-    let steps = ci["jobs"]["smoke"]["steps"]
+    let steps = ci["jobs"]["test-linux"]["steps"]
         .as_array()
-        .expect("ci.yml's smoke job has steps");
+        .expect("ci.yml's test-linux job has steps");
     let runs: Vec<&Value> = steps
         .iter()
         .filter(|step| {
             step.get("run")
                 .and_then(Value::as_str)
-                .is_some_and(|run| run.contains("just smoke-real"))
+                .is_some_and(|run| run.contains("just ci-test-linux"))
         })
         .collect();
     let [run] = runs[..] else {
-        panic!("ci.yml's smoke job runs `just smoke-real` in exactly one step: {runs:?}")
+        panic!("ci.yml's test-linux job runs `just ci-test-linux`, which runs the smoke, in exactly one step: {runs:?}")
     };
     assert_eq!(
         run.get("env")
             .and_then(|env| env.get(SMOKE_REPO_KEY))
             .map(scalar),
         Some(secret.clone()),
-        "the step running `just smoke-real` maps the {SMOKE_REPO_KEY} secret into its \
+        "the step running the smoke maps the {SMOKE_REPO_KEY} secret into its \
          environment as {SMOKE_REPO_KEY}: {run:?}"
     );
     // The secret the step reads is one `gh-secrets.json` provisions, so the
@@ -842,26 +389,20 @@ fn a_hard_coded_scratch_repository_is_recognised() {
 }
 
 #[test]
-fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
+fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
     let ci = workflow("ci.yml");
     // The pull request's one Mac job runs its proofs through its recipe, whose
     // target list (`scripts/ci-job.sh`) holds the suite and both installs.
     let lane = &ci["jobs"]["test-macos"];
     assert_eq!(lane["runs-on"].as_str(), Some("macos-latest"));
-    assert!(
-        ci["jobs"]["macos"].is_null(),
-        "the retired Mac lane is back"
-    );
-    let commands = |key: &str| {
-        ci["jobs"][key]["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|step| step["run"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    assert!(commands("test-macos").contains("just ci-test-macos"));
+    let commands = lane["steps"]
+        .as_array()
+        .expect("test-macos has steps")
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(commands.contains("just ci-test-macos"));
     let script = fs::read_to_string(repo_root().join("scripts/ci-job.sh")).expect("ci-job.sh");
     let mac_targets = script
         .lines()
@@ -873,28 +414,13 @@ fn the_pr_and_opted_in_diagnostic_lanes_preserve_the_three_former_mac_proofs() {
     for target in ["test-quick", "install-smoke", "install-documented"] {
         assert!(mac_targets.contains(target), "test-macos omitted {target}");
     }
-    // Dispatch-local checks cannot initiate a paid manual Mac probe. These
-    // structural assertions preserve the diagnostic's same real install/smoke
-    // commands; native runner execution remains GitHub's third-party boundary.
-    let diagnostic = commands("macos-diagnostic");
-    for proof in [
-        "just check-cross",
-        "cargo install --path . --locked",
-        "documented=$(grep",
-        "git show FETCH_HEAD:scripts/smoke-published.sh",
-        "bash scripts/smoke-published.sh",
-        "bash \"$RUNNER_TEMP/smoke-published.sh\"",
-    ] {
-        assert!(
-            diagnostic.contains(proof),
-            "macos-diagnostic omitted {proof}"
-        );
-    }
-    for key in ["install", "install-documented"] {
-        assert!(!onepipeline_testfakes::yaml::to_string(&ci["jobs"][key])
-            .unwrap()
-            .contains("macos-latest"));
-    }
+    let mut jobs: Vec<&String> = ci["jobs"].as_object().expect("ci.yml has jobs").keys().collect();
+    jobs.sort();
+    assert_eq!(
+        jobs,
+        ["lint", "test-linux", "test-macos", "test-windows"],
+        "ci.yml runs a job beside the four"
+    );
 }
 
 /// Every pull-request leg that runs the e2e tier keeps the per-test profile
@@ -917,7 +443,7 @@ fn every_test_leg_keeps_the_profile_records_from_where_the_harness_writes_them()
         "ci.yml sets {DIR_ENV}, so its records are not where its uploads look"
     );
     let mut names = Vec::new();
-    for key in ["gate", "test-linux", "test-windows", "test-macos"] {
+    for key in ["test-linux", "test-windows", "test-macos"] {
         let steps = ci["jobs"][key]["steps"]
             .as_array()
             .unwrap_or_else(|| panic!("job {key} has no steps"));
@@ -996,37 +522,14 @@ fn the_e2e_test_targets_declare_the_profile_records_as_outputs() {
 }
 
 /// The Windows leg is one job, `test-windows`, running the whole suite: nothing
-/// hands it a share of a partition, and `cross (windows-latest)`, the context
-/// branch protection requires, passes only on the verdict that job records once
-/// every step before it passed.
+/// hands it a share of a partition.
 #[test]
-fn the_windows_leg_runs_whole_in_one_job_whose_verdict_its_carrier_reads() {
+fn the_windows_leg_runs_whole_in_one_job() {
     let ci = workflow("ci.yml");
-    assert!(ci["jobs"]["cross"].is_null(), "the Windows shards are back");
     let job = &ci["jobs"]["test-windows"];
     let text = onepipeline_testfakes::yaml::to_string(job).unwrap();
     assert!(
         !text.contains("ONEPIPELINE_TEST_PARTITION") && job.get("strategy").is_none(),
         "test-windows runs a share of the suite: {text}"
-    );
-    let steps = job["steps"].as_array().expect("test-windows has steps");
-    let proved = steps.last().expect("test-windows has a last step");
-    assert_eq!(proved["id"], "proved", "the verdict is not recorded last");
-    assert!(proved.get("if").is_none(), "{proved}");
-    assert_eq!(
-        job["outputs"]["windows-latest"].as_str(),
-        Some("${{ steps.proved.outputs.windows-latest }}")
-    );
-    let carrier = &ci["jobs"]["cross-windows"];
-    assert_eq!(needs(carrier), ["changes", "test-windows"]);
-    let verdict = carrier["steps"]
-        .as_array()
-        .expect("the carrier has steps")
-        .iter()
-        .find_map(|step| step["env"]["LEG_VERDICT"].as_str())
-        .expect("the carrier reads the leg's verdict");
-    assert_eq!(
-        verdict,
-        "${{ needs.test-windows.outputs['windows-latest'] }}"
     );
 }

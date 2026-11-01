@@ -3,14 +3,14 @@ name: Engine currency
 # Whether `Cargo.lock` still resolves the sibling engines `Cargo.toml` already
 # permits.
 #
-# The answer changes when the registry moves rather than when this tree does, so
-# this asks at every change instead of on a clock: drift is found at the next
-# push rather than up to a week later, at the cost of surfacing on pull requests
-# that had nothing to do with it.
+# The answer changes when the registry moves rather than when this tree does.
+# Every pull request already asks it, advisory, as a step of `ci.yml`'s `lint`;
+# this workflow asks it by hand alone, so it spends no job slot of its own on a
+# pull request or a push.
 #
-# **A red run does not block the pull request it appeared on.** No branch
-# protection requires this check, so a release nobody here made cannot stop an
-# unrelated change from merging. One `cargo update -p <spec>` and a commit, on any
+# **A red answer blocks nothing.** No branch protection requires it, so a release
+# nobody here made cannot stop an unrelated change from merging. One
+# `cargo update -p <spec>` and a commit, on any
 # branch, closes it; `just engines-current` prints the spec and says where to
 # record a floor if the gap holds one. A newer release that one of this
 # manifest's own pins holds back — it requires a sibling outside that pin's
@@ -24,9 +24,6 @@ name: Engine currency
 # entry point, against a lock that is current and a lock that is behind.
 
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 permissions:

@@ -11,7 +11,7 @@
 // long-running journey is `flow run`, which supervises a program, relays
 // SIGINT/SIGTERM/SIGHUP to it and exits with its status; that program
 // (`PROGRAM` below) records which process started it and which signal reached it.
-// CI runs this file on Windows (`launcher.yml`) and macOS (`ci.yml`'s Mac lane);
+// CI runs this file on Windows and macOS (`ci.yml`'s `test-windows` and `test-macos`);
 // Linux runs it in the gate with the rest of the project's tests.
 
 import { spawn, spawnSync } from "node:child_process";

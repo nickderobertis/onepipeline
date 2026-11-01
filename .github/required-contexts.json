@@ -1,22 +1,9 @@
 {
-  "//": "llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] the contexts branch protection on main requires, by rendered name. Their source is GitHub's branch protection, which no offline check can read; `setup_github_governance.py --verify` is the drift gate, run by governance. tests/ci_workflows.rs and .github/ci-shape/ read this one copy. A change here is a governance change, never an edit to match a renamed job.",
+  "//": "llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] the contexts branch protection on main requires, by rendered name, with `strict: false` (a branch need not be up to date). Their source is GitHub's branch protection, which no offline check can read; `setup_github_governance.py --verify` is the drift gate, run by governance. tests/ci_workflows.rs and .github/ci-shape/ read this one copy. A change here is a governance change, never an edit to match a renamed job.",
   "contexts": [
-    "gate",
-    "pr-title",
-    "llmlint",
-    "msrv",
-    "deny",
-    "wheel",
-    "cross (macos-latest)",
-    "cross (windows-latest)",
-    "install (ubuntu-latest)",
-    "install (macos-latest)",
-    "install (windows-latest)",
-    "install-documented (ubuntu-latest)",
-    "install-documented (macos-latest)",
-    "install-documented (windows-latest)",
-    "smoke",
-    "release-compat",
-    "visual-docs / report (x86_64, shots/current, shots/verify, Visual docs)"
+    "lint",
+    "test-linux",
+    "test-windows",
+    "test-macos"
   ]
 }
