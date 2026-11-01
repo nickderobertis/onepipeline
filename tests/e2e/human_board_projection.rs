@@ -329,6 +329,10 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     )
     .expect("the store configuration");
 
+    // The host refuses the record of what was projected — a directory stands where it goes — so
+    // every later state of these items is projected from content rebuilt, not recorded.
+    let record = world.runs.join("human-items/projected.json");
+    std::fs::create_dir_all(&record).expect("a directory where the record goes");
     for (name, _) in CASES {
         let start = from_the_launch_directory(
             &world,
@@ -337,7 +341,10 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
         );
         let started = world.run_on(start, &format!("start {name}"));
         // A refusal is said by the driver and leaves the item unbound: either fails here.
-        started.exited(0).err_lacks("its projection into");
+        started
+            .exited(0)
+            .err_lacks("its projection into")
+            .err_has("could not be recorded");
         let item = item_of(&world, &launch, name);
         assert!(
             item["tracker"]["url"]
@@ -452,8 +459,9 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     let public_id = id_of(&public).clone();
     let filed_count = filed.len();
 
-    // A later state is projected with the content it was first filed with: completing the public
-    // item closes its issue, which the store's intent accepts only for that same content.
+    // With no record of what it was filed with, completing the public item rebuilds its content —
+    // its plan's link and repositories read again — which the store's intent accepts only when it
+    // is the content first filed, closing that issue rather than filing a second.
     let item = item_of(&world, &launch, "public-plan");
     let complete = from_the_launch_directory(
         &world,
@@ -471,6 +479,9 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
         state["issues"][&public_id]
     );
     assert_eq!(filed_on(&state).len(), filed_count, "{:#}", state["issues"]);
+
+    // The host takes records again.
+    std::fs::remove_dir(&record).expect("the directory where the record goes");
 
     // A plan that cannot be read is a refusal: the item is held with nothing filed anywhere, and
     // the next write, once the plan reads again, files it where its plan routes it.
@@ -536,11 +547,8 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     );
     let recovered_id = id.clone();
 
-    // The record of what was projected is lost: completing the recovered item rebuilds its
-    // content — its plan's link and repositories read again — and the store's intent answers
-    // the task it filed, closing it rather than filing a second.
-    std::fs::remove_file(world.runs.join("human-items/projected.json"))
-        .expect("the projection record");
+    // Recorded this time: completing the recovered item is projected with the content its
+    // record kept, and the store's intent closes the task it filed.
     let recovered_item = item_of_key(&world, &launch, "recovered");
     let complete = from_the_launch_directory(
         &world,
