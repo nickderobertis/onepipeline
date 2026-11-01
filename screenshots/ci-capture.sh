@@ -7,7 +7,8 @@
 # under the same `sh -e`, because a step of a job on the runner cannot itself
 # run in a container.
 #
-# It captures HEAD, from a clone of it under `target/ci-capture`, with `shots/`
+# It captures HEAD, from a clone of it at `$RUNNER_TEMP/ci-capture` (in CI) or
+# `target/ci-capture` (anywhere else), with `shots/`
 # and its own cargo target (`target/ci-capture-target`) mounted from this
 # checkout: the capture builds its release
 # binaries into its tree's own `target/release`, and `lint` runs it beside its
@@ -83,9 +84,16 @@ command="$(read_with capture-command)" || exit 1
 # `lint` runs it for real on every pull request, against the committed baseline,
 # which is its end-to-end proof. Its refusals are in tests/ci_jobs/proofs.test.mjs,
 # and the command it runs is held under dash by tests/visual_docs.rs.
-copy="$ROOT/target/ci-capture"
+# In CI the clone lives outside `target/`: `lint` starts this beside
+# Swatinem/rust-cache, whose restore pre-cleans `target/` on a partial key match
+# (any change to a manifest or the lock) and deletes everything in a directory
+# there but its `build`, `deps` and `.fingerprint`, the clone's `.git` included.
+copy="${RUNNER_TEMP:-$ROOT/target}/ci-capture"
 head="$(git rev-parse HEAD)"
-if [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ]; then
+# Kept only while it is a repository of its own at HEAD: a directory with no
+# `.git` of its own would answer with the enclosing checkout's HEAD.
+if [ "$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$copy" 2>/dev/null && pwd -P)" ] ||
+  [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ]; then
   rm -rf -- "$copy"
   git clone --quiet --no-checkout "$ROOT" "$copy"
   git -C "$copy" checkout --quiet --detach "$head"

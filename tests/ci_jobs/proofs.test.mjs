@@ -8,12 +8,22 @@
 // — cargo, Docker, the network — so these cases run nothing but the script. What
 // a proof does once it gets past them is what the jobs themselves run, on every
 // pull request that reaches the crate.
+// The capture's clone of HEAD is the one thing past them proved here, against a
+// stand-in `docker` that only records how it was run.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { commit, root, run, scratchWorkspace } from "./support.mjs";
+import { commit, git, root, run, scratchWorkspace } from "./support.mjs";
 
 describe("the install proofs' refusals", () => {
   it("refuses a proof it does not have", () => {
@@ -139,6 +149,54 @@ describe("the visual-docs capture's refusals", () => {
       assert.match(log, refusal);
     });
   }
+
+  // A stand-in `docker` on PATH that records how it was run: the capture's own
+  // container run builds release binaries, which `lint` runs for real.
+  function standInDocker(t) {
+    const bin = mkdtempSync(join(tmpdir(), "ci-capture-docker-"));
+    t.after(() => rmSync(bin, { recursive: true, force: true }));
+    writeFileSync(join(bin, "docker"), '#!/bin/sh\nprintf "%s\\n" "$@" > "$DOCKER_ARGS"\n');
+    chmodSync(join(bin, "docker"), 0o755);
+    return { PATH: `${bin}:${process.env.PATH}`, DOCKER_ARGS: join(bin, "args") };
+  }
+
+  it("clones HEAD outside target/ in CI, where rust-cache cleans", (t) => {
+    const dir = scratchWorkspace(t);
+    const temp = mkdtempSync(join(tmpdir(), "ci-capture-runner-temp-"));
+    t.after(() => rmSync(temp, { recursive: true, force: true }));
+    const docker = standInDocker(t);
+    const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
+      SHOTS_OUT: "shots/current/x86_64",
+      RUNNER_TEMP: temp,
+      ...docker,
+    });
+    assert.equal(status, 0, log);
+    const copy = join(temp, "ci-capture");
+    assert.equal(git(copy, "rev-parse", "--show-toplevel"), copy);
+    assert.equal(git(copy, "rev-parse", "HEAD"), git(dir, "rev-parse", "HEAD"));
+    assert.ok(existsSync(join(copy, "rust-toolchain.toml")));
+    assert.ok(!existsSync(join(dir, "target", "ci-capture")));
+    const args = readFileSync(docker.DOCKER_ARGS, "utf8").split("\n");
+    assert.ok(args.includes(`${copy}:/__w/onepipeline/onepipeline`), args.join(" "));
+  });
+
+  it("re-clones a copy that rust-cache's clean left without its own .git", (t) => {
+    const dir = scratchWorkspace(t);
+    // What the clean leaves of a clone: the directories it keeps, no `.git`, so
+    // `git -C` there answers with the enclosing checkout's HEAD.
+    const copy = join(dir, "target", "ci-capture");
+    mkdirSync(join(copy, "deps"), { recursive: true });
+    const docker = standInDocker(t);
+    const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
+      SHOTS_OUT: "shots/current/x86_64",
+      RUNNER_TEMP: "",
+      ...docker,
+    });
+    assert.equal(status, 0, log);
+    assert.equal(git(copy, "rev-parse", "--show-toplevel"), copy);
+    assert.ok(existsSync(join(copy, "rust-toolchain.toml")));
+    assert.ok(!existsSync(join(copy, "deps")));
+  });
 
   it("refuses a visual-docs workflow that does not parse", (t) => {
     const dir = scratchWorkspace(t);
