@@ -1418,15 +1418,10 @@ fn the_scripts_refuse_what_they_cannot_run() {
 // proven on GitHub by the demonstration run recorded on this change request.
 #[test]
 fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
-    // `ci.yml` holds gate, the manual Mac diagnostic and the three test jobs
-    // (`test-linux`, `test-windows`, `test-macos`) that run their recipes; `release-sweep.yml` holds the full
-    // sweep on the release pull request, which re-runs its failures the same way.
-    let workflow = [
-        ".github/workflows/ci.yml",
-        ".github/workflows/release-sweep.yml",
-    ]
-    .map(|path| fs::read_to_string(repo_root().join(path)).expect("the workflow reads"))
-    .join("\n");
+    // `ci.yml` holds the three test jobs (`test-linux`, `test-windows`,
+    // `test-macos`) that run their recipes, and no other workflow runs a tier.
+    let workflow = fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
+        .expect("the workflow reads");
     let config: toml::Value = toml::from_str(&repository_config()).expect("the config parses");
     let slow = &config["profile"]["default"]["slow-timeout"];
     let period: u64 = slow["period"]
@@ -1451,20 +1446,13 @@ fn the_rerun_steps_run_only_after_a_failure_and_are_bounded_by_what_they_run() {
             })
         })
         .count();
-    assert_eq!(
-        archived_runs, 6,
-        "gate, manual Mac, the three test jobs and release sweep archive their build"
-    );
+    assert_eq!(archived_runs, 3, "the three test jobs archive their build");
 
     let steps: Vec<&str> = workflow
         .split("      - name: ")
         .filter(|step| step.starts_with("Does each failed test fail again on this build"))
         .collect();
-    assert_eq!(
-        steps.len(),
-        6,
-        "one rerun step each in gate, manual Mac, the three test jobs and release sweep"
-    );
+    assert_eq!(steps.len(), 3, "one rerun step each in the three test jobs");
     for step in steps {
         let field = |key: &str| {
             step.lines()

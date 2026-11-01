@@ -1,5 +1,5 @@
-// What ci.yml's four jobs promise, read off the workflow files and nothing else
-// (this target's inputs are `.github/` alone):
+// What ci.yml's four jobs promise, read off the workflow files and the
+// screencomp.toml the visual-docs lane is resolved from (this target's inputs):
 //
 // - `lint`, `test-linux`, `test-windows` and `test-macos`, by those ids, unnamed,
 //   on the runners their names say, each bounded at its ruled timeout, each
@@ -9,7 +9,7 @@
 //   composite actions, and never through its reusable workflow from ci.yml;
 // - the release pull request's shortcut asked by the three test jobs, gating
 //   their work, and never by `lint`;
-// - every job behind a context branch protection requires today still defined;
+// - every context branch protection requires reported by a pull-request job;
 // - every cache a workflow restores keyed on what produced it, pull requests
 //   restoring Rust caches without saving them, and `rust-cache-warm.yml` saving
 //   from main under exactly the keys the test jobs restore.
@@ -19,6 +19,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { runGraph } from "../workflow-graph.mjs";
 
 const github = join(dirname(fileURLToPath(import.meta.url)), "..");
 const workflows = Object.fromEntries(
@@ -48,9 +49,21 @@ const CONDITION = {
 const TESTS = ["test-linux", "test-windows", "test-macos"];
 
 // The contexts branch protection requires, from the tree's one copy of them
-// (`required-contexts.json`, which tests/ci_workflows.rs reads too); the jobs
-// behind them stay until protection moves to the four.
+// (`required-contexts.json`, which tests/ci_workflows.rs reads too).
 const REQUIRED = JSON.parse(readFileSync(join(github, "required-contexts.json"), "utf8")).contexts;
+// The one lane visual-docs.yml's reusable workflow renders for this repository,
+// `report (<arch>, <current>, <verify>, <title>)`, resolved by the workflow-graph
+// interpreter from the pinned reusable workflow's own matrix and screencomp.toml:
+// what `lint`'s composite steps judge must be what that workflow judges on a push
+// to main.
+const lanes = runGraph(workflows["visual-docs.yml"], {
+  eventName: "push",
+  ref: "refs/heads/main",
+  head: "0".repeat(40),
+  event: { head_commit: { message: "feat: a change" } },
+}).filter((row) => row.job === "visual-docs / report");
+assert.equal(lanes.length, 1, "visual-docs.yml renders other than one report lane");
+const VISUAL_DOCS_LANE = lanes[0].name;
 const REUSABLE_VISUAL_DOCS = "nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml";
 const COMPOSITES = [
   "nickderobertis/screencomp@",
@@ -138,16 +151,19 @@ describe("ci.yml's four jobs", () => {
 });
 
 describe("the judged lint", () => {
-  it("installs in `lint` exactly the harnesses the `llmlint` job pins", () => {
-    // The two run one judge until the old job is retired; the harness pins are
-    // what an upstream release has broken a required check through before.
-    const installs = (job) =>
-      steps(job)
-        .map(runs)
-        .filter((run) => /^npm install -g /.test(run))
-        .sort();
-    assert.ok(installs(ci.jobs.llmlint).length > 0, "the llmlint job installs no harness");
-    assert.deepEqual(installs(ci.jobs.lint), installs(ci.jobs.llmlint));
+  it("installs in `lint` each harness at an exact release", () => {
+    // The harness pins are what an upstream release has broken a required check
+    // through before, so neither may float.
+    const installs = steps(ci.jobs.lint)
+      .map(runs)
+      .filter((run) => /^npm install -g /.test(run));
+    assert.deepEqual(
+      installs.map((run) => run.replace(/@\d+\.\d+\.\d+$/, "@<pinned>")).sort(),
+      [
+        "npm install -g @anthropic-ai/claude-code@<pinned>",
+        "npm install -g @openai/codex@<pinned>",
+      ],
+    );
   });
 });
 
@@ -174,6 +190,15 @@ describe("the visual docs", () => {
       started < waited && waited < judged,
       "`lint` judges the capture before waiting for it",
     );
+    // The capture clones HEAD under `target/ci-capture`, and rust-cache, on a
+    // restore that is not a full key match, prunes files under `target/`: started
+    // first, the clone loses its `rust-toolchain.toml` mid-capture (run
+    // 41310531964's `lint`), and its manifests leak into rust-cache's key.
+    const restored = lint.findIndex((step) => uses(step).startsWith("Swatinem/rust-cache@"));
+    assert.ok(
+      restored !== -1 && restored < started,
+      "`lint` starts the capture under `target/` before rust-cache restores and prunes it",
+    );
     for (const action of COMPOSITES) {
       assert.ok(
         lint.some((step) => uses(step).startsWith(action)),
@@ -189,6 +214,27 @@ describe("the visual docs", () => {
     }
   });
 
+  it("publish their comment and preview from `lint`, the one place a pull request's are made", () => {
+    // visual-docs.yml no longer runs on a pull request's push, so nothing races
+    // `lint`'s deploy for the Pages build screencomp gates on; the switch is on,
+    // and it is what the deploy, the classify step and the comment each read.
+    const lint = ci.jobs.lint;
+    assert.equal(lint.env?.VISUAL_DOCS_PUBLISH, "true");
+    const switched = (prefix) => {
+      const step = steps(lint).find((candidate) => uses(candidate).startsWith(prefix));
+      assert.ok(step, `\`lint\` has no ${prefix} step`);
+      return step;
+    };
+    const publish = "${{ env.VISUAL_DOCS_PUBLISH }}";
+    assert.equal(switched("nickderobertis/screencomp/visual-docs@").with?.publish, publish);
+    assert.equal(switched("nickderobertis/screencomp/visual-docs-aggregate@").with?.publish, publish);
+    assert.match(
+      String(switched("nickderobertis/screencomp/visual-docs-pages@").if),
+      /^env\.VISUAL_DOCS_PUBLISH == 'true' && /,
+    );
+    assert.equal(workflows["visual-docs.yml"].on.pull_request?.types?.join(), "closed");
+  });
+
   it("never run through screencomp's reusable workflow from ci.yml", () => {
     for (const [id, job] of Object.entries(ci.jobs)) {
       assert.ok(
@@ -199,12 +245,11 @@ describe("the visual docs", () => {
   });
 
   it("are judged with the inputs visual-docs.yml's reusable workflow gives its one lane", () => {
-    // The lane branch protection names, `(<arch>, <current>, <verify>, <title>)`,
-    // and the inputs visual-docs.yml sets over the reusable workflow's defaults
-    // (the snapshot in fixtures/, pinned with it): what the composite steps
-    // pass must be what that workflow would, so the two paths judge alike.
-    const lane = REQUIRED.find((context) => context.startsWith("visual-docs / report ("));
-    const [arch, current, verify, title] = /\((.+)\)$/.exec(lane)[1].split(", ");
+    // The lane the reusable workflow renders, and the inputs visual-docs.yml sets
+    // over its defaults (the snapshot in fixtures/, pinned with it): what the
+    // composite steps pass must be what that workflow would, so the two paths
+    // judge alike.
+    const [arch, current, verify, title] = /\((.+)\)$/.exec(VISUAL_DOCS_LANE)[1].split(", ");
     const reusable = parse(
       readFileSync(join(github, "fixtures", "visual-docs-reusable.yml"), "utf8"),
     );
@@ -283,12 +328,9 @@ describe("the release pull request's shortcut", () => {
         `\`${id}\` does work before asking whether it is owed`,
       );
       for (const step of all.slice(at + 1)) {
-        // The verdict a carrier reads is recorded on a shortcut too: the job
-        // succeeded, having proven its tests already passed.
         const gated =
           String(step.if ?? "").includes("steps.shortcut.outputs.skip != 'true'") ||
-          String(step.if ?? "").includes("steps.gate.outcome == 'failure'") ||
-          (step.id === "proved" && step.if === undefined);
+          String(step.if ?? "").includes("steps.gate.outcome == 'failure'");
         assert.ok(gated, `\`${id}\`'s "${step.name ?? uses(step)}" runs on a shortcut`);
       }
     });
@@ -302,24 +344,14 @@ describe("the release pull request's shortcut", () => {
   });
 });
 
-describe("today's required contexts", () => {
-  it("are each still reported by a job of a workflow that runs on pull requests", () => {
+describe("the required contexts", () => {
+  it("are exactly the four, each reported by ci.yml on a pull request", () => {
+    assert.deepEqual([...REQUIRED].sort(), Object.keys(FOUR).sort());
     const reported = new Set();
-    for (const workflow of Object.values(workflows)) {
-      if (pullRequestTrigger(workflow) === undefined) continue;
-      for (const [id, job] of Object.entries(workflow.jobs ?? {})) {
-        for (const name of rendered(id, job)) reported.add(name);
-      }
+    for (const [id, job] of Object.entries(ci.jobs ?? {})) {
+      for (const name of rendered(id, job)) reported.add(name);
     }
-    const visual = workflows["visual-docs.yml"]?.jobs?.["visual-docs"];
     for (const context of REQUIRED) {
-      if (context.startsWith("visual-docs / ")) {
-        assert.ok(
-          String(visual?.uses ?? "").startsWith(REUSABLE_VISUAL_DOCS),
-          `no visual-docs job reports \`${context}\``,
-        );
-        continue;
-      }
       assert.ok(reported.has(context), `no job reports \`${context}\` on a pull request`);
     }
   });

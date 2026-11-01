@@ -1,0 +1,21 @@
+{
+  "path": "repos/nickderobertis/onepipeline/actions/runs/41192531055/jobs?per_page=100&filter=latest",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "run": 41192531055,
+    "workflow": "Release",
+    "event": "release",
+    "read": "the jobs of a run at the release commit"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:25 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/actions/runs/41192531055/jobs?per_page=100&filter=latest'",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  },
+  "served_in_progress": {
+    "job": "publish",
+    "why": "The release tail runs as publish's last step, so the step sees its own job still running: the replay serves this one job with status in_progress, conclusion null and completed_at null. This is the one change any served recording carries; the file holds what GitHub answered."
+  }
+}

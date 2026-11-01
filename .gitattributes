@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# Recorded GitHub responses, byte for byte as `gh api --include` printed them: their header
+# lines end in CRLF, which is what the release-tail replay serves back.
+.github/tests/fixtures/release-tail/recordings/*.http -text

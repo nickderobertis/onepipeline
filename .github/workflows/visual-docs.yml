@@ -1,8 +1,12 @@
 # Terminal screenshots, through screencomp's reusable workflow. The capture step
 # is ours; screencomp owns the classify gate, the gallery and the PR comment.
 #
-# Informational and **not a required check** — AGENTS.md says why, beside the two
-# other workflows this repository keeps out of its required set.
+# A pull request's visual docs are captured, judged, commented and previewed by
+# `ci.yml`'s `lint`, through screencomp's composite actions. This workflow runs
+# only for what happens outside a pull request's checks: deleting a closed pull
+# request's preview, publishing the canonical gallery from a push to `main`,
+# pruning the gallery's history on a schedule, and a run by hand. **Not a
+# required check** — AGENTS.md says why.
 
 name: Visual docs
 
@@ -15,19 +19,24 @@ name: Visual docs
 # images. `screencomp doctor --env` is what checks this call is wired correctly here.
 on:
   pull_request:
-    # `closed` lets screencomp delete this PR's gh-pages preview once it closes,
-    # so stale /pr-<n>/ galleries do not accumulate on the branch.
-    types: [opened, synchronize, reopened, closed]
+    # `closed` alone: screencomp deletes this PR's gh-pages preview once it
+    # closes, so stale /pr-<n>/ galleries do not accumulate on the branch.
+    types: [closed]
   push:
     branches: [main]
   schedule:
     # Monthly: prune the gh-pages gallery history so committed images do not
     # grow the branch without bound (keeps the 20 most recent versions).
     - cron: "19 5 1 * *"
+  workflow_dispatch:
 # llmlint: ignore-end[changed_behavior_has_e2e]
 
 jobs:
   visual-docs:
+    # Not on the push that merges release-plz's release pull request: it changes
+    # only versions and the changelog, which no screenshot shows, and the release
+    # commit runs no push workflow but release-plz's and the cache warmer's.
+    if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
     # llmlint: ignore-block[least_privilege_grants] granted on the job rather than the
     # workflow, and neither can be narrowed further by event here: `permissions` values
     # are literals — GitHub accepts no expression in them — and a reusable-workflow call

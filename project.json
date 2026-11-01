@@ -168,7 +168,8 @@
     },
     "wheel-smoke": {
       "command": "bash scripts/install-proof.sh wheel",
-      "//": "The x86_64 Linux wheel, built by the release's own script in its manylinux image (Docker), installed into a venv and smoke-tested. Uncached for the reason install-smoke is.",
+      "//": "The x86_64 Linux wheel, built by the release's own script in its manylinux image (Docker), installed into a venv and smoke-tested. Uncached for the reason install-smoke is. After install-smoke, whose Linux run times the host-view-time budget's reads: the image pull and the container's release compile starve the 4-vCPU runner, and test-linux's run 41316119034 read 192 ms against its 100 ms when the pull overlapped them, where every other run read 17 to 70 ms. The wheel ends well inside the job's critical path, so the order costs it nothing.",
+      "dependsOn": ["install-smoke"],
       "cache": false,
       "//end": "llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge, external_service_suite_stays_out_of_the_affected_tier]"
     }

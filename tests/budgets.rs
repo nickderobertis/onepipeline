@@ -151,14 +151,15 @@ fn the_budgets_file_registers_the_host_view_budget() {
         ["node", "scripts/host-view-budget.mjs"],
         "the budget's command is not the committed reporter"
     );
-    // It times the release binary CI's `install` job builds, so the gate's `just budgets`,
-    // which builds none, leaves it to `just host-view-budget` there.
+    // It times the release binary `test-linux`'s install proof builds, so the gate's
+    // `just budgets`, which builds none, leaves it to `just host-view-budget` there.
     assert_eq!(budget.labels, ["release-binary"]);
     let justfile = std::fs::read_to_string(root().join("justfile")).expect("the justfile reads");
     assert!(justfile.contains("check budgets.yaml --exclude-label release-binary"));
     assert!(justfile.contains("onebudgetspec check budgets.yaml --id host-view-time"));
-    let ci = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).expect("ci.yml");
-    assert!(ci.contains("just host-view-budget \"$(command -v onepipeline)\""));
+    let proof =
+        std::fs::read_to_string(root().join("scripts/install-proof.sh")).expect("install-proof.sh");
+    assert!(proof.contains("just host-view-budget \"$root/bin/onepipeline\""));
 }
 
 /// The review round's quota budget, as `budgets.yaml` registers it: reported by its command off

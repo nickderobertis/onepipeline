@@ -227,10 +227,7 @@ test("the workload models every trigger the workflows declare and every event th
 });
 const required = JSON.parse(readFileSync(".github/required-contexts.json", "utf8")).contexts;
 test("the required contexts are the list .github/required-contexts.json holds", () => {
-  assert.ok(required.length > 0, ".github/required-contexts.json lists no required contexts");
-  assert.ok(required.includes("install (ubuntu-latest)"));
-  assert.ok(required.includes("install (windows-latest)"));
-  assert.equal(new Set(required).size, required.length);
+  assert.deepEqual([...required].sort(), ["lint", "test-linux", "test-macos", "test-windows"]);
 });
 
 function scenario(id, eventName, action, kind, fork, opt, branch = "release-plz-fixture") {
@@ -337,11 +334,6 @@ test("actual workflow graph routes all events, preserves contexts and records li
                   mac.map((j) => `${j.workflow}:${j.job}`),
                   ["rust-cache-warm.yml:macos"],
                 );
-              else if (id === "manual-opt-in")
-                assert.deepEqual(
-                  mac.map((j) => j.job),
-                  ["macos-diagnostic"],
-                );
               else assert.deepEqual(mac, [], `${id} never requests Mac automatically`);
               for (const row of resolved.flatMap((r) => r.jobs))
                 assert.ok(
@@ -445,27 +437,6 @@ test("expression and matrix resolution fail clearly for unsupported routing and 
     [{ os: "ubuntu-latest" }, { os: "macos-latest" }],
   );
 });
-function driveCarrier(proof, changes, macos, required, crate = "true") {
-  const job = workflows()["ci.yml"].jobs[`${proof}-macos`];
-  assert.equal(job.if, "always()");
-  const step = job.steps.find((step) => step.run);
-  const context = {
-    needs: {
-      changes: { result: changes, outputs: { macos: required, crate } },
-      "test-macos": { result: macos },
-    },
-  };
-  const env = Object.fromEntries(
-    Object.entries(step.env).map(([key, expression]) => [
-      key,
-      expression.includes("${{") ? String(evaluate(expression, context)) : expression,
-    ]),
-  );
-  return spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
-    encoding: "utf8",
-    env: { ...process.env, ...env },
-  });
-}
 // The contexts a run reports: every selected row under its rendered name, and a
 // job skipped outright under its own name only when it has no matrix — GitHub
 // reports a skipped matrix job under its bare key, never under a leg's name.
@@ -474,29 +445,11 @@ function emittedContexts(workflow, rows) {
     .filter((row) => row.selected || !workflow.jobs[row.job]?.strategy?.matrix)
     .map((row) => ({ name: row.name, selected: row.selected }));
 }
-// A required job skipped by its own path condition still reports its name, and
-// GitHub counts that as passing; only a matrix job loses its legs' names.
-function skippedOnPath(workflow, row) {
-  const job = workflow.jobs[row.job];
-  return (
-    !row.selected && !job?.strategy?.matrix && /needs\.changes\.outputs\.crate/.test(job?.if ?? "")
-  );
-}
-test("an ordinary pull request emits every required context once, whatever the diff reaches or its jobs conclude", () => {
+test("an ordinary pull request emits every required context once, whatever its jobs conclude", () => {
   const all = workflows();
   const opt = { pypi: "true", npm: "true", crate: "true" };
   for (const crate of ["true", "false"])
-    for (const results of [
-      {},
-      { gate: "failure" },
-      { macos: "failure" },
-      { cross: "failure" },
-      { install: "failure" },
-      { wheel: "failure" },
-      { gate: "failure", macos: "failure", cross: "failure" },
-      { changes: "failure" },
-      { changes: "cancelled" },
-    ])
+    for (const results of [{}, { "test-linux": "failure" }, { "test-macos": "failure" }])
       for (const [kind, branch] of [
         ["source", "feature"],
         ["dependency", "feature"],
@@ -508,126 +461,18 @@ test("an ordinary pull request emits every required context once, whatever the d
           results,
         };
         const label = `${kind}/crate=${crate}/${JSON.stringify(results)}`;
-        const resolved = runs(all, s);
-        const contexts = resolved.flatMap((run) =>
-          emittedContexts(all[run.workflow], run.jobs).map((context) => ({
-            ...context,
-            pathSkip: skippedOnPath(
-              all[run.workflow],
-              run.jobs.find((row) => row.name === context.name),
-            ),
-          })),
+        const contexts = runs(all, s).flatMap((run) =>
+          emittedContexts(all[run.workflow], run.jobs),
         );
         for (const name of required) {
           const emitted = contexts.filter((context) => context.name === name);
           assert.equal(emitted.length, 1, `${label}: ${name} reports exactly once`);
-          // A crate-touching PR runs every required context; otherwise only a
-          // non-matrix job's own path condition may skip it.
-          if (crate === "true" && !results.changes)
-            assert.equal(emitted[0].selected, true, `${label}: ${name} runs`);
-          else
-            assert.ok(
-              emitted[0].selected || emitted[0].pathSkip,
-              `${label}: ${name} is neither run nor reported by its own path skip`,
-            );
+          // Each of the four starts on every pull request, but `test-macos` on
+          // release-plz's own, where it reports skipped.
+          const skipped = name === "test-macos" && branch.startsWith("release-plz-");
+          assert.equal(emitted[0].selected, !skipped, `${label}: ${name} runs`);
         }
       }
-});
-function pathCarriers() {
-  const jobs = workflows()["ci.yml"].jobs;
-  return Object.entries(jobs)
-    .filter(([, job]) =>
-      (job.steps ?? []).some((step) => step.run === "node .github/macos-policy.mjs path-carrier"),
-    )
-    .map(([key, job]) => ({ key, job, step: job.steps.find((step) => step.env?.PROOF_RESULT) }));
-}
-test("the real path carriers pass only a proven leg or an authorized path omission", () => {
-  const carriers = pathCarriers();
-  assert.deepEqual(carriers.map(({ job }) => job.name).sort(), [
-    "cross (windows-latest)",
-    "install (ubuntu-latest)",
-    "install (windows-latest)",
-    "wheel",
-  ]);
-  for (const { key, job, step } of carriers) {
-    assert.equal(job["runs-on"], "ubuntu-latest", key);
-    assert.equal(job.if, "always()", key);
-    const proof = job.needs.find((need) => need !== "changes");
-    assert.deepEqual(job.needs, ["changes", proof], key);
-    // Every verdict the carrier reads: one per leg, or one per shard of a leg
-    // split across jobs, which passes only when every shard recorded its own.
-    const legs = [...step.env.LEG_VERDICT.matchAll(/outputs\['([^']+)'\]/g)].map((m) => m[1]);
-    assert.ok(legs.length, `${key} reads a leg's verdict`);
-    const leg = step.env.LEG;
-    const recorded = legs.length > 1 ? ["every", "some", "none"] : ["every", "none"];
-    for (const changes of ["success", "failure", "cancelled", "skipped", ""])
-      for (const crate of ["true", "false", ""])
-        for (const result of ["success", "failure", "cancelled", "skipped", ""])
-          for (const shards of recorded) {
-            const verdict = shards === "every" ? "success" : "";
-            const outputs = Object.fromEntries(
-              legs
-                .slice(0, { every: legs.length, some: 1, none: 0 }[shards])
-                .map((l) => [l, "success"]),
-            );
-            const context = {
-              needs: {
-                changes: { result: changes, outputs: changes === "success" ? { crate } : {} },
-                [proof]: { result, outputs },
-              },
-            };
-            const env = Object.fromEntries(
-              Object.entries(step.env).map(([name, expression]) => [
-                name,
-                expression.includes("${{")
-                  ? String(evaluate(expression, context) ?? "")
-                  : expression,
-              ]),
-            );
-            const run = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
-              encoding: "utf8",
-              env: { ...process.env, ...env },
-            });
-            // A carrier whose proof runs on every pull request names the crate
-            // affected outright: its proof's own success is the verdict.
-            const affected = step.env.CRATE_AFFECTED.includes("${{")
-              ? crate
-              : step.env.CRATE_AFFECTED;
-            const accepted =
-              changes === "success" &&
-              ((affected === "false" && result === "skipped" && !verdict) ||
-                (affected === "true" &&
-                  ["success", "failure"].includes(result) &&
-                  verdict === "success"));
-            const label = `${key}/${changes}/${crate}/${result}/${shards}`;
-            assert.equal(run.status === 0, accepted, `${label}: ${run.stdout}${run.stderr}`);
-            if (accepted && affected === "false") assert.match(run.stdout, /no tests claimed/);
-            if (accepted && affected === "true")
-              assert.match(run.stdout, new RegExp(`${leg} succeeded`));
-          }
-  }
-});
-test("real carrier command refuses every failed prerequisite and unauthorized omission", () => {
-  for (const proof of ["cross", "install", "install-documented"])
-    for (const changes of ["success", "failure", "cancelled", "skipped", ""])
-      for (const macos of ["success", "failure", "cancelled", "skipped", ""])
-        for (const required of ["true", "false", ""]) {
-          const result = driveCarrier(proof, changes, macos, required);
-          const accepted =
-            changes === "success" &&
-            ((required === "true" && macos === "success") ||
-              (required === "false" && macos === "skipped"));
-          assert.equal(
-            result.status === 0,
-            accepted,
-            `${proof}/${changes}/${macos}/${required}: ${result.stderr}`,
-          );
-          if (accepted && required === "false") assert.match(result.stdout, /no Mac tests claimed/);
-        }
-  for (const crate of ["false", ""]) {
-    const r = driveCarrier("cross", "success", "success", "true", crate);
-    assert.equal(r.status === 0, crate === "false");
-  }
 });
 
 test("unknown PR metadata and ordinary version edits route through the actual Mac lane", () => {
@@ -697,32 +542,6 @@ test("budget readers report existing telemetry and refuse missing or stale recor
   }
 });
 
-test("actual carriers remain reachable through prerequisite failures and path-sensitive skips", () => {
-  const ci = workflows()["ci.yml"];
-  const s = scenario(
-    "pr-synchronize",
-    "pull_request",
-    "synchronize",
-    "source",
-    false,
-    { pypi: "false", npm: "false" },
-    "feature",
-  );
-  // The platform test jobs wait on nothing, so neither a path-sensitive skip nor
-  // a failed `changes` keeps them or the carriers that read them from running.
-  const skipped = runGraph(ci, { ...s, crate: "false" });
-  assert.equal(skipped.find((j) => j.job === "test-windows").selected, true);
-  assert.equal(skipped.find((j) => j.job === "test-macos").selected, true);
-  for (const result of ["failure", "cancelled", "skipped"]) {
-    const rows = runGraph(ci, { ...s, results: { changes: result } });
-    assert.equal(rows.find((j) => j.job === "test-macos").selected, true);
-    for (const proof of ["cross", "install", "install-documented"]) {
-      assert.equal(rows.find((j) => j.job === `${proof}-macos`).selected, true);
-      assert.notEqual(driveCarrier(proof, result, "skipped", "").status, 0);
-    }
-  }
-});
-
 test("semantic manifest comparison rejects dependency, lock content and malformed version edits", () => {
   for (const [path, contents] of [
     ["package.json", '{"version":"1.2.4","dependencies":{"sibling":"0.2"}}'],
@@ -787,62 +606,6 @@ test("release publication waits for every platform's own build, test-install and
   }
 });
 
-test("the actual CI classification step writes the omission-controlling output", () => {
-  const step = workflows()["ci.yml"].jobs.changes.steps.find((step) => step.id === "macos");
-  const tooling = join(repo, ".github");
-  mkdirSync(tooling, { recursive: true });
-  writeFileSync(join(tooling, "macos-policy.mjs"), readFileSync(".github/macos-policy.mjs"));
-  for (const [payload, head, eventName, want] of [
-    [event(), heads.source, "pull_request", "true"],
-    [event(), heads.version, "pull_request", "false"],
-    [event(), heads.dependency, "pull_request", "true"],
-    [event(true), heads.version, "pull_request", "true"],
-    ["malformed", heads.version, "pull_request", "true"],
-    [{}, heads.source, "push", "false"],
-  ]) {
-    const input =
-      typeof payload === "string"
-        ? payload
-        : {
-            ...payload,
-            before: base,
-            pull_request: payload.pull_request
-              ? {
-                  ...payload.pull_request,
-                  base: { ...payload.pull_request.base, sha: base },
-                  head: { ...payload.pull_request.head, sha: head },
-                }
-              : undefined,
-          };
-    writeFileSync(eventPath, typeof input === "string" ? input : JSON.stringify(input));
-    const output = join(scratch, "github-output");
-    writeFileSync(output, "");
-    const github = { event: typeof input === "string" ? {} : input, sha: head };
-    const env = Object.fromEntries(
-      Object.entries(step.env).map(([key, expression]) => [
-        key,
-        String(evaluate(expression, { github })),
-      ]),
-    );
-    const result = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
-      cwd: repo,
-      encoding: "utf8",
-      env: {
-        ...process.env,
-        ...env,
-        // Nx sets FORCE_COLOR for the tasks the CI gate runs; the step must
-        // still write a plain boolean then.
-        FORCE_COLOR: "1",
-        GITHUB_EVENT_PATH: eventPath,
-        GITHUB_EVENT_NAME: eventName,
-        GITHUB_OUTPUT: output,
-      },
-    });
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(readFileSync(output, "utf8"), `required=${want}\n`);
-  }
-});
-
 test("automatic workflow_run fan-out cannot hide an extra Mac-spending run", () => {
   const all = workflows();
   const s = scenario(
@@ -867,17 +630,6 @@ test("automatic workflow_run fan-out cannot hide an extra Mac-spending run", () 
         run.workflow === "regression.yml" && run.jobs.some((job) => job.selected && job.macos),
     ),
   );
-  for (const eventName of [
-    "pull_request",
-    "push",
-    "workflow_run",
-    "schedule",
-    "repository_dispatch",
-  ]) {
-    const ordinary = { ...s, eventName, inputs: { diagnostic: true } };
-    const rows = runGraph(all["ci.yml"], ordinary);
-    assert.equal(rows.find((row) => row.job === "macos-diagnostic").selected, false);
-  }
 });
 
 test("registered budgets run through the existing pinned checker and manifest-directory routing", () => {
@@ -1174,10 +926,10 @@ test("unrecognized workflow/job/step fields are refused before budget interpreta
       w.unsupported = true;
     },
     (w) => {
-      w.jobs.gate.unsupported = true;
+      w.jobs.lint.unsupported = true;
     },
     (w) => {
-      w.jobs.gate.steps[0].unsupported = true;
+      w.jobs.lint.steps[0].unsupported = true;
     },
   ]) {
     const bad = structuredClone(ci);
@@ -1201,8 +953,6 @@ test("policy CLI rejects unknown or missing modes and incomplete, duplicate and 
       "--head",
       heads.version,
     ],
-    ["carrier", "unexpected"],
-    ["path-carrier", "unexpected"],
     ["unknown-mode"],
     [],
   ]) {
@@ -1218,7 +968,7 @@ test("policy CLI rejects unknown or missing modes and incomplete, duplicate and 
       },
     });
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /usage|duplicate|expected classify, carrier or path-carrier/);
+    assert.match(result.stderr, /usage|duplicate|expected classify/);
     assert.equal(result.stdout, "");
   }
 });
@@ -1421,24 +1171,6 @@ test("scheduled routing requires cron mappings with typed required fields", () =
     assert.throws(() => runGraph({ ...valid, on }, event), /invalid.*schedule/);
 });
 
-test("real carrier step rejects an unknown proof identity", () => {
-  const step = workflows()["ci.yml"].jobs["cross-macos"].steps.find((step) => step.run);
-  const result = spawnSync("bash", ["-eo", "pipefail", "-c", step.run], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      CHANGES_RESULT: "success",
-      MACOS_RESULT: "success",
-      MACOS_REQUIRED: "true",
-      CRATE_AFFECTED: "true",
-      PROOF: "unknown-proof",
-    },
-  });
-  assert.equal(result.status, 1);
-  assert.equal(result.stdout, "");
-  assert.match(result.stderr, /unknown Mac proof/);
-});
-
 test("budget CLI rejects missing, extra, misspelled and unsupported arguments", () => {
   const valid = ["--metric", "jobs-per-run", "--telemetry", ".github/.telemetry/macos-policy.json"];
   for (const args of [
@@ -1488,30 +1220,31 @@ test("budget reader refuses omitted, duplicated and unknown workload inventory",
 });
 
 test("changes outputs follow actual declarations and producer wiring", () => {
-  const ci = workflows()["ci.yml"];
+  const launcher = workflows()["launcher.yml"];
   const s = scenario(
-    "pr-opened",
-    "pull_request",
-    "opened",
+    "manual-opt-in",
+    "workflow_dispatch",
+    null,
     "source",
     false,
     { pypi: "false", npm: "false" },
     "feature",
   );
-  // A job gated on the classifier's output, as the retired Mac lane was: it
-  // follows the output's declared name, not the name it once had.
-  const gated = structuredClone(ci);
-  gated.jobs["cross-macos"].if = "needs.changes.outputs.macos == 'true'";
-  assert.equal(runGraph(gated, s).find((j) => j.job === "cross-macos").selected, true);
-  const renamed = structuredClone(gated);
-  renamed.jobs.changes.outputs.apple = renamed.jobs.changes.outputs.macos;
-  delete renamed.jobs.changes.outputs.macos;
-  assert.equal(runGraph(renamed, s).find((j) => j.job === "cross-macos").selected, false);
-  renamed.jobs["cross-macos"].if = "needs.changes.outputs.apple == 'true'";
-  assert.equal(runGraph(renamed, s).find((j) => j.job === "cross-macos").selected, true);
-  const broken = structuredClone(ci);
-  const producer = broken.jobs.changes.steps.find((step) => step.id === "macos");
-  producer.run = producer.run.replace('echo "required=', 'echo "alternate=');
+  // launcher.yml's job gated on its `changes` job's output: it follows the
+  // output's declared name, not the name it once had.
+  const run = (workflow, crate) =>
+    runGraph(workflow, { ...s, crate }).find((j) => j.job === "launcher").selected;
+  assert.equal(run(launcher, "true"), true);
+  assert.equal(run(launcher, "false"), false);
+  const renamed = structuredClone(launcher);
+  renamed.jobs.changes.outputs.distribution = renamed.jobs.changes.outputs.npm;
+  delete renamed.jobs.changes.outputs.npm;
+  assert.equal(run(renamed, "true"), false);
+  renamed.jobs.launcher.if = "needs.changes.outputs.distribution == 'true'";
+  assert.equal(run(renamed, "true"), true);
+  const broken = structuredClone(launcher);
+  const producer = broken.jobs.changes.steps.find((step) => step.id === "affected");
+  producer.run = producer.run.replace('echo "npm=', 'echo "npm=$x" && echo "alternate=');
   assert.throws(() => runGraph(broken, s), /unresolved changes output/);
 });
 

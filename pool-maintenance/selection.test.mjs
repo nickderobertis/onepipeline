@@ -2,11 +2,11 @@
 //
 // Its measurement builds the workspace twice, so no per-change path may select it: not
 // `just check` (every project's `check`), and not the affected run, whatever the change
-// touches. The release-PR sweep runs it, after its gate, through `just budgets-host`.
+// touches, and no workflow either: it is run by hand, through `just budgets-host`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -62,13 +62,12 @@ describe("the pool-maintenance budget", () => {
     });
   }
 
-  it("is run by the release-PR sweep after its quality gate", () => {
-    const workflow = readFileSync(join(root, ".github", "workflows", "release-sweep.yml"), "utf8");
-    const gate = workflow.indexOf("just check");
-    const job = workflow.split(/\n {2}host-budgets:\n/)[1]?.split(/\n {2}\S/)[0] ?? "";
-    assert.ok(gate > 0, "release-sweep.yml no longer runs `just check`");
-    assert.match(job, /^ {4}needs: release-sweep$/m, "the host budgets do not wait for the gate");
-    assert.match(job, /^ {8}run: just budgets-host$/m, job);
+  it("is run by hand through `just budgets-host`, and by no workflow", () => {
+    const workflows = join(root, ".github", "workflows");
+    for (const name of readdirSync(workflows)) {
+      const workflow = readFileSync(join(workflows, name), "utf8");
+      assert.doesNotMatch(workflow, /budgets-host/, `${name} runs the host budgets`);
+    }
     const justfile = readFileSync(join(root, "justfile"), "utf8");
     const recipe = justfile.split("\nbudgets-host:\n")[1]?.split("\n\n")[0] ?? "";
     assert.match(recipe, /scripts\/nx\.sh run-many -t budgets-host$/m, recipe);

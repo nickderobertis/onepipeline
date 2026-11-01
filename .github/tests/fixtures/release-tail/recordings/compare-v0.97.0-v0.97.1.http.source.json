@@ -1,0 +1,14 @@
+{
+  "path": "repos/nickderobertis/onepipeline/compare/v0.97.0...v0.97.1?per_page=100",
+  "fetched_from": {
+    "release": "v0.97.1",
+    "read": "the comparison of the previous release with this one"
+  },
+  "repository": "nickderobertis/onepipeline",
+  "recorded": {
+    "at": "Sun, 01 Nov 2026 10:41:02 GMT",
+    "with": "gh api --include --method GET 'repos/nickderobertis/onepipeline/compare/v0.97.0...v0.97.1?per_page=100'",
+    "read_only": true,
+    "as": "exactly what gh printed: the status line, every response header and the body, unedited"
+  }
+}

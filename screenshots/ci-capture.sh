@@ -105,10 +105,13 @@ command="$(read_with capture-command)" || exit 1
 # there but its `build`, `deps` and `.fingerprint`, the clone's `.git` included.
 copy="${RUNNER_TEMP:-$ROOT/target}/ci-capture"
 head="$(git rev-parse HEAD)"
-# Kept only while it is a repository of its own at HEAD: a directory with no
-# `.git` of its own would answer with the enclosing checkout's HEAD.
-if [ "$(git -C "$copy" rev-parse --show-toplevel 2>/dev/null)" != "$(cd "$copy" 2>/dev/null && pwd -P)" ] ||
-  [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ]; then
+# A kept clone is reused only when it is its own repository, at HEAD, with no
+# file missing: off CI it sits in `target/`, which a cache restore or a clean can
+# prune to a skeleton, and inside that git finds this checkout's repository
+# instead, whose HEAD matches.
+if [ "$(git -C "$copy" rev-parse --absolute-git-dir 2>/dev/null)" != "$(cd "$copy" 2>/dev/null && pwd -P)/.git" ] ||
+  [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ] ||
+  ! git -C "$copy" diff --quiet HEAD 2>/dev/null; then
   rm -rf -- "$copy"
   git clone --quiet --no-checkout "$ROOT" "$copy"
   git -C "$copy" checkout --quiet --detach "$head"

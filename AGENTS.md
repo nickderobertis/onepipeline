@@ -86,8 +86,8 @@ consuming `project.json` — an undeclared one silently drops that project out o
   e2e, and nothing is `#[ignore]`d or skipped to pass.
 - **Two tiers, split by credential.** The offline tier runs in `just check`. The
   credentialled one is `just smoke-real`, kept out of `check` and `gate` so a
-  laptop pays nothing for it, and run by CI's `smoke` job through that same
-  recipe. A journey that needs a credential belongs in the second tier and
+  laptop pays nothing for it, and run by CI's `test-linux` job through the Nx target
+  that recipe runs. A journey that needs a credential belongs in the second tier and
   **refuses** when it is missing — a skip is a pass nobody earned.
 - **Validate external input at its trust boundary.** Plan files, executor-rules
   files, and reply envelopes are external input: the schema structs reject
@@ -114,42 +114,58 @@ title *is* the release-driving commit and is linted against Conventional Commits
 as a required check. PRs follow `.github/pull_request_template.md` (terse
 **What** / **Why**).
 
-Branch protection on `main` requires **every** gating job in `ci.yml`, each
-matrix leg by its rendered name, with linear history, no force-pushes, and admins
-able to override. Apply it with the create-repo skill's
-`setup_github_governance.py`, passing every context, and **re-apply it whenever a
-job or a matrix is added or renamed** — GitHub holds the required set, nothing
-reconciles it against the workflow, and a leg nobody required is advisory, which
-auto-merge lands straight past.
+Branch protection on `main` requires exactly `ci.yml`'s four jobs — `lint`,
+`test-linux`, `test-windows` and `test-macos` — by their rendered names, with
+linear history, no force-pushes, and admins able to override. It does **not**
+require a branch to be up to date (`strict: false`), by the user's decision of
+2026-10-18, and no workflow re-runs the tests on a push to `main`. That is the
+trade: a merge whose tests passed against an older `main` can land untested
+against the newer one, and what catches it is `rust-cache-warm.yml`'s build-only
+job on every push to `main`, which fails when `main` does not build. Apply the
+protection with the create-repo skill's `setup_github_governance.py`, passing
+every context in `.github/required-contexts.json`, and **re-apply it whenever a
+job is added or renamed** — GitHub holds the required set, nothing reconciles it
+against the workflow, and a job nobody required is advisory, which auto-merge
+lands straight past.
 
-`ci.yml` is the whole of that set. `engine-currency.yml` also runs on every pull
-request and is deliberately **not** required: what it asks is whether the
-registry has moved past this lock, so its answer changes without this tree
-changing and a release nobody here made would otherwise block an unrelated
-merge. Red there is closed by one `cargo update -p <spec>` on any branch, never
-by requiring it here. `visual-docs.yml` is the second and is **not** required
-either: it is a documentation check that needs
-two third-party tools `just check` does not install, and a stale picture is a
-thing to refresh rather than a reason to hold a correct change out of `main`.
-CI verifies visual drift; local capture and review are manual. No screenshot
-step is reachable from `check`, from `gate`, or from `ci.yml`'s `gate` job. `release-sweep.yml` is not required either: it
-runs only on the release PR, and is skipped on every other one. `notignored.yml`
-is not required either: it posts one
-sticky comment listing the suppressions a pull request adds, a review artifact
-rather than a gate, and it skips fork pull requests, so a required context there
-would never report for them. `launcher.yml` is not required either: it runs the
-npm launcher's process-tree journeys on Windows when a change reaches the npm
-project, and requiring it is a branch-protection change only the owner approves.
-The same journeys are **enforced** on macOS and Linux: on macOS in `ci.yml`'s
-`test-macos` (the one Mac job a pull request may spend, through the npm
-project's `test-launcher` target), and on Linux in `just check`.
+`ci.yml`'s four jobs are the whole of that set and the only jobs a pull
+request's push runs, because every job slot is one of the 20 the account shares
+(`.github/ci-shape/events.test.mjs` holds it): a check another workflow used to
+run becomes a step of one of the four. The engine-currency step stays advisory —
+its answer moves when the registry does, not when this tree does, so a release
+nobody here made must not block an unrelated merge; red there is closed by one
+`cargo update -p <spec>` on any branch. `visual-docs.yml` is **not** required:
+a stale gallery is a thing to refresh, not a reason to hold a correct change out
+of `main`.
+
+**Eight budgets in `budgets.yaml` hold CI, CD and the local gate**, each read from
+telemetry the run already produced, never measured afresh:
+
+<!-- llmlint: ignore-block[agents_md_durable_and_terse] the change that set these budgets requires this section to name each one with its label and where it is checked, beside the required checks it holds: budgets.yaml says what each measures, and this is the one place that says which moment enforces which, and why none of them can block a release or a laptop's gate. -->
+- The seven labelled `release-tail` — `onepipeline-ci-check-time`,
+  `onepipeline-cd-job-time`, `onepipeline-release-cycle-time`,
+  `onepipeline-ci-job-count`, `onepipeline-cd-job-count`,
+  `onepipeline-release-read-requests` and `onepipeline-pr-read-requests` — are
+  checked **after the release, reporting only**, by the last step of
+  `release.yml`'s `publish`. Nothing reads that step's result, so an over figure
+  never blocks, demotes or reverts a release. `scripts/actions-budget-figures.sh`
+  is dero-skills' create-repo copy: change it there, never here. At PR time a
+  check that runs long is failed by its own `timeout-minutes`.
+- `onepipeline-gate-time`, labelled `host-variable`, is checked **by `just gate`
+  on a development machine, as a warning**: over warns and still passes, since a
+  laptop's timing varies too much to refuse on. No pre-push hook runs it; CI owns
+  the gate.
+
+<!-- llmlint: ignore-end[agents_md_durable_and_terse] -->
+
+Every other check of the root `budgets.yaml` excludes both labels.
 
 **A job's assertions and the artifact it installs come from one revision.**
-`install-documented` installs the remote's default branch — README's `cargo
-install --git` one-liner names no ref — so it is smoked with *that* revision's
-`scripts/smoke-published.sh`, not the branch's; the site says why. Paired the
-other way, such a job is unsatisfiable for the very pull request that changes
-what it asserts.
+`onepipeline:install-documented`, which the three test jobs run, installs the
+remote's default branch — README's `cargo install --git` one-liner names no ref —
+so it is smoked with *that* revision's `scripts/smoke-published.sh`, not the
+branch's; `scripts/install-proof.sh` says why. Paired the other way, such a proof
+is unsatisfiable for the very pull request that changes what it asserts.
 
 **Releases are fully automated; the only human action is merging a change.**
 `release-plz` is the single version driver: `release-plz.yml` opens a release PR
@@ -172,19 +188,13 @@ an earlier attempt rather than uploading over it, and the Release's archive
 follows them (`release/release.py`'s `publish` says how); verify reports a
 platform its registries serve as more than one build.
 
-**Where each tier runs follows from that release model.** Releases are batched:
-every merge since the last tag rides one release-plz release PR, so the commit
-that ships is that PR's, and no single merge's job swept it. The broader tier —
-one `run-many` sweep of `just check` over every project but the live and network
-tiers — therefore runs on the release PR (`release-sweep.yml`, selected by its
-`release-plz-` head branch, its own job and not a required context). Every other
-pull request runs the affected tier against its merge base, and a push to `main`
-the affected tier against the commit before the push (`ci.yml`'s `gate`,
-`ONEPIPELINE_NX_BASE_SHA`); with no derivable base, either falls back to the
-full sweep. Nothing re-sweeps at release time: the release PR's sweep is the last
-gate on what ships. A Release made by hand — the documented fallback — is
-refused when its tag does not name `Cargo.toml`'s version, and is otherwise
-trusted to name a commit `main` gated.
+**Where each tier runs follows from that release model.** Every pull request,
+the release PR included, runs its affected tier against its merge base, and with
+no derivable base every project; affected selection is a speed optimisation, so
+it fails closed. Nothing re-sweeps at release time or on a push to `main`. A
+Release made by hand — the documented fallback — is refused when its tag does not
+name `Cargo.toml`'s version, and is otherwise trusted to name a commit `main`
+gated.
 
 **What this repository publishes is declared once**, in `release-targets.toml`
 at the root, at the canonical release-target schema `onevcs`'s `docs/contract.md`

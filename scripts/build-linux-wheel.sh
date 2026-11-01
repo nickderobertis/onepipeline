@@ -4,7 +4,7 @@
 #
 # This is the one definition of a Linux wheel build: release.yml's `build-linux`
 # and `build-linux-arm64` jobs run it through release/release.py, and ci.yml's
-# `wheel` job through `just wheel-linux`, so a pull request builds under the
+# `test-linux` through `just wheel-linux` (`onepipeline:wheel-smoke`), so a pull request builds under the
 # image, prerequisites and maturin invocation a release does. The release
 # packages each Linux archive and npm package from the binary inside its wheel,
 # so all three share that wheel's glibc floor.

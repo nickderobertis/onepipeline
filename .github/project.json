@@ -19,6 +19,12 @@
         "{workspaceRoot}/scripts/npm-build.mjs",
         "{workspaceRoot}/release-targets.toml",
         "{workspaceRoot}/justfile",
+        "{workspaceRoot}/budgets.yaml",
+        "{workspaceRoot}/package.json",
+        "{workspaceRoot}/package-lock.json",
+        "{workspaceRoot}/scripts/actions-budget-figures.sh",
+        "{workspaceRoot}/scripts/gate-time.sh",
+        "{workspaceRoot}/scripts/gate-time-budget.mjs",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/npm/onepipeline-cli/package.json",
         "{workspaceRoot}/tests/ci_workflows.rs",
@@ -28,9 +34,9 @@
     },
     "test-ci-shape": {
       "command": "node --test .github/ci-shape/*.test.mjs",
-      "//": "What ci.yml's four jobs promise, read off the workflow files alone: its inputs are this directory and nothing else, so a change anywhere else never re-runs it and one here always does.",
+      "//": "What ci.yml's four jobs promise and which workflows each event starts, read off the workflow files and the screencomp.toml the visual-docs matrix is resolved from: its inputs are those and nothing else, so a change anywhere else never re-runs it and one to them always does.",
       "cache": true,
-      "inputs": ["{projectRoot}/**/*"]
+      "inputs": ["{projectRoot}/**/*", "{workspaceRoot}/screencomp.toml"]
     },
     "lint": {
       "command": "node node_modules/@biomejs/biome/bin/biome lint .github"

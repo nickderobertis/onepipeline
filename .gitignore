@@ -36,3 +36,6 @@ REPO_PLAN.md
 /shots/verify/
 /site/
 __pycache__/
+
+# `just gate`'s wall-clock record (scripts/gate-time.sh), read back by onepipeline-gate-time.
+/.gate-time.json
