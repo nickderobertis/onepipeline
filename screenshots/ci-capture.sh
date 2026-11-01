@@ -101,7 +101,16 @@ inside=/__w/onepipeline/onepipeline
 # build, and `lint` restores what main's warm run built into it.
 build="$ROOT/target/ci-capture-target"
 mkdir -p "$build"
+# Built for capturing, not for shipping: what a shot shows is the text a verb
+# prints, which no optimisation level changes, while the release profile's thin
+# LTO and single codegen unit cost `lint` most of its 30 minutes. These are
+# cargo's own profile overrides, set for this build alone; the shipped
+# profile is untouched.
 docker run --rm \
+  -e CARGO_PROFILE_RELEASE_LTO=false \
+  -e CARGO_PROFILE_RELEASE_CODEGEN_UNITS=256 \
+  -e CARGO_PROFILE_RELEASE_OPT_LEVEL=0 \
+  -e CARGO_INCREMENTAL=0 \
   -v "$copy":"$inside" -v "$ROOT/shots":"$inside/shots" -v "$build":"$inside/target" -w "$inside" \
   -e SHOTS_OUT \
   -e HOST_OWNER="$(id -u):$(id -g)" \
