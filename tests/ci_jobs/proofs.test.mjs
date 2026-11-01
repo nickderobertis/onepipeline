@@ -260,14 +260,22 @@ describe("the warm build's test doubles", () => {
     assert.match(recipe, /plain\) target="\{\{justfile_directory\(\)\}\}\/target"/);
   });
 
-  it("are built by both families of the warm build", () => {
+  it("are built by both families of the warm build, last", () => {
+    // Last, because a test build after them leaves them stale: built ahead of
+    // the instrumented test build, testfakes and onevcs compiled again inside
+    // the first journey (90 s and 31 s on a 20-core host); built after it, each
+    // journey's build of them took under a second.
     const warm = readFileSync(join(root, "scripts/warm-rust-cache.sh"), "utf8");
     for (const [family, mode] of [
       ["linux", "instrumented"],
       ["cross", "plain"],
     ]) {
       const arm = warm.split(`\n  ${family})\n`)[1]?.split(";;")[0] ?? "";
-      assert.match(arm, new RegExp(`^    just _e2e-doubles-build ${mode}$`, "m"), family);
+      const lines = arm
+        .trim()
+        .split("\n")
+        .map((line) => line.trim());
+      assert.equal(lines.at(-1), `just _e2e-doubles-build ${mode}`, family);
     }
   });
 });
