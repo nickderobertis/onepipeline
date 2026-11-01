@@ -4687,6 +4687,85 @@ fn a_stop_run_from_inside_its_own_run_ends_the_run_and_answers() {
     );
 }
 
+/// A stop run from inside its own run still answers when the run's process
+/// group is orphaned while the stop holds that run frozen.
+///
+/// A dispatch's stop inherits the driver's process group, and the teardown
+/// freezes the driver and the dispatch before it signals them. If the group
+/// is orphaned while one of its members is stopped, POSIX has the kernel send
+/// `SIGHUP` and then `SIGCONT` to every member, and so to a stop still in the
+/// group. The group is orphaned when the last process outside it with a
+/// child inside it exits. Here that process is the `start --detach` launcher,
+/// the driver's parent, which exits once it has read the driver's claim. A
+/// stop killed that way has ended without printing anything, which is the
+/// empty answer the macOS leg once read.
+///
+/// The launcher is held before it reads the claim and the stop is held with
+/// the tree frozen, so the launcher's exit lands inside the freeze every time,
+/// whatever this host's timing.
+#[cfg(unix)]
+#[test]
+fn a_stop_from_inside_its_run_answers_when_its_frozen_group_is_orphaned() {
+    let world = World::new("driver-stop-orphaned-group");
+    world.script("build.stops-its-run", "");
+    world.script("build.wait", "hold");
+    let path = world.plan("orphaned", &plan_of("orphaned", vec![agent("build", &[])]));
+    // llmlint: ignore-block[tests_mirror_real_usage] the property is the order of two
+    // processes: the launcher exits while the stop holds the run frozen. No user-facing input
+    // can set that order. The two failpoints only hold the real binaries in place. The launch,
+    // the stop the dispatch runs, and every outcome asserted come from the binaries themselves.
+    let launcher = crate::harness::Rendezvous::failpoint();
+    let discovered = crate::harness::Rendezvous::failpoint();
+    let mut start = world.cmd(&["start", &path, "--detach"]);
+    start.env("ONEPIPELINE_TEST_HANDOVER_UNREAD_GATE", launcher.address());
+    // Inherited by the driver and then by the dispatch, so the stop the dispatch
+    // starts meets it. Nothing else in the run tears a tree down.
+    start.env(
+        "ONEPIPELINE_TEST_STOP_DISCOVERED_GATE",
+        discovered.address(),
+    );
+    let (started, stop, driver) = std::thread::scope(|scope| {
+        let starting = scope.spawn(|| world.run_on(start, "start --detach"));
+        let held = launcher.arrived_within_a_step(&world, "the launcher's first reading");
+        let frozen = discovered.arrived_within_a_step(&world, "the stop's discovery");
+        let driver = identity_in(&world.run_json("orphaned", "launch.json"));
+        let driver = u32::try_from(driver.0).expect("a pid");
+        assert!(
+            process_state(driver).starts_with('T'),
+            "the stop's discovery answered with the driver, pid {driver}, not stopped: {:?}",
+            process_state(driver)
+        );
+        // The launcher reads the claim, answers and exits. Its exit is what
+        // orphans the driver's group, and it lands while the group is frozen.
+        held.release();
+        let started = starting.join().expect("the launch returns");
+        let stop = frozen.pid;
+        frozen.release();
+        (started, stop, driver)
+    });
+    // llmlint: ignore-end[tests_mirror_real_usage]
+    started.exited(0);
+    world.until("the stop to answer", |_| process_ended(stop));
+    let said =
+        std::fs::read_to_string(world.fakes.join("build.stopper.out")).expect("what the stop said");
+    assert!(
+        said.contains("\"stopped\":true"),
+        "a stop whose run's group was orphaned under its freeze ended without answering: {said:?}"
+    );
+    world.until("the run's driver to end", |_| process_ended(driver));
+}
+
+/// What this host says a process is doing, as `ps` leads its state with.
+#[cfg(unix)]
+fn process_state(pid: u32) -> String {
+    let output = onepipeline_testfakes::profile::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .output()
+        .expect("ps is available to the process-tree journeys");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 /// A stop that cannot see what it must end refuses, changes nothing, and works
 /// on the retry.
 ///

@@ -464,6 +464,7 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
     };
     listed();
     aim_at_descent(&mut aimed, &table, self::pid());
+    leave_the_group_it_freezes(&aimed);
     // Frozen before anything is signalled, and listed again until a listing
     // finds nothing new. One listing is a moment old by the time its signals go
     // out, and a dispatch that starts its next turn inside that moment starts a
@@ -501,6 +502,38 @@ fn platform_stop(roots: &[u32], how: Stop) -> Signalling {
         .map(|(pid, _)| *pid)
         .collect();
     (established(&answers), aimed, delivered, discovery)
+}
+
+/// Put this process in a process group of its own when it shares one with any
+/// process in `aimed`, before any of them is frozen.
+///
+/// A stop run from inside the run it ends inherits that run's group, and the
+/// teardown then freezes members of that group. If the group is orphaned while
+/// a member is stopped — the last process outside it with a child inside it
+/// exits, such as the `start --detach` launcher that is the driver's parent —
+/// POSIX has the kernel send `SIGHUP` and `SIGCONT` to every member, and a stop
+/// still in the group ends on that `SIGHUP` before it has answered. Out of the
+/// group, the stop is not one of the members the kernel signals, and what it
+/// froze is still signalled by the stop as before.
+///
+/// Only a shared group is left. A stop typed at a terminal, or started by
+/// anything outside the run, keeps the group it was started in and the job
+/// control that comes with it.
+#[cfg(unix)]
+fn leave_the_group_it_freezes(aimed: &[u32]) {
+    // SAFETY: `getpgrp` takes nothing and cannot fail.
+    let mine = unsafe { libc::getpgrp() };
+    // SAFETY: `getpgid` takes a pid and touches no memory. A pid it cannot
+    // answer for gives `-1`, which is never this process's group.
+    let shared = aimed.iter().any(|pid| {
+        libc::pid_t::try_from(*pid).is_ok_and(|pid| unsafe { libc::getpgid(pid) } == mine)
+    });
+    if shared {
+        // SAFETY: `setpgid(0, 0)` makes the caller lead a new group of its own.
+        // It fails only for a session leader, and a session leader already
+        // leads its own group, which nothing in the run inherited from above it.
+        unsafe { libc::setpgid(0, 0) };
+    }
 }
 
 /// Pause everything in `aimed`, wait until the host shows all of it stopped,
