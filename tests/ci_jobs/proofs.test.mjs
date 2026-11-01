@@ -79,6 +79,17 @@ describe("the visual-docs capture's refusals", () => {
     });
   }
 
+  for (const temp of ["relative/temp", "/runner/../escape", "/runner/./temp", "/runner temp"]) {
+    it(`refuses to clone into a RUNNER_TEMP of ${temp}`, () => {
+      const { status, log } = run(root, "bash", ["screenshots/ci-capture.sh"], {
+        SHOTS_OUT: "shots/current/x86_64",
+        RUNNER_TEMP: temp,
+      });
+      assert.equal(status, 2, log);
+      assert.match(log, /RUNNER_TEMP='.*' is not an absolute directory/);
+    });
+  }
+
   it("captures every lane in order in the background and waits for them to succeed", (t) => {
     // The lanes' orchestration is what is under test; each lane's capture is a
     // stand-in that records it, because a real one builds release binaries in

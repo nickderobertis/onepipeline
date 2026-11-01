@@ -42,6 +42,21 @@ esac
   echo "ACTION: name a relative directory under shots/, e.g. shots/current/x86_64" >&2
   exit 2
 }
+# CI's RUNNER_TEMP holds the capture's clone, which is removed and bind-mounted
+# (below), so a value that is not a plain absolute directory is refused rather
+# than resolved somewhere else.
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  case "$RUNNER_TEMP/" in
+    */../* | */./*) bad=1 ;;
+    /?*) bad="" ;;
+    *) bad=1 ;;
+  esac
+  [ -z "$bad" ] && [[ $RUNNER_TEMP =~ ^[A-Za-z0-9._/-]+$ ]] || {
+    echo "ci-capture: RUNNER_TEMP='$RUNNER_TEMP' is not an absolute directory" >&2
+    echo "ACTION: unset RUNNER_TEMP, or set it to an absolute path with no '.' or '..' segment" >&2
+    exit 2
+  }
+fi
 command -v docker >/dev/null || {
   echo "ci-capture: docker not found; the capture runs in the image visual-docs.yml names" >&2
   echo "ACTION: install Docker, then re-run" >&2

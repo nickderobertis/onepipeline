@@ -155,7 +155,7 @@ fn plan_reach(dir: &Path, plan: &str) -> Result<crate::taskgraph::PlanReach, Str
         .map_err(|e| format!("its plan {plan} could not be read: {e}"))
 }
 
-// llmlint: ignore[changed_behavior_has_e2e] the qualified-id fallback is for a source that answers a project with no address, which no tracker source a human board is does — GitHub and Linear both answer one, which `human_board_projection` drives end to end; the fallback's spelling is held by `a_plan_link_follows_the_body_and_names_the_plan_by_its_address_or_its_id`.
+// llmlint: ignore-block[changed_behavior_has_e2e] the qualified-id fallback is for a source that answers a project with no address, which no tracker source a human board is does — GitHub and Linear both answer one, which `human_board_projection` drives end to end; the fallback's spelling is held by `a_plan_link_follows_the_body_and_names_the_plan_by_its_address_or_its_id`.
 /// `body` with a closing line linking the plan that owns it: its address where the plan's
 /// source gives one, else its qualified id.
 fn with_plan_link(body: &str, plan: &str, url: Option<&str>) -> String {
@@ -163,6 +163,7 @@ fn with_plan_link(body: &str, plan: &str, url: Option<&str>) -> String {
     // A body is never blank: both the raise and the journal's decoder refuse one.
     format!("{}\n\nPlan: {link}", body.trim_end())
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// A task's tracker binding, and the record that it was projected.
 pub(crate) struct Bound {
