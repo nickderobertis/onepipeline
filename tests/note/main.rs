@@ -8505,3 +8505,263 @@ fn a_carried_note_withdrawn_with_nothing_driving_stays_withdrawn_once_the_run_is
         world.events_of(run, "node-settled").len() >= 2
     });
 }
+
+/// End the driver holding `run`'s lock, as the adoption journeys do, so nothing
+/// drives the run until something adopts it.
+#[cfg(unix)]
+fn end_the_holder(world: &World, run: &str) {
+    let holder: Value = serde_json::from_str(
+        &std::fs::read_to_string(world.run_file(run, "owner.lock"))
+            .expect("the driver holds the run's lock"),
+    )
+    .expect("the lock is a record");
+    let driver = holder["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .unwrap_or_else(|| panic!("the lock names its holder's pid: {holder}"));
+    harness::end_process(driver);
+}
+
+/// Send a carried note to `later` on a run nothing drives, and read the envelope
+/// id its receipt names: `reply` applies it itself, as the run's writer.
+#[cfg(unix)]
+fn applied_with_nothing_driving(world: &World, run: &str, text: &str) -> u64 {
+    let applied = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(note_op_with("later", text, "next", true)),
+    );
+    applied.exited(0);
+    let answer: Value = serde_json::from_str(applied.stdout.trim())
+        .unwrap_or_else(|error| panic!("the receipt is not JSON: {error}: {}", applied.stdout));
+    assert_eq!(answer["state"], json!("applied"), "{answer}");
+    answer["reply"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("the receipt names no envelope: {answer}"))
+}
+
+/// A note `reply` applied itself, because nothing was driving the run, is named
+/// by the envelope id its receipt carries — the same id the run's command record
+/// holds it under — and withdrawn by that name while nothing drives the run. A
+/// driver that then adopts the run composes the node's next dispatch without it,
+/// and with the note carried beside it.
+#[cfg(unix)]
+#[test]
+fn a_note_applied_with_nothing_driving_is_withdrawn_by_the_envelope_its_receipt_names() {
+    let world = World::new("note-withdraw-applied-here");
+    let run = "withdrawappliedhere";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    end_the_holder(&world, run);
+    let sent = applied_with_nothing_driving(&world, run, NOTE);
+    let kept = applied_with_nothing_driving(&world, run, SECOND_CARRIED);
+
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(
+        [sent, kept],
+        [
+            queued_id_of(&world, run, NOTE),
+            queued_id_of(&world, run, SECOND_CARRIED)
+        ],
+        "the receipts do not name the envelopes the run's command record holds"
+    );
+    assert_ne!(sent, kept, "two envelopes were given one id");
+    assert_eq!(
+        withdrawals(&world, run)
+            .iter()
+            .map(|withdrawn| [withdrawn["envelope"].clone(), withdrawn["from"].clone()])
+            .collect::<Vec<_>>(),
+        [[json!(sent), json!("carried")]]
+    );
+    let answered_again = outcome_of(&world, run, sent).expect("answered");
+    assert_eq!(
+        answered_again["results"][0]["outcome"],
+        json!("refused"),
+        "the envelope was not answered again with the note withdrawn: {answered_again}"
+    );
+
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let task = dispatches_of(&world, run, "later")[0][0].clone();
+    assert_eq!(
+        planner_notes(&task),
+        SECOND_CARRIED,
+        "the adopted run's dispatch is not composed with the remaining note alone:\n{task}"
+    );
+    assert_eq!(withdrawals(&world, run).len(), 1);
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// The same note withdrawn once a driver has adopted the run, before the node's
+/// next dispatch: the withdrawal reaches the driver over the queue, is answered
+/// applied, and that dispatch is composed without the note.
+#[cfg(unix)]
+#[test]
+fn a_note_applied_with_nothing_driving_is_withdrawn_after_a_driver_adopts_the_run() {
+    let world = World::new("note-withdraw-applied-here-adopted");
+    let run = "withdrawappliedadopted";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    end_the_holder(&world, run);
+    let sent = applied_with_nothing_driving(&world, run, NOTE);
+    let kept = applied_with_nothing_driving(&world, run, SECOND_CARRIED);
+
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    world.until("the adopted run to dispatch build again", |world| {
+        dispatch_records_of(world, run, "build").len() >= 2
+    });
+    assert!(
+        dispatches_of(&world, run, "later").is_empty(),
+        "later was dispatched before the withdrawal was sent"
+    );
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    assert_eq!(sent, queued_id_of(&world, run, NOTE));
+    assert_eq!(
+        withdrawals(&world, run)
+            .iter()
+            .map(|withdrawn| [withdrawn["envelope"].clone(), withdrawn["from"].clone()])
+            .collect::<Vec<_>>(),
+        [[json!(sent), json!("carried")]]
+    );
+    assert_eq!(
+        outcome_of(&world, run, sent).expect("answered")["results"][0]["outcome"],
+        json!("refused")
+    );
+    assert_eq!(
+        outcome_of(&world, run, kept).expect("answered")["results"][0]["outcome"],
+        json!("applied")
+    );
+
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let task = dispatches_of(&world, run, "later")[0][0].clone();
+    assert_eq!(
+        planner_notes(&task),
+        SECOND_CARRIED,
+        "the dispatch after the withdrawal is not composed with the remaining note alone:\n{task}"
+    );
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+}
+
+/// An envelope `reply` applied itself takes the next id after the ones the run's
+/// queue already numbered, and a driver that later adopts the run neither applies
+/// it again nor answers it again: its note is journalled once, its envelope is
+/// answered once, and the node's next dispatch carries it once.
+#[cfg(unix)]
+#[test]
+fn an_envelope_applied_with_nothing_driving_is_applied_once_after_the_run_is_adopted() {
+    let world = World::new("note-applied-here-once");
+    let run = "appliedhereonce";
+    held_conversation(
+        &world,
+        run,
+        vec![agent("build", &[]), agent("later", &["build"])],
+    );
+    world
+        .run_with_stdin_on(
+            world.agentgraph_cmd(&["reply", run]),
+            &envelope(note_op_with("later", SECOND_CARRIED, "next", true)),
+        )
+        .exited(0)
+        .out_has("\"state\":\"applied\"");
+    let queued = queued_id_of(&world, run, SECOND_CARRIED);
+    end_the_holder(&world, run);
+    let sent = applied_with_nothing_driving(&world, run, NOTE);
+    assert_eq!(
+        [sent, queued_id_of(&world, run, NOTE)],
+        [queued + 1, queued + 1],
+        "the envelope applied here was not numbered after the queued one"
+    );
+    let journalled = |world: &World| {
+        world
+            .journal(run)
+            .iter()
+            .filter(|event| is_record_of(event, sent, 0))
+            .count()
+    };
+    assert_eq!(journalled(&world), 1);
+    assert_eq!(outcomes_for(&world, run, sent), 1);
+
+    world
+        .run_on(
+            world.agentgraph_cmd(&["adopt", run, "--detach"]),
+            "adopt --detach",
+        )
+        .exited(0);
+    release(&world.fakes, "turn.go");
+    release(&world.fakes, "turn.settle");
+    world.until("later to be dispatched", |world| {
+        dispatches_of(world, run, "later")
+            .first()
+            .is_some_and(|turns| !turns.is_empty())
+    });
+    let task = dispatches_of(&world, run, "later")[0][0].clone();
+    assert_eq!(
+        task.matches(NOTE).count(),
+        1,
+        "the note applied here is not composed into the dispatch exactly once:\n{task}"
+    );
+    world.until("the run to settle", |world| {
+        world.events_of(run, "node-settled").len() >= 2
+    });
+    assert_eq!(
+        journalled(&world),
+        1,
+        "the adopting driver journalled the envelope applied here a second time"
+    );
+    assert_eq!(
+        outcomes_for(&world, run, sent),
+        1,
+        "the adopting driver answered the envelope applied here a second time"
+    );
+    assert_eq!(
+        world
+            .events_of(run, "edit-committed")
+            .iter()
+            .filter(|event| event["payload"]["command"]["text"] == NOTE)
+            .count(),
+        1
+    );
+}

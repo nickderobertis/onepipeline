@@ -4759,8 +4759,9 @@ present and two are present only when the envelope carried the half they name:
 }
 ```
 
-`reply` is the identifier in the channel, and `0` where this process applied the
-commands itself and there was no queue to put them in. `state` names whichever
+`reply` is the identifier in the channel. For an envelope carrying commands it is
+the envelope's durable id in the run's command record, whichever process applied
+them — see *Amended: `reply` for a direct apply* below. `state` names whichever
 half the branch the envelope took is named for.
 
 An **absent** key means the envelope carried no such half, which is a different
@@ -4806,6 +4807,21 @@ alone that a note waits, without reading the channel. Older readers ignore the k
 `verbs::Receipt::notes`, whose values are the channel layout's own `CommandVerdict`, and
 the block above states it; the journeys read `each` as the words each node's value may
 take.
+
+**Amended: `reply` for a direct apply, ruled.** The manager approved, for the plan node
+`op-withdraw-applied-note`, that an envelope this process applies itself — because nothing
+was driving the run — is recorded in the run's command record under the next envelope id,
+the same 0, 1, 2… numbering the queue gives every envelope, claimed and answered there as
+a reconciler answers one, and that `reply` carries that id rather than `0`. Its notes name
+that id and their index, so a carried note of it not yet composed into a dispatch is
+withdrawn by `withdraw-note` whether or not a driver runs by then, and a driver adopting
+the run finds the envelope answered and never applies it a second time. In the library the
+shape is `verbs::ReplyOutcome::AppliedHere { reply, verdict }`, whose `reply` is that id
+and which `Receipt::reply()` returns. `state` and `commands` still say `applied`. Since
+numbering starts at `0`, `0` is a real envelope id here. A verdict written straight to a
+settled run's record, with no commands, is still `ReplyOutcome::Answered { reply: 0 }`.
+This changes a public enum's shape and what the wire's `reply` means for a direct apply,
+so it is released as a breaking change.
 
 ## 65. One journal kind means both "a command was accepted" and "the graph changed" — OPEN
 

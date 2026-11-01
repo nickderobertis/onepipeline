@@ -4034,13 +4034,13 @@ fn surface_message(message: Option<&String>, file: Option<&PathBuf>) -> Result<S
 /// [`crate::note::deliver`] reads what the delivery answered out of it.
 ///
 /// **Applied is two variants and not one with an `Option`**, because which
-/// process applied the commands decides both of the other two facts and they do
-/// not vary independently: the process that compiled them has them in hand and
-/// has no queue id, and the one that handed them to the run's reconciler has the
-/// queue id and never sees what they became. A single variant carrying both as
-/// options would spell two more states — a local apply with nothing compiled, a
-/// reconciled one carrying operations — that no path can reach and every reader
-/// would still have to answer for.
+/// process applied the commands decides what is in hand: the process that
+/// compiled them has what they became, and the one that handed them to the run's
+/// reconciler never sees it. Both have the envelope's id in the run's command
+/// record. A single variant carrying the operations as an option would spell two
+/// more states — a local apply with nothing compiled, a reconciled one carrying
+/// operations — that no path can reach and every reader would still have to
+/// answer for.
 pub(crate) enum Submitted {
     /// A commandless verdict, queued for whichever reader the run owes one.
     Answered {
@@ -4050,6 +4050,9 @@ pub(crate) enum Submitted {
     /// Every command applied **by this process**, which took the run's ownership
     /// lock because nothing was driving it.
     AppliedHere {
+        /// The envelope's id in the run's command record, where this process
+        /// recorded it as it applied it.
+        reply: u64,
         /// What they compiled to. In hand, so a caller needs no second read of
         /// the record to find out what it just did.
         operations: Vec<edits::Operation>,
@@ -4095,7 +4098,7 @@ pub(crate) fn deliver_note_envelope(
     let id = id.clone();
     match submit_envelope(paths, None, envelope)? {
         // Compiled here, so what it answered is in hand.
-        Submitted::AppliedHere { operations } => reached_in(&operations)
+        Submitted::AppliedHere { operations, .. } => reached_in(&operations)
             .map(crate::note::Delivered::To)
             .ok_or_else(|| {
                 Error::Refused(format!(
@@ -4389,8 +4392,8 @@ pub(crate) fn submit_envelope(
                     journal_verdict(paths, None, envelope)?;
                     drop(lock);
                     // A verdict with no commands, delivered to the run's own record
-                    // rather than to a queue, so there is no id to name: `0`, the
-                    // spelling entry 64 gives a receipt with no queue behind it.
+                    // rather than to a queue, so there is no id to name: `0`, as
+                    // entry 64 states for a verdict written to the run's record.
                     return Ok(Submitted::Answered { reply: 0 });
                 }
             }
@@ -4617,6 +4620,42 @@ pub(crate) fn submit_envelope(
                     };
                     pending.push(operations);
                 }
+                // Recorded in the run's command record before anything of it is
+                // journalled, under the next id the queue numbers envelopes by: the
+                // run's record then names it as it names every envelope, a note of it
+                // is withdrawn by that name, and a driver adopting the run finds it
+                // answered rather than applying it a second time.
+                let reply = match engine::record_applying(
+                    paths,
+                    &channel,
+                    envelope.author.clone(),
+                    &envelope.commands,
+                ) {
+                    Ok(reply) => reply,
+                    Err(error) => {
+                        lock.release();
+                        return Err(error);
+                    }
+                };
+                // Each note named by that envelope and its index, as a reconciler
+                // names what it delivers.
+                let pending: Vec<Vec<edits::Operation>> = pending
+                    .iter()
+                    .enumerate()
+                    .map(|(index, operations)| engine::from_envelope(operations, reply, index))
+                    .collect();
+                // Answered as a reconciler answers an envelope it applied, and at once:
+                // every command of it has validated and delivered, so it is applied
+                // whatever follows, and a record left unanswered is one the next
+                // driver would judge and apply a second time.
+                if let Err(error) = channel.answer_commands(&engine::applied_here(
+                    reply,
+                    &envelope.commands,
+                    &pending,
+                )) {
+                    lock.release();
+                    return Err(error);
+                }
                 // And only then journal, so a refusal in either phase leaves the
                 // record exactly as it was.
                 for (command, operations) in envelope.commands.iter().zip(&pending) {
@@ -4693,6 +4732,7 @@ pub(crate) fn submit_envelope(
                 }
                 deliver_verdict_half(paths, &channel, correlation, envelope)?;
                 return Ok(Submitted::AppliedHere {
+                    reply,
                     operations: compiled,
                 });
             }
