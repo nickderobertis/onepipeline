@@ -1472,13 +1472,8 @@ pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>
     taken
 }
 
-/// Record the envelope a writer that took the run through [`accept`] is applying
-/// itself, under the same gate a submission takes — see
-/// [`ChannelState::record_applying`] — and answer its id.
-///
-/// So the envelope is numbered as the queue numbers every other, a note of it is
-/// named by that id and its index, and a claimer finds it answered rather than
-/// applying it a second time. The caller answers it once it is applied.
+/// [`ChannelState::record_applying`], for a writer that took the run through
+/// [`accept`], under the same handover gate a submission takes.
 pub(crate) fn record_applying(
     paths: &RunPaths,
     channel: &ChannelState,

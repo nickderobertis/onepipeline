@@ -7959,13 +7959,20 @@ fn a_live_note_no_driver_claimed_is_withdrawn_with_nothing_driving() {
         std::fs::read_to_string(&queue).is_ok_and(|queued| queued.contains(LIVE_WITHDRAWN))
     });
     let sent = queued_id_of(&world, run, LIVE_WITHDRAWN);
-    world
-        .run_with_stdin_on(
-            world.agentgraph_cmd(&["reply", run]),
-            &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
-        )
-        .exited(0)
-        .out_has("\"state\":\"applied\"");
+    let withdrawing = world.run_with_stdin_on(
+        world.agentgraph_cmd(&["reply", run]),
+        &envelope(withdraw_op(sent, 0, WITHDRAWN_BECAUSE)),
+    );
+    withdrawing.exited(0).out_has("\"state\":\"applied\"");
+    // Applied here, and recorded behind the envelope still waiting ahead of it,
+    // under the id its receipt names.
+    let withdrawal: Value = serde_json::from_str(withdrawing.stdout.trim()).expect("a receipt");
+    let by = queued_id_of(&world, run, WITHDRAWN_BECAUSE);
+    assert_eq!(withdrawal["reply"], json!(by), "{withdrawal}");
+    assert!(
+        by > sent,
+        "the withdrawal was not recorded behind the note it withdraws"
+    );
     assert_eq!(
         withdrawals(&world, run)
             .iter()
@@ -8005,6 +8012,14 @@ fn a_live_note_no_driver_claimed_is_withdrawn_with_nothing_driving() {
     assert!(prompts(&world)
         .iter()
         .all(|prompt| !prompt.contains(LIVE_WITHDRAWN)));
+    // The claim that took the note's envelope off the queue took the withdrawal's
+    // behind it, and passed over it: answered once, and committed once.
+    assert_eq!(
+        outcomes_for(&world, run, by),
+        1,
+        "the envelope applied here was answered again once it was claimed"
+    );
+    assert_eq!(withdrawals(&world, run).len(), 1);
 }
 
 /// A driver that dies while a note it withdrew from its delivery's queue still

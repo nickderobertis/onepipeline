@@ -2298,13 +2298,18 @@ impl ChannelState {
     /// run's writer applied itself and recorded behind others still waiting — see
     /// [`record_applying`](Self::record_applying). Nothing is read for no records.
     fn answered_among(&self, records: &[Value]) -> BTreeSet<u64> {
-        if records.is_empty() {
-            return BTreeSet::new();
+        let ids: BTreeSet<u64> = records
+            .iter()
+            .filter_map(|record| record.get("id").and_then(Value::as_u64))
+            .collect();
+        if ids.is_empty() {
+            return ids;
         }
         self.outcome_lines()
             .unwrap_or_default()
             .iter()
             .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
+            .filter(|id| ids.contains(id))
             .collect()
     }
 
