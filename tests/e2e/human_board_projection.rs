@@ -26,7 +26,6 @@ use crate::linear_loopback::Linear;
 use crate::linear_writeback::{from_the_launch_directory, KEY_ENV, STATES, STATUSES};
 use crate::private_github_home::{described, metadata_of, GitHub};
 
-/// The environment variable every board source reads its token from.
 const TOKEN_ENV: &str = "ONEPIPELINE_LOOPBACK_BOARD_TOKEN";
 /// The host the store's projection authority names, and the one this journey runs as.
 const HOST: &str = "projection-host";
@@ -55,7 +54,6 @@ const CASES: &[(&str, &[&str])] = &[
     ("org-plan", &[ORG_REPOSITORY]),
 ];
 
-/// The human step of plan `name`, whose title names its plan.
 fn title_of(name: &str) -> String {
     format!("Approve the {name}")
 }
@@ -121,7 +119,6 @@ fn seeded_issues() -> Vec<Value> {
     issues
 }
 
-/// One `github-projects` source over board `number` of `github`.
 fn board_source(
     github: &GitHub,
     name: &str,
@@ -481,7 +478,6 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     );
     assert_eq!(filed_on(&state).len(), filed_count, "{:#}", state["issues"]);
 
-    // The host takes records again.
     std::fs::remove_dir(&record).expect("the directory where the record goes");
 
     // A plan that cannot be read is a refusal: the item is held with nothing filed anywhere, and
@@ -549,7 +545,13 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     let recovered_id = id.clone();
 
     // Recorded this time: completing the recovered item is projected with the content its
-    // record kept, and the store's intent closes the task it filed.
+    // record kept, and the store's intent closes the task it filed — with its plan unreadable,
+    // so content rebuilt from the plan would be refused rather than projected.
+    std::fs::write(
+        launch.join("onetaskgraph.yaml"),
+        configuration(&github, &linear, &intents, false),
+    )
+    .expect("the store configuration");
     let recovered_item = item_of_key(&world, &launch, "recovered");
     let complete = from_the_launch_directory(
         &world,
@@ -563,7 +565,8 @@ fn a_plan_owned_human_item_is_filed_on_the_board_its_plan_repositories_route_it_
     world
         .run_on(complete, "complete the recovered item")
         .exited(0)
-        .err_lacks("its projection into");
+        .err_lacks("its projection into")
+        .err_lacks("could not be read");
     let state = github.state();
     assert_eq!(
         state["issues"][&recovered_id]["state"], "CLOSED",
@@ -656,7 +659,6 @@ fn a_plan_whose_source_answers_no_address_is_linked_by_its_qualified_id() {
     )
     .expect("the host's human-item configuration");
 
-    // The plan, held in a `local-md` plans source, with one task naming the public repository.
     let plan = world.plan(
         "unaddressed-plan",
         &json!({"name": "unaddressed-plan", "tasks": [

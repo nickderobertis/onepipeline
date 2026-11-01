@@ -137,7 +137,6 @@ struct Content {
     repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }
 
-/// `spelled` as the store's own title, refused as the store refuses it.
 fn title(spelled: String) -> Result<onetaskgraph_core::task_projection::ProjectionTitle, String> {
     onetaskgraph_core::task_projection::ProjectionTitle::new(spelled)
         .map_err(|e| format!("the task's title is not one the store accepts: {e}"))
