@@ -215,7 +215,10 @@ fn every_required_context_is_reported_on_every_pull_request() {
 
     let mut required = required_contexts();
     required.sort();
-    assert_eq!(required, ["lint", "test-linux", "test-macos", "test-windows"]);
+    assert_eq!(
+        required,
+        ["lint", "test-linux", "test-macos", "test-windows"]
+    );
     for context in &required {
         let (file, key) = reporters
             .get(context.as_str())
@@ -414,7 +417,11 @@ fn the_pr_mac_lane_preserves_the_three_former_mac_proofs() {
     for target in ["test-quick", "install-smoke", "install-documented"] {
         assert!(mac_targets.contains(target), "test-macos omitted {target}");
     }
-    let mut jobs: Vec<&String> = ci["jobs"].as_object().expect("ci.yml has jobs").keys().collect();
+    let mut jobs: Vec<&String> = ci["jobs"]
+        .as_object()
+        .expect("ci.yml has jobs")
+        .keys()
+        .collect();
     jobs.sort();
     assert_eq!(
         jobs,
