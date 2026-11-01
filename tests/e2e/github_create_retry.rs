@@ -51,6 +51,20 @@ fn shadow_of(world: &World, run: &str, node: &str) -> PathBuf {
     found.into_iter().next().expect("one shadow")
 }
 
+/// The origin the write-back records for the shadow document at `relative`, its path under the
+/// shadow's `tasks` directory: the shadow source's id for it, whose project and task parts the
+/// store joins with `/` on every host. A Windows path separates them with `\`, which no part
+/// carries — each is hex — so it is read as the separator it is.
+fn shadow_origin(relative: &Path) -> String {
+    format!(
+        "{SHADOW_SOURCE}:{}",
+        relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/")
+    )
+}
+
 /// The metadata a shadow document's front matter records.
 fn shadow_metadata(path: &Path) -> Value {
     let text = std::fs::read_to_string(path).expect("the shadow document");
@@ -163,13 +177,10 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
     // from — in its body and in its board item's origin field, and it carries the added node.
     let shadow = shadow_of(&world, name, ADDED);
     let metadata = shadow_metadata(&shadow);
-    let source = format!(
-        "{SHADOW_SOURCE}:{}",
+    let source = shadow_origin(
         shadow
             .strip_prefix(world.run_file(name, "writeback/tasks"))
-            .expect("under the shadow's tasks")
-            .with_extension("")
-            .to_string_lossy()
+            .expect("under the shadow's tasks"),
     );
     let carrying: Vec<(&String, &Value)> = state["issues"]
         .as_object()
@@ -222,4 +233,17 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         "the shadow holds no create in flight: {metadata:#}"
     );
     world.release("anchor.go");
+}
+
+/// A shadow document's origin is the one the write-back records whichever separator the host's
+/// path puts between its parts: Windows names it `626f6172643a706c616e\6578616d706c6573.md`.
+#[test]
+fn a_shadow_documents_origin_is_the_same_whichever_separator_its_path_carries() {
+    let origin = "onepipeline-writeback:626f6172643a706c616e/6578616d706c6573";
+    for relative in [
+        r"626f6172643a706c616e\6578616d706c6573.md",
+        "626f6172643a706c616e/6578616d706c6573.md",
+    ] {
+        assert_eq!(shadow_origin(Path::new(relative)), origin, "{relative}");
+    }
 }
