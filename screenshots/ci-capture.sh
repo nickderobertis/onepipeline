@@ -114,7 +114,7 @@ docker run --rm \
   -v "$copy":"$inside" -v "$ROOT/shots":"$inside/shots" -v "$build":"$inside/target" -w "$inside" \
   -e SHOTS_OUT \
   -e HOST_OWNER="$(id -u):$(id -g)" \
-  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0="$inside" \
   -e INSIDE="$inside" \
   "$image" sh -e -c 'trap "chown -R \"\$HOST_OWNER\" \"\$INSIDE\"" EXIT
 '"$command" || {
