@@ -66,8 +66,9 @@ fn shadow_metadata(path: &Path) -> Value {
 
 /// A live addition whose create GitHub ran and whose answer was then dropped is retried by the
 /// write-back, and the retry finishes the issue the interrupted attempt filed: the board holds
-/// exactly one issue for it, carrying the shadow's origin, the shadow links that issue and holds
-/// no create in flight, and the write-back record says the retry created nothing.
+/// exactly one issue for it, carrying the shadow's origin, the write-back landed the node on that
+/// issue, the shadow holds no create in flight, and the write-back record says the retry created
+/// nothing.
 #[test]
 fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_on_retry() {
     let name = "github-create-retry";
@@ -162,7 +163,6 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
     // Exactly one issue carries the shadow's origin — the id the store copies the added node
     // from — in its body and in its board item's origin field, and it carries the added node.
     let shadow = shadow_of(&world, name, ADDED);
-    let metadata = shadow_metadata(&shadow);
     // The origin is an id, its segments joined by `/` on every platform, not a path
     // in the host's own spelling.
     let source = format!(
@@ -216,12 +216,27 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         items[0]
     );
 
-    // The shadow links that issue and holds no create in flight.
-    assert_eq!(
-        metadata["onetaskgraph.copies"]["board"],
-        json!(format!("board:{issue_id}")),
-        "the shadow links the one issue: {metadata:#}"
+    // The write-back landed the added node on that issue. Its baseline is what keeps that link:
+    // the shadow carries the store's link only from the copy that writes it to the next
+    // attempt's rewrite, and the anchor's own projections rewrite it at any moment from here, so
+    // an assertion on the shadow's link would read one instant of that cycle. The baseline is
+    // waited on rather than read once, because it is saved beside the record already seen.
+    let landed =
+        |world: &World| world.run_json(name, "writeback-landed.json")["items"][ADDED].clone();
+    world.until(
+        "the baseline to record where the added node landed",
+        |world| !landed(world)["destination"].is_null(),
     );
+    let baseline = landed(&world);
+    assert_eq!(
+        baseline["destination"],
+        json!(format!("board:{issue_id}")),
+        "the write-back landed the added node on the one issue: {baseline:#}"
+    );
+
+    // The shadow holds no create in flight: the store removed it in the write that linked the
+    // issue, and a rewrite keeps one only where the document it replaces still holds it.
+    let metadata = shadow_metadata(&shadow);
     assert!(
         metadata.get("onetaskgraph.creating").is_none(),
         "the shadow holds no create in flight: {metadata:#}"
