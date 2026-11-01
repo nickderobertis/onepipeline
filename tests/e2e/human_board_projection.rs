@@ -42,8 +42,8 @@ const PRIVATE_REPOSITORY: &str = "owner/secret";
 /// The organization's repository, whose human tasks its route sends to Linear.
 const ORG_REPOSITORY: &str = "acme/widget";
 
-/// The four placements: each plan's name, the repositories its human task names, and its
-/// human node's id.
+/// The four placements: each plan's name, and the repository each of its work tasks names, one
+/// task a repository listed.
 const CASES: &[(&str, &[&str])] = &[
     ("public-plan", &[PUBLIC_REPOSITORY]),
     ("private-plan", &[PRIVATE_REPOSITORY]),

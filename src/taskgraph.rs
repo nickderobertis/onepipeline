@@ -409,7 +409,10 @@ impl Store {
         }
         repositories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         Ok(PlanReach {
-            url: held.item.url.filter(|url| !url.trim().is_empty()),
+            url: held
+                .item
+                .url
+                .and_then(|url| onetaskgraph_core::task_projection::TrackerUrl::new(url).ok()),
             repositories,
         })
     }
@@ -1786,8 +1789,9 @@ pub(crate) enum StoredKind {
 
 /// Where a plan reaches, as [`Store::plan_reach`] reads it.
 pub(crate) struct PlanReach {
-    /// The address the plan's project answers at, where its source gives one.
-    pub url: Option<String>,
+    /// The address the plan's project answers at, where its source gives one an absolute
+    /// HTTPS address with no credentials in it — the only kind a reader is handed as a link.
+    pub url: Option<onetaskgraph_core::task_projection::TrackerUrl>,
     /// Every repository the plan's live tasks name, each once, sorted by origin.
     pub repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }

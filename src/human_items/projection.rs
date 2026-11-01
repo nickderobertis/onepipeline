@@ -118,7 +118,11 @@ fn content(dir: &Path, journal: &Path, item: &HumanItem) -> Result<Content, Stri
     };
     if let Some(plan) = &item.owner.plan {
         let reach = plan_reach(dir, plan)?;
-        content.body = with_plan_link(&content.body, plan, reach.url.as_deref());
+        content.body = with_plan_link(
+            &content.body,
+            plan,
+            reach.url.as_ref().map(|url| url.as_str()),
+        );
         content.repositories = reach.repositories;
     }
     Ok(content)
@@ -156,12 +160,8 @@ fn plan_reach(dir: &Path, plan: &str) -> Result<crate::taskgraph::PlanReach, Str
 /// source gives one, else its qualified id.
 fn with_plan_link(body: &str, plan: &str, url: Option<&str>) -> String {
     let link = url.map_or_else(|| format!("`{plan}`"), |url| format!("[{plan}]({url})"));
-    let body = body.trim_end();
-    if body.is_empty() {
-        format!("Plan: {link}")
-    } else {
-        format!("{body}\n\nPlan: {link}")
-    }
+    // A body is never blank: both the raise and the journal's decoder refuse one.
+    format!("{}\n\nPlan: {link}", body.trim_end())
 }
 
 /// A task's tracker binding, and the record that it was projected.
@@ -280,10 +280,6 @@ mod tests {
         assert_eq!(
             with_plan_link("Approve it.", "local:plan", None),
             "Approve it.\n\nPlan: `local:plan`"
-        );
-        assert_eq!(
-            with_plan_link("  \n", "local:plan", None),
-            "Plan: `local:plan`"
         );
     }
 
