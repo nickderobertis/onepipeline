@@ -185,6 +185,34 @@ describe("the jobs' target lists", () => {
     }
   });
 
+  // install-smoke's Linux run times host-view-time's reads against a 100 ms line, and
+  // wheel-smoke's image pull and container compile starve the runner they share:
+  // overlapping them read 192 ms in run 41316119034. Planned by the real Nx over
+  // test-linux's own list, so an edge Nx would not honour fails here too.
+  it("plan test-linux's wheel build after the install proof that times host-view-time", () => {
+    const { status, stdout, stderr } = spawnSync(
+      "bash",
+      [
+        "scripts/nx.sh",
+        "run-many",
+        "-t",
+        listed("test-linux").join(","),
+        "-p",
+        "onepipeline",
+        "--graph=stdout",
+      ],
+      { cwd: root, encoding: "utf8", env: { ...process.env, ONEPIPELINE_NX_SHOW_OUTPUT: "1" } },
+    );
+    assert.equal(status, 0, stderr);
+    const graph = JSON.parse(stdout.slice(stdout.indexOf("{")));
+    assert.ok(graph.tasks.tasks["onepipeline:install-smoke"], "test-linux plans no install-smoke");
+    assert.deepEqual(
+      graph.tasks.dependencies["onepipeline:wheel-smoke"],
+      ["onepipeline:install-smoke"],
+      "Nx may start the wheel build while install-smoke times host-view-time",
+    );
+  });
+
   it("cover every target `just check-cross` runs, on Windows and macOS alike", () => {
     const justfile = readFileSync(join(root, "justfile"), "utf8");
     const recipes = /^check-cross: (.+)$/m.exec(justfile)[1].split(" ");
