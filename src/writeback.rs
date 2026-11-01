@@ -3875,8 +3875,8 @@ const REFRESHED: &[&str] = &[
     MetadataKey::COPY_LOCATIONS_KEY,
 ];
 
-/// Write one lineage's shadow task document at `path`, keeping each of the store's records
-/// `kept` names from the document it replaces.
+/// Everything else on the document is the snapshot's to say: the store's records survive a
+/// rewrite only where `kept` names them, which is [`CREATING`] or [`REFRESHED`].
 fn task_shadow(path: &Path, mut front: Value, content: &str, kept: &[&str]) -> Result<(), String> {
     for (key, record) in shadow_records(path, kept) {
         front["metadata"][key] = record;
@@ -3903,8 +3903,6 @@ fn shadow_records<'k>(path: &Path, keys: &[&'k str]) -> Vec<(&'k str, Value)> {
         .collect()
 }
 
-/// The metadata the front matter of the shadow document at `path` holds, when it is there and
-/// reads as a shadow.
 fn shadow_front_metadata(path: &Path) -> Option<serde_json::Map<String, Value>> {
     let text = std::fs::read_to_string(path).ok()?;
     let (front, _) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
