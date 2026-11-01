@@ -205,6 +205,27 @@ describe("the visual docs", () => {
     }
   });
 
+  it("publish their comment and preview from `lint`, the one place a pull request's are made", () => {
+    // visual-docs.yml no longer runs on a pull request's push, so nothing races
+    // `lint`'s deploy for the Pages build screencomp gates on; the switch is on,
+    // and it is what the deploy, the classify step and the comment each read.
+    const lint = ci.jobs.lint;
+    assert.equal(lint.env?.VISUAL_DOCS_PUBLISH, "true");
+    const switched = (prefix) => {
+      const step = steps(lint).find((candidate) => uses(candidate).startsWith(prefix));
+      assert.ok(step, `\`lint\` has no ${prefix} step`);
+      return step;
+    };
+    const publish = "${{ env.VISUAL_DOCS_PUBLISH }}";
+    assert.equal(switched("nickderobertis/screencomp/visual-docs@").with?.publish, publish);
+    assert.equal(switched("nickderobertis/screencomp/visual-docs-aggregate@").with?.publish, publish);
+    assert.match(
+      String(switched("nickderobertis/screencomp/visual-docs-pages@").if),
+      /^env\.VISUAL_DOCS_PUBLISH == 'true' && /,
+    );
+    assert.equal(workflows["visual-docs.yml"].on.pull_request?.types?.join(), "closed");
+  });
+
   it("never run through screencomp's reusable workflow from ci.yml", () => {
     for (const [id, job] of Object.entries(ci.jobs)) {
       assert.ok(
