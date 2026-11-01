@@ -3852,33 +3852,68 @@ fn shadow_origin(path: &Path) -> Option<GlobalId> {
     })
 }
 
-/// Write one lineage's shadow task document at `path`, keeping the store's record of a create
-/// in flight from the document it replaces.
+/// The store's records a rewrite of a shadow document that a creating copy reads next keeps:
+/// its record of a create in flight.
 ///
 /// A create an earlier attempt began and never saw answered is recorded on this shadow, and
 /// only there (`onetaskgraph.creating`): the store finds the item that create made by the key it
 /// records. So every rewrite of the shadow keeps it, and the retried create reaches that item
 /// rather than filing a second; the store removes it in the write that links the item.
-fn task_shadow(path: &Path, mut front: Value, content: &str) -> Result<(), String> {
-    if let Some(intent) = shadow_intent(path) {
-        front["metadata"][MetadataKey::CREATING_KEY] = intent;
+const CREATING: &[&str] = &[MetadataKey::CREATING_KEY];
+
+/// The store's records the rewrite before each attempt keeps: a create in flight, and the link
+/// the store recorded to the item a copy landed (`onetaskgraph.copies`, with the
+/// `onetaskgraph.copy_locations` that means something only beside it).
+///
+/// No copy reads that rewrite: a copy reads only the documents [`write_shadow`] rewrites for
+/// the lineages it creates, which keep only [`CREATING`], and it takes every other document
+/// out. So a link this rewrite dropped is one nothing writes back, and the shadow of an item
+/// already on the board would forget it the first time any lineage of the plan moved.
+const REFRESHED: &[&str] = &[
+    MetadataKey::CREATING_KEY,
+    MetadataKey::COPIES_KEY,
+    MetadataKey::COPY_LOCATIONS_KEY,
+];
+
+/// Everything else on the document is the snapshot's to say: the store's records survive a
+/// rewrite only where `kept` names them, which is [`CREATING`] or [`REFRESHED`].
+fn task_shadow(path: &Path, mut front: Value, content: &str, kept: &[&str]) -> Result<(), String> {
+    for (key, record) in shadow_records(path, kept) {
+        front["metadata"][key] = record;
     }
     document(path, &front, content)
 }
 
-/// The store's record, on the shadow document at `path`, of a create in flight from it
-/// (`onetaskgraph.creating`), when the document is there and holds one. A document that is not
-/// there, or that cannot be read as a shadow, records none: [`shadow_origin`] says why on its
-/// read of the same document, and the rewrite then writes exactly what it did before.
-fn shadow_intent(path: &Path) -> Option<Value> {
+/// The store's records `keys` names on the shadow document at `path` — a create in flight from
+/// it (`onetaskgraph.creating`), the link to what a copy of it landed — each that the document
+/// holds. A document that is not there, or that cannot be read as a shadow, records none:
+/// [`shadow_origin`] says why on its read of the same document, and the rewrite then writes
+/// exactly what it did before.
+fn shadow_records<'k>(path: &Path, keys: &[&'k str]) -> Vec<(&'k str, Value)> {
+    let Some(mut metadata) = shadow_front_metadata(path) else {
+        return Vec::new();
+    };
+    keys.iter()
+        .filter_map(|key| {
+            metadata
+                .remove(*key)
+                .filter(|record| !record.is_null())
+                .map(|record| (*key, record))
+        })
+        .collect()
+}
+
+fn shadow_front_metadata(path: &Path) -> Option<serde_json::Map<String, Value>> {
     let text = std::fs::read_to_string(path).ok()?;
     let (front, _) = text.strip_prefix("---\n")?.split_once("\n---\n")?;
-    let mut front = crate::yaml::from_str::<Value>(front).ok()?;
-    front
+    match crate::yaml::from_str::<Value>(front)
+        .ok()?
         .get_mut("metadata")?
-        .as_object_mut()?
-        .remove(MetadataKey::CREATING_KEY)
-        .filter(|intent| !intent.is_null())
+        .take()
+    {
+        Value::Object(metadata) => Some(metadata),
+        _ => None,
+    }
 }
 
 /// One lineage as the snapshot alone renders it: the half of its shadow task the landed
@@ -4401,7 +4436,7 @@ fn write_shadow(
     for root in created {
         let (front, content) = task_document(snapshot, &lineages, root, ends)?;
         let path = tasks.join(format!("{}.md", task_file(root)));
-        task_shadow(&path, front, &content)?;
+        task_shadow(&path, front, &content, CREATING)?;
         written.insert(path);
     }
     // Only what this copy creates is a member: a document anything earlier left here — an
@@ -4624,6 +4659,7 @@ fn refresh_shadow(snapshot: &Snapshot, baseline: &Baseline) -> Result<(), String
             &tasks.join(format!("{}.md", task_file(root))),
             front,
             &content,
+            REFRESHED,
         )?;
     }
     Ok(())
@@ -7882,6 +7918,53 @@ mod tests {
         super::refresh_shadow(&fixture.snapshot, &baseline).expect("the shadow is refreshed");
         let (refreshed, _) = written(&path);
         assert_eq!(refreshed["metadata"][MetadataKey::CREATING_KEY], intent);
+    }
+
+    /// The link the store records on a shadow to the item its copy landed survives the rewrite
+    /// before every attempt, so a later attempt that only updates some other lineage leaves the
+    /// shadow of an item already on the board naming that item; the rewrite a creating copy
+    /// reads is still written without it.
+    #[test]
+    fn the_rewrite_before_an_attempt_keeps_the_store_s_link_to_the_landed_item() {
+        let fixture = Fixture::new("link-kept");
+        let created = std::collections::BTreeSet::from(["design".to_owned()]);
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is written");
+        let path = shadow_task(&fixture, "design");
+        let link = json!({"board": "board:I_3"});
+        let located = json!({"board": {
+            "id": "board:I_3",
+            "location": {"url": "https://github.com/owner/service/issues/3"},
+        }});
+        let (mut front, body) = written(&path);
+        front["metadata"][MetadataKey::COPIES_KEY] = link.clone();
+        front["metadata"][MetadataKey::COPY_LOCATIONS_KEY] = located.clone();
+        super::document(&path, &front, &body).expect("the store's link is recorded");
+
+        let baseline = super::Baseline {
+            path: fixture.dir.join("landed.json"),
+            landed: super::LandedBaseline::empty(&fixture.snapshot.project),
+        };
+        super::refresh_shadow(&fixture.snapshot, &baseline).expect("the shadow is refreshed");
+        let (refreshed, _) = written(&path);
+        assert_eq!(
+            refreshed["metadata"][MetadataKey::COPIES_KEY],
+            link,
+            "{refreshed:#}"
+        );
+        assert_eq!(
+            refreshed["metadata"][MetadataKey::COPY_LOCATIONS_KEY],
+            located,
+            "{refreshed:#}"
+        );
+
+        write_shadow(&fixture.snapshot, &created, &fixture.ends).expect("the shadow is rewritten");
+        let (recreated, _) = written(&path);
+        for key in [MetadataKey::COPIES_KEY, MetadataKey::COPY_LOCATIONS_KEY] {
+            assert!(
+                recreated["metadata"].get(key).is_none(),
+                "a creating copy's shadow carries no {key}: {recreated:#}"
+            );
+        }
     }
 
     /// The image-carrying step's rewrite of a created task's shadow document — `local-md`'s

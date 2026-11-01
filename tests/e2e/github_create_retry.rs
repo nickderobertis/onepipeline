@@ -18,7 +18,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::harness::World;
-use crate::linear_writeback::{from_the_launch_directory, projection_records};
+use crate::linear_writeback::{
+    from_the_launch_directory, projection_completed_after, projection_records,
+};
 use crate::private_github_home::{described, metadata_of, GitHub};
 
 /// The repository the board files into.
@@ -49,6 +51,20 @@ fn shadow_of(world: &World, run: &str, node: &str) -> PathBuf {
         .collect();
     assert_eq!(found.len(), 1, "one shadow carries {node}: {found:?}");
     found.into_iter().next().expect("one shadow")
+}
+
+/// The origin the write-back records for the shadow document at `relative`, its path under the
+/// shadow's `tasks` directory: the shadow source's id for it, whose project and task parts the
+/// store joins with `/` on every host. A Windows path separates them with `\`, which no part
+/// carries — each is hex — so it is read as the separator it is.
+fn shadow_origin(relative: &Path) -> String {
+    format!(
+        "{SHADOW_SOURCE}:{}",
+        relative
+            .with_extension("")
+            .to_string_lossy()
+            .replace('\\', "/")
+    )
 }
 
 /// The metadata a shadow document's front matter records.
@@ -163,13 +179,10 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
     // from — in its body and in its board item's origin field, and it carries the added node.
     let shadow = shadow_of(&world, name, ADDED);
     let metadata = shadow_metadata(&shadow);
-    let source = format!(
-        "{SHADOW_SOURCE}:{}",
+    let source = shadow_origin(
         shadow
             .strip_prefix(world.run_file(name, "writeback/tasks"))
-            .expect("under the shadow's tasks")
-            .with_extension("")
-            .to_string_lossy()
+            .expect("under the shadow's tasks"),
     );
     let carrying: Vec<(&String, &Value)> = state["issues"]
         .as_object()
@@ -221,5 +234,42 @@ fn a_write_back_create_interrupted_after_the_board_filed_it_reaches_that_issue_o
         metadata.get("onetaskgraph.creating").is_none(),
         "the shadow holds no create in flight: {metadata:#}"
     );
+
+    // A later attempt that updates only another lineage rewrites every shadow first, and the
+    // shadow still links that issue after it.
+    let before = projection_records(&world, name).len();
     world.release("anchor.go");
+    world.until("the anchor's own update to land", |world| {
+        projection_completed_after(world, name, before, "anchor")
+    });
+    let after = shadow_metadata(&shadow_of(&world, name, ADDED));
+    assert_eq!(
+        after["onetaskgraph.copies"]["board"],
+        json!(format!("board:{issue_id}")),
+        "the shadow links the one issue after a later attempt: {after:#}"
+    );
+    assert_eq!(
+        after["onetaskgraph.copy_locations"]["board"]["id"],
+        json!(format!("board:{issue_id}")),
+        "the shadow says where that issue is after a later attempt: {after:#}"
+    );
 }
+
+// llmlint: ignore-block[tests_mirror_real_usage] the code this proves is the journey's own:
+// `shadow_origin` is what the journey above composes its expected origin with, and it was that
+// composition, not the engine, that differed on Windows. A Linux path never separates its parts
+// with `\`, so the journey itself cannot present the Windows form here; this hands the helper
+// the exact path the Windows log shows.
+/// A shadow document's origin is the one the write-back records whichever separator the host's
+/// path puts between its parts: Windows names it `626f6172643a706c616e\6578616d706c6573.md`.
+#[test]
+fn a_shadow_documents_origin_is_the_same_whichever_separator_its_path_carries() {
+    let origin = "onepipeline-writeback:626f6172643a706c616e/6578616d706c6573";
+    for relative in [
+        r"626f6172643a706c616e\6578616d706c6573.md",
+        "626f6172643a706c616e/6578616d706c6573.md",
+    ] {
+        assert_eq!(shadow_origin(Path::new(relative)), origin, "{relative}");
+    }
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
