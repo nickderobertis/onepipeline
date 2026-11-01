@@ -228,6 +228,8 @@ mod linear_writeback;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod node_validator;
 mod older_launch_record;
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey reads a plan out of a GitHub board and has the write-back create a live addition through the linked `github-projects` plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod private_github_home` below.
+mod github_create_retry;
 // llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey reads a plan out of a private GitHub board and writes a live addition back through the linked `github-projects` plugin, exercising `taskgraph`, `writeback`, `edits` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod linear_writeback` above.
 mod private_github_home;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] what these journeys

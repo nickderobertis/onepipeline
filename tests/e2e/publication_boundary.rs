@@ -2780,6 +2780,7 @@ fn a_private_plan_whose_public_task_carries_an_id_anchor_copies_through_the_link
                     no_link: true,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
                 .unwrap_or_else(|error| {

@@ -19,6 +19,12 @@ sent each request; every board reads the one model, as every GitHub endpoint doe
 before filing an issue on a board declared private. `GET /state` answers the whole model and
 the request log.
 
+POST `/drop-create` with `{"title": T}` runs the next `createIssue` whose title contains `T`, as
+GitHub does, and then closes the connection without answering it: the create a client sent and
+never saw answered, which the issue it made outlives. Issues a document creates carry the time
+they were created, newest last in `Repository.issues` ordered by `CREATED_AT`; seeded ones carry
+one fixed, earlier time.
+
 The first argument names the directory the URL is published to, whole, as `endpoint`; the
 second a JSON file seeding the model, and the third the schema: `{"owner": LOGIN, "repositories": {"owner/name":
 "public" | "private"}, "boards": {"<number>": {"public": BOOL, "priority"?: BOOL}}, "issues": [{"id": ID,
@@ -31,6 +37,7 @@ import pathlib
 import re
 import sys
 import threading
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 STATUS_OPTIONS = ["Backlog", "Todo", "Queued", "In Progress", "Needs Attention", "Done", "Canceled"]
@@ -588,6 +595,9 @@ class World:
                 "fields": fields,
             }
         self.issues, self.items, self.minted = {}, {}, 0
+        # The title fragment of the next create whose answer is dropped, and whether the one
+        # just run was it.
+        self.drop_title, self.dropped = None, False
         for issue in seed["issues"]:
             self.create_issue(issue["repository"], issue["title"], issue["body"],
                               issue.get("parent"), issue["id"])
@@ -609,8 +619,10 @@ class World:
             raise Unsupported("no repository %r" % repository)
         held = self.repositories[repository]
         held["issues"] += 1
+        created = STAMP if node else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         node = node or self.mint("I")
         self.issues[node] = {"id": node, "repository": repository, "number": held["issues"],
+                             "createdAt": created,
                              "title": title, "body": body, "state": "OPEN",
                              "stateReason": None, "parent": None, "subIssues": [],
                              "blockedBy": []}
@@ -793,7 +805,7 @@ class Issue(Node):
         return "https://github.com/%s/issues/%d" % (self.held["repository"], self.held["number"])
 
     def f_createdAt(self, _):
-        return STAMP
+        return self.held["createdAt"]
 
     def f_updatedAt(self, _):
         return STAMP
@@ -866,6 +878,17 @@ class Repository(Node):
                 return Issue(self.world, node)
         return None
 
+    def f_issues(self, arguments):
+        order = arguments.get("orderBy") or {"field": "CREATED_AT", "direction": "ASC"}
+        if order["field"] != "CREATED_AT" or arguments.get("after") is not None:
+            raise Unsupported("the loopback lists a repository's issues by creation, one page")
+        held = sorted((node for node, issue in self.world.issues.items()
+                       if issue["repository"] == self.slug),
+                      key=lambda node: (self.world.issues[node]["createdAt"],
+                                        self.world.issues[node]["number"]),
+                      reverse=order["direction"] == "DESC")
+        return connection([Issue(self.world, node) for node in held], arguments)
+
 
 class Query(Node):
     typename = "Query"
@@ -931,6 +954,8 @@ class Mutation(Node):
     def f_createIssue(self, arguments):
         supplied = arguments["input"]
         repository = self.world.repository_by_id(supplied["repositoryId"])
+        if self.world.drop_title is not None and self.world.drop_title in supplied["title"]:
+            self.world.drop_title, self.world.dropped = None, True
         node = self.world.create_issue(repository, supplied["title"], supplied.get("body", ""),
                                        supplied.get("parentIssueId"))
         for board in supplied.get("projectV2Ids") or []:
@@ -1005,6 +1030,26 @@ class Mutation(Node):
 
 world = World(json.loads(pathlib.Path(sys.argv[2]).read_text()))
 schema = Schema(pathlib.Path(sys.argv[3]).read_text())
+# llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] `Repository.issues` is the one
+# field a linked store document reads that the pinned fixture omits: onetaskgraph-github-projects
+# 0.12.14's `ISSUES_BY_CREATION` lists a repository's issues newest first to find a create by its
+# key, and its `schema.graphql` defines no `Repository.issues`. This is GitHub's own definition
+# of it (docs.github.com/en/graphql/reference/objects#repository), reduced to the arguments that
+# document passes. A fixture that defines any of these names keeps its own definition, so once
+# the fixture carries the field this adds nothing.
+SUPPLEMENT = Schema("""
+type Repository { issues(first: Int, after: String, orderBy: IssueOrder): IssueConnection! }
+input IssueOrder { field: IssueOrderField! direction: OrderDirection! }
+enum IssueOrderField { CREATED_AT UPDATED_AT COMMENTS }
+""")
+# llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+for typename, fields in SUPPLEMENT.fields.items():
+    for name, defined in fields.items():
+        schema.fields.setdefault(typename, {}).setdefault(name, defined)
+for name, fields in SUPPLEMENT.inputs.items():
+    schema.inputs.setdefault(name, fields)
+for name, members in SUPPLEMENT.enums.items():
+    schema.enums.setdefault(name, members)
 requests = []
 unsupported = []
 lock = threading.Lock()
@@ -1075,6 +1120,22 @@ class Handler(BaseHTTPRequestHandler):
         self.reply({"message": "Not Found"}, 404)
 
     def do_POST(self):
+        if self.path == "/drop-create":
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+                if not 0 < length <= 4096:
+                    raise ValueError("Content-Length must be between 1 and 4096")
+                request = json.loads(self.rfile.read(length))
+                if (not isinstance(request, dict) or set(request) != {"title"}
+                        or not isinstance(request["title"], str) or not request["title"]):
+                    raise ValueError("a dropped create names a title fragment")
+            except ValueError as error:
+                self.reply({"message": str(error)}, 400)
+                return
+            with lock:
+                world.drop_title = request["title"]
+            self.reply({})
+            return
         if not re.fullmatch(r"/board/\d+/graphql", self.path):
             self.reply({"message": "Not Found"}, 404)
             return
@@ -1085,11 +1146,17 @@ class Handler(BaseHTTPRequestHandler):
             request = json.loads(self.rfile.read(length))
             with lock:
                 answer = answer_graphql(self.path, request)
+                dropped, world.dropped = world.dropped, False
         except (Unsupported, KeyError, TypeError, ValueError) as error:
             with lock:
+                world.dropped = False
                 unsupported.append(str(error))
             print("github_world: %s" % error, file=sys.stderr, flush=True)
             self.reply({"errors": [{"message": "loopback: %s" % error}]}, 400)
+            return
+        if dropped:
+            # The create ran; its answer never reaches the client.
+            self.close_connection = True
             return
         self.reply(answer)
 

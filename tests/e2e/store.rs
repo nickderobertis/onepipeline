@@ -3174,6 +3174,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
                     no_link: false,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
         },
@@ -4788,6 +4789,7 @@ fn a_live_add_leaves_the_edited_board_project_untouched() {
                     no_link: false,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
                 .unwrap()

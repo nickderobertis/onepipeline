@@ -1420,6 +1420,7 @@ impl World {
                     no_link: false,
                     expect: None,
                     statuses: Vec::new(),
+                    conditions: onetaskgraph_core::CopyConditions::default(),
                 })
                 .await
                 .expect("the real store copies the project")

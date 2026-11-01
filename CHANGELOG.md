@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.97.2](https://github.com/nickderobertis/onepipeline/compare/v0.97.1...v0.97.2) - 2026-10-31
+
+### Added
+
+- *(deps)* link the plan store that makes a create safe to retry and guards its writes ([#1325](https://github.com/nickderobertis/onepipeline/pull/1325))
+
+## [0.97.1](https://github.com/nickderobertis/onepipeline/compare/v0.97.0...v0.97.1) - 2026-10-31
+
+### Performance
+
+- cut onepipeline's per-test cost in the e2e suite and library ([#1278](https://github.com/nickderobertis/onepipeline/pull/1278))
+
 ## [0.97.0](https://github.com/nickderobertis/onepipeline/compare/v0.96.2...v0.97.0) - 2026-10-31
 
 ### Added
