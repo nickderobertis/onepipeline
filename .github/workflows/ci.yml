@@ -72,8 +72,18 @@ jobs:
           # This job's token can write, and the judge runs harness agents over
           # the checkout: no credential is left in it for them to find.
           persist-credentials: false
+      # rust-cache keys on the OS, every installed toolchain and every Cargo
+      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
+      # saves from main for `test-linux`, whose warm build includes this job's
+      # clippy build. Before the capture starts: on a restore that is not a
+      # full key match rust-cache prunes files under `target/`, where the
+      # capture's clone of HEAD lives.
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          shared-key: test-linux
+          save-if: false
       # The capture builds release binaries in a container for most of this
-      # job's length, so it starts first and runs beside the checks below, from
+      # job's length, so it starts early and runs beside the checks below, from
       # its own clone of HEAD (screenshots/ci-capture-lanes.sh); the step that
       # judges it waits for it. Both lanes, one after the other: the second reuses
       # the first's build, for the reproducibility gate.
@@ -88,14 +98,6 @@ jobs:
         env:
           SHOTS_LANES: shots/current/x86_64 shots/verify/x86_64
         run: bash screenshots/ci-capture-lanes.sh start "$RUNNER_TEMP"
-      # rust-cache keys on the OS, every installed toolchain and every Cargo
-      # manifest and lockfile; restored only, under the key `rust-cache-warm.yml`
-      # saves from main for `test-linux`, whose warm build includes this job's
-      # clippy build.
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          shared-key: test-linux
-          save-if: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

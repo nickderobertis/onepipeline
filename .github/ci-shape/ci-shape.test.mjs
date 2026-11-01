@@ -190,6 +190,15 @@ describe("the visual docs", () => {
       started < waited && waited < judged,
       "`lint` judges the capture before waiting for it",
     );
+    // The capture clones HEAD under `target/ci-capture`, and rust-cache, on a
+    // restore that is not a full key match, prunes files under `target/`: started
+    // first, the clone loses its `rust-toolchain.toml` mid-capture (run
+    // 41310531964's `lint`), and its manifests leak into rust-cache's key.
+    const restored = lint.findIndex((step) => uses(step).startsWith("Swatinem/rust-cache@"));
+    assert.ok(
+      restored !== -1 && restored < started,
+      "`lint` starts the capture under `target/` before rust-cache restores and prunes it",
+    );
     for (const action of COMPOSITES) {
       assert.ok(
         lint.some((step) => uses(step).startsWith(action)),
