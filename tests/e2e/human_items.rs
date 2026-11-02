@@ -457,6 +457,23 @@ fn each_manager_sees_its_own_items_and_what_holds_its_work() {
         let fields: Vec<&String> = view["item"].as_object().unwrap().keys().collect();
         assert_eq!(fields.len(), 15, "{fields:?}");
     }
+
+    // A run whose launch record cannot be read is nobody's, as the run views judge
+    // it: what its run raised and what holds its plan or run fall out of this
+    // session's view, while its own and the host's hold stay.
+    std::fs::write(mine.runs.join(name).join("launch.json"), "{not json").unwrap();
+    for verb in ["list", "report"] {
+        let text = mine.run(&["human-items", verb]).stdout.clone();
+        shows(
+            &text,
+            &["own", "their-host"],
+            &["by-my-run", "on-my-plan", "on-my-run", "their-own"],
+        );
+        assert!(
+            text.contains("other open items on this host (--all lists every item)"),
+            "{text}"
+        );
+    }
 }
 
 fn stays_undispatched(world: &World, run: &str, for_: std::time::Duration) {

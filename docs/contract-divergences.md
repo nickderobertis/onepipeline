@@ -13037,6 +13037,8 @@ each is a proposal until ruled.
 
 ## 145. The live list and report are brief and scoped to the asking session — OPEN
 
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the proposal AGENTS.md routes every divergence through: it restates the departure from `docs/contract.md` so the planner can rule on it, and the behaviour it describes is held by `tests/human_items_live.rs`, `tests/e2e/human_items.rs` and `tests/contract.rs`, not by this text. -->
+
 **Proposal, for the planner who owns the contract.** The task for node
 `human-item-report-summary` asks for a manager's human-items read to fit a phone, so
 the live surface now departs from three sentences of `docs/contract.md`'s Human items
@@ -13064,3 +13066,5 @@ section, which is left as approved:
    itself when its path names no repository and number. `schemas()` now exports the
    phase context as `PhaseContext`, published in `schemas/human-items.schema.json`
    with the fixture `tests/fixtures/human-items-phase-context.json`.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

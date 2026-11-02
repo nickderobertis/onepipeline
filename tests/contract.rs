@@ -12082,6 +12082,100 @@ fn the_published_phase_context_carries_an_optional_ticket_title() {
     assert!(!validator.is_valid(&unknown));
 }
 
+/// The README's paragraph on how `list` and `report` read names exactly the
+/// flags those two verbs take for it: each flag it names is one both verbs
+/// take, and `--full`, `--all` and `--json`, the three it explains, are named.
+#[test]
+fn the_readmes_human_items_reading_paragraph_names_the_verbs_flags() {
+    let raw = std::fs::read_to_string(repo_root().join("README.md")).expect("the README ships");
+    let readme = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let passage = readme
+        .split_once("`list` and `report` print each item as one compact entry")
+        .expect("the README says how `list` and `report` print an item")
+        .1
+        .split_once("Priorities read Critical")
+        .expect("that paragraph ends where the priorities begin")
+        .0;
+    let human_items = Cli::command()
+        .find_subcommand("human-items")
+        .expect("the binary offers `human-items`")
+        .clone();
+    let named: BTreeSet<&str> = passage
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter_map(|span| span.strip_prefix("--"))
+        .collect();
+    for verb in ["list", "report"] {
+        let taken: BTreeSet<String> = human_items
+            .find_subcommand(verb)
+            .unwrap_or_else(|| panic!("`human-items` offers `{verb}`"))
+            .get_arguments()
+            .filter_map(|arg| arg.get_long().map(str::to_string))
+            .collect();
+        for flag in &named {
+            assert!(
+                taken.contains(*flag),
+                "the README names `--{flag}`, which `human-items {verb}` does not take"
+            );
+        }
+    }
+    for flag in ["full", "all", "json"] {
+        assert!(
+            named.contains(flag),
+            "the README does not explain `--{flag}`"
+        );
+    }
+}
+
+/// A ticket built in process, which no decoder checked, is held to the same
+/// rule: `expand` refuses a blank title before anything is raised, and links a
+/// titled ticket by that title.
+#[test]
+fn expanding_a_phase_built_in_process_refuses_a_blank_ticket_title() {
+    use onepipeline::human_items::config::{EffectiveConfig, HumanItemsConfig};
+    use onepipeline::human_items::phases::{expand, Expanded, PhaseContext, Ticket};
+    let config = EffectiveConfig {
+        human_items: serde_json::from_value::<HumanItemsConfig>(json!({
+            "enabled": true,
+            "hooks": [{
+                "phase": "ticket-review", "kind": "task",
+                "title": "Review the tickets", "body": "Triage the tickets below.",
+                "priority": "low", "block": {"scope": "nothing"},
+                "aggregate": "ticket_review"
+            }]
+        }))
+        .unwrap(),
+        sources: Vec::new(),
+    };
+    let mut context: PhaseContext = serde_json::from_value(json!({
+        "owner": {"session": "mgr", "run": null, "plan": "plans:alpha"},
+        "dedup_key": "in-process",
+        "tickets": [{"id": "board-1", "url": "https://github.com/acme/widgets/issues/9"}]
+    }))
+    .unwrap();
+    context.tickets[0].title = Some("Ship the widget".into());
+    let Ok(Expanded::Raise { item, .. }) = expand(&config, "ticket-review", &context) else {
+        panic!("a titled ticket did not expand to a raise");
+    };
+    assert!(
+        item.body
+            .contains("- [Ship the widget](https://github.com/acme/widgets/issues/9)\n"),
+        "{}",
+        item.body
+    );
+    context.tickets.push(Ticket {
+        id: "board-2".into(),
+        url: "https://github.com/acme/widgets/issues/10".into(),
+        priority: None,
+        title: Some(" \t ".into()),
+    });
+    assert_eq!(
+        expand(&config, "ticket-review", &context).err().as_deref(),
+        Some("a ticket's title, when given, is not blank")
+    );
+}
+
 #[test]
 fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations() {
     use onepipeline::human_items::*;

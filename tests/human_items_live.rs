@@ -602,6 +602,18 @@ fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
     lines["owner"]["plan"] = json!("plans:alpha");
     lines["body"] = json!("Read the design.\nThen confirm it in chat.\nThird line.");
     world.raise(&lines);
+    // The boundaries: a body exactly as long as a description, the same line with
+    // more after it, and multibyte text longer than a description.
+    let exact_body = "x".repeat(80);
+    for (dedup, body) in [
+        ("exact", exact_body.clone()),
+        ("then", format!("{exact_body}\nmore")),
+        ("wide", "é".repeat(85)),
+    ] {
+        let mut boundary = item(dedup, "question", "low", "mgr", json!({"scope":"nothing"}));
+        boundary["body"] = json!(body);
+        world.raise(&boundary);
+    }
 
     for verb in ["list", "report"] {
         let text = world.ok(Some("mgr"), &[verb]);
@@ -636,6 +648,21 @@ fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
             "{text}"
         );
         assert_eq!(lines[2], "  Read the design.…", "{text}");
+        assert_eq!(
+            entry("question exact")[2],
+            format!("  {exact_body}"),
+            "{text}"
+        );
+        assert_eq!(
+            entry("question then")[2],
+            format!("  {}…", "x".repeat(79)),
+            "{text}"
+        );
+        assert_eq!(
+            entry("question wide")[2],
+            format!("  {}…", "é".repeat(79)),
+            "{text}"
+        );
         for cut in [
             "and then confirm.",
             "Then confirm it in chat.",
@@ -656,13 +683,34 @@ fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
     }
     let report = world.ok(Some("mgr"), &["report"]);
     assert!(
-        report.starts_with("Human items: 3 listed, 1 blocking\n"),
+        report.starts_with("Human items: 6 listed, 1 blocking\n"),
         "{report}"
     );
     let blocking = report.find("Blocking (1)").unwrap();
-    let rest = report.find("Not blocking (2)").unwrap();
+    let rest = report.find("Not blocking (5)").unwrap();
     assert!(blocking < report.find("- task long").unwrap());
     assert!(report.find("- task long").unwrap() < rest);
+
+    // A closed item's entry names its state after its source.
+    let short = world.json(None, &["list", "--json", "--kind", "question"]);
+    let short = short
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["dedup_key"] == "short")
+        .unwrap()["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    world.ok(Some("mgr"), &["answer", &short, "--text", "Widgets."]);
+    for verb in ["list", "report"] {
+        let text = world.ok(Some("mgr"), &[verb, "--state", "answered"]);
+        assert!(
+            text.contains("  Low question · blocks nothing · session mgr · answered\n"),
+            "{verb}: {text}"
+        );
+        assert!(!text.contains("question exact"), "{verb}: {text}");
+    }
 }
 
 fn telemetry(path: &Path) -> Vec<Value> {
@@ -1400,6 +1448,9 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
              "priority": "high", "title": "Fix the [flaky] login test"},
             {"id": "board-2", "url": "https://github.com/acme/widgets/pull/40", "priority": "low"},
             {"id": "board-3", "url": "https://gitlab.example/group/gadgets/-/merge_requests/3"},
+            {"id": "board-4", "url": "https://github.com/acme/widgets/issues/77/?tab=1#top",
+             "priority": "low"},
+            {"id": "board-5", "url": "https://tracker/notes (draft)", "priority": "low"},
         ]}),
     );
     let receipt = phase(&world, None, "ticket-review", &ctx);
@@ -1410,8 +1461,14 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
         ),
         "{body}"
     );
+    // A trailing slash, query and fragment do not hide the number; a URL naming
+    // no repository and number is its own text, bracketed where it has spaces.
     assert!(
-        body.contains("\nLow\n- [widgets#40](https://github.com/acme/widgets/pull/40)\n"),
+        body.contains(
+            "\nLow\n- [widgets#40](https://github.com/acme/widgets/pull/40)\n\
+             - [widgets#77](https://github.com/acme/widgets/issues/77/?tab=1#top)\n\
+             - [https://tracker/notes (draft)](<https://tracker/notes (draft)>)\n"
+        ),
         "{body}"
     );
     assert!(

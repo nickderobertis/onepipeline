@@ -40,13 +40,13 @@ pub struct Ticket {
     /// Its title, the text the review links it by; absent, it is linked by its
     /// short repository reference. Optional and omitted when absent, so a context
     /// written before it existed is read unchanged.
-    // llmlint: ignore[invalid_states_unrepresentable] the task adds an optional `title` string to the context's `{id, url, priority}` ticket; the decoder refuses a blank one, `expand` refuses it again for a context built in process, and absence is the legacy shape a reference link stands in for.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "nonblank_title"
     )]
     #[schemars(length(min = 1), pattern(r"\S"))]
+    // llmlint: ignore[invalid_states_unrepresentable] the task adds an optional `title` string to the context's `{id, url, priority}` ticket, beside its `String` id and url; the decoder refuses a blank one, `expand` refuses it again for a context built in process, and absence is the legacy shape a reference link stands in for.
     pub title: Option<String>,
 }
 

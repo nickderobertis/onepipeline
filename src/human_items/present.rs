@@ -21,6 +21,7 @@ pub(crate) const DESCRIPTION_CHARS: usize = 80;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Asker {
     /// The asking session.
+    // llmlint: ignore[invalid_states_unrepresentable] session, run and plan here are compared only against `HumanItemOwner`, `HumanItemBlock` and `LaunchRecord`, which spell all three as `String`; an `Asker` is built only by `HumanItems::asker` from a resolved session and the launch records it reads, and a newtype here would be unwrapped at every comparison.
     pub session: String,
     /// The runs that session launched, judged as the run views judge `[mine]`.
     pub runs: BTreeSet<String>,
@@ -134,18 +135,13 @@ pub(crate) fn blocking(item: &HumanItem, blocked: &super::HumanItemBlocked) -> S
 pub(crate) fn description(body: &str) -> String {
     let body = body.trim();
     let first = body.lines().next().unwrap_or_default().trim_end();
-    let cut_line = first.len() < body.len();
-    let mut chars = first.chars();
-    let kept: String = chars.by_ref().take(DESCRIPTION_CHARS).collect();
-    if chars.next().is_some() {
-        // Cut inside the line: leave room for the ellipsis.
-        let kept: String = kept.chars().take(DESCRIPTION_CHARS - 1).collect();
-        format!("{}…", kept.trim_end())
-    } else if cut_line {
-        format!("{kept}…")
-    } else {
-        kept
+    let cut = first.len() < body.len() || first.chars().count() > DESCRIPTION_CHARS;
+    if !cut {
+        return first.to_owned();
     }
+    // Leave room for the ellipsis, whether the cut is inside the line or after it.
+    let kept: String = first.chars().take(DESCRIPTION_CHARS - 1).collect();
+    format!("{}…", kept.trim_end())
 }
 
 /// One item as a compact entry: title and id, then priority, kind, what it
@@ -188,6 +184,10 @@ mod tests {
         assert!(cut.chars().count() <= DESCRIPTION_CHARS, "{cut}");
         let exact = "x".repeat(DESCRIPTION_CHARS);
         assert_eq!(description(&exact), exact);
+        // A full-length first line with more after it is still cut to fit.
+        let then = description(&format!("{exact}\nmore"));
+        assert_eq!(then.chars().count(), DESCRIPTION_CHARS, "{then}");
+        assert!(then.ends_with('…'), "{then}");
         // Multibyte text is cut on a character, never inside one.
         let wide = "é".repeat(DESCRIPTION_CHARS + 5);
         assert_eq!(description(&wide).chars().count(), DESCRIPTION_CHARS);
