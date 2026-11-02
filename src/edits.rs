@@ -995,6 +995,24 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
                     frontier.stated_landings.insert(node.clone(), stated);
                 }
             }
+            // A supersession moves the lineage, and the export edges with it, exactly as
+            // the fold reads them: a later command of the same envelope is compiled
+            // against a graph the replaced node has already left, so an edge still
+            // naming that node would read as dangling and refuse the whole envelope.
+            Operation::RetryRequested {
+                node, replacement, ..
+            }
+            | Operation::ReworkRequested {
+                node, replacement, ..
+            } => {
+                frontier
+                    .superseded
+                    .insert(node.clone(), replacement.clone());
+                frontier.export_edges = crate::boundary::edges_now(
+                    &frontier.export_edges,
+                    &std::iter::once((node.clone(), replacement.clone())).collect(),
+                );
+            }
             _ => {}
         }
     }
