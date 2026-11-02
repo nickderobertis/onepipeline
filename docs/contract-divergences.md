@@ -13067,10 +13067,10 @@ section, which is left as approved:
    phase context as `PhaseContext`, published in `schemas/human-items.schema.json`
    with the fixture `tests/fixtures/human-items-phase-context.json`.
 4. *The phase context is unversioned* — it gains an optional `schema_version`,
-   omitted when absent. Absent is version 1, the context as first published; 2 is
-   the current version and the first to admit a ticket `title`. A reader refuses
-   any other number, a non-integer and `null` before anything is raised, and
-   refuses a title in a context that states or defaults to version 1; the
-   published schema states both rules.
+   omitted when absent, whose only value is 1: absent is read as 1. The ticket
+   `title` is additive and needs no version of its own, so it is accepted whatever
+   the context declares, or none (the manager's ruling for this node). A reader
+   refuses any other number, a non-integer and `null` before anything is raised,
+   and the published schema states the same.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

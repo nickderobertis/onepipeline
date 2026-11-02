@@ -12048,11 +12048,12 @@ fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
     assert!(CONTRACT.contains("detail.nodes is grouped by blocked.plans in that order"));
 }
 
-/// The published phase context carries a ticket's optional `title` and the
-/// `schema_version` that admits it: a version 2 context with titles and one
-/// written before either existed both validate against the exported schema and
-/// round-trip unchanged, and a blank title, an unsupported version, and a title
-/// in a version 1 context are refused by both the schema and the reader.
+/// The published phase context carries a ticket's optional `title` and an
+/// optional `schema_version`, whose only value is 1: a context stating it with
+/// titles and one written before either existed both validate against the
+/// exported schema and round-trip unchanged, a title is accepted whatever the
+/// context declares, and a blank title or an unsupported version is refused by
+/// both the schema and the reader.
 #[test]
 fn the_published_phase_context_carries_an_optional_ticket_title() {
     use onepipeline::human_items::phases::{PhaseContext, PhaseContextVersion};
@@ -12071,7 +12072,6 @@ fn the_published_phase_context_carries_an_optional_ticket_title() {
     for fixture in &fixtures {
         validator.validate(fixture).unwrap();
         let parsed: PhaseContext = serde_json::from_value(fixture.clone()).unwrap();
-        parsed.validate().unwrap();
         let written = serde_json::to_value(&parsed).unwrap();
         // An absent title and an absent version stay absent on the wire, so an
         // older reader is unaffected.
@@ -12085,7 +12085,7 @@ fn the_published_phase_context_carries_an_optional_ticket_title() {
     }
     let legacy: PhaseContext = serde_json::from_value(fixtures[1].clone()).unwrap();
     assert_eq!(legacy.version(), PhaseContextVersion::V1);
-    for unsupported in [json!(0), json!(3), json!("2"), Value::Null] {
+    for unsupported in [json!(0), json!(2), json!("1"), Value::Null] {
         let mut context = fixtures[1].clone();
         context["schema_version"] = unsupported.clone();
         assert!(
@@ -12097,22 +12097,17 @@ fn the_published_phase_context_carries_an_optional_ticket_title() {
             "the schema accepted schema_version {unsupported}"
         );
     }
-    for version in [json!(1), Value::Null] {
-        let mut titled = fixtures[0].clone();
-        match version {
-            Value::Null => titled.as_object_mut().unwrap().remove("schema_version"),
-            version => titled
-                .as_object_mut()
-                .unwrap()
-                .insert("schema_version".into(), version),
-        };
-        let parsed: PhaseContext = serde_json::from_value(titled.clone()).unwrap();
-        assert!(parsed.validate().is_err(), "{titled}");
-        assert!(
-            !validator.is_valid(&titled),
-            "the schema accepted a title below version 2: {titled}"
-        );
-    }
+    // A title needs no version: with the marker removed, the titled fixture is
+    // still a valid context.
+    let mut unversioned = fixtures[0].clone();
+    unversioned
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_version");
+    validator.validate(&unversioned).unwrap();
+    let parsed: PhaseContext = serde_json::from_value(unversioned).unwrap();
+    assert_eq!(parsed.version(), PhaseContextVersion::V1);
+    assert!(parsed.tickets[0].title.is_some());
     let mut blank = fixtures[0].clone();
     blank["tickets"][0]["title"] = json!(" ");
     assert!(serde_json::from_value::<PhaseContext>(blank.clone()).is_err());

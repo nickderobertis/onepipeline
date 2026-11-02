@@ -4407,38 +4407,12 @@
       "owner",
       "dedup_key"
     ],
-    "if": {
-      "not": {
-        "properties": {
-          "schema_version": {
-            "const": 2
-          }
-        },
-        "required": [
-          "schema_version"
-        ]
-      }
-    },
-    "then": {
-      "properties": {
-        "tickets": {
-          "items": {
-            "not": {
-              "required": [
-                "title"
-              ]
-            }
-          }
-        }
-      }
-    },
     "$defs": {
       "PhaseContextVersion": {
-        "description": "The phase context's contract version: 1, the context as first published and what an absent `schema_version` means, or 2, which adds a ticket's optional `title`.",
+        "description": "The phase context's contract version: 1, the only one, and what an absent `schema_version` means.",
         "type": "integer",
         "enum": [
-          1,
-          2
+          1
         ]
       },
       "HumanItemOwner": {
