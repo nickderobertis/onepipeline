@@ -172,7 +172,7 @@ const ACTION: &str = "build the wheel and upload it to PyPI, then run onevcs rel
 ///
 /// The dependency lands *outside* the consumer's repository, which is the whole
 /// condition every behaviour here is keyed to.
-fn two_repositories(world: &World) -> (Repository, Repository) {
+pub(crate) fn two_repositories(world: &World) -> (Repository, Repository) {
     let consumer = world.repository("local-direct", &[]);
     let engine = world.extra_repository(ENGINE);
     (engine, consumer)
@@ -180,7 +180,7 @@ fn two_repositories(world: &World) -> (Repository, Repository) {
 
 /// The consumer node: a lifecycle node in the *other* repository, depending on
 /// the engine node.
-fn consumer(adoption: Option<&str>) -> Value {
+pub(crate) fn consumer(adoption: Option<&str>) -> Value {
     let mut node = lifecycle("consumer", &["engine"]);
     if let Some(adoption) = adoption {
         node["adoption"] = json!(adoption);
@@ -203,7 +203,7 @@ fn consumes_publishing_a_change(node: &mut Value, targets: Value) {
 }
 
 /// The engine node: a lifecycle node in the repository that releases.
-fn engine() -> Value {
+pub(crate) fn engine() -> Value {
     let mut node = lifecycle(ENGINE, &[]);
     node["repo"] = json!(ENGINE);
     node
@@ -217,7 +217,7 @@ fn engine() -> Value {
 /// given nor the absent file that means no release. A rename is one step to every
 /// reader, so a probe run gets the answer before or the answer after and never
 /// half of either.
-fn releases_at(answer: &Path, version: &str) {
+pub(crate) fn releases_at(answer: &Path, version: &str) {
     // Written whole, under a name no probe reads, and then moved onto the one
     // every probe does: what this avoids is a *reader* seeing half an answer, so
     // the file here is the complete one and the rename is the single step.
@@ -1470,7 +1470,7 @@ fn dispatched(world: &World, run: &str, node: &str) -> bool {
 }
 
 /// The `awaiting` entries of the last `release-wait` raised about one node.
-fn awaiting(world: &World, run: &str, node: &str) -> Vec<Value> {
+pub(crate) fn awaiting(world: &World, run: &str, node: &str) -> Vec<Value> {
     world
         .events_of(run, "release-wait")
         .into_iter()
@@ -1493,7 +1493,7 @@ fn answered(world: &World, run: &str, node: &str) -> Option<String> {
 }
 
 /// The text of the last release-wait surface raised about one node.
-fn wait_surface(world: &World, run: &str, node: &str) -> String {
+pub(crate) fn wait_surface(world: &World, run: &str, node: &str) -> String {
     world
         .events_of(run, "planner-surface-queued")
         .into_iter()
@@ -1569,7 +1569,7 @@ fn every_wait_was_surfaced_before_it_was_recorded(world: &World, run: &str, node
 /// nothing publishes nothing — and a dependency that never landed has no release
 /// to ask about. What each of these journeys is keyed to is a *landing*, so each
 /// node's work has to be real.
-fn start(world: &World, name: &str, nodes: Vec<Value>) -> String {
+pub(crate) fn start(world: &World, name: &str, nodes: Vec<Value>) -> String {
     start_with(world, name, nodes, &[])
 }
 
@@ -1578,7 +1578,7 @@ fn start(world: &World, name: &str, nodes: Vec<Value>) -> String {
 /// The source filter is a **launch** decision — declared once, before a session
 /// is cut — so a journey about what a filter keeps out of the store has to state
 /// it here rather than after the run is going.
-fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> String {
+pub(crate) fn start_with(world: &World, name: &str, nodes: Vec<Value>, extra: &[&str]) -> String {
     for node in &nodes {
         let id = node["id"].as_str().expect("every node has an id");
         // Named for the run as well as the node: two runs of one world publish
@@ -1623,7 +1623,7 @@ const ASKS: usize = 5;
 /// an answer of released, and an unchanged wait surfaced again only once the
 /// last one has been read, at an interval that doubles from here to its fixed
 /// four-hour ceiling — which is what [`read_waits`] does between waits.
-fn watching(name: &str) -> World {
+pub(crate) fn watching(name: &str) -> World {
     World::new(name)
         .with_env(
             "ONEPIPELINE_RELEASE_POLL_SECONDS",
@@ -1639,7 +1639,7 @@ fn watching(name: &str) -> World {
 /// — divergence entry 99 — so a journey that watches a held node go on waiting
 /// reads what it was told, exactly as a person would, rather than counting
 /// repeats nobody read.
-fn read_waits(world: &World, run: &str) {
+pub(crate) fn read_waits(world: &World, run: &str) {
     for _ in 0..64 {
         let read = world.run(&["next", run]);
         read.exited(0);

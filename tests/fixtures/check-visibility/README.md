@@ -9,10 +9,12 @@ request, #298.
 
 - `printobserver-holdup-listing.json` — the listing of open change requests by head
   branch, replayed as recorded.
-- `printobserver-holdup-standings.json` — the one standings read of #298. Every check on
-  it passed when it was recorded, so `tests/e2e/check_visibility.rs` sets the `status`
-  and `conclusion` of named contexts on its own copy before replaying it — a failing
-  required check, a failing check that is not required, a pending required check — and
+- `printobserver-holdup-standings.json` — the one standings read of #298. When it was
+  recorded three of its checks were red (`gate (windows-x86_64)`, `supply-chain` and
+  `gate-shard (windows-x86_64, 1/5)`) and three skipped. `tests/e2e/check_visibility.rs`
+  sets those three red ones green on its own copy, then sets the `status` and
+  `conclusion` of the contexts a journey is about — a failing required check, a failing
+  check that is not required, a pending required check — before replaying it, and
   changes nothing else about the answer.
 
 `fake-gh` replays them from `gh.holdup-listing` and `gh.holdup-standings`, and records

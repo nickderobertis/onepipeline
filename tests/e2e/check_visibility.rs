@@ -721,3 +721,295 @@ fn a_check_the_timeout_stops_following_is_named_and_its_later_failure_is_not() {
             .out_has("slow on https://github.com/owner/service/pull/1 (node 'service') — not required — does not block");
     }
 }
+
+/// The recorded listing of `printobserver`'s open release change request.
+const HOLDUP_LISTING: &str =
+    include_str!("../fixtures/check-visibility/printobserver-holdup-listing.json");
+
+/// The recorded standings read of that change request, every check on it passing.
+const HOLDUP_STANDINGS: &str =
+    include_str!("../fixtures/check-visibility/printobserver-holdup-standings.json");
+
+/// The release change request those recordings are about.
+const RELEASE_CHANGE: &str = "https://github.com/nickderobertis/printobserver/pull/298";
+
+/// The three checks the recording itself reports red, each set green, so a journey
+/// states every failing check it is about.
+const RECORDED_RED: [(&str, &str, Option<&str>); 3] = [
+    (
+        "gate-shard (windows-x86_64, 1/5)",
+        "COMPLETED",
+        Some("SUCCESS"),
+    ),
+    ("supply-chain", "COMPLETED", Some("SUCCESS")),
+    ("gate (windows-x86_64)", "COMPLETED", Some("SUCCESS")),
+];
+
+/// The recorded standings read with its recorded red checks set green and then the
+/// named contexts set to `(status, conclusion)`, nothing else about the answer changed.
+fn holdup_standings(set: &[(&str, &str, Option<&str>)]) -> String {
+    let mut answer: Value = serde_json::from_str(HOLDUP_STANDINGS).expect("the recording");
+    let nodes = answer
+        .pointer_mut("/data/repository/c0/headRef/target/statusCheckRollup/contexts/nodes")
+        .and_then(Value::as_array_mut)
+        .expect("the recording carries its rollup");
+    for (name, status, conclusion) in RECORDED_RED.iter().chain(set) {
+        let node = nodes
+            .iter_mut()
+            .find(|node| node["name"] == *name)
+            .unwrap_or_else(|| panic!("the recording has no check {name}"));
+        node["status"] = Value::from(*status);
+        node["conclusion"] = conclusion.map_or(Value::Null, Value::from);
+        if conclusion.is_none() {
+            node["completedAt"] = Value::Null;
+        }
+    }
+    answer.to_string()
+}
+
+/// A world holding `consumer` under published adoption on the engine repository's
+/// automated release, whose host rule declares `release_change` when `declared`, and
+/// whose host answers a holdup read with `standings`.
+fn held_world(name: &str, declared: bool, standings: &str) -> (World, std::path::PathBuf) {
+    let world =
+        crate::adoption::watching(name).with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", "0.5");
+    world.write_graphs();
+    let (engine_repo, _consumer) = crate::adoption::two_repositories(&world);
+    let (script, answer) = world.probe_in(&engine_repo, "engine");
+    let release_change = if declared {
+        "\x20   release_change: {head: \"release-plz-*\"}\n"
+    } else {
+        ""
+    };
+    world.releases(&format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         {release_change}\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {script}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n"
+    ));
+    crate::adoption::releases_at(&answer, "0.1.0");
+    world.script("gh.holdup-listing", HOLDUP_LISTING);
+    world.script("gh.holdup-standings", standings);
+    world.script("gh.holdup-numbers", "298");
+    (world, answer)
+}
+
+/// Every holdup read the host answered, in order.
+fn holdup_reads(world: &World) -> Vec<Value> {
+    std::fs::read_to_string(world.fakes.join("gh").join("holdup-reads.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a holdup read record"))
+        .collect()
+}
+
+/// A held release whose own change request has a failing required check, a failing
+/// check that blocks nothing and a pending required check names all three on the
+/// `release-wait` surface and in that dependency's `holdup`, each with its label.
+#[test]
+fn a_release_wait_names_what_holds_the_release_and_whether_each_check_blocks() {
+    let (world, _answer) = held_world(
+        "release-holdup",
+        true,
+        &holdup_standings(&[
+            ("gate (linux-x86_64)", "COMPLETED", Some("FAILURE")),
+            ("classify", "COMPLETED", Some("FAILURE")),
+            ("integration (linux-x86_64)", "IN_PROGRESS", None),
+        ]),
+    );
+    let run = crate::adoption::start(
+        &world,
+        "releaseholdup",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    world.until("the wait to name what holds the release", |world| {
+        crate::adoption::wait_surface(world, &run, "consumer").contains("held by")
+    });
+    let surface = crate::adoption::wait_surface(&world, &run, "consumer");
+    let line = surface
+        .lines()
+        .find(|line| line.starts_with("  held by "))
+        .unwrap_or_else(|| panic!("{surface}"));
+    assert!(
+        line.starts_with(&format!(
+            "  held by {RELEASE_CHANGE} (the release's own change request): failing — "
+        )),
+        "{line}"
+    );
+    for named in [
+        "gate (linux-x86_64) (required — blocks the merge)",
+        "classify (not required — does not block)",
+        "; pending — integration (linux-x86_64) (required — blocks the merge)",
+    ] {
+        assert!(line.contains(named), "{named:?} is not in {line}");
+    }
+    assert!(
+        surface.contains("- github.com/owner/engine crate — automated release, waited "),
+        "{surface}"
+    );
+
+    world.until("the record to carry the holdup", |world| {
+        crate::adoption::awaiting(world, &run, "consumer")
+            .first()
+            .is_some_and(|entry| entry.get("holdup").is_some())
+    });
+    let entry = crate::adoption::awaiting(&world, &run, "consumer")[0].clone();
+    let holdup = &entry["holdup"];
+    assert!(holdup["read_at"].is_string(), "{holdup}");
+    let change = &holdup["changes"][0];
+    assert_eq!(change["url"], RELEASE_CHANGE);
+    assert_eq!(change["draft"], false);
+    let failing: Vec<(Value, Value, Value)> = change["failing"]
+        .as_array()
+        .expect("failing")
+        .iter()
+        .map(|check| {
+            (
+                check["check"].clone(),
+                check["required"].clone(),
+                check["requirement"].clone(),
+            )
+        })
+        .collect();
+    assert!(failing.contains(&(
+        Value::from("gate (linux-x86_64)"),
+        Value::from(true),
+        Value::from("required — blocks the merge")
+    )));
+    assert!(failing.contains(&(
+        Value::from("classify"),
+        Value::from(false),
+        Value::from("not required — does not block")
+    )));
+    assert!(change["failing"][0]["url"].is_string(), "{change}");
+    assert_eq!(
+        change["pending"],
+        serde_json::json!([{"check": "integration (linux-x86_64)", "required": true,
+            "requirement": "required — blocks the merge"}])
+    );
+}
+
+/// An identity whose rule declares no release change request is waited on exactly
+/// as it was: no holdup is read, and the surface and record carry nothing new.
+#[test]
+fn a_release_wait_on_an_identity_with_no_release_change_reads_as_it_did() {
+    let (world, _answer) = held_world("release-undeclared", false, HOLDUP_STANDINGS);
+    let run = crate::adoption::start(
+        &world,
+        "releaseundeclared",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    world.until("the wait to have answered not-released", |world| {
+        crate::adoption::wait_surface(world, &run, "consumer").contains("last answer: not-released")
+    });
+    // Past several holdup intervals.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let surface = crate::adoption::wait_surface(&world, &run, "consumer");
+    let lines: Vec<&str> = surface.lines().collect();
+    assert_eq!(lines.len(), 3, "{surface}");
+    assert!(lines[0]
+        .starts_with("node 'consumer' is held under published adoption, waiting on 1 release(s):"));
+    assert!(
+        lines[1].starts_with("- github.com/owner/engine crate — automated release, waited ")
+            && lines[1].ends_with("last answer: not-released")
+    );
+    assert!(lines[2].starts_with("Nothing times this out"));
+    assert!(
+        holdup_reads(&world).is_empty(),
+        "{:?}",
+        holdup_reads(&world)
+    );
+    for event in world.events_of(&run, "release-wait") {
+        for entry in event["payload"]["awaiting"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            assert!(entry.get("holdup").is_none(), "{entry}");
+        }
+    }
+}
+
+/// A release whose own change request has only a failing check that blocks nothing
+/// holds nothing more than any wait: the surface names that check as not blocking,
+/// and when the release arrives the held node is dispatched on the same pass as when
+/// the holdup reads nothing failing.
+#[test]
+fn a_failing_optional_check_on_the_release_change_holds_nothing_when_the_release_arrives() {
+    let arrive = |name: &str, standings: &str| {
+        let (world, answer) = held_world(name, true, standings);
+        let run = crate::adoption::start(
+            &world,
+            &name.replace('-', ""),
+            vec![
+                crate::adoption::engine(),
+                crate::adoption::consumer(Some("published")),
+            ],
+        );
+        world.until("the wait to name the release change request", |world| {
+            crate::adoption::wait_surface(world, &run, "consumer").contains("held by")
+        });
+        let surface = crate::adoption::wait_surface(&world, &run, "consumer");
+        crate::adoption::releases_at(&answer, "0.2.0");
+        world.until("the held node to be dispatched", |world| {
+            world
+                .events_of(&run, "node-dispatched")
+                .iter()
+                .any(|event| event["labels"]["node"] == "consumer")
+        });
+        // What the pass that took up the arrival wrote, from the arrival to the
+        // dispatch.
+        let journal = world.journal(&run);
+        let arrived = journal
+            .iter()
+            .position(|event| event["kind"] == "release-arrived")
+            .expect("the arrival");
+        let dispatched = journal
+            .iter()
+            .position(|event| {
+                event["kind"] == "node-dispatched" && event["labels"]["node"] == "consumer"
+            })
+            .expect("the dispatch");
+        let between: Vec<String> = journal[arrived..=dispatched]
+            .iter()
+            .filter(|event| event["source"] == "pipeline")
+            .map(|event| event["kind"].as_str().unwrap_or_default().to_owned())
+            .collect();
+        (surface, between)
+    };
+    let (red, red_pass) = arrive(
+        "release-optional-red",
+        &holdup_standings(&[("classify", "COMPLETED", Some("FAILURE"))]),
+    );
+    assert!(
+        red.contains(&format!(
+            "  held by {RELEASE_CHANGE} (the release's own change request): failing — classify \
+             (not required — does not block)"
+        )),
+        "{red}"
+    );
+    let (green, green_pass) = arrive("release-optional-green", &holdup_standings(&[]));
+    assert!(
+        green.contains(&format!(
+            "  held by {RELEASE_CHANGE}: its required checks passed and it has not been merged"
+        )),
+        "{green}"
+    );
+    assert_eq!(red_pass, green_pass);
+    assert!(
+        !red_pass.iter().any(|kind| kind == "release-wait"),
+        "{red_pass:?}"
+    );
+}
