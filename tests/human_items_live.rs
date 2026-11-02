@@ -615,8 +615,22 @@ fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
         world.raise(&boundary);
     }
 
+    // One item of another session's, holding nothing: left out, and counted alone.
+    world.raise(&item(
+        "elsewhere",
+        "question",
+        "low",
+        "other",
+        json!({"scope":"nothing"}),
+    ));
+
     for verb in ["list", "report"] {
         let text = world.ok(Some("mgr"), &[verb]);
+        assert!(
+            text.contains("; 1 other open item on this host (--all lists every item).\n"),
+            "{text}"
+        );
+        assert!(!text.contains("question elsewhere"), "{text}");
         let entry = |title: &str| -> Vec<String> {
             let lines: Vec<&str> = text.lines().collect();
             let at = lines
@@ -1445,7 +1459,7 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
         "titled",
         &json!({"owner": owner, "dedup_key": "titled", "tickets": [
             {"id": "board-1", "url": "https://github.com/acme/widgets/issues/12",
-             "priority": "high", "title": "Fix the [flaky] login test"},
+             "priority": "high", "title": "Fix the [flaky] login\\ test"},
             {"id": "board-2", "url": "https://github.com/acme/widgets/pull/40", "priority": "low"},
             {"id": "board-3", "url": "https://gitlab.example/group/gadgets/-/merge_requests/3"},
             {"id": "board-4", "url": "https://github.com/acme/widgets/issues/77/?tab=1#top",
@@ -1457,7 +1471,7 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
     let body = receipt["item"]["item"]["body"].as_str().unwrap().to_owned();
     assert!(
         body.contains(
-            "\nHigh\n- [Fix the \\[flaky\\] login test](https://github.com/acme/widgets/issues/12)\n"
+            "\nHigh\n- [Fix the \\[flaky\\] login\\\\ test](https://github.com/acme/widgets/issues/12)\n"
         ),
         "{body}"
     );

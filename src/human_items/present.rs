@@ -20,13 +20,14 @@ pub(crate) const DESCRIPTION_CHARS: usize = 80;
 /// The session a reader acts for, and the runs and plans it owns.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Asker {
+    // llmlint: ignore-block[invalid_states_unrepresentable] session, run and plan here are compared only against `HumanItemOwner`, `HumanItemBlock` and `LaunchRecord`, which spell all three as `String`; an `Asker` is built only by `HumanItems::asker` from a resolved session and the launch records it reads, and a newtype here would be unwrapped at every comparison.
     /// The asking session.
-    // llmlint: ignore[invalid_states_unrepresentable] session, run and plan here are compared only against `HumanItemOwner`, `HumanItemBlock` and `LaunchRecord`, which spell all three as `String`; an `Asker` is built only by `HumanItems::asker` from a resolved session and the launch records it reads, and a newtype here would be unwrapped at every comparison.
     pub session: String,
     /// The runs that session launched, judged as the run views judge `[mine]`.
     pub runs: BTreeSet<String>,
     /// The plans of those runs.
     pub plans: BTreeSet<String>,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 impl Asker {
