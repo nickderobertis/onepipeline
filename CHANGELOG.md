@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.98.2](https://github.com/nickderobertis/onepipeline/compare/v0.98.1...v0.98.2) - 2026-11-02
+
+### Fixed
+
+- *(writeback)* hold home completion until the last projection lands ([#1356](https://github.com/nickderobertis/onepipeline/pull/1356))
+
 ## [0.98.1](https://github.com/nickderobertis/onepipeline/compare/v0.98.0...v0.98.1) - 2026-11-02
 
 ### Fixed
