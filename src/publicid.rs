@@ -115,7 +115,7 @@ pub(crate) fn decide(run: &str, name: Option<&str>) -> Decided {
     decide_with(run, name, passes)
 }
 
-fn decide_with(
+pub(crate) fn decide_with(
     run: &str,
     name: Option<&str>,
     mut passes: impl FnMut(&str) -> std::result::Result<bool, String>,

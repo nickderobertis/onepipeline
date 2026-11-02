@@ -915,6 +915,26 @@ impl World {
         }
     }
 
+    /// The same host launching from a **second runs root**: the same `HOSTNAME`, `onevcs`
+    /// state root, plans store and stand-in GitHub, under a launching session of its own, with
+    /// the runs root `<scratch root>/<name>` beside this world's — an operator on one host
+    /// who points `ONEPIPELINE_RUNS_DIR` somewhere else.
+    pub fn in_runs_root(&self, name: &str) -> Self {
+        *live() += 1;
+        let runs = self.root.join(name);
+        profile::fs::create_dir_all(&runs).expect("a scratch directory");
+        Self {
+            root: self.root.clone(),
+            runs,
+            fakes: self.fakes.clone(),
+            project: self.project.clone(),
+            session: format!("{}-{name}", self.session),
+            environment: self.environment.clone(),
+            scripted: self.scripted,
+            home: self.home.clone(),
+        }
+    }
+
     /// The same project seen from **another host**: the same plans store, the same origin
     /// and the same stand-in GitHub, and none of this host's own state — an empty runs root,
     /// a fresh `onevcs` state root holding only a clone of the origin registered under the
@@ -6108,6 +6128,19 @@ pub const DECOY_PROJECT: &str = "not-this-runs-board";
 /// only in a fixture that could not tell them apart.
 pub fn project_id(name: &str) -> String {
     format!("{name}-board")
+}
+
+/// The public id a run whose plan names something private is published under: `run-` and
+/// the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
+pub fn hashed(run: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(run.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("run-{hex}")
 }
 
 /// Why a store fixture could not tell a right answer from a wrong one, or `None`
