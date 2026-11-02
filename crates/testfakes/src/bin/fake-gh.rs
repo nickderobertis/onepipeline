@@ -1215,9 +1215,22 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
             // What this host reports about the change request's checks, which is
             // the scripted part: unscripted it reports none, which is the
             // repository whose only bar is the `command:` gate its rules name.
+            // Under `gh.rollup-addresses`, each check carries the address `gh pr checks`
+            // gives it, as the real rollup's `detailsUrl` does.
             "statusCheckRollup": reported
                 .iter()
-                .map(|check| check.rollup_entry(reran_on_lift(dir, state)))
+                .enumerate()
+                .map(|(index, check)| {
+                    let mut entry = check.rollup_entry(reran_on_lift(dir, state));
+                    if dir.join("gh.rollup-addresses").exists() {
+                        entry["detailsUrl"] = serde_json::json!(format!(
+                            "https://github.com/{}/actions/runs/1/job/{}",
+                            opened.repo,
+                            index + 1
+                        ));
+                    }
+                    entry
+                })
                 .collect::<Vec<_>>(),
         })
     );
