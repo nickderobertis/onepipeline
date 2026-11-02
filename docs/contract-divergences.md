@@ -13066,11 +13066,10 @@ section, which is left as approved:
    itself when its path names no repository and number. `schemas()` now exports the
    phase context as `PhaseContext`, published in `schemas/human-items.schema.json`
    with the fixture `tests/fixtures/human-items-phase-context.json`.
-4. *The phase context is unversioned* — it gains an optional `schema_version`,
-   omitted when absent, whose only value is 1: absent is read as 1. The ticket
-   `title` is additive and needs no version of its own, so it is accepted whatever
-   the context declares, or none (the manager's ruling for this node). A reader
-   refuses any other number, a non-integer and `null` before anything is raised,
-   and the published schema states the same.
+4. *The phase context is unversioned* — it gains an optional numeric
+   `schema_version`, omitted when absent and written back as given. By the
+   manager's ruling for this node it introduces no version and gates nothing: a
+   ticket `title` is additive and accepted whatever number the context declares,
+   or none, and no declared number is refused.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

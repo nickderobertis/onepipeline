@@ -4354,8 +4354,13 @@
     "type": "object",
     "properties": {
       "schema_version": {
-        "description": "The contract version the context was written against; absent, it is a\nversion 1 context, and it is omitted again when written back.",
-        "$ref": "#/$defs/PhaseContextVersion"
+        "description": "The contract version the writer declares, if any. It is carried as given\nand never gates what the context may hold: a ticket title is accepted\nwhatever it says, or with none. Omitted again when absent.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0
       },
       "owner": {
         "description": "Who owns the item.",
@@ -4408,13 +4413,6 @@
       "dedup_key"
     ],
     "$defs": {
-      "PhaseContextVersion": {
-        "description": "The phase context's contract version: 1, the only one, and what an absent `schema_version` means.",
-        "type": "integer",
-        "enum": [
-          1
-        ]
-      },
       "HumanItemOwner": {
         "description": "The originating session and optional run and plan.",
         "type": "object",

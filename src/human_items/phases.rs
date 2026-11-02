@@ -123,86 +123,16 @@ fn nonblank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
     Ok(value)
 }
 
-/// The version of the phase context's contract a writer wrote against.
-///
-/// Version 1 is the only one: the context as published, whose ticket `title` is
-/// an optional, additive field and needs no version of its own. A context
-/// without `schema_version` is read as version 1, and a reader refuses any other
-/// number rather than guessing what it adds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PhaseContextVersion {
-    /// The context as published.
-    V1,
-}
-
-impl PhaseContextVersion {
-    /// The version this onepipeline writes.
-    pub const CURRENT: Self = Self::V1;
-    /// Every version this onepipeline reads, oldest first.
-    pub const SUPPORTED: [Self; 1] = [Self::V1];
-
-    /// The version as it is spelled on the wire.
-    pub fn number(self) -> u32 {
-        match self {
-            Self::V1 => 1,
-        }
-    }
-}
-
-impl Serialize for PhaseContextVersion {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u32(self.number())
-    }
-}
-
-impl<'de> Deserialize<'de> for PhaseContextVersion {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let number = u64::deserialize(d)?;
-        Self::SUPPORTED
-            .into_iter()
-            .find(|v| u64::from(v.number()) == number)
-            .ok_or_else(|| {
-                serde::de::Error::custom(format!(
-                    "unsupported phase context schema_version {number}; this onepipeline reads 1"
-                ))
-            })
-    }
-}
-
-impl JsonSchema for PhaseContextVersion {
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        "PhaseContextVersion".into()
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "description": "The phase context's contract version: 1, the only one, and what an absent `schema_version` means.",
-            "type": "integer",
-            "enum": Self::SUPPORTED.map(Self::number),
-        })
-    }
-}
-
-/// A present `schema_version` is a supported number; `null` is not absence.
-fn present_version<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<PhaseContextVersion>, D::Error> {
-    PhaseContextVersion::deserialize(d).map(Some)
-}
-
 /// What a phase supplies when it raises.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PhaseContext {
-    /// The contract version the context was written against; absent, it is a
-    /// version 1 context, and it is omitted again when written back.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "present_version"
-    )]
-    #[schemars(with = "PhaseContextVersion")]
-    pub schema_version: Option<PhaseContextVersion>,
+    /// The contract version the writer declares, if any. It is carried as given
+    /// and never gates what the context may hold: a ticket title is accepted
+    /// whatever it says, or with none. Omitted again when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] by the manager's ruling for this node the phase context introduces no version of its own and refuses nothing for the version it declares; the field exists only so a producer that writes `schema_version` is read, and every number it may hold means the same context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     /// Who owns the item.
     pub owner: HumanItemOwner,
     /// The phase's own identity for this occurrence; the item's dedup key is
@@ -222,14 +152,6 @@ pub struct PhaseContext {
     /// The tickets a `ticket_review` hook aggregates.
     #[serde(default)]
     pub tickets: Vec<Ticket>,
-}
-
-impl PhaseContext {
-    /// The version the context is read as: its `schema_version`, or 1 when it
-    /// names none.
-    pub fn version(&self) -> PhaseContextVersion {
-        self.schema_version.unwrap_or(PhaseContextVersion::V1)
-    }
 }
 
 /// What a phase raise amounts to.
