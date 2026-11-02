@@ -133,6 +133,7 @@ describe("the visual-docs capture's refusals", () => {
     chmodSync(join(bin, "docker"), 0o755);
     const { status, log } = run(dir, "bash", ["screenshots/ci-capture.sh"], {
       SHOTS_OUT: "shots/current/x86_64",
+      RUNNER_TEMP: "",
       SEEN: seen,
       PATH: `${bin}:${process.env.PATH}`,
     });
