@@ -930,14 +930,23 @@ and the item holds that node's branch; answering or completing it attests the st
 dismissing it drops the step and detaches its dependents.
 
 ```bash
-onepipeline human-items list                 # open items, blocking first, full bodies
+onepipeline human-items list                 # this session's open items, blocking first
 onepipeline human-items report               # the one printable manager report
+onepipeline human-items report --full --all  # every item on the host, with full bodies
 onepipeline human-items show ITEM            # one item and every step it blocks
 onepipeline human-items answer ITEM --text "Use the gradual rollout."
 onepipeline human-items complete ITEM
 onepipeline human-items dismiss ITEM [--reason TEXT]
 onepipeline human-items watch                # this session's item events, once each
 ```
+
+`list` and `report` print each item as one compact entry — title, priority,
+kind, what it blocks, its source and one line of its body — and `--full` prints
+every body whole. With no filter they show what this session raised or its runs
+raised, plus any blocking item from elsewhere that holds its work (the host, or a
+plan or run it launched), and count the rest on a line naming `--all`; a process
+with no `ONEPIPELINE_LAUNCHER_SESSION` sees the whole host. A filter selects
+across the whole host, and `--json` always answers every matching item.
 
 Priorities read Critical, High, Medium and Low. Critical means drop everything
 for complete development disruption or critical production journeys down with

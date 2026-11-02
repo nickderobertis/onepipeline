@@ -5,6 +5,7 @@ mod delivery;
 mod durable;
 mod live;
 pub mod phases;
+mod present;
 mod projection;
 pub(crate) mod runtime;
 pub use approval::REREAD;
@@ -521,7 +522,8 @@ pub fn schemas() -> serde_json::Value {
         "HumanItemDetail": schemars::schema_for!(HumanItemDetail),
         "HumanItemReceipt": schemars::schema_for!(HumanItemReceipt),
         "HumanItemMetadata": schemars::schema_for!(HumanItemMetadata),
-        "HumanItemEventPayload": schemars::schema_for!(HumanItemEventPayload)
+        "HumanItemEventPayload": schemars::schema_for!(HumanItemEventPayload),
+        "PhaseContext": schemars::schema_for!(phases::PhaseContext)
     })
 }
 
@@ -553,7 +555,8 @@ pub enum HumanItemsCommand {
         #[arg(long, requires = "phase")]
         context: Option<std::path::PathBuf>,
     },
-    /// List matching items and their full bodies.
+    /// List matching items: this session's own and those holding its work
+    /// unless a filter or `--all` is given, each in brief unless `--full`.
     List(HumanItemsQuery),
     /// Show an item and every blocked step.
     Show {
@@ -585,7 +588,9 @@ pub enum HumanItemsCommand {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Report matching items and their full bodies.
+    /// Report matching items, counting and grouping the blocking ones first:
+    /// this session's own and those holding its work unless a filter or
+    /// `--all` is given, each in brief unless `--full`.
     Report(HumanItemsQuery),
     /// Print the effective `human_items` configuration and where it was read from.
     Config {
@@ -611,9 +616,16 @@ pub struct HumanItemsQuery {
     /// Selectors from the same engine schema used by API queries.
     #[command(flatten)]
     pub filter: HumanItemFilter,
-    /// Emit engine JSON.
+    /// Emit engine JSON: every matching item on the host, whatever the session.
     #[arg(long)]
     pub json: bool,
+    /// Print every item's complete body instead of a one-line description.
+    #[arg(long)]
+    pub full: bool,
+    /// With no filter, list every item on the host rather than this session's
+    /// own and those holding its work.
+    #[arg(long)]
+    pub all: bool,
 }
 
 fn parse_priority(value: &str) -> Result<Priority, String> {
@@ -977,36 +989,13 @@ fn receipt(detail: &HumanItemDetail, action: &str) -> HumanItemReceipt {
 }
 
 fn render(item: &HumanItem, blocked: &HumanItemBlocked) -> String {
-    let source = if item.block == HumanItemBlock::Host {
-        "host".into()
-    } else {
-        match (&item.owner.plan, &item.owner.run) {
-            (Some(plan), Some(run)) => format!("plan {plan} / run {run}"),
-            (Some(plan), None) => format!("plan {plan}"),
-            (None, Some(run)) => format!("run {run}"),
-            (None, None) => format!("session {}", item.owner.session),
-        }
-    };
+    let source = present::source(item);
     let tracker = item
         .tracker
         .as_ref()
         .map(|t| format!("tracker {}\n", t.url))
         .unwrap_or_default();
-    let blocking = if item.is_blocking() {
-        match &item.block {
-            HumanItemBlock::Host => "blocks all work on this host".into(),
-            HumanItemBlock::Plan { plan } => format!("blocks all of {plan}"),
-            HumanItemBlock::Work { .. } => blocked
-                .plans
-                .iter()
-                .map(|p| format!("blocks {} steps in {}", p.count, p.plan))
-                .collect::<Vec<_>>()
-                .join("; "),
-            HumanItemBlock::Nothing => String::new(),
-        }
-    } else {
-        String::new()
-    };
+    let blocking = present::blocking(item, blocked);
     format!(
         "{}  {}  {:?}  {:?}  {}  {}\n{}\n{}{}\n",
         item.id,
@@ -1139,9 +1128,9 @@ fn to_json<T: Serialize>(value: &T) -> crate::error::Result<String> {
     serde_json::to_string(value).map_err(|e| crate::error::Error::Invalid(e.to_string()))
 }
 
-/// The one printable manager report: a count, then the blocking items and the
-/// rest, each with its full body.
-fn report(views: &[HumanItemView]) -> String {
+/// The one printable manager report: a count and what it reaches, then the
+/// blocking items and the rest, each in brief or with its full body.
+fn report(views: &[HumanItemView], reach: Option<&str>, full: bool) -> String {
     let blocking: Vec<_> = views.iter().filter(|v| v.item.is_blocking()).collect();
     let rest: Vec<_> = views.iter().filter(|v| !v.item.is_blocking()).collect();
     let mut out = format!(
@@ -1149,12 +1138,17 @@ fn report(views: &[HumanItemView]) -> String {
         views.len(),
         blocking.len()
     );
+    out.push_str(reach.unwrap_or_default());
     for (heading, group) in [("Blocking", blocking), ("Not blocking", rest)] {
         if group.is_empty() {
             continue;
         }
         out.push_str(&format!("\n{heading} ({})\n\n", group.len()));
         for view in group {
+            if !full {
+                out.push_str(&present::compact(view));
+                continue;
+            }
             out.push_str(&render(&view.item, &view.blocked));
             for plan in &view.blocked.plans {
                 for node in &plan.preview {
@@ -1175,6 +1169,23 @@ fn report(views: &[HumanItemView]) -> String {
         }
     }
     out
+}
+
+/// What a human-readable read without `--json` reaches: an explicit filter
+/// across the host, `--all`, or else the asking session's own and what holds
+/// its work, or the whole host, said, when no session resolves.
+fn reach(store: &HumanItems, query: &HumanItemsQuery) -> present::Reach {
+    if query.filter != HumanItemFilter::default() {
+        return present::Reach::Filtered;
+    }
+    if query.all {
+        return present::Reach::Host;
+    }
+    let session = crate::sys::launching_session();
+    if !crate::ledger::attributed(&session) {
+        return present::Reach::Unresolved;
+    }
+    present::Reach::Session(store.asker(session))
 }
 
 fn live_dispatch(command: HumanItemsCommand) -> crate::error::Result<i32> {
@@ -1251,16 +1262,25 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
         }
         HumanItemsCommand::List(query) => {
             let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let (views, line) = present::narrowed(views, &reach(&store, &query));
             let started = std::time::Instant::now();
-            let text: String = views.iter().map(|v| render(&v.item, &v.blocked)).collect();
+            let mut text = line.unwrap_or_default();
+            for view in &views {
+                if query.full {
+                    text.push_str(&render(&view.item, &view.blocked));
+                } else {
+                    text.push_str(&present::compact(view));
+                }
+            }
             print!("{text}");
             *rendered = started.elapsed().as_secs_f64() * 1000.0;
             return Ok(0);
         }
         HumanItemsCommand::Report(query) => {
             let views = store.query(&query.filter).map_err(|e| refused(&e))?;
+            let (views, line) = present::narrowed(views, &reach(&store, &query));
             let started = std::time::Instant::now();
-            print!("{}", report(&views));
+            print!("{}", report(&views, line.as_deref(), query.full));
             *rendered = started.elapsed().as_secs_f64() * 1000.0;
             return Ok(0);
         }

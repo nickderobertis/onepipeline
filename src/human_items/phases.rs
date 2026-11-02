@@ -37,6 +37,67 @@ pub struct Ticket {
     #[serde(default)]
     #[schemars(schema_with = "ticket_priority_schema")]
     pub priority: Option<Priority>,
+    /// Its title, the text the review links it by; absent, it is linked by its
+    /// short repository reference. Optional and omitted when absent, so a context
+    /// written before it existed is read unchanged.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "nonblank_title"
+    )]
+    #[schemars(length(min = 1), pattern(r"\S"))]
+    // llmlint: ignore[invalid_states_unrepresentable] the task adds an optional `title` string to the context's `{id, url, priority}` ticket, beside its `String` id and url; the decoder refuses a blank one, `expand` refuses it again for a context built in process, and absence is the legacy shape a reference link stands in for.
+    pub title: Option<String>,
+}
+
+impl Ticket {
+    /// The ticket as one markdown link: its title, or else its short repository
+    /// reference, linking its URL.
+    pub fn link(&self) -> String {
+        let text = match &self.title {
+            Some(title) => title.trim().to_owned(),
+            None => short_reference(&self.url).unwrap_or_else(|| self.url.trim().to_owned()),
+        };
+        let mut escaped = String::with_capacity(text.len());
+        for c in text.chars() {
+            if matches!(c, '\\' | '[' | ']') {
+                escaped.push('\\');
+            }
+            escaped.push(c);
+        }
+        let url = self.url.trim();
+        if url.contains(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+            format!("[{escaped}](<{url}>)")
+        } else {
+            format!("[{escaped}]({url})")
+        }
+    }
+}
+
+/// `<repo>#<number>` for a URL whose path ends in a number under a repository
+/// (`…/owner/repo/issues/12`, `…/group/repo/-/merge_requests/3`); `None` when
+/// its path does not.
+pub fn short_reference(url: &str) -> Option<String> {
+    let path = url.trim().split_once("://").map_or(url, |(_, rest)| rest);
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    let segments: Vec<&str> = path.split('/').skip(1).filter(|s| !s.is_empty()).collect();
+    let (number, rest) = segments.split_last()?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // The segment naming what the number counts, then the repository before it.
+    let (_, before) = rest.split_last()?;
+    let repo = before.iter().rev().find(|s| **s != "-")?;
+    Some(format!("{repo}#{number}"))
+}
+
+fn nonblank_title<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    match Option::<String>::deserialize(d)? {
+        Some(title) if title.trim().is_empty() => Err(serde::de::Error::custom(
+            "a ticket's title, when given, is not blank",
+        )),
+        title => Ok(title),
+    }
 }
 
 /// A ticket's priority as the store spells every value, `none` and absence alike
@@ -66,6 +127,12 @@ fn nonblank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PhaseContext {
+    /// The contract version the writer declares, if any. It is carried as given
+    /// and never gates what the context may hold: a ticket title is accepted
+    /// whatever it says, or with none. Omitted again when absent.
+    // llmlint: ignore[invalid_states_unrepresentable] by the manager's ruling for this node the phase context introduces no version of its own and refuses nothing for the version it declares; the field exists only so a producer that writes `schema_version` is read, and every number it may hold means the same context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     /// Who owns the item.
     pub owner: HumanItemOwner,
     /// The phase's own identity for this occurrence; the item's dedup key is
@@ -164,7 +231,8 @@ pub fn deduplicated(tickets: &[Ticket]) -> Vec<Ticket> {
         .collect()
 }
 
-/// The ticket links grouped by priority, the ones with none in their own group.
+/// The ticket links grouped by priority, the ones with none in their own group;
+/// each is a markdown link named by the ticket's title, never its board id.
 fn grouped(tickets: &[Ticket]) -> String {
     let mut out = String::new();
     for (heading, wanted) in [
@@ -183,7 +251,7 @@ fn grouped(tickets: &[Ticket]) -> String {
         }
         out.push_str(&format!("\n{heading}\n"));
         for ticket in group {
-            out.push_str(&format!("- {}: {}\n", ticket.id, ticket.url));
+            out.push_str(&format!("- {}\n", ticket.link()));
         }
     }
     out
@@ -275,6 +343,13 @@ pub fn expand(
     {
         return Err("a ticket names a nonblank id and url".into());
     }
+    if context.tickets.iter().any(|t| {
+        t.title
+            .as_ref()
+            .is_some_and(|title| title.trim().is_empty())
+    }) {
+        return Err("a ticket's title, when given, is not blank".into());
+    }
     if hook.aggregate == Some(HookAggregate::TicketReview) {
         let tickets = deduplicated(&context.tickets);
         if tickets.is_empty() {
@@ -301,7 +376,7 @@ pub fn expand(
                     "These tickets have no priority, so the review counts each as Medium:\n{}",
                     unknown
                         .iter()
-                        .map(|t| format!("- {}: {}", t.id, t.url))
+                        .map(|t| format!("- {}", t.link()))
                         .collect::<Vec<_>>()
                         .join("\n")
                 ),
@@ -330,4 +405,58 @@ pub fn expand(
         findings,
         retired,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_reference_names_the_repository_and_number() {
+        for (url, expected) in [
+            (
+                "https://github.com/acme/widgets/issues/12",
+                Some("widgets#12"),
+            ),
+            (
+                "https://github.com/acme/widgets/pull/40/",
+                Some("widgets#40"),
+            ),
+            (
+                "https://github.com/acme/widgets/issues/12?x=1#c",
+                Some("widgets#12"),
+            ),
+            (
+                "https://gitlab.example/group/gadgets/-/merge_requests/3",
+                Some("gadgets#3"),
+            ),
+            ("https://tracker/t-1", None),
+            ("https://tracker/12", None),
+            ("https://github.com/acme/widgets", None),
+        ] {
+            assert_eq!(short_reference(url).as_deref(), expected, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_link_escapes_its_text_and_brackets_an_awkward_url() {
+        let ticket = |title: Option<&str>, url: &str| Ticket {
+            id: "board-1".into(),
+            url: url.into(),
+            priority: None,
+            title: title.map(Into::into),
+        };
+        assert_eq!(
+            ticket(Some("Fix [it] \\ now"), "https://x/y").link(),
+            "[Fix \\[it\\] \\\\ now](https://x/y)"
+        );
+        assert_eq!(
+            ticket(None, "https://x/a (b)").link(),
+            "[https://x/a (b)](<https://x/a (b)>)"
+        );
+        assert_eq!(
+            ticket(None, "https://github.com/o/r/issues/5").link(),
+            "[r#5](https://github.com/o/r/issues/5)"
+        );
+    }
 }

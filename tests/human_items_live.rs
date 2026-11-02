@@ -576,6 +576,157 @@ fn list_and_report_print_labels_sources_bodies_and_blocking_wording() {
     );
 }
 
+/// By default each item is one compact entry — title and id, then priority,
+/// kind, what it blocks and its source, then one line of its body, cut with an
+/// ellipsis when the body is longer — and `--full` prints every complete body.
+#[test]
+fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
+    let world = Live::enabled();
+    let mut short = item(
+        "short",
+        "question",
+        "low",
+        "mgr",
+        json!({"scope":"nothing"}),
+    );
+    short["body"] = json!("Pick a name.");
+    world.raise(&short);
+    let long_line = format!(
+        "Restart the build service {}and then confirm.",
+        "after the outage ".repeat(8)
+    );
+    let mut long = item("long", "task", "high", "mgr", json!({"scope":"host"}));
+    long["body"] = json!(long_line);
+    world.raise(&long);
+    let mut lines = item("lines", "task", "medium", "mgr", json!({"scope":"nothing"}));
+    lines["owner"]["plan"] = json!("plans:alpha");
+    lines["body"] = json!("Read the design.\nThen confirm it in chat.\nThird line.");
+    world.raise(&lines);
+    // The boundaries: a body exactly as long as a description, the same line with
+    // more after it, and multibyte text longer than a description.
+    let exact_body = "x".repeat(80);
+    for (dedup, body) in [
+        ("exact", exact_body.clone()),
+        ("then", format!("{exact_body}\nmore")),
+        ("wide", "é".repeat(85)),
+    ] {
+        let mut boundary = item(dedup, "question", "low", "mgr", json!({"scope":"nothing"}));
+        boundary["body"] = json!(body);
+        world.raise(&boundary);
+    }
+
+    // One item of another session's, holding nothing: left out, and counted alone.
+    world.raise(&item(
+        "elsewhere",
+        "question",
+        "low",
+        "other",
+        json!({"scope":"nothing"}),
+    ));
+
+    for verb in ["list", "report"] {
+        let text = world.ok(Some("mgr"), &[verb]);
+        assert!(
+            text.contains("; 1 other open item on this host (--all lists every item).\n"),
+            "{text}"
+        );
+        assert!(!text.contains("question elsewhere"), "{text}");
+        let entry = |title: &str| -> Vec<String> {
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines
+                .iter()
+                .position(|l| l.starts_with(&format!("- {title} (hi-")))
+                .unwrap_or_else(|| panic!("{verb} has no entry {title}: {text}"));
+            lines[at..at + 3].iter().map(|l| (*l).to_owned()).collect()
+        };
+        let short = entry("question short");
+        assert_eq!(
+            short[1], "  Low question · blocks nothing · session mgr",
+            "{text}"
+        );
+        assert_eq!(short[2], "  Pick a name.", "{text}");
+        let long = entry("task long");
+        assert_eq!(
+            long[1], "  High task · blocks all work on this host · host",
+            "{text}"
+        );
+        assert!(long[2].ends_with('…'), "{text}");
+        assert!(long[2].chars().count() <= 2 + 80, "{text}");
+        assert!(
+            long_line.starts_with(long[2].trim().trim_end_matches('…')),
+            "{text}"
+        );
+        let lines = entry("task lines");
+        assert_eq!(
+            lines[1], "  Medium task · blocks nothing · plan plans:alpha",
+            "{text}"
+        );
+        assert_eq!(lines[2], "  Read the design.…", "{text}");
+        assert_eq!(
+            entry("question exact")[2],
+            format!("  {exact_body}"),
+            "{text}"
+        );
+        assert_eq!(
+            entry("question then")[2],
+            format!("  {}…", "x".repeat(79)),
+            "{text}"
+        );
+        assert_eq!(
+            entry("question wide")[2],
+            format!("  {}…", "é".repeat(79)),
+            "{text}"
+        );
+        for cut in [
+            "and then confirm.",
+            "Then confirm it in chat.",
+            "Third line.",
+        ] {
+            assert!(!text.contains(cut), "{verb} printed past one line: {text}");
+        }
+
+        let full = world.ok(Some("mgr"), &[verb, "--full"]);
+        for whole in [
+            "Pick a name.",
+            long_line.as_str(),
+            "Read the design.\nThen confirm it in chat.\nThird line.",
+        ] {
+            assert!(full.contains(whole), "{verb} --full lacks {whole}: {full}");
+        }
+        assert!(!full.contains('…'), "{full}");
+    }
+    let report = world.ok(Some("mgr"), &["report"]);
+    assert!(
+        report.starts_with("Human items: 6 listed, 1 blocking\n"),
+        "{report}"
+    );
+    let blocking = report.find("Blocking (1)").unwrap();
+    let rest = report.find("Not blocking (5)").unwrap();
+    assert!(blocking < report.find("- task long").unwrap());
+    assert!(report.find("- task long").unwrap() < rest);
+
+    // A closed item's entry names its state after its source.
+    let short = world.json(None, &["list", "--json", "--kind", "question"]);
+    let short = short
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["dedup_key"] == "short")
+        .unwrap()["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    world.ok(Some("mgr"), &["answer", &short, "--text", "Widgets."]);
+    for verb in ["list", "report"] {
+        let text = world.ok(Some("mgr"), &[verb, "--state", "answered"]);
+        assert!(
+            text.contains("  Low question · blocks nothing · session mgr · answered\n"),
+            "{verb}: {text}"
+        );
+        assert!(!text.contains("question exact"), "{verb}: {text}");
+    }
+}
+
 fn telemetry(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
@@ -1207,11 +1358,14 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
             "{heading}: {body}"
         );
         assert!(
-            body.contains(&format!("- {link}: https://tracker/{link}")),
+            body.contains(&format!(
+                "- [https://tracker/{link}](https://tracker/{link})\n"
+            )),
             "{link}: {body}"
         );
     }
-    assert_eq!(body.matches("t-2:").count(), 1, "{body}");
+    assert_eq!(body.matches("(https://tracker/t-2)").count(), 1, "{body}");
+    assert!(!body.contains("t-2:"), "no board id is printed: {body}");
     // The ticket with no priority raised a non-blocking finding naming it to the owner.
     let findings: Vec<Value> = world
         .json(None, &["list", "--json", "--session", "mgr"])
@@ -1291,6 +1445,116 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
     );
     // No other session's watch hears of either retirement.
     assert_eq!(world.run(Some("other"), &["watch"]).status.code(), Some(5));
+}
+
+/// A review names each ticket as a markdown link: by its title when the context
+/// gives one, and otherwise by its short repository reference — never by its
+/// board id. A blank title is refused before anything is written.
+#[test]
+fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ctx = context(
+        &world,
+        "titled",
+        &json!({"owner": owner, "dedup_key": "titled", "tickets": [
+            {"id": "board-1", "url": "https://github.com/acme/widgets/issues/12",
+             "priority": "high", "title": "Fix the [flaky] login\\ test"},
+            {"id": "board-2", "url": "https://github.com/acme/widgets/pull/40", "priority": "low"},
+            {"id": "board-3", "url": "https://gitlab.example/group/gadgets/-/merge_requests/3"},
+            {"id": "board-4", "url": "https://github.com/acme/widgets/issues/77/?tab=1#top",
+             "priority": "low"},
+            {"id": "board-5", "url": "https://tracker/notes (draft)", "priority": "low"},
+        ]}),
+    );
+    let receipt = phase(&world, None, "ticket-review", &ctx);
+    let body = receipt["item"]["item"]["body"].as_str().unwrap().to_owned();
+    assert!(
+        body.contains(
+            "\nHigh\n- [Fix the \\[flaky\\] login\\\\ test](https://github.com/acme/widgets/issues/12)\n"
+        ),
+        "{body}"
+    );
+    // A trailing slash, query and fragment do not hide the number; a URL naming
+    // no repository and number is its own text, bracketed where it has spaces.
+    assert!(
+        body.contains(
+            "\nLow\n- [widgets#40](https://github.com/acme/widgets/pull/40)\n\
+             - [widgets#77](https://github.com/acme/widgets/issues/77/?tab=1#top)\n\
+             - [https://tracker/notes (draft)](<https://tracker/notes (draft)>)\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "\nNo priority\n- [gadgets#3](https://gitlab.example/group/gadgets/-/merge_requests/3)\n"
+        ),
+        "{body}"
+    );
+    assert!(!body.contains("board-"), "no board id is printed: {body}");
+    // The finding naming the ticket with no priority links it the same way.
+    let finding = world
+        .json(None, &["list", "--json", "--session", "mgr"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] != receipt["item"]["item"]["id"])
+        .cloned()
+        .unwrap();
+    let text = finding["item"]["body"].as_str().unwrap();
+    assert!(
+        text.contains("- [gadgets#3](https://gitlab.example/group/gadgets/-/merge_requests/3)"),
+        "{text}"
+    );
+    assert!(!text.contains("board-3"), "{text}");
+
+    let records = world.journal().len();
+    let blank = context(
+        &world,
+        "blank-title",
+        &json!({"owner": owner, "dedup_key": "blank", "tickets": [
+            {"id": "a", "url": "https://github.com/acme/widgets/issues/1", "title": "  "},
+        ]}),
+    );
+    world.refused(
+        None,
+        &["raise", "--phase", "ticket-review", "--context", &blank],
+        "title, when given, is not blank",
+    );
+    assert_eq!(world.journal().len(), records);
+}
+
+/// A phase context may declare a `schema_version`, and what it declares gates
+/// nothing: a ticket's title is accepted and linked by that title with no
+/// version, with version 1 and with any other number, and an untitled ticket
+/// is linked by its short reference as it always was.
+#[test]
+fn a_ticket_title_is_accepted_whatever_version_the_context_declares() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ticket = json!({"id": "board-1", "url": "https://github.com/acme/widgets/issues/5",
+                        "priority": "high"});
+    let mut titled = ticket.clone();
+    titled["title"] = json!("Ship the widget");
+    let by_reference = "- [widgets#5](https://github.com/acme/widgets/issues/5)\n";
+    let by_title = "- [Ship the widget](https://github.com/acme/widgets/issues/5)\n";
+    for (name, version, ticket, link) in [
+        ("legacy", None, &ticket, by_reference),
+        ("titled-unversioned", None, &titled, by_title),
+        ("titled-1", Some(1), &titled, by_title),
+        ("titled-2", Some(2), &titled, by_title),
+        ("titled-7", Some(7), &titled, by_title),
+    ] {
+        let mut value = json!({"owner": owner, "dedup_key": name, "tickets": [ticket]});
+        if let Some(version) = version {
+            value["schema_version"] = json!(version);
+        }
+        let ctx = context(&world, name, &value);
+        let receipt = phase(&world, None, "ticket-review", &ctx);
+        let body = receipt["item"]["item"]["body"].as_str().unwrap();
+        assert!(body.contains(link), "{name}: {body}");
+        assert!(!body.contains("board-1"), "{name}: {body}");
+    }
 }
 
 /// A template that renders without error to a blank title or body is still an

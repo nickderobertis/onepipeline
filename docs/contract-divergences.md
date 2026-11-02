@@ -13050,3 +13050,42 @@ each is a proposal until ruled.
     store answers without a second ticket; a lost or unreadable probe record is said, and
     the outage it described is not probed again until it is raised again — a person may
     dismiss its item meanwhile.
+
+## 145. The live list and report are brief and scoped to the asking session — OPEN
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the proposal AGENTS.md routes every divergence through: it restates the departure from `docs/contract.md` so the planner can rule on it, and the behaviour it describes is held by `tests/human_items_live.rs`, `tests/e2e/human_items.rs` and `tests/contract.rs`, not by this text. -->
+
+**Proposal, for the planner who owns the contract.** The task for node
+`human-item-report-summary` asks for a manager's human-items read to fit a phone, so
+the live surface now departs from three sentences of `docs/contract.md`'s Human items
+section, which is left as approved:
+
+1. *"List and report print every full body beneath compact metadata"* — without
+   `--json`, the live `list` and `report` print each item as one compact entry: its
+   title and id, then priority, kind, what it blocks and its source, then at most one
+   line of its body (80 characters), ending in `…` whenever the body was cut.
+   `--full` prints every item as before, full body included.
+2. *The CLI block's `list` and `report` selectors* — both verbs gain `--full` and
+   `--all`. With no selector given, they show what the asking session
+   (`ONEPIPELINE_LAUNCHER_SESSION`) raised or a run it launched raised — ownership
+   judged as the run views judge `[mine]` — plus every open blocking item from
+   elsewhere that holds its work: a host hold, or a hold on a plan or run it
+   launched. A line after the count says how many other open items the host holds
+   and names `--all`, which lists every one; a process with no session sees the
+   whole host and that line says so. Any selector keeps today's meaning across the
+   whole host, and `--json` is never narrowed. `--sample` reads are unchanged: a
+   fixture bundle names no runs to own, and keeps printing every full body.
+3. *`tickets: [{id, url, priority}]`* — a ticket gains an optional, nonblank `title`,
+   omitted when absent, and a `ticket_review` body (and its no-priority finding)
+   names each ticket as a markdown link, `[title](url)`, with no board id; a ticket
+   without a title is linked by `<repo>#<number>` read off its URL, or by the URL
+   itself when its path names no repository and number. `schemas()` now exports the
+   phase context as `PhaseContext`, published in `schemas/human-items.schema.json`
+   with the fixture `tests/fixtures/human-items-phase-context.json`.
+4. *The phase context is unversioned* — it gains an optional numeric
+   `schema_version`, omitted when absent and written back as given. By the
+   manager's ruling for this node it introduces no version and gates nothing: a
+   ticket `title` is additive and accepted whatever number the context declares,
+   or none, and no declared number is refused.
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

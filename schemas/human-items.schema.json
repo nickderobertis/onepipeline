@@ -4346,5 +4346,166 @@
         ]
       }
     }
+  },
+  "PhaseContext": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "PhaseContext",
+    "description": "What a phase supplies when it raises.",
+    "type": "object",
+    "properties": {
+      "schema_version": {
+        "description": "The contract version the writer declares, if any. It is carried as given\nand never gates what the context may hold: a ticket title is accepted\nwhatever it says, or with none. Omitted again when absent.",
+        "type": [
+          "integer",
+          "null"
+        ],
+        "format": "uint32",
+        "minimum": 0
+      },
+      "owner": {
+        "description": "Who owns the item.",
+        "$ref": "#/$defs/HumanItemOwner"
+      },
+      "dedup_key": {
+        "description": "The phase's own identity for this occurrence; the item's dedup key is\nderived from it and the phase.",
+        "type": "string"
+      },
+      "node": {
+        "description": "The node a work hold binds, for a hook whose block is `work`.",
+        "type": [
+          "string",
+          "null"
+        ],
+        "default": null
+      },
+      "vars": {
+        "description": "Template variables for the title and body.",
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "default": {}
+      },
+      "approval": {
+        "description": "The document version a design review completes against.",
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HumanItemApproval"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "tickets": {
+        "description": "The tickets a `ticket_review` hook aggregates.",
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Ticket"
+        },
+        "default": []
+      }
+    },
+    "additionalProperties": false,
+    "required": [
+      "owner",
+      "dedup_key"
+    ],
+    "$defs": {
+      "HumanItemOwner": {
+        "description": "The originating session and optional run and plan.",
+        "type": "object",
+        "properties": {
+          "session": {
+            "description": "Session.",
+            "type": "string"
+          },
+          "run": {
+            "description": "Run.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "description": "Plan.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "session",
+          "run",
+          "plan"
+        ]
+      },
+      "HumanItemApproval": {
+        "description": "An opaque approval authority reference captured when raised.",
+        "type": "object",
+        "properties": {
+          "board_copy": {
+            "description": "Board copy.",
+            "type": "string"
+          },
+          "key": {
+            "description": "Key.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "board_copy",
+          "key"
+        ]
+      },
+      "Ticket": {
+        "description": "One ticket a review phase aggregates.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The ticket's id; the last occurrence of an id wins.",
+            "type": "string"
+          },
+          "url": {
+            "description": "Where a person opens it.",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Its priority, absent or `none` when it has no usable one.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              null,
+              "none",
+              "urgent",
+              "high",
+              "medium",
+              "low"
+            ],
+            "default": null
+          },
+          "title": {
+            "description": "Its title, the text the review links it by; absent, it is linked by its\nshort repository reference. Optional and omitted when absent, so a context\nwritten before it existed is read unchanged.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "url"
+        ]
+      }
+    }
   }
 }
