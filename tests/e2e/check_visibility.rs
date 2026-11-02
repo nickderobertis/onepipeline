@@ -1229,3 +1229,143 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     )
     .expect("the record is written");
 }
+
+/// Every refused call one of the double's refusal logs holds.
+fn refused(world: &World, log: &str) -> usize {
+    std::fs::read_to_string(world.fakes.join("gh").join(log))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+/// A follow read the host refuses leaves the change request followed: the next read
+/// is made on the interval, and the late failure is raised once it is read.
+#[test]
+fn a_refused_follow_read_leaves_the_change_followed_until_it_answers() {
+    let world = world_following("follow-refused", FAILS_ON_THE_THIRD_READ);
+    world.script("gh.follow-outage", "2");
+    let run = "followrefused";
+    launch(&world, run);
+    world.until("the late failure to be raised", |world| {
+        !world.events_of(run, "check-failed").is_empty()
+    });
+    assert_eq!(refused(&world, "follow-refused.jsonl"), 2);
+    assert_eq!(follow_reads(&world).len(), 3, "{:?}", follow_reads(&world));
+    assert_eq!(world.events_of(run, "check-failed").len(), 1);
+    release(&world, run);
+    assert_eq!(settlement(&world, run, "service").0, "done");
+}
+
+/// A followed change request whose head moved on is answered superseded, and is not
+/// read again: nothing is raised about checks on a head it no longer carries.
+#[test]
+fn a_superseded_head_stops_being_followed() {
+    let world = world_following("follow-superseded", FAILS_ON_THE_THIRD_READ);
+    world.script("gh.follow-superseded.1", "");
+    let run = "followsuperseded";
+    launch(&world, run);
+    world.until("a follow read", |world| !follow_reads(world).is_empty());
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert_eq!(follow_reads(&world).len(), 1, "{:?}", follow_reads(&world));
+    release(&world, run);
+    assert!(world.events_of(run, "check-failed").is_empty());
+    assert!(world.events_of(run, "checks-unfollowed").is_empty());
+    assert!(last_exit(&world, run)["payload"]
+        .get("checks_unfollowed")
+        .is_none());
+}
+
+/// An identity that declares a release change request and has none open says so on
+/// the wait, and records a holdup with no change requests.
+#[test]
+fn a_release_wait_with_no_release_change_open_says_so() {
+    let (world, _answer) = held_world("release-none-open", true, &holdup_standings(&[]));
+    let mut listing: Value = serde_json::from_str(HOLDUP_LISTING).expect("the recording");
+    listing["data"]["repository"]["pullRequests"]["nodes"] = serde_json::json!([]);
+    world.script("gh.holdup-listing", &listing.to_string());
+    let run = crate::adoption::start(
+        &world,
+        "releasenoneopen",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    world.until(
+        "the wait to say no release change request is open",
+        |world| {
+            crate::adoption::wait_surface(world, &run, "consumer")
+                .contains("\n  no release change request is open\n")
+        },
+    );
+    world.until("the record to carry the holdup", |world| {
+        crate::adoption::awaiting(world, &run, "consumer")
+            .first()
+            .is_some_and(|entry| entry.get("holdup").is_some())
+    });
+    let entry = crate::adoption::awaiting(&world, &run, "consumer")[0].clone();
+    assert_eq!(entry["holdup"]["changes"], serde_json::json!([]), "{entry}");
+    // The listing found nothing, so nothing was read about any change request.
+    assert!(holdup_reads(&world)
+        .iter()
+        .all(|read| read["query"] == "listing"));
+}
+
+/// A holdup read the host refuses after one it answered keeps that answer: the wait
+/// goes on naming what held the release, and the next answered read replaces it.
+#[test]
+fn a_refused_holdup_read_keeps_the_last_answer_until_one_is_answered() {
+    let (world, _answer) = held_world(
+        "release-holdup-refused",
+        true,
+        &holdup_standings(&[("gate (linux-x86_64)", "COMPLETED", Some("FAILURE"))]),
+    );
+    let run = crate::adoption::start(
+        &world,
+        "releaseholduprefused",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    let read_at = |world: &World| {
+        crate::adoption::awaiting(world, &run, "consumer")
+            .first()
+            .and_then(|entry| entry["holdup"]["read_at"].as_str().map(str::to_owned))
+    };
+    world.until("the first holdup to be recorded", |world| {
+        read_at(world).is_some()
+    });
+    let first = read_at(&world).expect("a read");
+    world.script("holdup-outage", "");
+    std::fs::rename(
+        world.fakes.join("holdup-outage"),
+        world.fakes.join("gh.holdup-outage"),
+    )
+    .expect("the outage begins");
+    world.until("two refused holdup reads", |world| {
+        refused(world, "holdup-refused.jsonl") >= 2
+    });
+    let recorded = world.events_of(&run, "release-wait").len();
+    crate::adoption::read_waits(&world, &run);
+    world.until("the wait to be recorded again", |world| {
+        world.events_of(&run, "release-wait").len() > recorded
+    });
+    assert_eq!(
+        read_at(&world).as_deref(),
+        Some(first.as_str()),
+        "the answer was lost"
+    );
+    assert!(crate::adoption::wait_surface(&world, &run, "consumer")
+        .contains("gate (linux-x86_64) (required — blocks the merge)"));
+
+    std::fs::remove_file(world.fakes.join("gh.holdup-outage")).expect("the outage ends");
+    let answered = holdup_reads(&world).len();
+    world.until("a holdup read answered again", |world| {
+        holdup_reads(world).len() > answered
+    });
+    world.until("the newer answer to be recorded", |world| {
+        crate::adoption::read_waits(world, &run);
+        read_at(world).is_some_and(|at| at != first)
+    });
+}

@@ -5570,7 +5570,7 @@
             "description": "The check's name."
           },
           "state": {
-            "type": "string",
+            "$ref": "#/$defs/FailingState",
             "description": "`failed` or `no-verdict`."
           },
           "conclusion": {
@@ -5607,7 +5607,17 @@
         ],
         "description": "`check-failed`: one failing check on a change request the run published, and its\none non-blocking surface.",
         "title": "CheckFailed",
-        "$schema": "https://json-schema.org/draft/2020-12/schema"
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {
+          "FailingState": {
+            "type": "string",
+            "enum": [
+              "failed",
+              "no-verdict"
+            ],
+            "description": "The two states a check is raised in: it failed, or it ended with no verdict."
+          }
+        }
       }
     },
     {
@@ -5628,7 +5638,7 @@
             "description": "The head commit the checks run on."
           },
           "reason": {
-            "type": "string",
+            "$ref": "#/$defs/UnfollowedReason",
             "description": "Why it stopped: `timeout`."
           },
           "checks": {
@@ -5650,6 +5660,13 @@
         "title": "ChecksUnfollowed",
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$defs": {
+          "UnfollowedReason": {
+            "type": "string",
+            "enum": [
+              "timeout"
+            ],
+            "description": "Why the driver stopped following a change request's checks: onevcs's checks timeout\npassed since its publication returned."
+          },
           "UnfollowedCheck": {
             "type": "object",
             "properties": {

@@ -1939,3 +1939,111 @@ fn the_store_operations_reporter_refuses_every_record_it_cannot_vouch_for() {
     assert!(!result.exists(), "a value was reported");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `scripts/check-visibility-quota-budget.sh` over a record staged under `cwd`.
+#[cfg(unix)]
+fn check_visibility_report(
+    cwd: &std::path::Path,
+    result: Option<&std::path::Path>,
+) -> std::process::Output {
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg(root().join("scripts/check-visibility-quota-budget.sh"))
+        .current_dir(cwd)
+        .env_remove("ONEBUDGETSPEC_RESULT");
+    if let Some(result) = result {
+        command.env("ONEBUDGETSPEC_RESULT", result);
+    }
+    command.output().expect("bash runs the committed reporter")
+}
+
+/// A record shaped as the workload journey writes it.
+#[cfg(unix)]
+fn check_visibility_record() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "workload": {"changes": 12, "repositories": 3, "followed_changes": 6,
+                     "running_checks_per_followed_change": 3, "running_minutes": 20,
+                     "held_nodes": 2, "held_hours": 3, "scale": 1000.0},
+        "phases": [
+            {"phase": "follow", "calls": [
+                {"at_ms": 10, "repo": "owner/service", "changes": ["1", "2"],
+                 "graphql_points": 1, "rest_requests": 0},
+                {"at_ms": 80, "repo": "owner/service", "changes": ["1"],
+                 "graphql_points": 1, "rest_requests": 0},
+            ]},
+            {"phase": "holdup", "calls": [
+                {"at_ms": 20, "query": "listing", "graphql_points": 1, "rest_requests": 0},
+                {"at_ms": 30, "query": "standings", "graphql_points": 1, "rest_requests": 0},
+            ]},
+        ],
+    })
+}
+
+/// The check-visibility reporter charges the record it is handed and reports the follow and
+/// holdup reads apart; it refuses a missing record, one that is not the stated workload, a
+/// call with no charge, and a run outside the checker.
+#[cfg(unix)]
+#[test]
+fn the_check_visibility_reporter_charges_its_record_and_refuses_what_it_cannot_vouch_for() {
+    let dir = scratch("check-visibility-report");
+    let records = dir.join("target/budget-records");
+    std::fs::create_dir_all(&records).expect("the records' directory");
+    let record = records.join("check-visibility-quota.json");
+    let result = dir.join("result.json");
+    let stderr =
+        |output: &std::process::Output| String::from_utf8_lossy(&output.stderr).into_owned();
+
+    let missing = check_visibility_report(&dir, Some(&result));
+    assert_eq!(missing.status.code(), Some(1), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("missing")
+            && stderr(&missing).contains("the_check_visibility_workload_reads_at_its_cadence"),
+        "{}",
+        stderr(&missing)
+    );
+
+    std::fs::write(&record, check_visibility_record().to_string()).expect("a record");
+    let reported = check_visibility_report(&dir, Some(&result));
+    assert_eq!(reported.status.code(), Some(0), "{}", stderr(&reported));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the result is written"))
+            .expect("the result is JSON");
+    assert_eq!(written["value"].as_f64(), Some(4.0), "{written}");
+    let detail = written["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("follow reads: 2 calls, 2 GraphQL points, 0 REST requests")
+            && detail.contains("holdup reads: 1 reads in 2 queries, 2 GraphQL points"),
+        "{detail}"
+    );
+
+    let mut other = check_visibility_record();
+    other["workload"]["changes"] = serde_json::json!(11);
+    std::fs::write(&record, other.to_string()).expect("a record");
+    let refused = check_visibility_report(&dir, Some(&result));
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("workload.changes must be 12"),
+        "{}",
+        stderr(&refused)
+    );
+
+    let mut uncharged = check_visibility_record();
+    uncharged["phases"][0]["calls"][0]
+        .as_object_mut()
+        .expect("a call")
+        .remove("graphql_points");
+    std::fs::write(&record, uncharged.to_string()).expect("a record");
+    let refused = check_visibility_report(&dir, Some(&result));
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        stderr(&refused).contains("graphql_points"),
+        "{}",
+        stderr(&refused)
+    );
+
+    std::fs::write(&record, check_visibility_record().to_string()).expect("a record");
+    let outside = check_visibility_report(&dir, None);
+    assert_eq!(outside.status.code(), Some(2), "{}", stderr(&outside));
+    assert!(stderr(&outside).contains("ONEBUDGETSPEC_RESULT is not set"));
+}

@@ -2609,6 +2609,21 @@ fn holdup_numbers_only(dir: &Path, query: &str) -> bool {
 /// Print the recorded response `gh.<script>`, and write the call with when it was made
 /// and the `rateLimit.cost` it reports to `gh/holdup-reads.jsonl`.
 fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
+    // `gh.holdup-outage`: every holdup query refused while it exists, each refusal
+    // written to `gh/holdup-refused.jsonl` with when it was made.
+    if dir.join("gh.holdup-outage").exists() {
+        let at = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |at| at.as_millis()),
+        )
+        .unwrap_or(u64::MAX);
+        let line = serde_json::json!({"at_ms": at, "query": query}).to_string();
+        if let Err(error) = append_line(&dir.join("gh").join("holdup-refused.jsonl"), &line) {
+            fake::fail(&format!("cannot record a refused holdup read: {error}"));
+        }
+        return fake::refuse("the host could not answer the holdup read");
+    }
     let Some(text) = fake::node_script(dir, "gh", script) else {
         return fake::refuse(&format!("no recorded response gh.{script} to replay"));
     };
@@ -2725,6 +2740,22 @@ fn sibling_check(
 fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path) -> ExitCode {
     use onevcs::RemoteHost;
     let repo = format!("{owner}/{name}");
+    // `gh.follow-outage` holding `N`: the first N follow reads are refused, as a host
+    // answering an error is, and each refusal is written to `gh/follow-refused.jsonl`.
+    if let Some(outage) = fake::node_script(dir, "gh", "follow-outage")
+        .and_then(|count| count.trim().parse::<u64>().ok())
+    {
+        let refused = dir.join("gh").join("follow-refused.jsonl");
+        let so_far = read_if_present(&refused).map_or(0, |text| text.lines().count() as u64);
+        if so_far < outage {
+            if let Err(error) =
+                append_line(&refused, &serde_json::json!({"repo": repo}).to_string())
+            {
+                fake::fail(&format!("cannot record a refused follow read: {error}"));
+            }
+            return fake::refuse("the host could not answer the follow read");
+        }
+    }
     let standings = match own_standing_list(owner, name, changes, dir) {
         Ok(standings) => standings,
         Err(refused) => return refused,
@@ -2755,12 +2786,20 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
                 .map(|(index, check)| sibling_check(check, &repo, index, &head, rerun))
                 .collect()
         };
-        // The double's copy follows the change request to the head it carries now.
+        // The double's copy follows the change request to the head it carries now —
+        // or, under `gh.follow-superseded.<NUMBER>`, to a later push than the one asked
+        // about, so the read answers it superseded.
+        let carried =
+            if fake::node_script(dir, "gh", &format!("follow-superseded.{}", change.0)).is_some() {
+                "0".repeat(40)
+            } else {
+                head.clone()
+            };
         state.changes.retain(|held| held.id != *change);
         state.changes.push(
             serde_json::from_value(serde_json::json!({
                 "id": change.0, "url": standing.url.as_str(),
-                "head_sha": head, "base": standing.base,
+                "head_sha": carried, "base": standing.base,
             }))
             .unwrap_or_else(|error| fake::fail(&format!("a followed change: {error}"))),
         );

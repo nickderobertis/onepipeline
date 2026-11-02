@@ -75,13 +75,14 @@ pub const UNFOLLOWED_SURFACE_KIND: &str = "checks-unfollowed";
 const NO_ADDRESS: &str = "the host reported no address for this check";
 
 /// A duration read from `name` in seconds, fractions allowed; `default` for an unset
-/// value and for one that is not a positive finite number.
+/// value and for one that is not a positive number a `Duration` can hold.
 pub(crate) fn seconds_env(name: &str, default: f64) -> Duration {
     std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
-        .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
-        .map_or_else(|| Duration::from_secs_f64(default), Duration::from_secs_f64)
+        .filter(|seconds| *seconds > 0.0)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .unwrap_or_else(|| Duration::from_secs_f64(default))
 }
 
 /// One `change-check` record's reading of one check.
@@ -1065,6 +1066,21 @@ mod tests {
         assert_eq!(
             seconds_env("ONEPIPELINE_TEST_NEVER_SET_SECONDS", 60.0),
             Duration::from_secs(60)
+        );
+        for (name, value) in [
+            ("ONEPIPELINE_TEST_HUGE_SECONDS", "1e100"),
+            ("ONEPIPELINE_TEST_NEGATIVE_SECONDS", "-1"),
+            ("ONEPIPELINE_TEST_NAN_SECONDS", "NaN"),
+            ("ONEPIPELINE_TEST_WORD_SECONDS", "soon"),
+        ] {
+            // Names no other test reads, so setting them races nothing.
+            std::env::set_var(name, value);
+            assert_eq!(seconds_env(name, 60.0), Duration::from_secs(60), "{value}");
+        }
+        std::env::set_var("ONEPIPELINE_TEST_FRACTION_SECONDS", "0.06");
+        assert_eq!(
+            seconds_env("ONEPIPELINE_TEST_FRACTION_SECONDS", 60.0),
+            Duration::from_millis(60)
         );
     }
 }

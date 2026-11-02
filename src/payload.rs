@@ -2241,7 +2241,7 @@ pub(crate) struct CheckFailed {
     /// The check's name.
     pub(crate) check: String,
     /// `failed` or `no-verdict`.
-    pub(crate) state: String,
+    pub(crate) state: FailingState,
     /// How it concluded, `null` where the host said nothing.
     pub(crate) conclusion: Option<String>,
     /// Whether it blocks the merge.
@@ -2263,9 +2263,25 @@ pub(crate) struct ChecksUnfollowed {
     /// The head commit the checks run on.
     pub(crate) head: String,
     /// Why it stopped: `timeout`.
-    pub(crate) reason: String,
+    pub(crate) reason: UnfollowedReason,
     /// Each check still running.
     pub(crate) checks: Vec<UnfollowedCheck>,
+}
+
+/// The two states a check is raised in: it failed, or it ended with no verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FailingState {
+    Failed,
+    NoVerdict,
+}
+
+/// Why the driver stopped following a change request's checks: onevcs's checks timeout
+/// passed since its publication returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum UnfollowedReason {
+    Timeout,
 }
 
 /// One check a `checks-unfollowed` names.
