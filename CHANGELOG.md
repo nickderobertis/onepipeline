@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.98.1](https://github.com/nickderobertis/onepipeline/compare/v0.98.0...v0.98.1) - 2026-11-02
+
+### Fixed
+
+- *(takeover)* mint a successor id distinct from the displaced driver's ([#1352](https://github.com/nickderobertis/onepipeline/pull/1352))
+
 ## [0.98.0](https://github.com/nickderobertis/onepipeline/compare/v0.97.5...v0.98.0) - 2026-11-02
 
 ### Added
