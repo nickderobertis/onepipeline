@@ -1169,7 +1169,7 @@ fn view(args: &[String], dir: &Path) -> ExitCode {
     if let Err(error) = std::fs::write(&path, phase) {
         fake::fail(&format!("cannot write {}: {error}", path.display()));
     }
-    let reported = scripted_checks(dir, &id, state);
+    let reported = scripted_checks(dir, &id, &opened.repo, state);
     // Only a read that asked for the rollup has been told what is still running.
     if fields.contains("statusCheckRollup")
         && reported_draft_running(dir, &id, state)
@@ -1473,12 +1473,41 @@ const READY_RUN_COMPLETED: &str = "2026-01-01T00:08:00Z";
 ///
 /// A line this program cannot read is **fatal**, not skipped: a journey scripting
 /// a check this host quietly dropped would assert against a rollup nobody wrote.
-fn scripted_checks(dir: &Path, id: &str, change: Change) -> Vec<Check> {
-    let text = reported_draft_running(dir, id, change)
-        .then(|| fake::node_script(dir, "gh", "checks.draft"))
-        .flatten()
-        .or_else(|| fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id))))
-        .or_else(|| fake::node_script(dir, "gh", "checks"));
+fn scripted_checks(dir: &Path, id: &str, repo: &str, change: Change) -> Vec<Check> {
+    // `gh.checks.later`: what the host reports once `gh.checks.later-ms` milliseconds
+    // have passed since it first reported this change request's checks — a check that
+    // concludes while the publication's watch is still reading.
+    let later = fake::node_script(dir, "gh", "checks.later").filter(|_| {
+        let wait: u64 = fake::node_script(dir, "gh", "checks.later-ms")
+            .and_then(|ms| ms.parse().ok())
+            .unwrap_or(0);
+        let first = dir
+            .join("gh")
+            .join(format!("{}.checks-first", fake::segment(id)));
+        let now = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |at| at.as_millis()),
+        )
+        .unwrap_or(u64::MAX);
+        let since = read_if_present(&first)
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                let _ = std::fs::write(&first, now.to_string());
+                now
+            });
+        now.saturating_sub(since) >= wait
+    });
+    let text = later.or_else(|| {
+        reported_draft_running(dir, id, change)
+            .then(|| fake::node_script(dir, "gh", "checks.draft"))
+            .flatten()
+            .or_else(|| fake::node_script(dir, "gh", &format!("checks.{}", fake::segment(id))))
+            // `gh.checks.repo.<OWNER>.<NAME>`: what every change request of one repository
+            // reports, for a journey whose change requests are numbered in no fixed order.
+            .or_else(|| fake::node_script(dir, "gh", &repo_script("checks", repo)))
+            .or_else(|| fake::node_script(dir, "gh", "checks"))
+    });
     let Some(text) = text else {
         return Vec::new();
     };
@@ -1870,6 +1899,7 @@ fn checks(args: &[String], dir: &Path) -> ExitCode {
     let reported = scripted_checks(
         dir,
         &change_key(dir, &opened),
+        &opened.repo,
         state_of_opened(dir, &opened),
     );
     if required_only {
@@ -2107,6 +2137,22 @@ fn review_read(args: &[String], dir: &Path) -> ExitCode {
         }
     }
     let field = |key: &str| fields.get(key).map(String::as_str);
+    // `onevcs::release_holdup`'s listing of the open change requests by head branch,
+    // replayed from `gh.holdup-listing` — a GitHub response as it was recorded.
+    if fields.len() == 3
+        && field("query").is_some_and(|query| query.contains("pullRequests(states: OPEN"))
+    {
+        return replayed(dir, "holdup-listing", "listing");
+    }
+    // And its read of the matches' rollups, replayed from `gh.holdup-standings` where
+    // every number it asks about is one `gh.holdup-numbers` lists.
+    if fields.len() == 3
+        && field("query").is_some_and(|query| {
+            query.contains("c0: pullRequest(number:") && holdup_numbers_only(dir, query)
+        })
+    {
+        return replayed(dir, "holdup-standings", "standings");
+    }
     if fields.len() == 3
         && field("owner").is_some()
         && field("name").is_some()
@@ -2456,7 +2502,7 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     if !query.contains("reviewThreads(")
         && changes
             .iter()
-            .all(|change| follow_script(dir, &change.0).is_some())
+            .all(|change| follow_script(dir, &format!("{owner}/{name}"), &change.0).is_some())
     {
         return holding_the_records(dir, || follow_read(owner, name, &changes, dir));
     }
@@ -2532,25 +2578,90 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     }
 }
 
+/// Whether every change request a standings query names is one `gh.holdup-numbers`
+/// lists: the release change requests a holdup read asks about.
+fn holdup_numbers_only(dir: &Path, query: &str) -> bool {
+    let Some(listed) = fake::node_script(dir, "gh", "holdup-numbers") else {
+        return false;
+    };
+    let listed: Vec<&str> = listed.split_whitespace().collect();
+    let asked: Vec<&str> = query
+        .split("pullRequest(number: ")
+        .skip(1)
+        .filter_map(|fragment| fragment.split(')').next())
+        .collect();
+    !asked.is_empty() && asked.iter().all(|number| listed.contains(number))
+}
+
+/// Print the recorded response `gh.<script>`, and write the call with when it was made
+/// and the `rateLimit.cost` it reports to `gh/holdup-reads.jsonl`.
+fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
+    let Some(text) = fake::node_script(dir, "gh", script) else {
+        return fake::refuse(&format!("no recorded response gh.{script} to replay"));
+    };
+    let response: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(response) => response,
+        Err(error) => return fake::refuse(&format!("gh.{script} is not JSON: {error}")),
+    };
+    let at = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |at| at.as_millis()),
+    )
+    .unwrap_or(u64::MAX);
+    let line = serde_json::json!({
+        "at_ms": at, "query": query,
+        "graphql_points": response.pointer("/data/rateLimit/cost").cloned().unwrap_or_default(),
+        "rest_requests": 0,
+    });
+    if let Err(error) = append_line(
+        &dir.join("gh").join("holdup-reads.jsonl"),
+        &line.to_string(),
+    ) {
+        fake::fail(&format!("cannot record a holdup read: {error}"));
+    }
+    println!("{response}");
+    ExitCode::SUCCESS
+}
+
 /// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
 /// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
-fn follow_script(dir: &Path, number: &str) -> Option<(String, bool)> {
+fn follow_script(dir: &Path, repo: &str, number: &str) -> Option<(String, bool)> {
     if let Some(text) = fake::node_script(dir, "gh", &format!("follow.{number}")) {
         return Some((text, false));
     }
-    fake::node_script(dir, "gh", &format!("follow-clock.{number}")).map(|text| (text, true))
+    fake::node_script(dir, "gh", &format!("follow-clock.{number}"))
+        .or_else(|| fake::node_script(dir, "gh", &repo_script("follow-clock", repo)))
+        .map(|text| (text, true))
+}
+
+/// The name of a script about every change request of `repo`: `<what>.repo.<OWNER>.<NAME>`.
+fn repo_script(what: &str, repo: &str) -> String {
+    let (owner, name) = repo.split_once('/').unwrap_or((repo, ""));
+    format!(
+        "{what}.repo.{}.{}",
+        fake::segment(owner),
+        fake::segment(name)
+    )
 }
 
 /// One follow script's readings: blocks of `NAME STATUS CONCLUSION REQUIRED` lines
 /// split by `---`, each block of a clock script opening with `after_ms <N>` — the
-/// milliseconds after the change request's first follow read it starts answering.
-fn follow_readings(text: &str, clock: bool) -> Vec<(u64, Vec<Check>)> {
+/// milliseconds after the change request's first follow read it starts answering. A
+/// block holding a `rerun` line reports its checks as a later run on the same head, as
+/// a job re-run on the host is.
+fn follow_readings(text: &str, clock: bool) -> Vec<(u64, bool, Vec<Check>)> {
     text.split("\n---")
         .map(|block| {
             let mut after = 0;
+            let mut rerun = false;
             let mut checks = Vec::new();
             for line in block.lines().map(str::trim).filter(|line| !line.is_empty()) {
                 if line == "---" {
+                    continue;
+                }
+                if line == "rerun" {
+                    rerun = true;
                     continue;
                 }
                 if clock {
@@ -2564,15 +2675,21 @@ fn follow_readings(text: &str, clock: bool) -> Vec<(u64, Vec<Check>)> {
                 }
                 checks.push(Check::parse(line).unwrap_or_else(|why| fake::fail(&why)));
             }
-            (after, checks)
+            (after, rerun, checks)
         })
         .collect()
 }
 
 /// A scripted check as `onevcs` names one, on `head`, with the address
 /// `gh pr checks` gives it.
-fn sibling_check(check: &Check, repo: &str, index: usize, head: &str) -> onevcs::Check {
-    let entry = check.rollup_entry(false);
+fn sibling_check(
+    check: &Check,
+    repo: &str,
+    index: usize,
+    head: &str,
+    rerun: bool,
+) -> onevcs::Check {
+    let entry = check.rollup_entry(rerun);
     onevcs::Check {
         name: check.name.clone(),
         status: check.state.status().to_owned(),
@@ -2615,25 +2732,25 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
     )
     .unwrap_or(u64::MAX);
     for (change, standing) in changes.iter().zip(&standings) {
-        let (text, clock) = follow_script(dir, &change.0).expect("every change is scripted");
+        let (text, clock) = follow_script(dir, &repo, &change.0).expect("every change is scripted");
         let readings = follow_readings(&text, clock);
         let head = standing.head.0.clone();
-        let checks = |reading: &[Check]| -> Vec<onevcs::Check> {
+        let checks = |rerun: bool, reading: &[Check]| -> Vec<onevcs::Check> {
             reading
                 .iter()
                 .enumerate()
-                .map(|(index, check)| sibling_check(check, &repo, index, &head))
+                .map(|(index, check)| sibling_check(check, &repo, index, &head, rerun))
                 .collect()
         };
-        if !state.changes.iter().any(|held| held.id == *change) {
-            state.changes.push(
-                serde_json::from_value(serde_json::json!({
-                    "id": change.0, "url": standing.url.as_str(),
-                    "head_sha": head, "base": standing.base,
-                }))
-                .unwrap_or_else(|error| fake::fail(&format!("a followed change: {error}"))),
-            );
-        }
+        // The double's copy follows the change request to the head it carries now.
+        state.changes.retain(|held| held.id != *change);
+        state.changes.push(
+            serde_json::from_value(serde_json::json!({
+                "id": change.0, "url": standing.url.as_str(),
+                "head_sha": head, "base": standing.base,
+            }))
+            .unwrap_or_else(|error| fake::fail(&format!("a followed change: {error}"))),
+        );
         let first = dir
             .join("gh")
             .join(format!("{}.follow-first", fake::segment(&change.0)));
@@ -2648,15 +2765,15 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
             let current = readings
                 .iter()
                 .rev()
-                .find(|(after, _)| *after <= elapsed)
+                .find(|(after, _, _)| *after <= elapsed)
                 .or_else(|| readings.first())
-                .map(|(_, reading)| checks(reading))
+                .map(|(_, rerun, reading)| checks(*rerun, reading))
                 .unwrap_or_default();
             vec![current]
         } else {
             readings
                 .iter()
-                .map(|(_, reading)| checks(reading))
+                .map(|(_, rerun, reading)| checks(*rerun, reading))
                 .collect()
         };
         state.check_readings.insert(change.clone(), scripted);
