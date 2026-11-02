@@ -1164,38 +1164,45 @@ fn mint_run_id(
         .unwrap_or(base)
 }
 
-/// Mint this launch's run id and decide its public id, where `displaced` is what the claim
-/// of a driver on this host that the launch takes over names it by.
+/// Mint this launch's run id and decide its public id by `decide`, where `displaced` is what
+/// the claim of a driver on this host that the launch takes over names it by.
 ///
 /// That driver may be under another runs root, which the run id's uniqueness cannot see, and
 /// it tells a takeover from its own claim by run and host alone — so a candidate that it, or
 /// the public id decided for it, would repeat is skipped as an existing run is: the claim
 /// this launch writes then names a run other than the one it displaces, which that driver
-/// acknowledges rather than reading as its own. The public id is the one decided for the
-/// candidate kept, not asked afresh, so a check answering differently the second time
-/// cannot bring the two names back together. With no such claim, both are as they were.
+/// acknowledges rather than reading as its own. With no such claim, both are as they were.
 fn mint_over(
     plan: &Plan,
     native: &str,
     root: &Path,
     displaced: Option<&str>,
+    mut decide: impl FnMut(&str) -> crate::publicid::Decided,
 ) -> (String, crate::publicid::Decided) {
     let mut decided = None;
     let run = mint_run_id(plan, native, root, |candidate| {
         let Some(displaced) = displaced else {
             return false;
         };
-        let public = crate::publicid::decide(candidate, plan.name.as_deref());
+        let public = decide(candidate);
         let repeats = candidate == displaced || public.id.as_str() == displaced;
         decided = Some((candidate.to_owned(), public));
         repeats
     });
+    // llmlint: ignore-block[changed_behavior_has_e2e] the public id kept is the one the skip
+    // was decided over, never asked afresh, so a check answering differently the second time
+    // cannot bring the two names back together. No journey through the binary can make the
+    // linked check change its answer between two calls inside one launch;
+    // `driver::tests::a_takeovers_public_id_is_the_one_its_run_was_minted_over` drives this
+    // with a check that does, and both `a_same_host_takeover_from_a_second_runs_root_*`
+    // journeys in `tests/e2e/continuation.rs` drive the minting it keeps.
     let public = match decided {
         Some((candidate, public)) if candidate == run => public,
         // Its public id, decided where the id is minted and before anything records the
         // run: a check that cannot answer gives the hashed form, which names nothing.
-        _ => crate::publicid::decide(&run, plan.name.as_deref()),
+        _ => decide(&run),
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     (run, public)
 }
 
@@ -1692,7 +1699,9 @@ fn start(args: &StartArgs) -> Result<i32> {
         .as_ref()
         .filter(|claim| args.take_over && claim.host == sys::hostname())
         .map(|claim| claim.run.as_str());
-    let (run, public) = mint_over(&plan, project.native(), &root, displaced);
+    let (run, public) = mint_over(&plan, project.native(), &root, displaced, |run| {
+        crate::publicid::decide(run, plan.name.as_deref())
+    });
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has
@@ -5225,6 +5234,48 @@ mod tests {
             ),
             "tracked-release"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A takeover of a driver whose claim names the hashed form of `rooted` skips `rooted`
+    /// where its public id is that form, and keeps the public id its minted run was decided
+    /// over — even where the check, asked again, would have answered it the displaced one.
+    #[test]
+    fn a_takeovers_public_id_is_the_one_its_run_was_minted_over() {
+        let root = scratch("mint-over");
+        let displaced = crate::publicid::hashed("rooted");
+        let refusing = |run: &str| crate::publicid::decide_with(run, None, |_| Ok(false));
+        let (run, public) = mint_over(
+            &plan(Some("rooted")),
+            "plans:rooted",
+            &root,
+            Some(displaced.as_str()),
+            refusing,
+        );
+        assert_eq!(run, "rooted-2");
+        assert_eq!(public.id, crate::publicid::hashed("rooted-2"));
+
+        // The check passes the first candidate and refuses every later ask: a second ask of
+        // `rooted` would decide the displaced claim's own name.
+        let mut asked = 0;
+        let (run, public) = mint_over(
+            &plan(Some("rooted")),
+            "plans:rooted",
+            &root,
+            Some(displaced.as_str()),
+            |run| {
+                asked += 1;
+                crate::publicid::decide_with(run, None, |_| Ok(asked == 1))
+            },
+        );
+        assert_eq!(run, "rooted");
+        assert_eq!(public.id.as_str(), "rooted");
+        assert_eq!(asked, 1);
+
+        // With no displaced claim the first candidate is kept, whatever it decides.
+        let (run, public) = mint_over(&plan(Some("rooted")), "plans:rooted", &root, None, refusing);
+        assert_eq!(run, "rooted");
+        assert_eq!(public.id, displaced);
         std::fs::remove_dir_all(&root).ok();
     }
 
