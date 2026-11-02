@@ -4353,6 +4353,10 @@
     "description": "What a phase supplies when it raises.",
     "type": "object",
     "properties": {
+      "schema_version": {
+        "description": "The contract version the context was written against; absent, it is a\nversion 1 context, and it is omitted again when written back.",
+        "$ref": "#/$defs/PhaseContextVersion"
+      },
       "owner": {
         "description": "Who owns the item.",
         "$ref": "#/$defs/HumanItemOwner"
@@ -4403,7 +4407,40 @@
       "owner",
       "dedup_key"
     ],
+    "if": {
+      "not": {
+        "properties": {
+          "schema_version": {
+            "const": 2
+          }
+        },
+        "required": [
+          "schema_version"
+        ]
+      }
+    },
+    "then": {
+      "properties": {
+        "tickets": {
+          "items": {
+            "not": {
+              "required": [
+                "title"
+              ]
+            }
+          }
+        }
+      }
+    },
     "$defs": {
+      "PhaseContextVersion": {
+        "description": "The phase context's contract version: 1, the context as first published and what an absent `schema_version` means, or 2, which adds a ticket's optional `title`.",
+        "type": "integer",
+        "enum": [
+          1,
+          2
+        ]
+      },
       "HumanItemOwner": {
         "description": "The originating session and optional run and plan.",
         "type": "object",

@@ -12048,12 +12048,14 @@ fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
     assert!(CONTRACT.contains("detail.nodes is grouped by blocked.plans in that order"));
 }
 
-/// The published phase context carries a ticket's optional `title`: a context
-/// with titles and one written before they existed both validate against the
-/// exported schema and round-trip unchanged, and a blank title is refused by both.
+/// The published phase context carries a ticket's optional `title` and the
+/// `schema_version` that admits it: a version 2 context with titles and one
+/// written before either existed both validate against the exported schema and
+/// round-trip unchanged, and a blank title, an unsupported version, and a title
+/// in a version 1 context are refused by both the schema and the reader.
 #[test]
 fn the_published_phase_context_carries_an_optional_ticket_title() {
-    use onepipeline::human_items::phases::PhaseContext;
+    use onepipeline::human_items::phases::{PhaseContext, PhaseContextVersion};
     let schema = onepipeline::human_items::schemas();
     let validator = jsonschema::validator_for(&schema["PhaseContext"]).unwrap();
     let fixtures: Vec<Value> =
@@ -12061,13 +12063,55 @@ fn the_published_phase_context_carries_an_optional_ticket_title() {
     assert_eq!(fixtures.len(), 2);
     assert!(fixtures[0]["tickets"][0]["title"].is_string());
     assert!(fixtures[1]["tickets"][0].get("title").is_none());
+    assert_eq!(
+        fixtures[0]["schema_version"],
+        PhaseContextVersion::CURRENT.number()
+    );
+    assert!(fixtures[1].get("schema_version").is_none());
     for fixture in &fixtures {
         validator.validate(fixture).unwrap();
         let parsed: PhaseContext = serde_json::from_value(fixture.clone()).unwrap();
+        parsed.validate().unwrap();
         let written = serde_json::to_value(&parsed).unwrap();
-        // An absent title stays absent on the wire, so an older reader is unaffected.
+        // An absent title and an absent version stay absent on the wire, so an
+        // older reader is unaffected.
         assert_eq!(written["tickets"], fixture["tickets"], "{written}");
         assert_eq!(written["owner"], fixture["owner"]);
+        assert_eq!(
+            written.get("schema_version"),
+            fixture.get("schema_version"),
+            "{written}"
+        );
+    }
+    let legacy: PhaseContext = serde_json::from_value(fixtures[1].clone()).unwrap();
+    assert_eq!(legacy.version(), PhaseContextVersion::V1);
+    for unsupported in [json!(0), json!(3), json!("2"), Value::Null] {
+        let mut context = fixtures[1].clone();
+        context["schema_version"] = unsupported.clone();
+        assert!(
+            serde_json::from_value::<PhaseContext>(context.clone()).is_err(),
+            "the reader accepted schema_version {unsupported}"
+        );
+        assert!(
+            !validator.is_valid(&context),
+            "the schema accepted schema_version {unsupported}"
+        );
+    }
+    for version in [json!(1), Value::Null] {
+        let mut titled = fixtures[0].clone();
+        match version {
+            Value::Null => titled.as_object_mut().unwrap().remove("schema_version"),
+            version => titled
+                .as_object_mut()
+                .unwrap()
+                .insert("schema_version".into(), version),
+        };
+        let parsed: PhaseContext = serde_json::from_value(titled.clone()).unwrap();
+        assert!(parsed.validate().is_err(), "{titled}");
+        assert!(
+            !validator.is_valid(&titled),
+            "the schema accepted a title below version 2: {titled}"
+        );
     }
     let mut blank = fixtures[0].clone();
     blank["tickets"][0]["title"] = json!(" ");
@@ -12154,6 +12198,7 @@ fn expanding_a_phase_built_in_process_refuses_a_blank_ticket_title() {
         "tickets": [{"id": "board-1", "url": "https://github.com/acme/widgets/issues/9"}]
     }))
     .unwrap();
+    context.schema_version = Some(onepipeline::human_items::phases::PhaseContextVersion::CURRENT);
     context.tickets[0].title = Some("Ship the widget".into());
     let Ok(Expanded::Raise { item, .. }) = expand(&config, "ticket-review", &context) else {
         panic!("a titled ticket did not expand to a raise");

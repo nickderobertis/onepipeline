@@ -1,5 +1,6 @@
 [
   {
+    "schema_version": 2,
     "owner": {"session": "manager", "run": null, "plan": "plans:alpha"},
     "dedup_key": "sprint-12",
     "vars": {"sprint": "12"},

@@ -1242,8 +1242,12 @@ fn live_command(command: HumanItemsCommand, rendered: &mut f64) -> crate::error:
         } => {
             let bytes = std::fs::read(&context)
                 .map_err(|e| Error::Invalid(format!("{}: {e}", context.display())))?;
-            let context: phases::PhaseContext = serde_json::from_slice(&bytes)
+            let parsed: phases::PhaseContext = serde_json::from_slice(&bytes)
                 .map_err(|e| Error::Invalid(format!("{}: {e}", context.display())))?;
+            parsed
+                .validate()
+                .map_err(|e| Error::Invalid(format!("{}: {e}", context.display())))?;
+            let context = parsed;
             match store
                 .raise_phase(&phase, &context)
                 .map_err(|e| refused(&e))?

@@ -1457,7 +1457,7 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
     let ctx = context(
         &world,
         "titled",
-        &json!({"owner": owner, "dedup_key": "titled", "tickets": [
+        &json!({"schema_version": 2, "owner": owner, "dedup_key": "titled", "tickets": [
             {"id": "board-1", "url": "https://github.com/acme/widgets/issues/12",
              "priority": "high", "title": "Fix the [flaky] login\\ test"},
             {"id": "board-2", "url": "https://github.com/acme/widgets/pull/40", "priority": "low"},
@@ -1512,7 +1512,7 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
     let blank = context(
         &world,
         "blank-title",
-        &json!({"owner": owner, "dedup_key": "blank", "tickets": [
+        &json!({"schema_version": 2, "owner": owner, "dedup_key": "blank", "tickets": [
             {"id": "a", "url": "https://github.com/acme/widgets/issues/1", "title": "  "},
         ]}),
     );
@@ -1522,6 +1522,97 @@ fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
         "title, when given, is not blank",
     );
     assert_eq!(world.journal().len(), records);
+}
+
+/// The phase context is versioned: one written before `schema_version` existed
+/// is read as version 1 and raises as it always did, version 1 and 2 are
+/// accepted when stated, and a title needs version 2. An unsupported or
+/// misspelled version is refused before anything is written.
+#[test]
+fn a_phase_context_states_a_supported_version_or_is_read_as_the_first() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ticket = json!({"id": "board-1", "url": "https://github.com/acme/widgets/issues/5",
+                        "priority": "high"});
+    let body_of = |name: &str, value: Value| -> String {
+        let ctx = context(&world, name, &value);
+        phase(&world, None, "ticket-review", &ctx)["item"]["item"]["body"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    // Legacy: no version, no title — linked by its short reference.
+    let legacy = body_of(
+        "legacy",
+        json!({"owner": owner, "dedup_key": "legacy", "tickets": [ticket]}),
+    );
+    assert!(
+        legacy.contains("- [widgets#5](https://github.com/acme/widgets/issues/5)\n"),
+        "{legacy}"
+    );
+    let stated = body_of(
+        "stated-1",
+        json!({"schema_version": 1, "owner": owner, "dedup_key": "stated-1", "tickets": [ticket]}),
+    );
+    assert_eq!(stated, legacy);
+    // Current: version 2 with a title.
+    let mut titled = ticket.clone();
+    titled["title"] = json!("Ship the widget");
+    let current = body_of(
+        "current",
+        json!({"schema_version": 2, "owner": owner, "dedup_key": "current", "tickets": [titled]}),
+    );
+    assert!(
+        current.contains("- [Ship the widget](https://github.com/acme/widgets/issues/5)\n"),
+        "{current}"
+    );
+
+    let records = world.journal().len();
+    for (name, version, reason) in [
+        (
+            "future",
+            json!(3),
+            "unsupported phase context schema_version 3; this onepipeline reads 1 and 2",
+        ),
+        (
+            "zero",
+            json!(0),
+            "unsupported phase context schema_version 0",
+        ),
+        ("spelled", json!("2"), "invalid type: string \"2\""),
+        ("null", Value::Null, "invalid type: null"),
+    ] {
+        let ctx = context(
+            &world,
+            name,
+            &json!({"schema_version": version, "owner": owner, "dedup_key": name,
+                    "tickets": [ticket]}),
+        );
+        world.refused(
+            None,
+            &["raise", "--phase", "ticket-review", "--context", &ctx],
+            reason,
+        );
+    }
+    // A title in a context that states, or defaults to, version 1.
+    for (name, value) in [
+        (
+            "v1-titled",
+            json!({"schema_version": 1, "owner": owner, "dedup_key": "v1", "tickets": [titled]}),
+        ),
+        (
+            "unversioned-titled",
+            json!({"owner": owner, "dedup_key": "v0", "tickets": [titled]}),
+        ),
+    ] {
+        let ctx = context(&world, name, &value);
+        world.refused(
+            None,
+            &["raise", "--phase", "ticket-review", "--context", &ctx],
+            "a ticket's title is phase context schema_version 2",
+        );
+    }
+    assert_eq!(world.journal().len(), records, "a refused context wrote");
 }
 
 /// A template that renders without error to a blank title or body is still an

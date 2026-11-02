@@ -123,10 +123,106 @@ fn nonblank<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> 
     Ok(value)
 }
 
+/// The version of the phase context's contract a writer wrote against.
+///
+/// Version 1 is the context as first published, and is what a context without
+/// `schema_version` is read as; version 2 adds a ticket's optional `title`. A
+/// reader refuses any other number rather than guessing what it adds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PhaseContextVersion {
+    /// The context as first published: tickets are `{id, url, priority}`.
+    V1,
+    /// Tickets may carry a `title`.
+    V2,
+}
+
+impl PhaseContextVersion {
+    /// The version this onepipeline writes.
+    pub const CURRENT: Self = Self::V2;
+    /// Every version this onepipeline reads, oldest first.
+    pub const SUPPORTED: [Self; 2] = [Self::V1, Self::V2];
+
+    /// The version as it is spelled on the wire.
+    pub fn number(self) -> u32 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
+
+impl Serialize for PhaseContextVersion {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(self.number())
+    }
+}
+
+impl<'de> Deserialize<'de> for PhaseContextVersion {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let number = u64::deserialize(d)?;
+        Self::SUPPORTED
+            .into_iter()
+            .find(|v| u64::from(v.number()) == number)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unsupported phase context schema_version {number}; this onepipeline reads 1 and 2"
+                ))
+            })
+    }
+}
+
+impl JsonSchema for PhaseContextVersion {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "PhaseContextVersion".into()
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "The phase context's contract version: 1, the context as first published and what an absent `schema_version` means, or 2, which adds a ticket's optional `title`.",
+            "type": "integer",
+            "enum": Self::SUPPORTED.map(Self::number),
+        })
+    }
+}
+
+/// A present `schema_version` is a supported number; `null` is not absence.
+fn present_version<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<PhaseContextVersion>, D::Error> {
+    PhaseContextVersion::deserialize(d).map(Some)
+}
+
+/// A context below version 2 names no ticket title: the published schema says
+/// so as a conditional beside the properties the derive writes.
+fn titles_need_version_2(schema: &mut schemars::Schema) {
+    schema.insert(
+        "if".into(),
+        serde_json::json!({
+            "not": {"required": ["schema_version"], "properties": {"schema_version": {"const": 2}}}
+        }),
+    );
+    schema.insert(
+        "then".into(),
+        serde_json::json!({
+            "properties": {"tickets": {"items": {"not": {"required": ["title"]}}}}
+        }),
+    );
+}
+
 /// What a phase supplies when it raises.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(transform = titles_need_version_2)]
 pub struct PhaseContext {
+    /// The contract version the context was written against; absent, it is a
+    /// version 1 context, and it is omitted again when written back.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_version"
+    )]
+    #[schemars(with = "PhaseContextVersion")]
+    pub schema_version: Option<PhaseContextVersion>,
     /// Who owns the item.
     pub owner: HumanItemOwner,
     /// The phase's own identity for this occurrence; the item's dedup key is
@@ -146,6 +242,28 @@ pub struct PhaseContext {
     /// The tickets a `ticket_review` hook aggregates.
     #[serde(default)]
     pub tickets: Vec<Ticket>,
+}
+
+impl PhaseContext {
+    /// The version the context is read as: its `schema_version`, or 1 when it
+    /// names none.
+    pub fn version(&self) -> PhaseContextVersion {
+        self.schema_version.unwrap_or(PhaseContextVersion::V1)
+    }
+
+    /// Refuse what the context's version does not carry: a ticket title in a
+    /// version 1 context.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version() < PhaseContextVersion::V2
+            && self.tickets.iter().any(|t| t.title.is_some())
+        {
+            return Err(
+                "a ticket's title is phase context schema_version 2; write \"schema_version\": 2"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// What a phase raise amounts to.
@@ -344,6 +462,7 @@ pub fn expand(
     }) {
         return Err("a ticket's title, when given, is not blank".into());
     }
+    context.validate()?;
     if hook.aggregate == Some(HookAggregate::TicketReview) {
         let tickets = deduplicated(&context.tickets);
         if tickets.is_empty() {
