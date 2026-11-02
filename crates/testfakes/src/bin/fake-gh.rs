@@ -2450,6 +2450,16 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
     if changes.is_empty() {
         return fake::refuse("standings query names no complete change requests");
     }
+    // `gh.follow.<NUMBER>`: the checks a read *after* the publication's watch reports
+    // on that change request — a follow read, which is this same query — answered by
+    // `onevcs-testing`'s host, so it is charged and counted as GitHub charges it.
+    if !query.contains("reviewThreads(")
+        && changes
+            .iter()
+            .all(|change| follow_script(dir, &change.0).is_some())
+    {
+        return holding_the_records(dir, || follow_read(owner, name, &changes, dir));
+    }
     let repository_host = dir.join(format!(
         "review-host.{}.{}.json",
         fake::segment(owner),
@@ -2520,6 +2530,214 @@ fn standings_read(query: &str, owner: &str, name: &str, dir: &Path) -> ExitCode 
         }
         Err(error) => fake::refuse(&error.to_string()),
     }
+}
+
+/// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
+/// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
+fn follow_script(dir: &Path, number: &str) -> Option<(String, bool)> {
+    if let Some(text) = fake::node_script(dir, "gh", &format!("follow.{number}")) {
+        return Some((text, false));
+    }
+    fake::node_script(dir, "gh", &format!("follow-clock.{number}")).map(|text| (text, true))
+}
+
+/// One follow script's readings: blocks of `NAME STATUS CONCLUSION REQUIRED` lines
+/// split by `---`, each block of a clock script opening with `after_ms <N>` — the
+/// milliseconds after the change request's first follow read it starts answering.
+fn follow_readings(text: &str, clock: bool) -> Vec<(u64, Vec<Check>)> {
+    text.split("\n---")
+        .map(|block| {
+            let mut after = 0;
+            let mut checks = Vec::new();
+            for line in block.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                if line == "---" {
+                    continue;
+                }
+                if clock {
+                    if let Some(ms) = line.strip_prefix("after_ms ") {
+                        after = ms
+                            .trim()
+                            .parse()
+                            .unwrap_or_else(|_| fake::fail(&format!("{line:?} is no delay")));
+                        continue;
+                    }
+                }
+                checks.push(Check::parse(line).unwrap_or_else(|why| fake::fail(&why)));
+            }
+            (after, checks)
+        })
+        .collect()
+}
+
+/// A scripted check as `onevcs` names one, on `head`, with the address
+/// `gh pr checks` gives it.
+fn sibling_check(check: &Check, repo: &str, index: usize, head: &str) -> onevcs::Check {
+    let entry = check.rollup_entry(false);
+    onevcs::Check {
+        name: check.name.clone(),
+        status: check.state.status().to_owned(),
+        conclusion: entry["conclusion"].as_str().map(str::to_owned),
+        required: check.blocks == Blocks::Required,
+        head: Some(onevcs::Sha(head.to_owned())),
+        url: format!("https://github.com/{repo}/actions/runs/1/job/{}", index + 1)
+            .parse()
+            .ok(),
+        started_at: entry["startedAt"].as_str().map(str::to_owned),
+        completed_at: entry["completedAt"].as_str().map(str::to_owned),
+    }
+}
+
+/// A follow read: every check on each change request's head as its follow script
+/// says at this read, answered — and charged on its ledger — by `onevcs-testing`'s
+/// host, which holds a copy of each followed change request in `follow-host.json`.
+/// Every call is written to `gh/follow-reads.jsonl` with when it was made and what
+/// it was charged, which is what a journey reads a cadence off.
+fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path) -> ExitCode {
+    use onevcs::RemoteHost;
+    let repo = format!("{owner}/{name}");
+    let standings = match own_standing_list(owner, name, changes, dir) {
+        Ok(standings) => standings,
+        Err(refused) => return refused,
+    };
+    let path = dir.join("follow-host.json");
+    let mut state = if path.is_file() {
+        match onevcs_testing::FileHost::create(&path).and_then(|host| host.state()) {
+            Ok(state) => state,
+            Err(error) => return fake::refuse(&error.to_string()),
+        }
+    } else {
+        onevcs_testing::HostState::default()
+    };
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |at| at.as_millis()),
+    )
+    .unwrap_or(u64::MAX);
+    for (change, standing) in changes.iter().zip(&standings) {
+        let (text, clock) = follow_script(dir, &change.0).expect("every change is scripted");
+        let readings = follow_readings(&text, clock);
+        let head = standing.head.0.clone();
+        let checks = |reading: &[Check]| -> Vec<onevcs::Check> {
+            reading
+                .iter()
+                .enumerate()
+                .map(|(index, check)| sibling_check(check, &repo, index, &head))
+                .collect()
+        };
+        if !state.changes.iter().any(|held| held.id == *change) {
+            state.changes.push(
+                serde_json::from_value(serde_json::json!({
+                    "id": change.0, "url": standing.url.as_str(),
+                    "head_sha": head, "base": standing.base,
+                }))
+                .unwrap_or_else(|error| fake::fail(&format!("a followed change: {error}"))),
+            );
+        }
+        let first = dir
+            .join("gh")
+            .join(format!("{}.follow-first", fake::segment(&change.0)));
+        let since = read_if_present(&first)
+            .and_then(|text| text.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                let _ = std::fs::write(&first, now.to_string());
+                now
+            });
+        let scripted: Vec<Vec<onevcs::Check>> = if clock {
+            let elapsed = now.saturating_sub(since);
+            let current = readings
+                .iter()
+                .rev()
+                .find(|(after, _)| *after <= elapsed)
+                .or_else(|| readings.first())
+                .map(|(_, reading)| checks(reading))
+                .unwrap_or_default();
+            vec![current]
+        } else {
+            readings
+                .iter()
+                .map(|(_, reading)| checks(reading))
+                .collect()
+        };
+        state.check_readings.insert(change.clone(), scripted);
+    }
+    let host = match onevcs_testing::FileHost::seeded(&path, state) {
+        Ok(host) => host,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let asked: Vec<(onevcs::ChangeId, onevcs::Sha)> = changes
+        .iter()
+        .cloned()
+        .zip(standings.iter().map(|standing| standing.head.clone()))
+        .collect();
+    let followed = match host.follow_checks(&asked) {
+        Ok(followed) => followed,
+        Err(error) => return fake::refuse(&error.to_string()),
+    };
+    let log = dir.join("gh").join("follow-reads.jsonl");
+    let line = serde_json::json!({
+        "at_ms": now, "repo": repo,
+        "changes": changes.iter().map(|change| change.0.clone()).collect::<Vec<_>>(),
+        "graphql_points": followed.cost.graphql_points, "rest_requests": followed.cost.rest_requests,
+    });
+    if let Err(error) = append_line(&log, &line.to_string()) {
+        fake::fail(&format!("cannot record a follow read: {error}"));
+    }
+    use serde_json::{json, Value};
+    let page = |nodes: Vec<Value>| json!({"pageInfo": {"hasNextPage": false}, "nodes": nodes});
+    let mut repository =
+        json!({"defaultBranchRef": {"name": "main"}, "rulesets": page(Vec::new())});
+    let mut protections = Vec::new();
+    for (at, (standing, one)) in standings.iter().zip(&followed.changes).enumerate() {
+        let required: Vec<&str> = one
+            .checks
+            .iter()
+            .filter(|check| check.required)
+            .map(|check| check.name.as_str())
+            .collect();
+        protections.push(json!({"databaseId": at + 1, "pattern": standing.base,
+            "requiredStatusCheckContexts": required}));
+        let contexts: Vec<Value> = one
+            .checks
+            .iter()
+            .map(|check| {
+                json!({"__typename": "CheckRun", "name": check.name,
+                    "status": check.status.to_ascii_uppercase(),
+                    "conclusion": check.conclusion.as_ref().map(|c| c.to_ascii_uppercase()),
+                    "startedAt": check.started_at, "completedAt": check.completed_at,
+                    "detailsUrl": check.url.as_ref().map(onevcs::Url::as_str),
+                    "isRequired": check.required})
+            })
+            .collect();
+        repository[format!("c{at}")] = json!({
+            "url": standing.url, "state": "OPEN", "isDraft": standing.draft,
+            "body": standing.body, "baseRefName": standing.base,
+            "headRefName": standing.head_branch, "headRefOid": standing.head,
+            "mergedAt": Value::Null, "mergeCommit": Value::Null,
+            "baseRef": {"name": standing.base},
+            "headRef": {"target": {"statusCheckRollup": {"contexts": page(contexts)}}},
+            "closingIssuesReferences": {"nodes": closing_issues(dir)},
+        });
+    }
+    repository["branchProtectionRules"] = page(protections);
+    println!(
+        "{}",
+        json!({"data": {"rateLimit": {"cost": followed.cost.graphql_points}, "repository": repository}})
+    );
+    ExitCode::SUCCESS
+}
+
+/// Append one line to `path`, creating it.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
 }
 
 /// Translate sibling-owned standings and verdicts into GitHub's response fields.
