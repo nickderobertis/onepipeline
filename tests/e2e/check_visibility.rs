@@ -181,9 +181,9 @@ fn a_late_failing_check_that_blocks_nothing_is_shown_once_and_moves_nothing() {
     next.exited(0);
     let read: Value = serde_json::from_str(next.stdout.trim()).expect("next prints one object");
     assert!(
-        read["check_lines"]
-            .as_array()
-            .is_some_and(|lines| lines.iter().any(|said| *said == Value::from(line.clone()))),
+        read["check_lines"].as_array().is_some_and(|lines| lines
+            .iter()
+            .any(|said| said.as_str() == Some(line.as_str()))),
         "{read}"
     );
     assert!(
