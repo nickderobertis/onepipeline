@@ -183,6 +183,30 @@ budgets:
       writes and six claim reads. The 45 it replaces was arithmetic of 2026-10-10 over a design
       without the boundary's visibility probes (#852), the driver's claim (#862), the placement
       read (#916) or the publication fence (#965); the fence's writes alone are over 45.
+  - id: check-visibility-github-quota
+    measure: reported
+    command: [bash, scripts/check-visibility-quota-budget.sh]
+    unit: quota-units
+    direction: max
+    threshold: 250
+    description: >-
+      GitHub quota for following checks and release holds: GraphQL points plus REST requests one
+      realistic run spends on the host's gh token following its published change requests'
+      checks after publication and reading what holds its awaited releases; the reporter's
+      detail breaks it into follow reads and holdup reads, each with its call count and points.
+      Workload: one run of about 4 hours publishing 12 change requests across 3 repositories,
+      6 of which still have 3 non-required checks running for 20 minutes after their required
+      checks settle, and 2 nodes held 3 hours on one automated release whose release change
+      request has a failing required check. Read from the telemetry the e2e tier's
+      check-visibility workload journey records over onevcs-testing's remote double, which
+      answers and charges every follow read, and recorded GitHub responses replayed at onevcs's
+      `ONEVCS_GH` seam, which answer every holdup query and report its `rateLimit.cost`; the
+      journey runs every interval and duration divided by 1000, so the counts are what the
+      engine's own cadence and sharing produce. Basis: arithmetic from onevcs's stated costs — a
+      batched follow read is 1 GraphQL point for up to 50 change requests and no REST request,
+      so 6 changes x 20 one-minute reads with no two overlapping is 120 points; a holdup read is
+      at most 2 queries of 1 point, every 10 minutes and shared by both held nodes, 18 x 2 = 36;
+      156 in all, and 250 leaves room for the first reads at publication and at the run's end.
   # The CI, CD and local-gate budgets. The seven labelled `release-tail` are measured after a
   # release, from GitHub's own records of the runs it carried, by the last step of release.yml's
   # `publish` (`onebudgetspec check budgets.yaml --label release-tail`), reporting only;

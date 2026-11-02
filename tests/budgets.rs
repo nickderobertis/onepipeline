@@ -162,6 +162,75 @@ fn the_budgets_file_registers_the_host_view_budget() {
     assert!(proof.contains("just host-view-budget \"$root/bin/onepipeline\""));
 }
 
+/// The check-visibility quota budget, as `budgets.yaml` registers it: reported by its command
+/// off the record the e2e tier's workload journey writes, at most 250 quota units, unlabelled,
+/// and read by the `budgets` target only after that tier has written the record — which the
+/// tier declares among its outputs.
+#[test]
+fn the_budgets_file_registers_the_check_visibility_quota_budget() {
+    let loaded = onebudgetspec_core::load(&[root().join("budgets.yaml")], false)
+        .unwrap_or_else(|error| panic!("budgets.yaml does not load: {error}"));
+    let budget = loaded
+        .files()
+        .iter()
+        .flat_map(|file| &file.contents.budgets)
+        .find(|budget| budget.id == "check-visibility-github-quota")
+        .expect("budgets.yaml registers check-visibility-github-quota");
+    assert_eq!(budget.measure, Measure::Reported);
+    assert_eq!(budget.unit, "quota-units");
+    assert_eq!(budget.direction, Direction::Max);
+    assert!(
+        (budget.threshold - 250.0).abs() < f64::EPSILON,
+        "{}",
+        budget.threshold
+    );
+    assert_eq!(
+        budget.command,
+        ["bash", "scripts/check-visibility-quota-budget.sh"],
+        "the budget's command is not the committed reporter"
+    );
+    assert!(budget.labels.is_empty(), "{:?}", budget.labels);
+    let journeys = std::fs::read_to_string(root().join("tests/e2e/check_visibility.rs"))
+        .expect("the journeys");
+    assert!(journeys.contains(
+        "#[test]\nfn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent()"
+    ));
+    let project: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("project.json")).expect("project.json"),
+    )
+    .expect("project.json parses");
+    assert!(project["targets"]["budgets"]["inputs"]
+        .as_array()
+        .expect("the budgets target names its inputs")
+        .contains(&serde_json::json!(
+            "{workspaceRoot}/scripts/check-visibility-quota-budget.*"
+        )));
+    let reporter =
+        std::fs::read_to_string(root().join("scripts/check-visibility-quota-budget.mjs"))
+            .expect("the reporter reads");
+    let record = reporter
+        .lines()
+        .find_map(|line| line.strip_prefix("const record = \""))
+        .and_then(|rest| rest.strip_suffix("\";"))
+        .expect("the reporter names the record it reads");
+    assert!(
+        journeys.contains(&format!("pub(crate) const RECORD: &str = \"{record}\";")),
+        "the workload journey writes a record other than {record}"
+    );
+    let e2e: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root().join("tests/e2e/project.json"))
+            .expect("tests/e2e/project.json"),
+    )
+    .expect("tests/e2e/project.json parses");
+    assert!(
+        e2e["targets"]["test"]["outputs"]
+            .as_array()
+            .expect("the e2e tier names its outputs")
+            .contains(&serde_json::json!(format!("{{workspaceRoot}}/{record}"))),
+        "the e2e tier's outputs leave out {record}"
+    );
+}
+
 /// The review round's quota budget, as `budgets.yaml` registers it: reported by its command off
 /// the record the e2e tier's busy-round journey writes, at most 175 quota units, and read by the
 /// `budgets` target only after that tier has written the record — a record the tier declares

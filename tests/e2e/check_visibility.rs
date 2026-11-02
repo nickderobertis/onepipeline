@@ -1013,3 +1013,219 @@ fn a_failing_optional_check_on_the_release_change_holds_nothing_when_the_release
         "{red_pass:?}"
     );
 }
+
+/// Where the budget journey's telemetry is written for `check-visibility-github-quota`'s
+/// command to read.
+pub(crate) const RECORD: &str = "target/budget-records/check-visibility-quota.json";
+
+/// The budget's scale: every interval and duration of the workload divided by it.
+const SCALE: f64 = 1000.0;
+
+/// The slack one recorded call time may carry past the engine's own clock: the double
+/// stamps a call when its process starts, a few milliseconds after the engine asked.
+const STAMP_SLACK_MS: u64 = 25;
+
+/// A lifecycle node of repository `repo`.
+fn published_in(id: &str, repo: &str, deps: &[&str]) -> Value {
+    let mut node = lifecycle(id, deps);
+    node["repo"] = Value::from(repo);
+    node
+}
+
+/// Every pair of successive reads of one key closer together than `every_ms`, by the
+/// double's own stamps.
+fn closer_than(reads: &[Value], key: &str, every_ms: u64) -> Vec<(u64, u64)> {
+    let mut last: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut close = Vec::new();
+    for read in reads {
+        let at = read["at_ms"].as_u64().expect("a stamp");
+        let of = read[key].to_string();
+        if let Some(before) = last.insert(of, at) {
+            if at.saturating_sub(before) + STAMP_SLACK_MS < every_ms {
+                close.push((before, at));
+            }
+        }
+    }
+    close
+}
+
+/// The budget's workload, scaled by [`SCALE`]: one run publishing 12 change requests
+/// across 3 repositories — 6 of them with 3 checks that block nothing still running for
+/// 20 minutes after their required check settles — and 2 nodes held 3 hours on one
+/// automated release whose own change request has a failing required check. It asserts
+/// the engine's cadence and sharing, and records every follow and holdup read with what
+/// it cost for `scripts/check-visibility-quota-budget.sh`; it asserts no quota figure.
+#[test]
+fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent() {
+    let follow = 60.0 / SCALE;
+    let holdup = 600.0 / SCALE;
+    let timeout = 3600.0 / SCALE;
+    let running_ms = (20.0 * 60.0 * 1000.0 / SCALE) as u64;
+    let hold = std::time::Duration::from_secs_f64(3.0 * 3600.0 / SCALE);
+    let world = crate::adoption::watching("check-visibility-budget")
+        .with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", &follow.to_string())
+        .with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", &holdup.to_string())
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", &timeout.to_string());
+    world.write_graphs();
+    // Every change request watched for its checks and kept for review; the release
+    // producer's repository lands directly, so its release can be asked about.
+    world.repository("change-open", &[]);
+    std::fs::write(
+        world.onevcs_home().join("rules.yml"),
+        "version: 3\nrules:\n  - match: {owner: owner, name: engine}\n    publication: \
+         local-direct\n    approvals: none\ndefault:\n  publication: change-open\n  approvals: \
+         required\n",
+    )
+    .expect("the rules file is written");
+    let _tools = world.extra_repository("tools");
+    let engine_repo = world.extra_repository("engine");
+    let (script, answer) = world.probe_in(&engine_repo, "engine");
+    world.releases(&format!(
+        "version: 1\n\
+         repositories:\n\
+         \x20 - match: {{host: github.com, owner: owner, name: engine}}\n\
+         \x20   release_change: {{head: \"release-plz-*\"}}\n\
+         \x20   default_target: crate\n\
+         \x20   targets:\n\
+         \x20   - name: crate\n\
+         \x20     style: automated\n\
+         \x20     probe: {{script: {script}, timeout_seconds: 30}}\n\
+         default:\n\x20 adoption: fast\n"
+    ));
+    crate::adoption::releases_at(&answer, "0.1.0");
+    world.script("gh.holdup-listing", HOLDUP_LISTING);
+    world.script(
+        "gh.holdup-standings",
+        &holdup_standings(&[("gate (linux-x86_64)", "COMPLETED", Some("FAILURE"))]),
+    );
+    world.script("gh.holdup-numbers", "298");
+    let settled = "lint completed success required";
+    let running = "lint completed success required\nslow-a in_progress - advisory\nslow-b \
+                   in_progress - advisory\nslow-c in_progress - advisory";
+    world.script("gh.checks.repo.owner.service", running);
+    world.script("gh.checks.repo.owner.tools", settled);
+    world.script("gh.checks.repo.owner.engine", settled);
+    world.script(
+        "gh.follow-clock.repo.owner.service",
+        &format!(
+            "after_ms 0\n{running}\n---\nafter_ms {running_ms}\n{settled}\nslow-a completed \
+             success advisory\nslow-b completed success advisory\nslow-c completed success \
+             advisory"
+        ),
+    );
+
+    // The release producer lands directly; every other node opens a change request.
+    let mut producer = lifecycle("producer", &[]);
+    producer["repo"] = Value::from("engine");
+    let mut nodes = vec![producer];
+    for id in ["s1", "s2", "s3", "s4", "s5", "s6"] {
+        nodes.push(published_in(id, "service", &[]));
+    }
+    for id in ["t1", "t2"] {
+        nodes.push(published_in(id, "tools", &[]));
+    }
+    for id in ["c1", "c2"] {
+        let mut held = published_in(id, "tools", &["producer"]);
+        held["adoption"] = Value::from("published");
+        nodes.push(held);
+    }
+    for id in ["e1", "e2"] {
+        let mut node = published_in(id, "engine", &[]);
+        node["merge_policy"] = Value::from("change-open");
+        nodes.push(node);
+    }
+    let run = crate::adoption::start(&world, "checkvisibilitybudget", nodes);
+
+    world.until("the first holdup read", |world| {
+        !holdup_reads(world).is_empty()
+    });
+    let held_from = holdup_reads(&world)[0]["at_ms"].as_u64().expect("a stamp");
+    std::thread::sleep(hold);
+    crate::adoption::releases_at(&answer, "0.2.0");
+    world.until("the run to settle and its driver to let go", |world| {
+        world.run_file(&run, "result.json").is_file()
+            && !world.events_of(&run, "driver-exited").is_empty()
+    });
+    let result = world.run_json(&run, "result.json");
+    let opened = result["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .filter(|node| node["change_url"].is_string())
+        .count();
+    assert_eq!(opened, 12, "{result}");
+
+    // The cadence: one repository's follow reads never closer than the interval, and
+    // its change requests read together; one identity's holdup reads never closer
+    // than its interval, and shared by both held nodes.
+    let follows = follow_reads(&world);
+    let holdups = holdup_reads(&world);
+    let listings: Vec<Value> = holdups
+        .iter()
+        .filter(|read| read["query"] == "listing")
+        .cloned()
+        .collect();
+    assert!(
+        closer_than(&follows, "repo", (follow * 1000.0) as u64).is_empty(),
+        "{follows:?}"
+    );
+    assert!(
+        follows.iter().any(|read| read["changes"]
+            .as_array()
+            .is_some_and(|changes| changes.len() >= 2)),
+        "no read followed two change requests of one repository together: {follows:?}\n{:?}\n{:?}",
+        world
+            .events_of(&run, "change-check")
+            .iter()
+            .map(|event| format!(
+                "{} {} {}",
+                event["labels"]["node"], event["payload"]["name"], event["payload"]["state"]
+            ))
+            .collect::<Vec<_>>(),
+        world
+            .events_of(&run, "node-settled")
+            .iter()
+            .map(|event| format!(
+                "{} {} {}",
+                event["labels"]["node"], event["payload"]["outcome"], event["ts"]
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        follows.iter().all(|read| read["repo"] == "owner/service"),
+        "a change request with nothing running was followed: {follows:?}"
+    );
+    assert!(
+        closer_than(&listings, "query", (holdup * 1000.0) as u64).is_empty(),
+        "{listings:?}"
+    );
+    let held_for = listings
+        .last()
+        .and_then(|read| read["at_ms"].as_u64())
+        .unwrap_or(held_from)
+        .saturating_sub(held_from);
+    let shared_bound = held_for / (holdup * 1000.0) as u64 + 2;
+    assert!(
+        (listings.len() as u64) <= shared_bound,
+        "{} listings over {held_for} ms: each held node made its own",
+        listings.len()
+    );
+
+    let record = serde_json::json!({
+        "schema_version": 1,
+        "workload": {"changes": 12, "repositories": 3, "followed_changes": 6,
+                     "running_checks_per_followed_change": 3, "running_minutes": 20,
+                     "held_nodes": 2, "held_hours": 3, "scale": SCALE},
+        "phases": [
+            {"phase": "follow", "calls": follows},
+            {"phase": "holdup", "calls": holdups},
+        ],
+    });
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/budget-records");
+    std::fs::create_dir_all(&directory).expect("the record directory");
+    std::fs::write(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(RECORD),
+        serde_json::to_string_pretty(&record).expect("the record serializes"),
+    )
+    .expect("the record is written");
+}

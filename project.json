@@ -129,6 +129,7 @@
         "{workspaceRoot}/budgets.yaml",
         "{workspaceRoot}/scripts/stacked-spikes-budget.mjs",
         "{workspaceRoot}/scripts/review-round-quota-budget.*",
+        "{workspaceRoot}/scripts/check-visibility-quota-budget.*",
         "{workspaceRoot}/package-lock.json",
         "{workspaceRoot}/scripts/store-operations-budget.mjs",
         "{workspaceRoot}/scripts/settlement-latency-budget.sh",
