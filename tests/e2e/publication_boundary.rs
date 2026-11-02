@@ -2728,6 +2728,82 @@ fn a_private_coordinating_project_runs_its_public_consumer_from_a_screened_expor
     assert!(view.contains("status: done"), "{view}");
 }
 
+/// A private coordinating plan homed on a source the default sources leave out reads its
+/// home's tasks from that source and its members' from theirs, so it checks and launches with
+/// every node. The reader once asked the defaults, which the store narrows to the home's own
+/// source — so a home they did not name was dropped, and the plan read as the neutral view of
+/// its public task alone, refused as an export edge whose producer is no node of the plan.
+#[test]
+fn a_private_coordinating_plan_homed_off_the_default_sources_checks_and_launches_every_node() {
+    let (world, _, library) = private_home_world("boundary-home-off-defaults");
+    // Every source but the home's.
+    let world = world.with_env("ONETASKGRAPH_DEFAULT_SOURCES", "draft,views");
+    world.script("generalize.work-at", "examples/generic/sample.md");
+    world.script("generalize.work", "a generic example\n");
+    world.script("examples.work-at", "consumer.md");
+    world.script("examples.work", "what the public task built on it\n");
+    let run = "off-defaults";
+    let project = routed_into_private_home(&world, run, &Home::Private.exported_plan(run));
+    assert!(project.starts_with("plans:"), "{project}");
+
+    let checked = world.run(&["plan", "check", &project, "--json"]);
+    checked.exited(0);
+    let answered: Value = serde_json::from_str(checked.stdout.trim()).expect("one JSON object");
+    assert_eq!(answered["accepted"], json!(true), "{answered}");
+    assert_eq!(answered["refusals"], json!([]), "{answered}");
+
+    world.run(&["start", &project, "--attach"]).settled();
+    let launched = world.run_json(run, "plan.json");
+    let ids: Vec<&str> = launched["tasks"]
+        .as_array()
+        .expect("the launched nodes")
+        .iter()
+        .filter_map(|node| node["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["generalize", "examples"], "{launched}");
+    let repositories: Vec<&Value> = launched["tasks"]
+        .as_array()
+        .expect("the launched nodes")
+        .iter()
+        .map(|node| &node["repo"])
+        .collect();
+    assert_ne!(repositories[0], repositories[1], "{launched}");
+
+    for node in ["generalize", "examples"] {
+        let settled = settled(&world, run, node);
+        assert_eq!(settled["status"], "done", "{settled}\n{}", world.dump());
+    }
+    // Each was dispatched in its own repository: the producer kept its branch in the private
+    // one, and the consumer's session opened on the export into the public one.
+    let recorded = world.run_json(run, "exports.json");
+    let recorded = recorded.as_array().expect("a list of exports");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    assert_eq!(recorded[0]["producer"], "generalize", "{recorded:?}");
+    assert_ne!(recorded[0]["from"], recorded[0]["to"], "{recorded:?}");
+    let exported = recorded[0]["exported"]
+        .as_str()
+        .expect("a branch")
+        .to_owned();
+    let opened: Vec<Value> = world
+        .events_of(run, "session-opened")
+        .into_iter()
+        .filter(|event| event["labels"]["node"] == "examples")
+        .collect();
+    assert!(!opened.is_empty(), "{}", world.dump());
+    for event in &opened {
+        assert_eq!(event["payload"]["branch"], exported, "{event}");
+    }
+    git_out(&world, &library.checkout, &["fetch", "origin"]);
+    assert_eq!(
+        git_out(
+            &world,
+            &library.checkout,
+            &["show", "origin/main:consumer.md"]
+        ),
+        "what the public task built on it"
+    );
+}
+
 /// A private plan whose public task carries an anchor naming only itself — `<a id="…"></a>`,
 /// what a plan-task template writes before a schema-2 budget — and an in-page link to it is
 /// copied into the private home through the store this crate links, and the store's public

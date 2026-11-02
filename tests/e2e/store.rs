@@ -3044,9 +3044,7 @@ fn a_label_strict_destination_accepts_the_settlement_projection() {
     let world = World::new("store-writeback-label-strict");
     let store = world.store();
     let world = world
-        // Both sources, exactly as an operator's own configuration would declare them: the
-        // board this run launches from is the strict one.
-        .with_env("ONETASKGRAPH_DEFAULT_SOURCES", "plans,strict")
+        // The board this run launches from: the strict source.
         .with_env("ONETASKGRAPH_SOURCES__STRICT__PLUGIN", "subprocess")
         .with_env(
             "ONETASKGRAPH_SOURCES__STRICT__CONFIG__COMMAND",

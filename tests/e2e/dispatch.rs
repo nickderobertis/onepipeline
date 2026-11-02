@@ -7973,9 +7973,9 @@ fn run_labels_copy_origin_resolves_group_and_name() {
     world.plan_in(&authoring, "example", &plan_of("newest-copy", vec![]));
     world.copy_project_metadata("authoring:example-board", "newer");
     let newest = newest.replacen(crate::harness::STORE_SOURCE, "newer", 1);
-    let mut command = world.agentgraph_cmd(&["start", &newest, "--attach"]);
-    command.env("ONETASKGRAPH_DEFAULT_SOURCES", "newer");
-    world.run_on(command, "start the newer copy").exited(0);
+    world
+        .run_on_agentgraph(&["start", &newest, "--attach"])
+        .exited(0);
     // New activity on the earlier run must not rename a project after its newest launch.
     world
         .run_on_agentgraph(&["adopt", "copied", "--attach"])

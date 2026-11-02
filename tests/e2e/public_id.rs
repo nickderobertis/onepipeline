@@ -285,8 +285,7 @@ fn a_store_not_declared_private_and_a_public_branch_carry_the_public_id_and_noth
             "ONETASKGRAPH_SOURCES__SECRET__CONFIG__ROOT",
             &secret_root.to_string_lossy(),
         )
-        .with_env("ONETASKGRAPH_SOURCES__SECRET__VISIBILITY", "private")
-        .with_env("ONETASKGRAPH_DEFAULT_SOURCES", "plans,secret");
+        .with_env("ONETASKGRAPH_SOURCES__SECRET__VISIBILITY", "private");
     let held = held_publication(&world, &world.fakes.join("push.go"));
     world.repository("local-direct", &held.argv());
     registered(&world);

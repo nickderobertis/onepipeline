@@ -2085,10 +2085,7 @@ fn a_rendered_node_on_a_board_that_keeps_no_answers_loads_under_the_check_until_
         ]);
         command
             .current_dir(&dir)
-            .envs(env.iter().map(|(key, value)| (key, value)))
-            // The plan reader asks the default sources for a project's tasks, so the
-            // board is named as the one to ask.
-            .env("ONETASKGRAPH_DEFAULT_SOURCES", "board");
+            .envs(env.iter().map(|(key, value)| (key, value)));
         world
             .run_on(command, "plan check board")
             .exited(expect)

@@ -1194,6 +1194,11 @@ impl Reader {
     /// names, each in a source of its own, so the read asks the store for the home
     /// with its members and every task comes back qualified by its own source.
     ///
+    /// A qualified home is read from the source it names, whatever the defaults are:
+    /// the store keeps only the home's source out of the sources it is asked, so a read
+    /// asking the defaults dropped a home they leave out, and the plan read as its
+    /// members' tasks alone.
+    ///
     /// Checked rather than assumed: the project selector is a filter this build asked a
     /// **third party**'s sources to apply, and a plan assembled out of an item from
     /// somewhere else would carry a node nobody put in this plan. Both halves
@@ -1210,7 +1215,11 @@ impl Reader {
             project.as_str(),
             |token| {
                 let request = TaskRequest {
-                    sources: Vec::new(),
+                    // The home's own source, never the defaults: see above.
+                    sources: match &selector {
+                        ProjectSelector::Qualified(id) => vec![id.source.clone()],
+                        _ => Vec::new(),
+                    },
                     filters: Filters::default(),
                     priorities: Vec::new(),
                     metadata: Vec::new(),
