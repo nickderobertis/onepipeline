@@ -2062,8 +2062,23 @@ fn a_verdict_beside_commands_applied_with_nothing_driving_is_journalled_and_name
     );
     applied.exited(0);
     let receipt = applied.json();
-    // `0` because this process applied them itself: there was no queue to name.
-    assert_eq!(receipt["reply"], json!(0));
+    // This process applied them itself, and still names the envelope by the id the
+    // run's command record holds it under.
+    let recorded: Vec<serde_json::Value> =
+        std::fs::read_to_string(world.run_file("undrivenverdict", "channel/commands.jsonl"))
+            .expect("the run's command record is there")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("a recorded envelope is JSON"))
+            .collect();
+    assert_eq!(
+        recorded
+            .iter()
+            .filter(|envelope| envelope["commands"][0]["message"] == "waiting on a person")
+            .map(|envelope| envelope["id"].clone())
+            .collect::<Vec<_>>(),
+        [receipt["reply"].clone()],
+        "the receipt does not name the one envelope the run recorded: {receipt}"
+    );
     assert_eq!(receipt["state"], "applied");
     assert_eq!(receipt["verdict"], "delivered");
     assert_eq!(receipt["commands"], "applied");

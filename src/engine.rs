@@ -1472,6 +1472,35 @@ pub(crate) fn take_if_undriven(paths: &RunPaths) -> Result<Option<OwnershipLock>
     taken
 }
 
+/// [`ChannelState::record_applying`], for a writer that took the run through
+/// [`accept`], under the same handover gate a submission takes.
+pub(crate) fn record_applying(
+    paths: &RunPaths,
+    channel: &ChannelState,
+    author: crate::channel::Author,
+    commands: &[Command],
+) -> Result<u64> {
+    let handover = ledger::Handover::hold(paths)?;
+    let recorded = channel.record_applying(author, commands);
+    drop(handover);
+    recorded
+}
+
+/// The answer an envelope the run's writer applied itself is given, once each of
+/// its commands committed `applied[index]`: `applied`, as a reconciler answers an
+/// envelope it applied, each note's result naming the live turn that took it.
+pub(crate) fn applied_here(
+    id: u64,
+    commands: &[Command],
+    applied: &[Vec<edits::Operation>],
+) -> CommandOutcome {
+    let turns: Vec<Option<crate::note::NoteTurn>> = applied
+        .iter()
+        .map(|operations| turn_of(operations))
+        .collect();
+    applied_envelope(id, commands, &turns)
+}
+
 /// The section itself, for a caller already inside the handover — apart from its
 /// gate for the reason [`letting_go_under_the_handover`] is.
 fn accepting_under_the_handover(
@@ -5789,8 +5818,9 @@ fn partly_applied(id: u64, commands: &[Command], answered: &[Answered]) -> Comma
 
 /// `operations`, with each note delivery among them naming `envelope`, the
 /// command envelope it came in: what a driver taking the run over reads to
-/// tell a note already delivered from one it still owes.
-fn from_envelope(
+/// tell a note already delivered from one it still owes, and what a
+/// `withdraw-note` names a carried note by.
+pub(crate) fn from_envelope(
     operations: &[edits::Operation],
     envelope: u64,
     index: usize,

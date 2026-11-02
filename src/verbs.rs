@@ -889,9 +889,9 @@ impl VerdictHalf {
 /// What one submitted envelope became: one variant per outcome a submission can
 /// reach, so the receipt cannot be built out of parts that contradict each other.
 ///
-/// Which words `state` and `commands` spell, and whether there is a channel
-/// identifier to name at all, are decided by the same choice rather than carried
-/// as three fields a caller assembles.
+/// Which words `state` and `commands` spell, and which identifier `reply` names,
+/// are decided by the same choice rather than carried as three fields a caller
+/// assembles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyOutcome {
     /// A commandless verdict, queued for whichever reader the run owes one —
@@ -905,9 +905,12 @@ pub enum ReplyOutcome {
         verdict: VerdictHalf,
     },
     /// Every command applied by this process, which took the run's ownership
-    /// lock because nothing was driving it — so there is no queue and no
-    /// identifier to name.
+    /// lock because nothing was driving it. The envelope is still recorded in the
+    /// run's command record, under the next id the queue numbers envelopes by,
+    /// so a note of it is withdrawn by that id as any other note is.
     AppliedHere {
+        /// The envelope's durable id in the run's command record.
+        reply: u64,
         /// The verdict half that rode along, if one did.
         verdict: VerdictHalf,
     },
@@ -954,15 +957,16 @@ pub struct Receipt {
 }
 
 impl Receipt {
-    /// The identifier in the channel. The wire spells the local apply's absence
-    /// `0`, which is what this receipt has always answered there and is not a
-    /// second identifier.
+    /// The identifier in the channel: the envelope's id in the run's command
+    /// record for every outcome that applied or queued commands, whichever process
+    /// applied them, and a verdict's id — or `0` for one written to the run's own
+    /// record — for an envelope answered with no commands.
     pub fn reply(&self) -> u64 {
         match self.outcome {
             ReplyOutcome::Answered { reply, .. }
+            | ReplyOutcome::AppliedHere { reply, .. }
             | ReplyOutcome::AppliedByRun { reply, .. }
             | ReplyOutcome::Queued { reply, .. } => reply,
-            ReplyOutcome::AppliedHere { .. } => 0,
         }
     }
 
@@ -988,7 +992,7 @@ impl Receipt {
     pub fn verdict(&self) -> VerdictHalf {
         match self.outcome {
             ReplyOutcome::Answered { verdict, .. }
-            | ReplyOutcome::AppliedHere { verdict }
+            | ReplyOutcome::AppliedHere { verdict, .. }
             | ReplyOutcome::AppliedByRun { verdict, .. }
             | ReplyOutcome::Queued { verdict, .. } => verdict,
         }
@@ -1114,8 +1118,7 @@ fn submit(
     let mut advice = Vec::new();
     let outcome = match driver::submit_envelope(paths, correlation, envelope)? {
         Submitted::Answered { reply } => ReplyOutcome::Answered { reply, verdict },
-        // This process applied them itself, so there is no queue and no id in it.
-        Submitted::AppliedHere { .. } => ReplyOutcome::AppliedHere { verdict },
+        Submitted::AppliedHere { reply, .. } => ReplyOutcome::AppliedHere { reply, verdict },
         Submitted::AppliedByRun { reply } => ReplyOutcome::AppliedByRun { reply, verdict },
         // llmlint: ignore-block[cli_output_contract] the two outcomes this status shares are
         // told apart on stdout, by the receipt's `state`; the status answers whether the

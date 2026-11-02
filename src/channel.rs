@@ -2241,6 +2241,34 @@ impl ChannelState {
             .unwrap_or_default())
     }
 
+    /// Record one envelope the run's writer is applying **itself**, because nothing
+    /// was driving the run, and answer its id: appended under the queue's next id,
+    /// as [`submit`](Self::submit) appends one. The caller answers it once it is
+    /// applied, before it lets go of the run.
+    ///
+    /// Claimed at once where it is the only envelope waiting, so the cursor is past
+    /// it. Where envelopes submitted while nothing drove the run wait ahead of it,
+    /// it is left behind them — a claim cannot take it without taking them — and
+    /// the claim that later reaches it passes over it, answered: see
+    /// [`claim_commands_answering`](Self::claim_commands_answering). Either way no
+    /// reconciler applies it again. The caller holds the run's ownership lock and
+    /// the handover gate, which keeps a submission from landing between the append
+    /// and the claim.
+    pub(crate) fn record_applying(
+        &self,
+        author: Author,
+        commands: &[Command],
+    ) -> crate::Result<u64> {
+        let id = self.submit(author, commands)?;
+        let waiting = self.claimable_commands();
+        if waiting.undecodable == 0
+            && matches!(waiting.envelopes.as_slice(), [alone] if alone.id == id)
+        {
+            self.claim_commands_answering()?;
+        }
+        Ok(id)
+    }
+
     /// Exactly what [`claim_commands_answering`](Self::claim_commands_answering)
     /// would take, **without** taking it.
     ///
@@ -2254,13 +2282,35 @@ impl ChannelState {
             return Claimable::default();
         };
         let mut claimable = Claimable::default();
-        for record in commands.waiting().unwrap_or_default() {
-            match serde_json::from_value(record) {
+        let waiting = commands.waiting().unwrap_or_default();
+        let answered = self.answered_among(&waiting);
+        for record in waiting {
+            match serde_json::from_value::<QueuedCommands>(record) {
+                Ok(envelope) if answered.contains(&envelope.id) => {}
                 Ok(envelope) => claimable.envelopes.push(envelope),
                 Err(_) => claimable.undecodable += 1,
             }
         }
         claimable
+    }
+
+    /// The ids among `records` an outcome line already answers: envelopes the
+    /// run's writer applied itself and recorded behind others still waiting — see
+    /// [`record_applying`](Self::record_applying). Nothing is read for no records.
+    fn answered_among(&self, records: &[Value]) -> BTreeSet<u64> {
+        let ids: BTreeSet<u64> = records
+            .iter()
+            .filter_map(|record| record.get("id").and_then(Value::as_u64))
+            .collect();
+        if ids.is_empty() {
+            return ids;
+        }
+        self.outcome_lines()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(record, _)| record.get("id").and_then(Value::as_u64))
+            .filter(|id| ids.contains(id))
+            .collect()
     }
 
     /// Claim the command envelopes the reconciler has not drained yet.
@@ -2286,18 +2336,27 @@ impl ChannelState {
     ///
     /// The claim advances the cursor whatever the record holds, so a record this
     /// returned is one nothing will claim again: what it is owed is answered by
-    /// the caller or by nobody.
+    /// the caller or by nobody. An envelope already answered is claimed and passed
+    /// over: the run's writer applied it itself — see
+    /// [`record_applying`](Self::record_applying) — and its answer is written.
     pub(crate) fn claim_commands_answering(&self) -> crate::Result<Vec<Claimed>> {
         let commands = self.plain(COMMANDS)?;
-        let mut claimed = Vec::new();
+        let mut records = Vec::new();
         crate::loopstats::queue_claimed();
         while let Some(envelope) = commands
             .claim(&ConsumerName::default_consumer())
             .map_err(queue_failure)?
         {
-            claimed.push(Claimed::of(envelope.record));
+            records.push(envelope.record);
         }
-        Ok(claimed)
+        let answered = self.answered_among(&records);
+        Ok(records
+            .into_iter()
+            .map(Claimed::of)
+            .filter(|claimed| {
+                !matches!(claimed, Claimed::Envelope(envelope) if answered.contains(&envelope.id))
+            })
+            .collect())
     }
 
     /// [`claim_commands_answering`](Self::claim_commands_answering), unless the
