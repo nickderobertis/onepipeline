@@ -343,6 +343,28 @@ impl HumanItems {
         &self.config
     }
 
+    /// `session` and the runs and plans it owns: every run under this root
+    /// whose launch record names it, judged as the run views judge `[mine]`. A
+    /// run whose launch record cannot be read is nobody's here, as it is there.
+    pub(crate) fn asker(&self, session: String) -> super::present::Asker {
+        let mut asker = super::present::Asker {
+            session,
+            ..Default::default()
+        };
+        for paths in crate::ledger::all_runs(&self.root).runs {
+            let Ok(launch) =
+                crate::ledger::read_json::<crate::ledger::LaunchRecord>(&paths.launch())
+            else {
+                continue;
+            };
+            if launch.owned_by(&asker.session) {
+                asker.plans.insert(launch.project.clone());
+                asker.runs.insert(paths.run.clone());
+            }
+        }
+        asker
+    }
+
     /// Raise what a configured phase's hook expands to against `context`.
     /// Answers the receipt of the item raised, or `None` when the phase raised
     /// nothing (a review with no tickets).

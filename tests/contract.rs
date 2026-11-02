@@ -12048,6 +12048,40 @@ fn human_items_engine_schema_matches_the_published_copy_and_detects_drift() {
     assert!(CONTRACT.contains("detail.nodes is grouped by blocked.plans in that order"));
 }
 
+/// The published phase context carries a ticket's optional `title`: a context
+/// with titles and one written before they existed both validate against the
+/// exported schema and round-trip unchanged, and a blank title is refused by both.
+#[test]
+fn the_published_phase_context_carries_an_optional_ticket_title() {
+    use onepipeline::human_items::phases::PhaseContext;
+    let schema = onepipeline::human_items::schemas();
+    let validator = jsonschema::validator_for(&schema["PhaseContext"]).unwrap();
+    let fixtures: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/human-items-phase-context.json")).unwrap();
+    assert_eq!(fixtures.len(), 2);
+    assert!(fixtures[0]["tickets"][0]["title"].is_string());
+    assert!(fixtures[1]["tickets"][0].get("title").is_none());
+    for fixture in &fixtures {
+        validator.validate(fixture).unwrap();
+        let parsed: PhaseContext = serde_json::from_value(fixture.clone()).unwrap();
+        let written = serde_json::to_value(&parsed).unwrap();
+        // An absent title stays absent on the wire, so an older reader is unaffected.
+        assert_eq!(written["tickets"], fixture["tickets"], "{written}");
+        assert_eq!(written["owner"], fixture["owner"]);
+    }
+    let mut blank = fixtures[0].clone();
+    blank["tickets"][0]["title"] = json!(" ");
+    assert!(serde_json::from_value::<PhaseContext>(blank.clone()).is_err());
+    assert!(
+        !validator.is_valid(&blank),
+        "the schema accepted a blank title"
+    );
+    let mut unknown = fixtures[1].clone();
+    unknown["tickets"][0]["name"] = json!("not a field");
+    assert!(serde_json::from_value::<PhaseContext>(unknown.clone()).is_err());
+    assert!(!validator.is_valid(&unknown));
+}
+
 #[test]
 fn human_items_contract_fixture_round_trips_and_refuses_malformed_combinations() {
     use onepipeline::human_items::*;

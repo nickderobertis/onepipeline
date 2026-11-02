@@ -576,6 +576,95 @@ fn list_and_report_print_labels_sources_bodies_and_blocking_wording() {
     );
 }
 
+/// By default each item is one compact entry — title and id, then priority,
+/// kind, what it blocks and its source, then one line of its body, cut with an
+/// ellipsis when the body is longer — and `--full` prints every complete body.
+#[test]
+fn list_and_report_print_compact_entries_unless_asked_for_full_bodies() {
+    let world = Live::enabled();
+    let mut short = item(
+        "short",
+        "question",
+        "low",
+        "mgr",
+        json!({"scope":"nothing"}),
+    );
+    short["body"] = json!("Pick a name.");
+    world.raise(&short);
+    let long_line = format!(
+        "Restart the build service {}and then confirm.",
+        "after the outage ".repeat(8)
+    );
+    let mut long = item("long", "task", "high", "mgr", json!({"scope":"host"}));
+    long["body"] = json!(long_line);
+    world.raise(&long);
+    let mut lines = item("lines", "task", "medium", "mgr", json!({"scope":"nothing"}));
+    lines["owner"]["plan"] = json!("plans:alpha");
+    lines["body"] = json!("Read the design.\nThen confirm it in chat.\nThird line.");
+    world.raise(&lines);
+
+    for verb in ["list", "report"] {
+        let text = world.ok(Some("mgr"), &[verb]);
+        let entry = |title: &str| -> Vec<String> {
+            let lines: Vec<&str> = text.lines().collect();
+            let at = lines
+                .iter()
+                .position(|l| l.starts_with(&format!("- {title} (hi-")))
+                .unwrap_or_else(|| panic!("{verb} has no entry {title}: {text}"));
+            lines[at..at + 3].iter().map(|l| (*l).to_owned()).collect()
+        };
+        let short = entry("question short");
+        assert_eq!(
+            short[1], "  Low question · blocks nothing · session mgr",
+            "{text}"
+        );
+        assert_eq!(short[2], "  Pick a name.", "{text}");
+        let long = entry("task long");
+        assert_eq!(
+            long[1], "  High task · blocks all work on this host · host",
+            "{text}"
+        );
+        assert!(long[2].ends_with('…'), "{text}");
+        assert!(long[2].chars().count() <= 2 + 80, "{text}");
+        assert!(
+            long_line.starts_with(long[2].trim().trim_end_matches('…')),
+            "{text}"
+        );
+        let lines = entry("task lines");
+        assert_eq!(
+            lines[1], "  Medium task · blocks nothing · plan plans:alpha",
+            "{text}"
+        );
+        assert_eq!(lines[2], "  Read the design.…", "{text}");
+        for cut in [
+            "and then confirm.",
+            "Then confirm it in chat.",
+            "Third line.",
+        ] {
+            assert!(!text.contains(cut), "{verb} printed past one line: {text}");
+        }
+
+        let full = world.ok(Some("mgr"), &[verb, "--full"]);
+        for whole in [
+            "Pick a name.",
+            long_line.as_str(),
+            "Read the design.\nThen confirm it in chat.\nThird line.",
+        ] {
+            assert!(full.contains(whole), "{verb} --full lacks {whole}: {full}");
+        }
+        assert!(!full.contains('…'), "{full}");
+    }
+    let report = world.ok(Some("mgr"), &["report"]);
+    assert!(
+        report.starts_with("Human items: 3 listed, 1 blocking\n"),
+        "{report}"
+    );
+    let blocking = report.find("Blocking (1)").unwrap();
+    let rest = report.find("Not blocking (2)").unwrap();
+    assert!(blocking < report.find("- task long").unwrap());
+    assert!(report.find("- task long").unwrap() < rest);
+}
+
 fn telemetry(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()
@@ -1207,11 +1296,14 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
             "{heading}: {body}"
         );
         assert!(
-            body.contains(&format!("- {link}: https://tracker/{link}")),
+            body.contains(&format!(
+                "- [https://tracker/{link}](https://tracker/{link})\n"
+            )),
             "{link}: {body}"
         );
     }
-    assert_eq!(body.matches("t-2:").count(), 1, "{body}");
+    assert_eq!(body.matches("(https://tracker/t-2)").count(), 1, "{body}");
+    assert!(!body.contains("t-2:"), "no board id is printed: {body}");
     // The ticket with no priority raised a non-blocking finding naming it to the owner.
     let findings: Vec<Value> = world
         .json(None, &["list", "--json", "--session", "mgr"])
@@ -1291,6 +1383,74 @@ fn a_ticket_review_groups_every_link_and_one_rerun_updates_one_task() {
     );
     // No other session's watch hears of either retirement.
     assert_eq!(world.run(Some("other"), &["watch"]).status.code(), Some(5));
+}
+
+/// A review names each ticket as a markdown link: by its title when the context
+/// gives one, and otherwise by its short repository reference — never by its
+/// board id. A blank title is refused before anything is written.
+#[test]
+fn a_ticket_review_links_each_ticket_by_its_title_or_repository_reference() {
+    let world = hooked();
+    let owner = json!({"session": "mgr", "run": null, "plan": "plans:alpha"});
+    let ctx = context(
+        &world,
+        "titled",
+        &json!({"owner": owner, "dedup_key": "titled", "tickets": [
+            {"id": "board-1", "url": "https://github.com/acme/widgets/issues/12",
+             "priority": "high", "title": "Fix the [flaky] login test"},
+            {"id": "board-2", "url": "https://github.com/acme/widgets/pull/40", "priority": "low"},
+            {"id": "board-3", "url": "https://gitlab.example/group/gadgets/-/merge_requests/3"},
+        ]}),
+    );
+    let receipt = phase(&world, None, "ticket-review", &ctx);
+    let body = receipt["item"]["item"]["body"].as_str().unwrap().to_owned();
+    assert!(
+        body.contains(
+            "\nHigh\n- [Fix the \\[flaky\\] login test](https://github.com/acme/widgets/issues/12)\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("\nLow\n- [widgets#40](https://github.com/acme/widgets/pull/40)\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "\nNo priority\n- [gadgets#3](https://gitlab.example/group/gadgets/-/merge_requests/3)\n"
+        ),
+        "{body}"
+    );
+    assert!(!body.contains("board-"), "no board id is printed: {body}");
+    // The finding naming the ticket with no priority links it the same way.
+    let finding = world
+        .json(None, &["list", "--json", "--session", "mgr"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["item"]["id"] != receipt["item"]["item"]["id"])
+        .cloned()
+        .unwrap();
+    let text = finding["item"]["body"].as_str().unwrap();
+    assert!(
+        text.contains("- [gadgets#3](https://gitlab.example/group/gadgets/-/merge_requests/3)"),
+        "{text}"
+    );
+    assert!(!text.contains("board-3"), "{text}");
+
+    let records = world.journal().len();
+    let blank = context(
+        &world,
+        "blank-title",
+        &json!({"owner": owner, "dedup_key": "blank", "tickets": [
+            {"id": "a", "url": "https://github.com/acme/widgets/issues/1", "title": "  "},
+        ]}),
+    );
+    world.refused(
+        None,
+        &["raise", "--phase", "ticket-review", "--context", &blank],
+        "title, when given, is not blank",
+    );
+    assert_eq!(world.journal().len(), records);
 }
 
 /// A template that renders without error to a blank title or body is still an

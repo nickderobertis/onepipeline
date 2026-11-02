@@ -1,0 +1,27 @@
+[
+  {
+    "owner": {"session": "manager", "run": null, "plan": "plans:alpha"},
+    "dedup_key": "sprint-12",
+    "vars": {"sprint": "12"},
+    "tickets": [
+      {
+        "id": "board-1",
+        "url": "https://github.com/acme/widgets/issues/12",
+        "priority": "high",
+        "title": "Fix the flaky login test"
+      },
+      {
+        "id": "board-2",
+        "url": "https://github.com/acme/widgets/pull/40",
+        "priority": "low"
+      }
+    ]
+  },
+  {
+    "owner": {"session": "manager", "run": null, "plan": null},
+    "dedup_key": "written-before-titles",
+    "tickets": [
+      {"id": "board-3", "url": "https://github.com/acme/widgets/issues/7", "priority": "medium"}
+    ]
+  }
+]

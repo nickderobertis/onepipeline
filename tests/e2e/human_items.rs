@@ -222,6 +222,243 @@ fn input(
     })
 }
 
+/// Without a filter, a manager's `list` and `report` show what its own session
+/// raised or its runs raised, and what from elsewhere holds its work — the host,
+/// or a plan or run it launched — and count the rest on the line naming `--all`.
+/// A process with no session sees the whole host and says so; an explicit filter
+/// and `--json` keep reaching every session's items.
+#[test]
+fn each_manager_sees_its_own_items_and_what_holds_its_work() {
+    let mine = World::new("human-item-reach");
+    enabled(&mine);
+    let theirs = mine.as_session("session-other-manager");
+    let name = "reached";
+    let project = mine.plan(
+        name,
+        &plan_of(name, vec![human("gate", &[]), agent("after", &["gate"])]),
+    );
+    // This manager's run waits on its person, so it and its plan stay live.
+    mine.run(&["start", &project, "--attach"]).exited(0);
+    assert_eq!(items(&mine, &[]).len(), 1);
+    let me = mine.session.clone();
+    let other = theirs.session.clone();
+    let raised = [
+        // This session's own, holding nothing.
+        (
+            "own",
+            input(
+                "own",
+                "question",
+                &me,
+                None,
+                None,
+                json!({"scope": "nothing"}),
+            ),
+        ),
+        // Raised by this session's run under another session's name.
+        (
+            "by-my-run",
+            input(
+                "by-my-run",
+                "task",
+                "session-sub-worker",
+                Some(name),
+                Some(&project),
+                json!({"scope": "nothing"}),
+            ),
+        ),
+        // The other manager's: its own, a hold on its own plan, and holds reaching
+        // this session's work through the host, this plan and this run.
+        (
+            "their-own",
+            input(
+                "their-own",
+                "task",
+                &other,
+                None,
+                None,
+                json!({"scope": "nothing"}),
+            ),
+        ),
+        (
+            "their-plan",
+            input(
+                "their-plan",
+                "task",
+                &other,
+                None,
+                Some("plans:elsewhere"),
+                json!({"scope": "plan", "plan": "plans:elsewhere"}),
+            ),
+        ),
+        (
+            "their-host",
+            input(
+                "their-host",
+                "task",
+                &other,
+                None,
+                None,
+                json!({"scope": "host"}),
+            ),
+        ),
+        (
+            "on-my-plan",
+            input(
+                "on-my-plan",
+                "question",
+                &other,
+                None,
+                None,
+                json!({"scope": "plan", "plan": project}),
+            ),
+        ),
+        (
+            "on-my-run",
+            input(
+                "on-my-run",
+                "task",
+                &other,
+                None,
+                None,
+                json!({"scope": "work", "run": name, "node": "after"}),
+            ),
+        ),
+    ];
+    for (file, item) in &raised {
+        raise(&theirs, file, item);
+    }
+    let gate = "Do gate, which only a person can do.";
+    let title = |dedup: &str| format!("- Decide {dedup} (hi-");
+    let everything: Vec<String> = raised
+        .iter()
+        .map(|(dedup, _)| title(dedup))
+        .chain([format!("- {gate} (hi-")])
+        .collect();
+    let shows = |text: &str, wanted: &[&str], left_out: &[&str]| {
+        for dedup in wanted {
+            let entry = if *dedup == "gate" {
+                format!("- {gate} (hi-")
+            } else {
+                title(dedup)
+            };
+            assert!(text.contains(&entry), "{dedup} missing: {text}");
+        }
+        for dedup in left_out {
+            assert!(!text.contains(&title(dedup)), "{dedup} shown: {text}");
+        }
+    };
+    for verb in ["list", "report"] {
+        let text = mine.run(&["human-items", verb]).exited(0).stdout.clone();
+        shows(
+            &text,
+            &[
+                "gate",
+                "own",
+                "by-my-run",
+                "their-host",
+                "on-my-plan",
+                "on-my-run",
+            ],
+            &["their-own", "their-plan"],
+        );
+        assert!(
+            text.contains("2 other open items on this host (--all lists every item)"),
+            "{text}"
+        );
+
+        let text = theirs.run(&["human-items", verb]).exited(0).stdout.clone();
+        shows(
+            &text,
+            &[
+                "their-own",
+                "their-plan",
+                "their-host",
+                "on-my-plan",
+                "on-my-run",
+            ],
+            &["own", "by-my-run"],
+        );
+        assert!(!text.contains(gate), "{text}");
+        assert!(
+            text.contains("3 other open items on this host (--all lists every item)"),
+            "{text}"
+        );
+
+        for world in [&mine, &theirs] {
+            let text = world
+                .run(&["human-items", verb, "--all"])
+                .exited(0)
+                .stdout
+                .clone();
+            for entry in &everything {
+                assert!(text.contains(entry.as_str()), "--all lacks {entry}: {text}");
+            }
+            assert!(text.contains("Showing every item on this host."), "{text}");
+        }
+
+        // No session to resolve: the whole host, and the summary says so.
+        let output = mine
+            .cmd(&["human-items", verb])
+            .env_remove("ONEPIPELINE_LAUNCHER_SESSION")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        for entry in &everything {
+            assert!(
+                text.contains(entry.as_str()),
+                "unresolved lacks {entry}: {text}"
+            );
+        }
+        assert!(text.contains("so this is showing the whole host"), "{text}");
+
+        // An explicit filter, run as the other manager, reaches every session.
+        let text = theirs
+            .run(&["human-items", verb, "--kind", "question"])
+            .exited(0)
+            .stdout
+            .clone();
+        shows(
+            &text,
+            &["own", "on-my-plan"],
+            &["their-own", "by-my-run", "their-host"],
+        );
+        assert!(!text.contains("--all"), "{text}");
+        let text = theirs
+            .run(&["human-items", verb, "--session", &me])
+            .exited(0)
+            .stdout
+            .clone();
+        shows(&text, &["gate", "own"], &["their-host", "by-my-run"]);
+    }
+    let report = mine
+        .run(&["human-items", "report"])
+        .exited(0)
+        .stdout
+        .clone();
+    assert!(
+        report.starts_with("Human items: 6 listed, 4 blocking\n"),
+        "{report}"
+    );
+
+    // `--json` is never narrowed: every item on the host, in the shape it always had.
+    let all = items(&theirs, &[]);
+    assert_eq!(all.len(), everything.len());
+    assert_eq!(all, items(&mine, &[]));
+    assert_eq!(all, items(&mine, &["--all", "--full"]));
+    for view in &all {
+        let keys: Vec<&String> = view.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["item", "blocked"], "{view}");
+        let fields: Vec<&String> = view["item"].as_object().unwrap().keys().collect();
+        assert_eq!(fields.len(), 15, "{fields:?}");
+    }
+}
+
 fn stays_undispatched(world: &World, run: &str, for_: std::time::Duration) {
     let until = std::time::Instant::now() + for_;
     while std::time::Instant::now() < until {
