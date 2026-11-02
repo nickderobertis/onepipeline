@@ -22,7 +22,9 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{agent, held_publication, lifecycle, plan_of, project_id, renamed, World};
+use crate::harness::{
+    agent, hashed, held_publication, lifecycle, plan_of, project_id, renamed, World,
+};
 use crate::publication_boundary::declare_visibility;
 
 /// Plan A's name: the private repository's own.
@@ -31,18 +33,6 @@ const A: &str = "zephyrine-rollout";
 const B: &str = "widget-rollout";
 /// The second plan source, which the store declares `visibility: private`.
 const SECRET: &str = "secret";
-
-/// `run-` and the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
-fn hashed(run: &str) -> String {
-    use sha2::Digest;
-    let digest = sha2::Sha256::digest(run.as_bytes());
-    let hex: String = digest
-        .iter()
-        .take(6)
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("run-{hex}")
-}
 
 /// A world registering `service`, declared public, and `zephyrine`, declared private.
 fn registered(world: &World) {

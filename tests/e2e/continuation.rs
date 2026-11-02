@@ -1238,6 +1238,122 @@ fn a_driver_taken_over_mid_dispatch_withholds_its_publication_and_hands_over() {
     drop(successor);
 }
 
+/// Which of the displaced run's names a successor on its host would repeat, unchecked, when it
+/// mints from a runs root of its own.
+#[derive(Clone, Copy)]
+enum Repeats {
+    /// Its run id: a plan whose name passes the public-output check is named by its run id,
+    /// so the successor's first run-id candidate is the displaced claim's run.
+    RunId,
+    /// Its public id: a plan named after a private repository is named by the hashed form of
+    /// its run id, which the successor's first candidate decides as its public id too.
+    PublicId,
+}
+
+/// A takeover on the displaced driver's own host, from a second runs root, of a driver still
+/// mid-dispatch: the successor's first candidate repeats the displaced run's name, yet the
+/// successor's claim names a run of its own, so the displaced driver reads it as another's,
+/// records `driver-superseded` naming it, and acknowledges, and the successor starts on that
+/// acknowledgement under a run id and public id that differ from both of the displaced run's.
+fn a_same_host_takeover_from_a_second_runs_root(name: &str, repeats: Repeats) {
+    let world = patient_world(name).with_env("HOSTNAME", "host-a");
+    let run = match repeats {
+        Repeats::RunId => "rooted",
+        Repeats::PublicId => {
+            // `zephyrine` is a repository of this host's that it declares private, so a plan
+            // named after it is named publicly by its run id's hashed form.
+            world.extra_repository("zephyrine");
+            std::fs::write(
+                world.onevcs_home().join("rules.yml"),
+                "version: 4\nrules:\n  - match: {owner: owner}\n    visibility: private\n\
+                 default:\n  publication: change-open\n  approvals: required\n",
+            )
+            .expect("the rules file is written");
+            "zephyrine-rooted"
+        }
+    };
+    world.script("x.work", "x's change\n");
+    world.script("y.work", "y's change\n");
+    let x = world.rendezvous("x");
+    let project = author(
+        &world,
+        run,
+        vec![lifecycle("x", &[]), lifecycle("y", &["x"])],
+    );
+    world
+        .run_from(&world.project, &["start", &project, "--detach"])
+        .exited(0);
+    let mine = x.arrived();
+    let named = match repeats {
+        Repeats::RunId => run.to_owned(),
+        Repeats::PublicId => crate::harness::hashed(run),
+    };
+    let displaced = until_claimed_by(&world, &project, &named);
+    let displaced_reading = world.run(&["status", run, "--json"]).json();
+    assert_eq!(displaced_reading["run_id"], run, "{displaced_reading}");
+    assert_eq!(displaced_reading["public_id"], named, "{displaced_reading}");
+
+    let successor = world.in_runs_root("second-runs");
+    let taking = take_over_in_background(&successor, &project);
+    world.until("the successor's claim to reach the store", |world| {
+        stored_claim(world, &project)["pid"] != displaced["pid"]
+    });
+    let claim = stored_claim(&world, &project);
+    assert_eq!(claim["host"], displaced["host"], "{claim}");
+    mine.release();
+    world.until("the displaced driver to end", |world| {
+        world.run_file(run, "result.json").is_file()
+    });
+    superseded_by(&world, run, &claim);
+    let said = launched_over(taking);
+    assert!(said.contains("acknowledged the takeover"), "{said}");
+
+    let minted: Vec<String> = std::fs::read_dir(&successor.runs)
+        .expect("the successor's runs root")
+        .flatten()
+        .filter(|entry| entry.path().join("launch.json").is_file())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    let [adopter] = minted.as_slice() else {
+        panic!("the successor minted {minted:?}, not one run");
+    };
+    let reading = successor.run(&["status", adopter, "--json"]).json();
+    assert_eq!(reading["run_id"], adopter.as_str(), "{reading}");
+    assert_eq!(claim["run"], reading["public_id"], "{claim}\n{reading}");
+    for own in [&reading["run_id"], &reading["public_id"]] {
+        for theirs in [
+            &displaced_reading["run_id"],
+            &displaced_reading["public_id"],
+        ] {
+            assert_ne!(own, theirs, "{reading}\n{displaced_reading}");
+        }
+    }
+    x.arrived().release();
+    successor.until("the adopter to settle", |world| {
+        world.run_file(adopter, "result.json").is_file()
+    });
+    assert!(
+        !successor.events_of(adopter, "node-dispatched").is_empty(),
+        "the adopter drove nothing"
+    );
+    drop(successor);
+}
+
+/// A same-host takeover from a second runs root whose first run-id candidate is the displaced
+/// run's own id gets the displaced driver's acknowledgement and starts under another.
+#[test]
+fn a_same_host_takeover_from_a_second_runs_root_repeating_the_run_id_is_acknowledged() {
+    a_same_host_takeover_from_a_second_runs_root("takeover-rooted-run", Repeats::RunId);
+}
+
+/// A same-host takeover from a second runs root whose first public-id candidate is the
+/// displaced run's public id gets the displaced driver's acknowledgement and starts under
+/// another.
+#[test]
+fn a_same_host_takeover_from_a_second_runs_root_repeating_the_public_id_is_acknowledged() {
+    a_same_host_takeover_from_a_second_runs_root("takeover-rooted-public", Repeats::PublicId);
+}
+
 /// The setting naming the claim interval every host of a journey is given, in whole seconds:
 /// what paces a takeover's reads of the claim while it waits, and nothing a running driver
 /// does.

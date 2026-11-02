@@ -951,7 +951,9 @@ impl ClaimWatch {
     }
 
     /// Whether `claim` names a run other than this one and other than the one this launch
-    /// took the project over from.
+    /// took the project over from. Run and host are enough to tell a takeover from this
+    /// driver's own claim because a launch taking over a driver of its host never mints the
+    /// name that driver's claim holds (`driver::mint_over`).
     fn supersedes(&self, claim: &DriverClaim) -> bool {
         !claim.names(&self.run, &self.host) && self.displaced.as_ref() != Some(claim)
     }
