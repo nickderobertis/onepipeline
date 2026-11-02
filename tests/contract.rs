@@ -8882,7 +8882,7 @@ fn the_readmes_interface_claims_match_the_code_they_describe() {
         .split_once("`onepipeline watch RUN` is the bounded wait")
         .expect("the README documents the watch verb")
         .1
-        .split_once("## Where a dispatch runs")
+        .split_once("## Human items")
         .expect("that passage ends where the README's next heading begins")
         .0
         .to_string();

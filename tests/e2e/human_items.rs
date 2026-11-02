@@ -1753,8 +1753,8 @@ fn a_running_driver_releases_a_resolution_its_resolver_could_not() {
     world.release("side.go");
 }
 
-/// The report previews the first three steps an item holds in each plan and
-/// counts the rest; a run removed from the runs root takes its steps out of
+/// The full report previews the first three steps an item holds in each plan
+/// and counts the rest; a run removed from the runs root takes its steps out of
 /// every summary and detail.
 #[test]
 fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
@@ -1769,7 +1769,7 @@ fn the_report_previews_three_steps_and_a_removed_run_leaves_the_summary() {
     }
     let project = world.plan(name, &plan_of(name, nodes));
     world.run(&["start", &project, "--attach"]).exited(0);
-    let report = world.run(&["human-items", "report"]);
+    let report = world.run(&["human-items", "report", "--full"]);
     report.exited(0);
     let text = &report.stdout;
     assert!(
