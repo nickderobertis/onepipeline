@@ -6130,6 +6130,19 @@ pub fn project_id(name: &str) -> String {
     format!("{name}-board")
 }
 
+/// The public id a run whose plan names something private is published under: `run-` and
+/// the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
+pub fn hashed(run: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(run.as_bytes());
+    let hex: String = digest
+        .iter()
+        .take(6)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("run-{hex}")
+}
+
 /// Why a store fixture could not tell a right answer from a wrong one, or `None`
 /// when it can.
 ///

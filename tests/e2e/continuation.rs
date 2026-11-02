@@ -1286,7 +1286,7 @@ fn a_same_host_takeover_from_a_second_runs_root(name: &str, repeats: Repeats) {
     let mine = x.arrived();
     let named = match repeats {
         Repeats::RunId => run.to_owned(),
-        Repeats::PublicId => crate::public_id::hashed(run),
+        Repeats::PublicId => crate::harness::hashed(run),
     };
     let displaced = until_claimed_by(&world, &project, &named);
     let displaced_reading = world.run(&["status", run, "--json"]).json();
