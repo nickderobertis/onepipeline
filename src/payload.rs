@@ -984,6 +984,7 @@ pub(crate) struct EndingCheck {
     /// Whether it blocks the merge.
     pub(crate) required: bool,
     /// `required` in words.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan's agreed contract with the browser view carries both keys — `required` to decide on and `requirement` as the reader-facing words — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`), so the two are never set apart; a single field would break the agreed payload.
     pub(crate) requirement: String,
 }
 
@@ -2247,6 +2248,7 @@ pub(crate) struct CheckFailed {
     /// Whether it blocks the merge.
     pub(crate) required: bool,
     /// `required` in words: `onepipeline::vocabulary::requirement_label`.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan's agreed contract with the browser view carries both keys — `required` to decide on and `requirement` as the reader-facing words — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`), so the two are never set apart; a single field would break the agreed payload.
     pub(crate) requirement: String,
     /// Where its log is, `null` where the host gave no address.
     pub(crate) url: Option<String>,
@@ -2292,6 +2294,7 @@ pub(crate) struct UnfollowedCheck {
     /// Whether it blocks the merge.
     pub(crate) required: bool,
     /// `required` in words.
+    // llmlint: ignore[invalid_states_unrepresentable] the plan's agreed contract with the browser view carries both keys — `required` to decide on and `requirement` as the reader-facing words — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`), so the two are never set apart; a single field would break the agreed payload.
     pub(crate) requirement: String,
 }
 

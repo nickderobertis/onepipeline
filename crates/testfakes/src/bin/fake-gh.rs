@@ -1491,9 +1491,10 @@ fn scripted_checks(dir: &Path, id: &str, repo: &str, change: Change) -> Vec<Chec
     // have passed since it first reported this change request's checks — a check that
     // concludes while the publication's watch is still reading.
     let later = fake::node_script(dir, "gh", "checks.later").filter(|_| {
-        let wait: u64 = fake::node_script(dir, "gh", "checks.later-ms")
-            .and_then(|ms| ms.parse().ok())
-            .unwrap_or(0);
+        let wait: u64 = fake::node_script(dir, "gh", "checks.later-ms").map_or(0, |ms| {
+            ms.parse()
+                .unwrap_or_else(|_| fake::fail(&format!("gh.checks.later-ms {ms:?} is no delay")))
+        });
         let first = dir
             .join("gh")
             .join(format!("{}.checks-first", fake::segment(id)));
@@ -2742,9 +2743,12 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
     let repo = format!("{owner}/{name}");
     // `gh.follow-outage` holding `N`: the first N follow reads are refused, as a host
     // answering an error is, and each refusal is written to `gh/follow-refused.jsonl`.
-    if let Some(outage) = fake::node_script(dir, "gh", "follow-outage")
-        .and_then(|count| count.trim().parse::<u64>().ok())
-    {
+    if let Some(outage) = fake::node_script(dir, "gh", "follow-outage").map(|count| {
+        count
+            .trim()
+            .parse::<u64>()
+            .unwrap_or_else(|_| fake::fail(&format!("gh.follow-outage {count:?} is no count")))
+    }) {
         let refused = dir.join("gh").join("follow-refused.jsonl");
         let so_far = read_if_present(&refused).map_or(0, |text| text.lines().count() as u64);
         if so_far < outage {

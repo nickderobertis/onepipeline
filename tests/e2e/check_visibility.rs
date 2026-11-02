@@ -54,6 +54,11 @@ fn world_following(name: &str, follow: &str) -> World {
 
 /// Launch `run` detached over `service` and its held dependent `after`.
 fn launch(world: &World, run: &str) {
+    launch_with(world, run, &[]);
+}
+
+/// The same, with `extra` arguments to `start`.
+fn launch_with(world: &World, run: &str, extra: &[&str]) {
     let path = world.plan(
         run,
         &plan_of(
@@ -61,7 +66,9 @@ fn launch(world: &World, run: &str) {
             vec![lifecycle("service", &[]), agent("after", &["service"])],
         ),
     );
-    world.run_from(&world.project, &["start", path.as_str(), "--detach"]);
+    let mut argv = vec!["start", path.as_str(), "--detach"];
+    argv.extend_from_slice(extra);
+    world.run_from(&world.project, &argv).exited(0);
     world.until("the dependent to be dispatched", |world| {
         world
             .events_of(run, "node-dispatched")
@@ -154,7 +161,6 @@ fn a_late_failing_check_that_blocks_nothing_is_shown_once_and_moves_nothing() {
         assert!(message.contains(named), "{named:?} is not in {message}");
     }
 
-    // One record, carrying the check whole.
     let records = world.events_of(run, "check-failed");
     assert_eq!(records.len(), 1, "{}", world.dump());
     let payload = &records[0]["payload"];
@@ -1368,4 +1374,32 @@ fn a_refused_holdup_read_keeps_the_last_answer_until_one_is_answered() {
         crate::adoption::read_waits(world, &run);
         read_at(world).is_some_and(|at| at != first)
     });
+}
+
+/// A launch whose `vcs` filter keeps `change-check` out of the run is followed all the
+/// same, and what each read appends is held to that filter: nothing of it is relayed, so
+/// nothing is raised about it.
+#[test]
+fn a_launch_filtering_out_change_checks_relays_and_raises_nothing_its_follow_reads_append() {
+    let world = world_following("follow-filtered", FAILS_ON_THE_THIRD_READ);
+    let run = "followfiltered";
+    launch_with(
+        &world,
+        run,
+        &["--filter-vcs", r#"{"exclude": [{"kind": "change-check"}]}"#],
+    );
+    world.until("the follow to read the late failure", |world| {
+        follow_reads(world).len() >= 3
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert_eq!(follow_reads(&world).len(), 3, "{:?}", follow_reads(&world));
+    release(&world, run);
+    assert!(
+        world.events_of(run, "change-check").is_empty(),
+        "{}",
+        world.dump()
+    );
+    assert!(world.events_of(run, "check-failed").is_empty());
+    assert!(raised(&world, run, "check-failed").is_empty());
+    assert_eq!(settlement(&world, run, "service").0, "done");
 }

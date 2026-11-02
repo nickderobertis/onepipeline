@@ -1002,16 +1002,22 @@ impl Watch {
             self.holdup_asked.insert(identity.clone(), Instant::now());
             self.holdup_reading.insert(identity.clone());
             let send = self.holdup_send.clone();
+            let asked = identity.clone();
             let spawned = std::thread::Builder::new()
                 .name("release-holdup".to_owned())
                 .spawn(move || {
-                    let answer =
-                        onevcs::release_holdup(&identity).map_err(|error| error.to_string());
-                    let _ = send.send((identity, answer));
+                    let answer = onevcs::release_holdup(&asked).map_err(|error| error.to_string());
+                    let _ = send.send((asked, answer));
                 });
+            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+            // reaches this arm: it is a host that will not start a thread, as `Asker::start`
+            // records for its own. It leaves the identity due again on the interval, as a
+            // refused read does, which
+            // `a_refused_holdup_read_keeps_the_last_answer_until_one_is_answered` drives.
             if let Err(error) = spawned {
+                self.holdup_reading.remove(&identity);
                 eprintln!("onepipeline: cannot start a release holdup read: {error}");
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 

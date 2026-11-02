@@ -2386,7 +2386,6 @@ fn converge(
                 if releases.take_up_answers() {
                     return true;
                 }
-                // A follow read that answered.
                 if checks.take_up_answers() {
                     return true;
                 }

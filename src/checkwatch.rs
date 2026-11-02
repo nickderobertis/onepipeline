@@ -63,6 +63,7 @@ pub const DEFAULT_FOLLOW_SECONDS: f64 = 60.0;
 pub const CHECKS_TIMEOUT_ENV: &str = "ONEVCS_CHECKS_TIMEOUT_SECONDS";
 
 /// onevcs's default for [`CHECKS_TIMEOUT_ENV`]: an hour.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] onevcs 0.58.0 declares this default only in its private `gh` module and exports no constant or reader for it, so there is nothing to import; the follow-up asking onevcs to export it is drafted, and until then this is that library's documented default for the variable named beside it.
 pub const DEFAULT_CHECKS_TIMEOUT_SECONDS: f64 = 3600.0;
 
 /// The surface kind a failing check is raised under.
@@ -728,6 +729,7 @@ impl CheckWatch {
             self.read_at.insert(repo.clone(), Instant::now());
             self.reading.insert(repo.clone());
             let send = self.send.clone();
+            let asked = repo.clone();
             // Off the loop's thread for the release probe's reason: the read is a
             // host query, and a slow one asked inline would stall every node.
             let spawned = std::thread::Builder::new()
@@ -735,11 +737,18 @@ impl CheckWatch {
                 .spawn(move || {
                     let answer = onevcs::follow_checks(&onevcs::Providers::real(), &request)
                         .map_err(|error| error.to_string());
-                    let _ = send.send((repo, nodes, answer));
+                    let _ = send.send((asked, nodes, answer));
                 });
+            // llmlint: ignore-block[changed_behavior_has_e2e] no invocation a user can type
+            // reaches this arm: it is a host that will not start a thread, which no plan, flag
+            // or environment decides — the reason `release::Asker::start` gives for its own.
+            // What it does is leave the repository due again on the interval, as a refused
+            // read does, which `a_refused_follow_read_leaves_the_change_followed_until_it_answers`
+            // drives end to end.
             if let Err(error) = spawned {
+                self.reading.remove(&repo);
                 eprintln!("onepipeline: cannot start a check follow read: {error}");
-            }
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
         }
     }
 
