@@ -2787,7 +2787,8 @@ fn a_run_held_with_work_dispatched(run: &str) -> World {
     world
 }
 
-/// Where in the scripted store's calls `method` was asked, in order.
+/// Positions rather than a count, so a journey can say the home's `done` came after the run's
+/// last projection rather than only that both were asked.
 fn asked_at(world: &World, method: &str) -> Vec<usize> {
     world
         .store_calls()
