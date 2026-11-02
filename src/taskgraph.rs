@@ -1215,7 +1215,6 @@ impl Reader {
             project.as_str(),
             |token| {
                 let request = TaskRequest {
-                    // The home's own source, never the defaults: see above.
                     sources: match &selector {
                         ProjectSelector::Qualified(id) => vec![id.source.clone()],
                         _ => Vec::new(),

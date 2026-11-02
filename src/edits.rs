@@ -995,14 +995,11 @@ pub fn advance(frontier: &mut Frontier, operations: &[Operation]) {
                     frontier.stated_landings.insert(node.clone(), stated);
                 }
             }
-            // A supersession moves the lineage, and the export edges with it, exactly as
-            // the fold reads them: a later command of the same envelope is compiled
+            // A retry moves the lineage, and the export edges with it, exactly as the
+            // fold reads them: a later command of the same envelope is compiled
             // against a graph the replaced node has already left, so an edge still
             // naming that node would read as dangling and refuse the whole envelope.
             Operation::RetryRequested {
-                node, replacement, ..
-            }
-            | Operation::ReworkRequested {
                 node, replacement, ..
             } => {
                 frontier
