@@ -915,6 +915,26 @@ impl World {
         }
     }
 
+    /// The same host launching from a **second runs root**: the same `HOSTNAME`, `onevcs`
+    /// state root, plans store and stand-in GitHub, under a launching session of its own, with
+    /// the runs root `<scratch root>/<name>` beside this world's — an operator on one host
+    /// who points `ONEPIPELINE_RUNS_DIR` somewhere else.
+    pub fn in_runs_root(&self, name: &str) -> Self {
+        *live() += 1;
+        let runs = self.root.join(name);
+        profile::fs::create_dir_all(&runs).expect("a scratch directory");
+        Self {
+            root: self.root.clone(),
+            runs,
+            fakes: self.fakes.clone(),
+            project: self.project.clone(),
+            session: format!("{}-{name}", self.session),
+            environment: self.environment.clone(),
+            scripted: self.scripted,
+            home: self.home.clone(),
+        }
+    }
+
     /// The same project seen from **another host**: the same plans store, the same origin
     /// and the same stand-in GitHub, and none of this host's own state — an empty runs root,
     /// a fresh `onevcs` state root holding only a clone of the origin registered under the

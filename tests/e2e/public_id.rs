@@ -33,7 +33,7 @@ const B: &str = "widget-rollout";
 const SECRET: &str = "secret";
 
 /// `run-` and the first twelve lowercase hex digits of the SHA-256 of `run`'s UTF-8 bytes.
-fn hashed(run: &str) -> String {
+pub(crate) fn hashed(run: &str) -> String {
     use sha2::Digest;
     let digest = sha2::Sha256::digest(run.as_bytes());
     let hex: String = digest

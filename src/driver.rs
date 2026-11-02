@@ -1129,8 +1129,14 @@ fn gone_from_this_host(root: &Path, claim: Option<&crate::payload::DriverClaim>)
 ///
 /// The plan's own name first, which a project states as `onepipeline.name` or
 /// leaves to its own title; the native half of the qualified id otherwise, which
-/// is what a person launching it typed.
-fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
+/// is what a person launching it typed. A candidate already under `root`, or one
+/// `taken` refuses, is skipped for the next.
+fn mint_run_id(
+    plan: &Plan,
+    native: &str,
+    root: &Path,
+    mut taken: impl FnMut(&str) -> bool,
+) -> String {
     let base = plan
         .name
         .clone()
@@ -1148,13 +1154,49 @@ fn mint_run_id(plan: &Plan, native: &str, root: &Path) -> String {
         .collect();
     // The host's human-item store sits beside the runs, so no run takes its name.
     let reserved = |id: &str| Some(id) == crate::human_items::JOURNAL_PATH.split('/').next();
-    if !root.join(&base).exists() && !reserved(&base) {
+    let mut free = |id: &str| !root.join(id).exists() && !taken(id);
+    if !reserved(&base) && free(&base) {
         return base;
     }
     (2..)
         .map(|n| format!("{base}-{n}"))
-        .find(|candidate| !root.join(candidate).exists())
+        .find(|candidate| free(candidate))
         .unwrap_or(base)
+}
+
+/// Mint this launch's run id and decide its public id, where `displaced` is what the claim
+/// of a driver on this host that the launch takes over names it by.
+///
+/// That driver may be under another runs root, which the run id's uniqueness cannot see, and
+/// it tells a takeover from its own claim by run and host alone — so a candidate that it, or
+/// the public id decided for it, would repeat is skipped as an existing run is: the claim
+/// this launch writes then names a run other than the one it displaces, which that driver
+/// acknowledges rather than reading as its own. The public id is the one decided for the
+/// candidate kept, not asked afresh, so a check answering differently the second time
+/// cannot bring the two names back together. With no such claim, both are as they were.
+fn mint_over(
+    plan: &Plan,
+    native: &str,
+    root: &Path,
+    displaced: Option<&str>,
+) -> (String, crate::publicid::Decided) {
+    let mut decided = None;
+    let run = mint_run_id(plan, native, root, |candidate| {
+        let Some(displaced) = displaced else {
+            return false;
+        };
+        let public = crate::publicid::decide(candidate, plan.name.as_deref());
+        let repeats = candidate == displaced || public.id.as_str() == displaced;
+        decided = Some((candidate.to_owned(), public));
+        repeats
+    });
+    let public = match decided {
+        Some((candidate, public)) if candidate == run => public,
+        // Its public id, decided where the id is minted and before anything records the
+        // run: a check that cannot answer gives the hashed form, which names nothing.
+        _ => crate::publicid::decide(&run, plan.name.as_deref()),
+    };
+    (run, public)
 }
 
 /// The `filters:` block one launch declared, read and checked at its boundary.
@@ -1644,10 +1686,13 @@ fn start(args: &StartArgs) -> Result<i32> {
     // second change request beside one nothing has landed.
     crate::continuation::admit(claim.as_ref(), args.take_over)?;
     let root = ledger::runs_root();
-    let run = mint_run_id(&plan, project.native(), &root);
-    // Its public id, decided where the id is minted and before anything records the run: a
-    // check that cannot answer gives the hashed form, which names nothing.
-    let public = crate::publicid::decide(&run, plan.name.as_deref());
+    // A takeover of a driver of this host's must not mint the name that driver's claim holds,
+    // whichever runs root it drives from.
+    let displaced = claim
+        .as_ref()
+        .filter(|claim| args.take_over && claim.host == sys::hostname())
+        .map(|claim| claim.run.as_str());
+    let (run, public) = mint_over(&plan, project.native(), &root, displaced);
     // A takeover of a driver that may still be acting starts nothing until that driver has
     // let go: its claim is written now, and the project is read again — what this launch
     // continues, and what its write-back starts from — once the displaced driver has
@@ -5133,14 +5178,52 @@ mod tests {
         let root = scratch("mint");
         let project = "plans:release";
         assert_eq!(
-            mint_run_id(&plan(Some("tracked-release")), project, &root),
+            mint_run_id(&plan(Some("tracked-release")), project, &root, |_| false),
             "tracked-release"
         );
 
         std::fs::create_dir_all(root.join("tracked-release")).expect("an existing run");
         assert_eq!(
-            mint_run_id(&plan(Some("tracked-release")), project, &root),
+            mint_run_id(&plan(Some("tracked-release")), project, &root, |_| false),
             "tracked-release-2"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A candidate the launch refuses — the name a displaced driver's claim holds — is
+    /// skipped exactly as an existing run is, and nothing else is.
+    #[test]
+    fn a_run_id_skips_a_candidate_the_launch_refuses() {
+        let root = scratch("mint-taken");
+        let project = "plans:release";
+        let refusing = |refused: &'static str| move |candidate: &str| candidate == refused;
+        assert_eq!(
+            mint_run_id(
+                &plan(Some("tracked-release")),
+                project,
+                &root,
+                refusing("tracked-release")
+            ),
+            "tracked-release-2"
+        );
+        std::fs::create_dir_all(root.join("tracked-release-2")).expect("an existing run");
+        assert_eq!(
+            mint_run_id(
+                &plan(Some("tracked-release")),
+                project,
+                &root,
+                refusing("tracked-release")
+            ),
+            "tracked-release-3"
+        );
+        assert_eq!(
+            mint_run_id(
+                &plan(Some("tracked-release")),
+                project,
+                &root,
+                refusing("something-else")
+            ),
+            "tracked-release"
         );
         std::fs::remove_dir_all(&root).ok();
     }
@@ -5151,10 +5234,16 @@ mod tests {
     #[test]
     fn a_nameless_plan_takes_its_run_id_from_the_project_it_was_launched_by() {
         let root = scratch("mint-project");
-        assert_eq!(mint_run_id(&plan(None), "release", &root), "release");
+        assert_eq!(
+            mint_run_id(&plan(None), "release", &root, |_| false),
+            "release"
+        );
         // A run id names a directory, so anything that could not be one becomes
         // a character that can.
-        assert_eq!(mint_run_id(&plan(None), "odd name!", &root), "odd-name-");
+        assert_eq!(
+            mint_run_id(&plan(None), "odd name!", &root, |_| false),
+            "odd-name-"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
