@@ -88,6 +88,23 @@ pub(crate) fn set_done(store: &Store, home: &QualifiedId, within: Duration) -> A
     }
 }
 
+/// The record of a home left as it was, asked nothing, because the store refused the run's last
+/// projection — `refusal` its words for that — so the board does not show every node's
+/// settlement: a refusal, which no retry of the home's call changes.
+pub(crate) fn withheld(home: &QualifiedId, refusal: &str) -> HomeStatus {
+    record(
+        home,
+        Err((
+            FailureClass::Refused,
+            format!(
+                "left as it was: the store refused the run's last projection ({}), so the board \
+                 does not show every node's settlement and the home was not asked to be done",
+                crate::views::one_line(refusal)
+            ),
+        )),
+    )
+}
+
 /// The one record a finished call makes: `status` exactly when it was written, `class` and
 /// `reason` exactly when it failed.
 fn record(
