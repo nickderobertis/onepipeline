@@ -963,6 +963,11 @@ struct Pending {
     /// Remembered so that publishing it again attempts nothing: the store would refuse the
     /// same projection the same way, and only a graph that changed is worth asking about.
     refused: Option<Snapshot>,
+    /// The store's words for the refusal of the latest snapshot the worker attempted, until a
+    /// projection of that snapshot or a newer one lands: what holds the run's home off `done`,
+    /// because a board that refused the run's last projection does not show every node's
+    /// settlement. Unlike [`Pending::refused`], taking another snapshot does not clear it.
+    standing_refusal: Option<String>,
     /// How many attempts this worker has ended, landed or not: what a driver's launch wait
     /// ends on.
     attempts: u64,
@@ -2058,6 +2063,7 @@ fn worker(
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.waiting_on_store = false;
+                    state.standing_refusal = None;
                     state.last_success = Some(snapshot.clone());
                     if state.phase == RunPhase::Stopping && state.latest.is_none() {
                         return;
@@ -2080,6 +2086,7 @@ fn worker(
                 let (lock, _) = &*pending;
                 if let Ok(mut state) = lock.lock() {
                     state.waiting_on_store = false;
+                    state.standing_refusal = Some(failed.said());
                     state.unprojected.push(Unprojected {
                         project: snapshot.project.clone(),
                         items,
@@ -2311,6 +2318,10 @@ fn closer(
 /// projection is waiting on a store that is failing, or the store asked to be left alone — or
 /// where the run stopped while it was still being asked. No record is what has the next driver
 /// to close the run out make the call.
+///
+/// A run whose last projection the store refused — which no retry changes — has its home asked
+/// nothing and left as it was, in a failed record saying why: a board that does not show every
+/// node's settlement would otherwise say the plan is complete over work it still shows open.
 fn settle_home(
     store: &Store,
     run_dir: &Path,
@@ -2333,6 +2344,14 @@ fn settle_home(
             || store_asked_to_wait(run_dir)
         {
             return None;
+        }
+        if let Some(refusal) = &state.standing_refusal {
+            let withheld = crate::home::withheld(home, refusal);
+            eprintln!(
+                "onetaskgraph write-back of {home} as done was not asked for: {}",
+                withheld.reason.as_deref().unwrap_or_default()
+            );
+            return Some(withheld);
         }
     }
     let within = Deadline::Write { per_item, items: 1 }.within();

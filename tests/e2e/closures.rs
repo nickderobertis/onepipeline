@@ -2501,12 +2501,22 @@ fn local_home(world: &World, run: &str) -> PathBuf {
         .join(format!("{}.md", crate::harness::project_id(run)))
 }
 
-/// A run whose store configuration stops loading before it settles still settles `done`, and
-/// its one `home-status` record says `failed` — refused, in the store's words — which one
-/// non-blocking planner surface names beside the home; the home itself is not written.
+/// A run whose store configuration stops loading once its last projection has landed, before
+/// its home is asked for, still settles `done`, and its one `home-status` record says `failed` —
+/// refused, in the store's words — which one non-blocking planner surface names beside the home;
+/// the home itself is not written. (A configuration that stops loading before the run settles
+/// refuses the settlement's projection, which leaves the home as it was:
+/// `a_home_is_left_as_it_was_when_the_store_refuses_the_final_settlement_projection`.)
 #[test]
 fn a_home_whose_store_configuration_stops_loading_is_recorded_failed() {
     let world = World::new("home-unloaded");
+    let gate = crate::harness::Rendezvous::failpoint();
+    // llmlint: ignore-block[tests_mirror_real_usage] a configuration a person breaks in the
+    // instant between the run's last projection landing and its home being asked for is no
+    // timing a journey can arrange otherwise; the failpoint holds the real closure thread there,
+    // and every record asserted after it is the real store's and the real journal's.
+    let world = world.with_env("ONEPIPELINE_TEST_HOME_GATE", &gate.address());
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let notes = world.root.join("notes");
     std::fs::create_dir_all(&notes).expect("the notes source's root");
     let launch = launch_dir(
@@ -2523,12 +2533,14 @@ fn a_home_whose_store_configuration_stops_loading_is_recorded_failed() {
     world.until("work to be dispatched", |world| {
         !world.events_of(run, "node-dispatched").is_empty()
     });
+    world.release("work.go");
+    let held = gate.arrived();
     std::fs::write(
         launch.join("onetaskgraph.yaml"),
         "sources: [this is not a mapping\n",
     )
     .expect("the configuration is broken");
-    world.release("work.go");
+    held.release();
     world.until("the run to settle and record its home", |world| {
         !homes_of(world, run).is_empty() && !world.events_of(run, "driver-exited").is_empty()
     });
@@ -2758,4 +2770,165 @@ fn a_home_is_not_asked_for_while_the_projection_fails_on_a_store_that_is_down() 
     assert_eq!(homes.len(), 1, "{homes:#?}");
     assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
     assert_eq!(asked(&world), 1);
+}
+
+/// A run with one agent node `work`, launched through the scripted store and held with `work`
+/// dispatched — so the projections before its settlement have reached the store — and the name
+/// of its run and home.
+fn a_run_held_with_work_dispatched(run: &str) -> World {
+    let world = World::new(run);
+    world.script("work.wait", "hold");
+    let project = world.plan(run, &plan_of(run, vec![agent("work", &[])]));
+    let world = world.through_scripted_source();
+    world.run(&["start", &project, "--detach"]).exited(0);
+    world.until("work's dispatch to reach the store", |world| {
+        !world.events_of(run, "node-dispatched").is_empty() && world.store_asked("update_task") > 0
+    });
+    world
+}
+
+/// Positions rather than a count, so a journey can say the home's `done` came after the run's
+/// last projection rather than only that both were asked.
+fn asked_at(world: &World, method: &str) -> Vec<usize> {
+    world
+        .store_calls()
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call[0] == method)
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// A settled run whose store took every projection before its last node's settlement and
+/// refuses that settlement's — for good, a refusal no retry changes — settles all the same, with
+/// the refused projection journalled and raised as every refused projection is; its home is
+/// asked nothing, and its one `home-status` record says it was left as it was because the
+/// board does not show the run's last settlement.
+#[test]
+fn a_home_is_left_as_it_was_when_the_store_refuses_the_final_settlement_projection() {
+    let run = "home-final-refused";
+    let world = a_run_held_with_work_dispatched(run);
+    let accepted = world.store_asked("update_task");
+    world.store_refuses(
+        "update_task",
+        &json!({"kind": "refused", "message": "status done is disabled for source plans"}),
+    );
+    world.release("work.go");
+    world.until("the driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    assert!(
+        world.store_asked("update_task") > accepted,
+        "the settlement's projection never reached the store"
+    );
+    world.run(&["status", run]).exited(0).out_has("SETTLED");
+    let projected: Vec<Value> = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .map(|event| event["payload"].clone())
+        .filter(|surface| {
+            surface["message"].as_str().is_some_and(|message| {
+                message.contains("did not take this run's projection")
+                    && message.contains("status done is disabled for source plans")
+            })
+        })
+        .collect();
+    assert!(
+        !projected.is_empty(),
+        "the refused projection was not raised"
+    );
+    assert_eq!(
+        asked_at(&world, "set_project_status"),
+        Vec::<usize>::new(),
+        "the home was written done over a refused final projection"
+    );
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    let payload = &homes[0]["payload"];
+    assert_eq!(payload["outcome"], "failed", "{payload}");
+    assert_eq!(payload["status"], Value::Null, "{payload}");
+    assert_eq!(payload["class"], "refused", "{payload}");
+    assert!(
+        payload["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("left as it was") && reason.contains("refused")),
+        "{payload}"
+    );
+    let surfaced = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .filter(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("did not mark this run's home"))
+        })
+        .count();
+    assert_eq!(surfaced, 1, "the withheld home was not raised once");
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("— failed (refused): ")
+        .out_has("left as it was");
+}
+
+/// The same run, with the store taking its settlement's projection: its home is written `done`
+/// exactly once, after the last projection the run made has been taken.
+#[test]
+fn a_home_is_written_done_once_after_the_final_settlement_projection_is_taken() {
+    let run = "home-final-taken";
+    let world = a_run_held_with_work_dispatched(run);
+    world.release("work.go");
+    world.until("the driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    world.run(&["status", run]).exited(0).out_has("SETTLED");
+    let home = asked_at(&world, "set_project_status");
+    assert_eq!(home.len(), 1, "{:#?}", world.store_calls());
+    let projected = asked_at(&world, "update_task");
+    assert!(
+        projected.last().is_some_and(|last| *last < home[0]),
+        "the home was written before the last projection: {:#?}",
+        world.store_calls()
+    );
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
+}
+
+/// The same run, with the store refusing its settlement's projection once: the close-out's
+/// projection carries the settlement again, the store takes it, and the home's `done` follows
+/// it, once.
+#[test]
+fn a_home_follows_a_refused_settlement_projection_the_close_out_lands() {
+    let run = "home-final-landed-later";
+    let world = a_run_held_with_work_dispatched(run);
+    world.store_refuses_once(
+        "update_task",
+        &json!({"kind": "refused", "message": "status done is disabled for source plans"}),
+    );
+    world.release("work.go");
+    world.until("the driver to let go", |world| {
+        !world.events_of(run, "driver-exited").is_empty()
+    });
+    world.run(&["status", run]).exited(0).out_has("SETTLED");
+    let refused = world
+        .events_of(run, "planner-surface-queued")
+        .into_iter()
+        .any(|event| {
+            event["payload"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("status done is disabled"))
+        });
+    assert!(refused, "the settlement's projection was never refused");
+    let home = asked_at(&world, "set_project_status");
+    assert_eq!(home.len(), 1, "{:#?}", world.store_calls());
+    let projected = asked_at(&world, "update_task");
+    assert!(
+        projected.len() >= 2 && projected.last().is_some_and(|last| *last < home[0]),
+        "the home did not follow the projection that landed: {:#?}",
+        world.store_calls()
+    );
+    let homes = homes_of(&world, run);
+    assert_eq!(homes.len(), 1, "{homes:#?}");
+    assert_eq!(homes[0]["payload"]["outcome"], "written", "{homes:#?}");
 }
