@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.98.0](https://github.com/nickderobertis/onepipeline/compare/v0.97.5...v0.98.0) - 2026-11-02
+
+### Added
+
+- summarize human items by default and scope them to the asking session ([#1353](https://github.com/nickderobertis/onepipeline/pull/1353))
+
+### Fixed
+
+- *(reply)* [**breaking**] let a note applied with nothing driving be withdrawn ([#1350](https://github.com/nickderobertis/onepipeline/pull/1350))
+- project a plan's human items onto the configured human board ([#1344](https://github.com/nickderobertis/onepipeline/pull/1344))
+
 ## [0.97.5](https://github.com/nickderobertis/onepipeline/compare/v0.97.4...v0.97.5) - 2026-11-02
 
 ### Fixed
