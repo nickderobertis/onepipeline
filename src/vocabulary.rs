@@ -48,6 +48,24 @@ pub use onevcs::Phase;
 /// transitions are stamped in the same three words.
 pub use onevcs::Significance;
 
+/// The words a check's requirement is named in, wherever this stack renders one: a
+/// `change-check` line, a `check-failed` or `checks-unfollowed` surface, a release
+/// hold's failing and pending checks, and the browser view, which imports this
+/// rather than copying the phrase.
+///
+/// **One source of the phrase.** A reader acts differently on the two answers — a
+/// check that blocks the merge is the publication's own business, and one that does
+/// not is an advisory nothing waits on — so the words are stated once here, in lower
+/// case, and every rendering reads them from this function.
+#[must_use]
+pub const fn requirement_label(required: bool) -> &'static str {
+    if required {
+        "required — blocks the merge"
+    } else {
+        "not required — does not block"
+    }
+}
+
 /// The agent stack's vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Agent;
@@ -425,7 +443,7 @@ pub const EVENTS_BUNDLE_PATH: &str = "schemas/events.json";
 // through the bus's own `SchemaBundle`, asserts its version equals this, and holds the
 // contract paragraph naming it to the same string — so a value that is not a bundle version
 // fails the deterministic tier rather than reaching a link.
-pub const EVENTS_BUNDLE_VERSION: &str = "1.11.0";
+pub const EVENTS_BUNDLE_VERSION: &str = "1.12.0";
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// The ids [`EVENTS_BUNDLE_PATH`] publishes, in the order the bundle lists

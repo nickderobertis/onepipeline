@@ -13089,3 +13089,83 @@ section, which is left as approved:
    or none, and no declared number is refused.
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 146. A failing check that blocks nothing, a check finishing after the watch, and what holds a release were invisible to the manager — OPEN
+
+<!-- llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] this entry is the proposal AGENTS.md routes every divergence through: it restates the departure from `docs/contract.md` so the planner can rule on it, and the behaviour it describes is held by `tests/contract.rs`, `src/checkwatch.rs`'s and `src/payload.rs`'s tests and `tests/e2e/check_visibility.rs`, not by this text. -->
+
+**Proposal, for the planner who owns the contract.** The plan node
+`onepipeline-check-visibility` states this surface as its agreed contract with the browser
+view, built on `onevcs`'s check-visibility release (onevcs #598: the `attention`
+significance, `url` on `change-check`, `follow_checks` and `release_holdup`).
+`docs/contract.md` is left as approved; this build departs from it as follows.
+
+1. **The shipped `planner` profile admits `attention`.** It is
+   `include: [{source: pipeline}, {source: vcs, significance: milestone}, {source: vcs,
+   significance: blocker}, {source: vcs, significance: attention}], exclude: [{source:
+   pipeline, significance: progress}]`. A landing flow's watch reads through it, so its
+   default wake set admits `attention` too. No existing member moves.
+2. **One requirement label.** `onepipeline::vocabulary::requirement_label(required: bool)`
+   answers `required — blocks the merge` or `not required — does not block`, and every
+   rendering below reads it.
+3. **A `change-check` line.** Wherever the run's events are rendered as lines —
+   `monitor`, `watch`, a flow's `watch` — a `change-check` reads
+   `change-check '<check>' <state> (<requirement label>) [<significance>] log: <url>`,
+   ending at the label's bracket where the record carries no `url`. `next`'s one JSON
+   object gains `check_lines`, that line for each `change-check` among its `events`,
+   omitted when there is none; `Next` itself is unchanged.
+4. **`check-failed`.** Every relayed `change-check` whose state is `failed` or
+   `no-verdict`, required or not, raises one non-blocking surface of kind `check-failed`
+   (source `proposal`, `workstream` the node) once per run per (change request URL, head
+   commit, check), and then a `check-failed` record `{node, change, head, check, state,
+   conclusion, required, requirement, url}`. Its message is one line:
+   `check '<name>' failed on <change> (node '<node>', head <12>): <label>; log: <url, or
+   "the host reported no address for this check">. <consequence>`, with
+   `got no verdict (<conclusion>)` for a no-verdict check and the consequence
+   `Nothing is held, failed or retried for it.` or
+   `The publication's own outcome decides what happens to the node.`
+5. **Following checks after a publication returns.** While a settled node's change
+   request carries a check its session last recorded unsettled, the driver calls
+   `onevcs::follow_checks`, one call per repository for every change of it, at most every
+   `ONEPIPELINE_CHECK_FOLLOW_SECONDS` (default 60, fractions accepted), relays what each
+   call appended to the session's stream, and stops on `outstanding: false`,
+   `superseded: true`, or once `ONEVCS_CHECKS_TIMEOUT_SECONDS` (default 3600) has passed
+   since the publication returned. It moves no node, dependent or publication. An
+   adopting driver resumes it from the session streams and the run's own records.
+6. **`checks-unfollowed`.** At that timeout with checks still running, one record
+   `{node, change, head, reason: "timeout", checks: [{check, required, requirement}]}` and
+   one non-blocking surface of kind `checks-unfollowed`, once per (change request URL,
+   head commit): `stopped following <n> check(s) still running on <change> (node
+   '<node>', head <12>) after the checks timeout: '<check>' (<label>), …; a later result
+   of these is not shown.`
+7. **The run's ending.** `driver-exited` gains `checks_running` and `checks_unfollowed`,
+   each `[{node, change, head, check, required, requirement}]` and omitted when empty, and
+   `results` and `status` print `checks still running at run end:` and
+   `checks no longer followed (timed out):`, each check as
+   `<check> on <change> (node '<node>') — <label>`.
+8. **What holds an awaited release.** An automated wait whose last answer is
+   `not-released` reads `onevcs::release_holdup` for its identity immediately and then at
+   most every `ONEPIPELINE_RELEASE_HOLDUP_SECONDS` (default 600, fractions accepted), one
+   read shared by every node awaiting it. The `release-wait` surface's line for that
+   dependency gains one continuation line per open release change request —
+   `  held by <url> (the release's own change request): failing — <check> (<label>), …;
+   pending — <check> (<label>), …`, or `  held by <url>: its required checks passed and it
+   has not been merged`, or `  no release change request is open` — and its `awaiting`
+   entry gains `holdup: {read_at, changes: [{url, draft, verdict, failing: [{check,
+   required, requirement, url}], pending: [{check, required, requirement}]}]}`, only where
+   the identity declares a `release_change`. A failed read keeps the previous answer.
+
+```json
+{
+  "bundle_versions": {"events": "1.12.0"},
+  "event_kinds": ["check-failed", "checks-unfollowed"],
+  "surface_kinds": ["check-failed", "checks-unfollowed"],
+  "planner_profile_adds": {"source": "vcs", "significance": "attention"},
+  "driver_exited_fields": ["checks_running", "checks_unfollowed"],
+  "release_wait_awaiting_fields": ["holdup"],
+  "next_fields": ["check_lines"],
+  "environment": ["ONEPIPELINE_CHECK_FOLLOW_SECONDS", "ONEPIPELINE_RELEASE_HOLDUP_SECONDS", "ONEVCS_CHECKS_TIMEOUT_SECONDS"]
+}
+```
+
+<!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->

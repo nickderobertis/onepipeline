@@ -648,7 +648,23 @@ fn the_shipped_profiles_are_the_contracts_own_and_are_overridable() {
             onepipeline::vocabulary::Significance::Progress,
         )],
     };
+    // What the contract spells, and what entry 146 adds to it: the shipped profile
+    // also admits a `vcs` event stamped `attention`.
+    let added: Matcher =
+        serde_json::from_value(divergence_block("146.")["planner_profile_adds"].clone())
+            .expect("entry 146 names the matcher it adds");
+    assert_eq!(
+        added,
+        stamped(
+            Source::Vcs,
+            onepipeline::vocabulary::Significance::Attention
+        )
+    );
+    let contract_planner = planner.clone();
+    let mut planner = planner;
+    planner.include.push(added);
     assert_eq!(empty.profile("planner").expect("planner ships"), planner);
+    let planner = contract_planner;
     // And it is the profile the read-time profiles paragraph spells, read through
     // the grammar the paragraph's own spelling is in.
     let spelled = CONTRACT
@@ -1020,7 +1036,7 @@ fn the_committed_events_bundle_is_the_compiled_in_vocabulary() {
         onemessagebus::SchemaBundle::from_json(&committed).expect("the bus reads the document");
     assert_eq!(bundle.version().to_string(), EVENTS_BUNDLE_VERSION);
     assert_eq!(
-        divergence_block("141.")["bundle_versions"]["events"],
+        divergence_block("146.")["bundle_versions"]["events"],
         EVENTS_BUNDLE_VERSION,
         "the events bundle version must be the one the newest entry raising it records"
     );
@@ -6786,7 +6802,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // undocumented wire; a kind the contract lists and the enum does not carry is
     // a promise nothing keeps. `PIPELINE_KINDS` is what `Journal::emit` accepts,
     // so this is the emitted set and not a second copy of it.
-    assert_eq!(PIPELINE_KINDS.len(), 66, "the closed set changed size");
+    assert_eq!(PIPELINE_KINDS.len(), 68, "the closed set changed size");
     let listed: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -6797,7 +6813,7 @@ fn the_contract_enumerates_exactly_this_librarys_own_event_kinds() {
     // record proposes, and no others: a kind neither document names fails here.
     let proposed: BTreeSet<String> = [
         "40.", "47.", "55.", "65.", "70.", "92.", "119.", "121.", "122.", "123.", "126.", "127.",
-        "130.", "132.", "134.",
+        "130.", "132.", "134.", "146.",
     ]
     .into_iter()
     .flat_map(|entry| {

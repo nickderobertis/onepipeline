@@ -159,6 +159,15 @@ impl Ending {
             Self::SurfaceOnRun(run) => format!("surface on run {run}"),
             Self::NodeSettled { run, node } => format!("node-settled {run} {node}"),
             Self::RunJoined(run) => format!("run-joined {run}"),
+            Self::LandingProgress(progress)
+                if crate::checkwatch::change_check_line(&progress.event).is_some() =>
+            {
+                format!(
+                    "landing-progress {} {}",
+                    progress.landing,
+                    crate::checkwatch::change_check_line(&progress.event).unwrap_or_default()
+                )
+            }
             Self::LandingProgress(progress) => {
                 let named: Vec<String> = progress
                     .subjects()

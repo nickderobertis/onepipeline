@@ -3422,6 +3422,7 @@ pub(crate) fn status_reporting(view: &RunView, providers: Providers) -> String {
             out.push_str(&shutdown.line(&view.paths.run));
         }
         out.push_str(&driver_exit_lines(view));
+        out.push_str(&check_ending_lines(view));
         out.push_str(&note_lines(view));
         // What this run carried on from its project's store rather than ran, and where each
         // node it continued stands: a reader of a run launched on a host that never ran
@@ -4929,6 +4930,15 @@ fn superseded_suffix(view: &RunView, event: &Envelope) -> String {
 /// One control-stripped line derived from an event's recorded values.
 fn summarize(event: &Envelope) -> String {
     const CAP: usize = 96;
+    // A check's line names the check, whether it blocks the merge, and where its
+    // log is — never cut, for the reason a surface is not: an address cut short
+    // reaches nothing.
+    if let Some(line) = crate::checkwatch::change_check_line(event) {
+        return line
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+    }
     let mut detail = event.kind.0.clone();
     let surface = matches!(
         event.kind.0.as_str(),
@@ -5726,8 +5736,20 @@ pub fn results(view: &RunView) -> String {
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
     out.push_str(&crate::scratch::lines(view, None));
+    // And the checks still running, or no longer followed, as the run ended.
+    out.push_str(&check_ending_lines(view));
     out.push_str(&journal_loss_line(view));
     out
+}
+
+/// The checks the run's last `driver-exited` named as still running, or as no
+/// longer followed, as `results` and `status` print them: nothing where it named
+/// neither.
+fn check_ending_lines(view: &RunView) -> String {
+    crate::checkwatch::ending_sections(view.state.recalled.iter().rev().find(|event| {
+        event.source == Source::Pipeline
+            && PipelineKind::from_wire(&event.kind) == Some(PipelineKind::DriverExited)
+    }))
 }
 
 /// What the run's results say about the nodes a `retry` replaced, or nothing

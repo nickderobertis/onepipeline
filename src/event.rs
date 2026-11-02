@@ -412,6 +412,17 @@ pub enum PipelineKind {
     ScratchRemoved,
     /// Dispatch scratch was measured and kept at a non-success ending or pause.
     ScratchRetained,
+    /// A check on a change request this run published failed or ended with no
+    /// verdict, required or not, and its one non-blocking `check-failed` surface was
+    /// raised: one per (change request, head commit, check), carrying `node`,
+    /// `change`, `head`, `check`, `state`, `conclusion`, `required`, `requirement`
+    /// and `url`.
+    CheckFailed,
+    /// The driver stopped following checks still running on a published change
+    /// request once onevcs's checks timeout had passed since its publication
+    /// returned, and raised its one `checks-unfollowed` surface: `node`, `change`,
+    /// `head`, `reason` and `checks`.
+    ChecksUnfollowed,
     /// What the store answered when the run's home was marked `done`: entry 134 of
     /// `docs/contract-divergences.md`.
     ///
@@ -494,6 +505,8 @@ impl PipelineKind {
             Self::LandingDied => "landing-died",
             Self::ScratchRemoved => "scratch-removed",
             Self::ScratchRetained => "scratch-retained",
+            Self::CheckFailed => "check-failed",
+            Self::ChecksUnfollowed => "checks-unfollowed",
         }
     }
 
@@ -589,6 +602,8 @@ pub const PIPELINE_KINDS: &[PipelineKind] = &[
     PipelineKind::LandingDied,
     PipelineKind::ScratchRemoved,
     PipelineKind::ScratchRetained,
+    PipelineKind::CheckFailed,
+    PipelineKind::ChecksUnfollowed,
 ];
 
 /// The id of a stored artifact.

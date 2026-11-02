@@ -106,6 +106,114 @@ pub const DEFAULT_SURFACE_SECONDS: u64 = 900;
 /// The kind a held node's wait is surfaced under.
 pub const WAIT_SURFACE_KIND: &str = "release-wait";
 
+/// The environment variable bounding how often what holds one awaited release is
+/// read, in seconds (fractions allowed).
+pub const HOLDUP_ENV: &str = "ONEPIPELINE_RELEASE_HOLDUP_SECONDS";
+
+/// How often what holds an awaited release is read when nothing overrides it: ten
+/// minutes. A holdup read is two host queries, and what it answers — a release's
+/// own change request and its checks — moves when a job finishes.
+pub const DEFAULT_HOLDUP_SECONDS: f64 = 600.0;
+
+/// What one `onevcs::release_holdup` read answered about an identity, and when.
+#[derive(Debug, Clone)]
+struct Holdup {
+    /// When it was read, RFC 3339.
+    read_at: String,
+    answer: onevcs::ReleaseHoldup,
+}
+
+impl Holdup {
+    /// The continuation lines a wait's surface carries under the dependency: one per
+    /// open release change request, or the one saying none is open. Nothing for an
+    /// identity that declares no release change request.
+    fn lines(&self) -> Vec<String> {
+        if !self.answer.declared {
+            return Vec::new();
+        }
+        if self.answer.changes.is_empty() {
+            return vec!["  no release change request is open".to_owned()];
+        }
+        let label = crate::vocabulary::requirement_label;
+        self.answer
+            .changes
+            .iter()
+            .map(|change| {
+                let named = |checks: Vec<&onevcs::Check>| {
+                    checks
+                        .iter()
+                        .map(|check| format!("{} ({})", check.name, label(check.required)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let failing = named(change.checks.iter().filter(|c| failing(c)).collect());
+                let pending = named(change.checks.iter().filter(|c| !c.settled()).collect());
+                let mut parts = Vec::new();
+                if !failing.is_empty() {
+                    parts.push(format!("failing — {failing}"));
+                }
+                if !pending.is_empty() {
+                    parts.push(format!("pending — {pending}"));
+                }
+                if parts.is_empty() {
+                    format!(
+                        "  held by {}: its required checks passed and it has not been merged",
+                        change.url
+                    )
+                } else {
+                    format!(
+                        "  held by {} (the release's own change request): {}",
+                        change.url,
+                        parts.join("; ")
+                    )
+                }
+            })
+            .collect()
+    }
+
+    /// The `holdup` an `awaiting` entry carries, or `None` where the identity
+    /// declares no release change request.
+    fn payload(&self) -> Option<Value> {
+        if !self.answer.declared {
+            return None;
+        }
+        let label = crate::vocabulary::requirement_label;
+        let changes: Vec<Value> = self
+            .answer
+            .changes
+            .iter()
+            .map(|change| {
+                json!({
+                    "url": change.url.as_str(),
+                    "draft": change.draft,
+                    "verdict": serde_json::to_value(&change.verdict).unwrap_or(Value::Null),
+                    "failing": change.checks.iter().filter(|c| failing(c)).map(|check| json!({
+                        "check": check.name,
+                        "required": check.required,
+                        "requirement": label(check.required),
+                        "url": check.url.as_ref().map(onevcs::Url::as_str),
+                    })).collect::<Vec<_>>(),
+                    "pending": change.checks.iter().filter(|c| !c.settled()).map(|check| json!({
+                        "check": check.name,
+                        "required": check.required,
+                        "requirement": label(check.required),
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        Some(json!({"read_at": self.read_at, "changes": changes}))
+    }
+}
+
+/// Whether a check is one a holdup names as failing: it failed, or ended with no
+/// verdict.
+fn failing(check: &onevcs::Check) -> bool {
+    matches!(
+        check.state(),
+        onevcs::CheckState::Failed | onevcs::CheckState::NoVerdict
+    )
+}
+
 /// What ended the hold a queued wait surface reports, when something has.
 ///
 /// The three records that clear a release hold on the run's own record — the
@@ -689,6 +797,16 @@ pub(crate) struct Watch {
     /// not be described is a node launched against work no release carries.
     unresolved: BTreeMap<String, Vec<Unresolved>>,
     asker: Asker,
+    /// What holds each awaited identity's release, as its last holdup read said —
+    /// one answer shared by every node awaiting that identity.
+    holdups: BTreeMap<String, Holdup>,
+    /// When each identity's holdup was last asked for.
+    holdup_asked: BTreeMap<String, Instant>,
+    /// The identities with a holdup read in flight.
+    holdup_reading: BTreeSet<String>,
+    holdup_send: Sender<(String, std::result::Result<onevcs::ReleaseHoldup, String>)>,
+    holdup_answers: Receiver<(String, std::result::Result<onevcs::ReleaseHoldup, String>)>,
+    holdup_every: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -749,6 +867,7 @@ impl Watch {
                 _ => {}
             }
         }
+        let (holdup_send, holdup_answers) = mpsc::channel();
         Self {
             repositories: Repositories::default(),
             dependencies: BTreeMap::new(),
@@ -763,6 +882,12 @@ impl Watch {
             stated: BTreeMap::new(),
             read_landings: None,
             asker: Asker::start(Duration::from_secs(poll_seconds())),
+            holdups: BTreeMap::new(),
+            holdup_asked: BTreeMap::new(),
+            holdup_reading: BTreeSet::new(),
+            holdup_send,
+            holdup_answers,
+            holdup_every: crate::checkwatch::seconds_env(HOLDUP_ENV, DEFAULT_HOLDUP_SECONDS),
         }
     }
 
@@ -829,7 +954,76 @@ impl Watch {
             arrived = true;
             self.take_up(&keys, &answer);
         }
+        let holdups: Vec<_> = self.holdup_answers.try_iter().collect();
+        for (identity, answer) in holdups {
+            arrived = true;
+            self.holdup_reading.remove(&identity);
+            match answer {
+                Ok(answer) => {
+                    self.holdups.insert(
+                        identity,
+                        Holdup {
+                            read_at: crate::sys::now_rfc3339(),
+                            answer,
+                        },
+                    );
+                }
+                // The previous answer stands; the next read is due on the interval.
+                Err(why) => eprintln!(
+                    "onepipeline: could not read what holds the release of {identity}: {why}"
+                ),
+            }
+        }
         arrived
+    }
+
+    /// Ask what holds each identity an automated wait last heard `not-released`
+    /// about — immediately at the first such answer, then at most every
+    /// [`HOLDUP_ENV`], one read per identity shared by every node awaiting it — off
+    /// the loop's thread.
+    fn ask_holdups(&mut self, waits: &[(Key, Dependency)]) {
+        let identities: BTreeSet<String> = waits
+            .iter()
+            .filter(|(key, dependency)| {
+                dependency.style == Some(ReleaseStyle::Automated)
+                    && self.answers.get(key) == Some(&Answer::NotReleased)
+            })
+            .map(|(_, dependency)| dependency.identity.clone())
+            .collect();
+        for identity in identities {
+            if self.holdup_reading.contains(&identity)
+                || self
+                    .holdup_asked
+                    .get(&identity)
+                    .is_some_and(|at| at.elapsed() < self.holdup_every)
+            {
+                continue;
+            }
+            self.holdup_asked.insert(identity.clone(), Instant::now());
+            self.holdup_reading.insert(identity.clone());
+            let send = self.holdup_send.clone();
+            let spawned = std::thread::Builder::new()
+                .name("release-holdup".to_owned())
+                .spawn(move || {
+                    let answer =
+                        onevcs::release_holdup(&identity).map_err(|error| error.to_string());
+                    let _ = send.send((identity, answer));
+                });
+            if let Err(error) = spawned {
+                eprintln!("onepipeline: cannot start a release holdup read: {error}");
+            }
+        }
+    }
+
+    /// The holdup a wait on `dependency` renders, where its last answer is
+    /// `not-released` from an automated target and a read has answered.
+    fn holdup_of(&self, key: &Key, dependency: &Dependency) -> Option<&Holdup> {
+        if dependency.style != Some(ReleaseStyle::Automated)
+            || self.answers.get(key) != Some(&Answer::NotReleased)
+        {
+            return None;
+        }
+        self.holdups.get(&dependency.identity)
     }
 
     /// Record what one ask answered, about every wait it was put on behalf of.
@@ -960,6 +1154,7 @@ impl Watch {
         // one no longer watched is not waiting on anything here.
         self.unresolved
             .retain(|node, _| watching.iter().any(|watched| watched.id == *node));
+        self.ask_holdups(&waits);
         self.asker.ask(questions_of(&waits));
     }
 
@@ -1103,11 +1298,15 @@ impl Watch {
             .map(|dependency| {
                 let key = (node.to_owned(), dependency.dep.clone());
                 format!(
-                    "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                    "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
                     dependency.dep,
                     dependency.style.map_or("", |style| style.as_str()),
                     dependency.action.as_deref().unwrap_or_default(),
-                    self.last_answer(&key, dependency)
+                    self.last_answer(&key, dependency),
+                    // What holds the release is news when it moves, and only then.
+                    self.holdup_of(&key, dependency)
+                        .map(|holdup| holdup.lines().join("\n"))
+                        .unwrap_or_default()
                 )
             })
             .collect();
@@ -1289,6 +1488,11 @@ impl Watch {
                     "last_answer".to_owned(),
                     json!(self.last_answer(&key, dependency)),
                 );
+                // Only where the host declares how to find the release's own change
+                // request: every other entry is exactly what it was.
+                if let Some(holdup) = self.holdup_of(&key, dependency).and_then(Holdup::payload) {
+                    entry.insert("holdup".to_owned(), holdup);
+                }
                 Value::Object(entry)
             })
             .chain(self.unresolved_of(node).iter().map(|unresolved| {
@@ -1324,6 +1528,8 @@ impl Watch {
     fn wait_surface(&self, node: &str) -> Surface {
         let now = crate::sys::now_millis();
         let mut lines: Vec<String> = Vec::new();
+        // The continuation lines, counted apart: the count is of releases.
+        let mut held_by: Vec<String> = Vec::new();
         for dependency in self
             .dependencies
             .get(node)
@@ -1354,6 +1560,10 @@ impl Watch {
                 "- {named} — {style}, waited {waited}, last answer: {answered}",
                 named = dependency.named(),
             ));
+            if let Some(holdup) = self.holdup_of(&key, dependency) {
+                held_by.extend(holdup.lines());
+                lines.extend(holdup.lines());
+            }
         }
         // A dependency the run could not describe is named by the id the plan
         // gives it, which is all the run has for it, and the line says why: the
@@ -1373,7 +1583,7 @@ impl Watch {
                 "node '{node}' is held under published adoption, waiting on {count} \
                  release(s):\n{lines}\nNothing times this out and nothing will fail the node. \
                  Keep waiting, flip this node to `adoption: fast` by live edit, or stop the run.",
-                count = lines.len(),
+                count = lines.len() - held_by.len(),
                 lines = lines.join("\n"),
             ),
             source: crate::channel::source::PROPOSAL.to_owned(),
