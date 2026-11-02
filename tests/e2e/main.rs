@@ -141,6 +141,8 @@ mod holds;
 // not release, a probe's interval) and are seconds each.
 mod human_items;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore[expensive_tests_stay_behind_their_own_edge] this journey launches plans read out of a GitHub board and projects their human items through the linked `github-projects` and `linear` plugins, exercising `taskgraph`, `human_items` and `driver` together, so the crate is the narrowest edge it can honestly sit behind; same grounds as `mod private_github_home` below.
+mod human_board_projection;
 // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] ten journeys, about five
 // minutes together on a loaded host (290 s at load1 about 17), nearly all of it three cold reads of a generated
 // 100-run root's ~260 MB of journals by this suite's debug build, two of them the budget

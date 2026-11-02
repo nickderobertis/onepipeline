@@ -1307,14 +1307,22 @@ onevcs-testing = "0.19.26"
 # its lease, so the next attempt is refused `create-in-progress` and retried once that lease
 # ends (`tests/e2e/writeback_budget.rs`). `src/writeback.rs`'s exhaustive classification names
 # the store's seven new refusals.
-onetaskgraph-core = "=0.12.14"
-onetaskgraph-plugin-api = "=0.12.14"
-onetaskgraph-local-md = "=0.12.14"
+# **0.13.1 is the floor for filing human tasks on a GitHub board** (`store-field-setup-fix`):
+# it sets up a board's missing Status options and Priority field with the inputs GitHub
+# accepts (onetaskgraph #3842), where 0.12.13's Status update sent a `projectId` GitHub refuses,
+# so a human-task board lacking either could not be set up. A plan-owned human item is projected with no
+# plan project — the human-task source's own `task_projection.project` places it — and with
+# the repositories its plan's tasks name, so the store's human-task routes classify and place
+# it (`src/human_items/projection.rs`); `tests/e2e/human_board_projection.rs` drives a public,
+# a private, a mixed and an organization's plan through it.
+onetaskgraph-core = "=0.13.1"
+onetaskgraph-plugin-api = "=0.13.1"
+onetaskgraph-local-md = "=0.13.1"
 # Test-support only: the Linear plugin the store links through its `linear` feature, named
 # directly so `tests/e2e/linear_loopback.rs` drives its public `TaskSource` and reads the
 # GraphQL documents it sends (`onetaskgraph_linear::graphql`) — the one statement of what
 # the loopback Linear answers. Exact and at the family's one release, like the three above.
-onetaskgraph-linear = "=0.12.14"
+onetaskgraph-linear = "=0.13.1"
 # Test-support only: the budget checker's own library, at exactly the release `justfile`'s
 # `onebudgetspec-version` installs. Pinned here so `just engines-current` reads its pin.
 onebudgetspec-core = "=0.1.5"

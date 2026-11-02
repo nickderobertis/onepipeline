@@ -7,7 +7,8 @@
 # under the same `sh -e`, because a step of a job on the runner cannot itself
 # run in a container.
 #
-# It captures HEAD, from a clone of it under `target/ci-capture`, with `shots/`
+# It captures HEAD, from a clone of it at `$RUNNER_TEMP/ci-capture` (in CI) or
+# `target/ci-capture` (anywhere else), with `shots/`
 # and its own cargo target (`target/ci-capture-target`) mounted from this
 # checkout: the capture builds its release
 # binaries into its tree's own `target/release`, and `lint` runs it beside its
@@ -41,6 +42,21 @@ esac
   echo "ACTION: name a relative directory under shots/, e.g. shots/current/x86_64" >&2
   exit 2
 }
+# CI's RUNNER_TEMP holds the capture's clone, which is removed and bind-mounted
+# (below), so a value that is not a plain absolute directory is refused rather
+# than resolved somewhere else.
+if [ -n "${RUNNER_TEMP:-}" ]; then
+  case "$RUNNER_TEMP/" in
+    */../* | */./*) bad=1 ;;
+    /?*) bad="" ;;
+    *) bad=1 ;;
+  esac
+  [ -z "$bad" ] && [[ $RUNNER_TEMP =~ ^[A-Za-z0-9._/-]+$ ]] || {
+    echo "ci-capture: RUNNER_TEMP='$RUNNER_TEMP' is not an absolute directory" >&2
+    echo "ACTION: unset RUNNER_TEMP, or set it to an absolute path with no '.' or '..' segment" >&2
+    exit 2
+  }
+fi
 command -v docker >/dev/null || {
   echo "ci-capture: docker not found; the capture runs in the image visual-docs.yml names" >&2
   echo "ACTION: install Docker, then re-run" >&2
@@ -83,12 +99,16 @@ command="$(read_with capture-command)" || exit 1
 # `lint` runs it for real on every pull request, against the committed baseline,
 # which is its end-to-end proof. Its refusals are in tests/ci_jobs/proofs.test.mjs,
 # and the command it runs is held under dash by tests/visual_docs.rs.
-copy="$ROOT/target/ci-capture"
+# In CI the clone lives outside `target/`: `lint` starts this beside
+# Swatinem/rust-cache, whose restore pre-cleans `target/` on a partial key match
+# (any change to a manifest or the lock) and deletes everything in a directory
+# there but its `build`, `deps` and `.fingerprint`, the clone's `.git` included.
+copy="${RUNNER_TEMP:-$ROOT/target}/ci-capture"
 head="$(git rev-parse HEAD)"
 # A kept clone is reused only when it is its own repository, at HEAD, with no
-# file missing: main's warm run captures too, so the `target/` rust-cache
-# restores can hold this directory pruned to a skeleton, and inside that git
-# finds this checkout's repository instead, whose HEAD matches.
+# file missing: off CI it sits in `target/`, which a cache restore or a clean can
+# prune to a skeleton, and inside that git finds this checkout's repository
+# instead, whose HEAD matches.
 if [ "$(git -C "$copy" rev-parse --absolute-git-dir 2>/dev/null)" != "$(cd "$copy" 2>/dev/null && pwd -P)/.git" ] ||
   [ "$(git -C "$copy" rev-parse HEAD 2>/dev/null)" != "$head" ] ||
   ! git -C "$copy" diff --quiet HEAD 2>/dev/null; then

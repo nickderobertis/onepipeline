@@ -51,6 +51,12 @@ struct Record {
     title: String,
     body: String,
     priority: super::Priority,
+    /// The repositories it was first projected with: a plan-owned task's plan's, which the
+    /// store routes and classifies it by. Absent for a task no plan owns, and in a record an
+    /// earlier build wrote, which projected none.
+    // llmlint: ignore[changed_behavior_has_e2e] a record an earlier build wrote is one the store accepted with no repositories — a planless task, or one whose task source was its plan's own — so reading it as none replays exactly what was accepted; `a_record_an_earlier_build_wrote_reads_as_projected_with_no_repositories` holds the decoding, and the replay journeys drive the reread.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repositories: Vec<onetaskgraph_plugin_api::Repository>,
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
@@ -91,15 +97,75 @@ pub(crate) fn pending<'a>(
 }
 
 /// The content `item` is projected with: what it was first projected as — the
-/// record's copy, or, where that is lost, the journal's own record of the item as
-/// it stood when its tracker was bound — else its own.
-fn content(journal: &Path, item: &HumanItem) -> (String, String, super::Priority) {
+/// record's copy — else the item as the journal recorded it when its tracker was bound,
+/// or as it stands, with its plan's reach added when a plan owns it.
+fn content(dir: &Path, journal: &Path, item: &HumanItem) -> Result<Content, String> {
     if let Some(r) = projected(journal).remove(&item.id) {
-        return (r.title, r.body, r.priority);
+        return Ok(Content {
+            title: title(r.title)?,
+            body: r.body,
+            priority: r.priority,
+            repositories: r.repositories,
+        });
     }
     let bound = super::live::first_tracked(journal, &item.id);
     let first = bound.as_ref().unwrap_or(item);
-    (first.title.clone(), first.body.clone(), first.priority)
+    let mut content = Content {
+        title: title(first.title.clone())?,
+        body: first.body.clone(),
+        priority: first.priority,
+        repositories: Vec::new(),
+    };
+    if let Some(plan) = &item.owner.plan {
+        let reach = plan_reach(dir, plan)?;
+        content.body = with_plan_link(
+            &content.body,
+            plan,
+            reach.url.as_ref().map(|url| url.as_str()),
+        );
+        content.repositories = reach.repositories;
+    }
+    Ok(content)
+}
+
+/// What a projected task carries, fixed at its first projection: the store binds its
+/// intent to it, so every later state is projected with this same content.
+struct Content {
+    title: onetaskgraph_core::task_projection::ProjectionTitle,
+    body: String,
+    priority: super::Priority,
+    repositories: Vec<onetaskgraph_plugin_api::Repository>,
+}
+
+fn title(spelled: String) -> Result<onetaskgraph_core::task_projection::ProjectionTitle, String> {
+    onetaskgraph_core::task_projection::ProjectionTitle::new(spelled)
+        .map_err(|e| format!("the task's title is not one the store accepts: {e}"))
+}
+
+/// The plan `plan` names, read where it is held. Refused rather than projected without
+/// it: a task projected with no repositories is classified public, so a private plan's
+/// task would land on a public board.
+fn plan_reach(dir: &Path, plan: &str) -> Result<crate::taskgraph::PlanReach, String> {
+    let id: crate::taskgraph::QualifiedId = plan
+        .parse()
+        .map_err(|e: crate::error::Error| format!("its plan {plan} is not one to read: {e}"))?;
+    crate::taskgraph::Store::at(dir)
+        .plan_reach(&id)
+        .map_err(|e| format!("its plan {plan} could not be read: {e}"))
+}
+
+/// `body` with a closing line linking the plan that owns it: its address where the plan's
+/// source gives one, else its qualified id.
+fn with_plan_link(body: &str, plan: &str, url: Option<&str>) -> String {
+    let link = url.map_or_else(|| format!("`{plan}`"), |url| format!("[{plan}]({url})"));
+    // A body is never blank: both the raise and the journal's decoder refuse one.
+    format!("{}\n\nPlan: {link}", body.trim_end())
+}
+
+/// A task's tracker binding, and the record that it was projected.
+pub(crate) struct Bound {
+    pub(crate) tracker: HumanItemTracker,
+    record: Record,
 }
 
 /// Project one task into `source`, as the store configured from `dir` places it.
@@ -109,9 +175,9 @@ pub(crate) fn project(
     journal: &Path,
     source: &str,
     item: &HumanItem,
-) -> Result<HumanItemTracker, String> {
+) -> Result<Bound, String> {
     let resolution = item.resolution.as_ref();
-    let (title, body, priority) = content(journal, item);
+    let content = content(dir, journal, item)?;
     use onetaskgraph_core::task_projection as wire;
     let refused =
         |what: &str, why: String| format!("the task's {what} is not one the store accepts: {why}");
@@ -136,17 +202,13 @@ pub(crate) fn project(
                 .transpose()
                 .map_err(|e| refused("owner plan", e))?,
         },
-        title: wire::ProjectionTitle::new(title).map_err(|e| refused("title", e))?,
-        body,
-        priority,
-        repositories: Vec::new(),
-        project: item
-            .owner
-            .plan
-            .clone()
-            .map(wire::ProjectionProjectId::new)
-            .transpose()
-            .map_err(|e| refused("plan", e))?,
+        title: content.title.clone(),
+        body: content.body.clone(),
+        priority: content.priority,
+        repositories: content.repositories.clone(),
+        // Placed by the task source's own configured project wherever it routes: the
+        // plan's project is in the plans source, which a human task never lands in.
+        project: None,
         source: onetaskgraph_plugin_api::SourceName::new(source)
             .map_err(|e| refused("task_source", e.to_string()))?,
         state: match Projected::of(item.state) {
@@ -171,25 +233,25 @@ pub(crate) fn project(
                 .project_human(&request, &crate::sys::hostname()),
         )
         .map_err(|e| e.to_string())?;
-    Ok(HumanItemTracker {
-        task: bound.task().to_string(),
-        url: bound.url().to_string(),
+    Ok(Bound {
+        tracker: HumanItemTracker {
+            task: bound.task().to_string(),
+            url: bound.url().to_string(),
+        },
+        record: Record {
+            state: Projected::of(item.state),
+            title: content.title.as_str().to_owned(),
+            body: content.body,
+            priority: content.priority,
+            repositories: content.repositories,
+        },
     })
 }
 
-/// Record that `item` has been projected at its current state.
-pub(crate) fn record(journal: &Path, item: &HumanItem) {
-    let (title, body, priority) = content(journal, item);
+/// Record that `item` has been projected as `bound` says.
+pub(crate) fn record(journal: &Path, item: &HumanItem, bound: Bound) {
     let mut done = projected(journal);
-    done.insert(
-        item.id.clone(),
-        Record {
-            state: Projected::of(item.state),
-            title,
-            body,
-            priority,
-        },
-    );
+    done.insert(item.id.clone(), bound.record);
     if let Err(why) = crate::ledger::write_atomic(
         &projected_path(journal),
         &serde_json::to_vec(&done).unwrap_or_default(),
@@ -200,5 +262,30 @@ pub(crate) fn record(journal: &Path, item: &HumanItem) {
              write projects it again, which the store answers without a second task",
             item.id
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_plan_link;
+
+    #[test]
+    fn a_plan_link_follows_the_body_and_names_the_plan_by_its_address_or_its_id() {
+        assert_eq!(
+            with_plan_link("Approve it.\n", "plans:I_1", Some("https://example.test/1")),
+            "Approve it.\n\nPlan: [plans:I_1](https://example.test/1)"
+        );
+        assert_eq!(
+            with_plan_link("Approve it.", "local:plan", None),
+            "Approve it.\n\nPlan: `local:plan`"
+        );
+    }
+
+    #[test]
+    fn a_record_an_earlier_build_wrote_reads_as_projected_with_no_repositories() {
+        let earlier = r#"{"state":"open","title":"Decide","body":"Why.","priority":"high"}"#;
+        let record: super::Record = serde_json::from_str(earlier).unwrap();
+        assert!(record.repositories.is_empty());
+        assert_eq!(serde_json::to_string(&record).unwrap(), earlier);
     }
 }
