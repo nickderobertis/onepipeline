@@ -732,7 +732,8 @@ fn a_check_the_timeout_stops_following_is_named_and_its_later_failure_is_not() {
 const HOLDUP_LISTING: &str =
     include_str!("../fixtures/check-visibility/printobserver-holdup-listing.json");
 
-/// The recorded standings read of that change request, every check on it passing.
+/// The recorded standings read of that change request, as recorded: three of its checks
+/// red and three skipped, which [`holdup_standings`] sets green before a journey's own.
 const HOLDUP_STANDINGS: &str =
     include_str!("../fixtures/check-visibility/printobserver-holdup-standings.json");
 
@@ -1505,4 +1506,55 @@ fn an_adopting_driver_does_not_follow_again_what_the_timeout_stopped_following()
         exited["payload"].get("checks_running").is_none(),
         "{exited}"
     );
+}
+
+/// What holds the release changing between two holdup reads is news: the wait is raised
+/// again with the new answer — here a required check that was red now pending, and a
+/// check that blocks nothing ended with no verdict, which reads as failing — and the
+/// record beside it carries the same.
+#[test]
+fn a_holdup_that_changes_raises_the_wait_again_with_what_holds_the_release_now() {
+    let (world, _answer) = held_world(
+        "release-holdup-changes",
+        true,
+        &holdup_standings(&[("gate (linux-x86_64)", "COMPLETED", Some("FAILURE"))]),
+    );
+    let run = crate::adoption::start(
+        &world,
+        "releaseholdupchanges",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    world.until("the first holdup on the wait", |world| {
+        crate::adoption::wait_surface(world, &run, "consumer")
+            .contains("failing — gate (linux-x86_64) (required — blocks the merge)")
+    });
+    world.script(
+        "gh.holdup-standings",
+        &holdup_standings(&[
+            ("gate (linux-x86_64)", "IN_PROGRESS", None),
+            ("classify", "COMPLETED", Some("CANCELLED")),
+        ]),
+    );
+    let now = format!(
+        "  held by {RELEASE_CHANGE} (the release's own change request): failing — classify \
+         (not required — does not block); pending — gate (linux-x86_64) (required — blocks the \
+         merge)"
+    );
+    world.until("the wait to say what holds the release now", |world| {
+        crate::adoption::read_waits(world, &run);
+        crate::adoption::wait_surface(world, &run, "consumer").contains(&now)
+    });
+    world.until("the record to carry it", |world| {
+        crate::adoption::awaiting(world, &run, "consumer")
+            .first()
+            .is_some_and(|entry| {
+                entry["holdup"]["changes"][0]["failing"]
+                    == serde_json::json!([{"check": "classify", "required": false,
+                        "requirement": "not required — does not block",
+                        "url": entry["holdup"]["changes"][0]["failing"][0]["url"]}])
+            })
+    });
 }

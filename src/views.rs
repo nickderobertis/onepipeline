@@ -5736,7 +5736,6 @@ pub fn results(view: &RunView) -> String {
     // And the last maintenance sweep that did something, for the same reason.
     out.push_str(&crate::maintenance::results_lines(view));
     out.push_str(&crate::scratch::lines(view, None));
-    // And the checks still running, or no longer followed, as the run ended.
     out.push_str(&check_ending_lines(view));
     out.push_str(&journal_loss_line(view));
     out
