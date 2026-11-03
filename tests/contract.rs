@@ -7924,6 +7924,8 @@ const RULINGS: &[(&str, &str)] = &[
     ),
     // op-journal-scaling: the bus's byte-offset cursor adds two files to the channel layout.
     ("143.", "`replies-cursor.json.offset`"),
+    // The 0.9.5 link: the marked bus copy is re-decided against it, wording kept.
+    ("147.", "decided against `onemessagebus` 0.9.5"),
 ];
 
 /// A plan spanning sources, as the contract's block states it: the store's own two member

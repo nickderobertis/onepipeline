@@ -13169,3 +13169,22 @@ significance, `url` on `change-check`, `follow_checks` and `release_holdup`).
 ```
 
 <!-- llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate] -->
+
+## 147. The marked bus copy re-decided against onemessagebus 0.9.5 — RESOLVED
+
+**Ruled by the planner, and `docs/contract.md` edited to match.** This build links
+`onemessagebus` 0.9.5, the newest release `Cargo.toml` permits, and the npm-pinned
+`onemessagebus-cli` the channel-layout journeys drive is 0.9.5 with it. The contract's marked
+copy of the bus's envelope shape and filter grammar is re-decided against 0.9.5 with its
+wording kept: its two statements of the release it was decided against name 0.9.5 where they
+named 0.9.4, and nothing else in either paragraph changes.
+
+**Evidence.** The published 0.9.4 and 0.9.5 crate sources differ only in `src/inbox.rs` and
+`src/spool.rs`, beside their manifests and VCS stamps: 0.9.5 adds an inbox `lapsed` check by
+which a receiver drops a message its sender withdrew or whose deadline passed, and splits the
+spool's deadline read out of its expiry. The envelope, the filter grammar, its parser and the
+files a run's channel directory holds are 0.9.4's unchanged, so the eleven files of
+`onepipeline::channel::layout::FILES` stand as entry 143 left them.
+
+**Ruling:** the planner ruled the 0.9.5 re-decision and these contract edits (correlation
+`c-f9b1963b0152220a8a18992ffa7e83af`).
