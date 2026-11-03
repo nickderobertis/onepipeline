@@ -932,35 +932,30 @@ pub(crate) fn ending(
         {
             continue;
         }
-        let text = |key: &str| {
-            event
-                .payload
-                .get(key)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
+        // Another process may have written the record: one that does not say whose
+        // checks they were, or whether each blocks the merge, is named and left out
+        // rather than listed as an advisory check of nobody's.
+        let record = match serde_json::from_value::<crate::payload::ChecksUnfollowed>(
+            Value::Object(event.payload.clone()),
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                eprintln!(
+                    "onepipeline: a {} record of this run is not one, so its checks are not \
+                     listed at the run's end: {error}",
+                    event.kind
+                );
+                continue;
+            }
         };
-        let (node, change, head) = (text("node"), text("change"), text("head"));
-        unfollowed_keys.insert((change.clone(), head.clone()));
-        for check in event
-            .payload
-            .get("checks")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+        unfollowed_keys.insert((record.change.clone(), record.head.clone()));
+        for check in &record.checks {
             unfollowed.push(named(
-                &node,
-                &change,
-                &head,
-                check
-                    .get("check")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default(),
-                check
-                    .get("required")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                &record.node,
+                &record.change,
+                &record.head,
+                &check.check,
+                check.required,
             ));
         }
     }
@@ -1022,18 +1017,22 @@ pub(crate) fn ending_sections(exited: Option<&Envelope>) -> String {
         out.push_str(heading);
         out.push('\n');
         for check in listed {
-            let text = |key: &str| check.get(key).and_then(Value::as_str).unwrap_or("-");
-            let required = check
-                .get("required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            out.push_str(&format!(
-                "  {} on {} (node '{}') — {}\n",
-                crate::views::one_line(text("check")),
-                crate::views::one_line(text("change")),
-                crate::views::one_line(text("node")),
-                requirement_label(required),
-            ));
+            // An entry that does not say what it names, or whether it blocks the merge, is
+            // shown as such rather than labelled as one that does not block.
+            match serde_json::from_value::<crate::payload::EndingCheck>(check.clone()) {
+                Ok(check) => out.push_str(&format!(
+                    "  {} on {} (node '{}') — {}\n",
+                    crate::views::one_line(&check.check),
+                    crate::views::one_line(&check.change),
+                    crate::views::one_line(&check.node),
+                    requirement_label(check.required),
+                )),
+                Err(error) => out.push_str(&format!(
+                    "  an entry this record does not state readably ({}): {}\n",
+                    crate::views::one_line(&error.to_string()),
+                    crate::views::one_line(&check.to_string()),
+                )),
+            }
         }
     }
     out
@@ -1063,6 +1062,32 @@ mod tests {
             payload: payload.as_object().cloned().expect("an object"),
             artifacts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_ending_entry_that_does_not_say_whether_it_blocks_is_not_labelled_advisory() {
+        let exited = check(
+            json!({"checks_running": [
+                {"node": "a", "change": "https://h/o/r/pull/1", "head": "0123456789abcdef",
+                 "check": "lint", "required": true, "requirement": "required — blocks the merge"},
+                {"node": "a", "change": "https://h/o/r/pull/1", "head": "0123456789abcdef",
+                 "check": "docs"},
+            ]}),
+            "milestone",
+        );
+        let sections = ending_sections(Some(&exited));
+        let lines: Vec<&str> = sections.lines().collect();
+        assert_eq!(lines[0], "checks still running at run end:");
+        assert_eq!(
+            lines[1],
+            "  lint on https://h/o/r/pull/1 (node 'a') — required — blocks the merge"
+        );
+        assert!(
+            lines[2].starts_with("  an entry this record does not state readably (")
+                && lines[2].contains("\"docs\""),
+            "{sections}"
+        );
+        assert!(!sections.contains("does not block"), "{sections}");
     }
 
     #[test]
