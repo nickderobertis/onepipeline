@@ -460,7 +460,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1540,9 +1540,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.22.1"
+version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04fa448faccc8b6f088e5b954d9c6e2581f3a9faef24cfa613673d09fe85af94"
+checksum = "6ddececd7e1ff49e73eee2eb38d7efb349551e99abb81d732d66ac47a02bd4b0"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1557,9 +1557,9 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.4"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37765a19a871ae7e89e87441dc70a3c7df312917b8fed9397529b2050571613a"
+checksum = "38ac7189e0e48ccf405c82310a8486855a1ea177f2141a4e9e942fffc3c49567"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
@@ -2124,7 +2124,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2181,7 +2181,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2557,7 +2557,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3111,7 +3111,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
