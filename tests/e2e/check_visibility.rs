@@ -539,6 +539,7 @@ fn an_adopting_driver_resumes_following_and_raises_nothing_twice() {
 /// Rewrite `run`'s journal through `edit`, which sees every record and appends any it
 /// returns after the last; the fold checkpoint is dropped, as a journal it no longer
 /// corroborates leaves it, so the run is read from the journal alone.
+#[cfg(unix)]
 fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
     let path = world.run_file(run, "events.jsonl");
     let mut records: Vec<Value> = std::fs::read_to_string(&path)
