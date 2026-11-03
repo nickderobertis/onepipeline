@@ -26,7 +26,7 @@ use serde_json::json;
 use crate::harness::{
     global, lifecycle, onetaskgraph_binary, plan_of, project_id, World, STORE_SOURCE,
 };
-use crate::linear_loopback::{content_of, metadata_of, Linear, Operation};
+use crate::linear_loopback::{content_of, metadata_of, Fault, Linear, Operation};
 use crate::linear_writeback::{
     configuration, from_the_launch_directory, KEY_ENV, SETTLEMENT, SOURCE, STATES, STATUSES,
 };
@@ -73,6 +73,20 @@ struct Homed {
 
 /// Render the plan's tasks, copy the plan into Linear, and answer where it landed.
 fn homed(name: &str) -> Homed {
+    homed_by(name, |world, _, launch, plan| {
+        copied(
+            world,
+            launch,
+            plan,
+            onetaskgraph_core::CopyScope::Projects { tasks: true },
+        )
+    })
+}
+
+/// [`homed`], with the plan's project and tasks copied into Linear by `copy`, which is handed
+/// the world, the loopback, the launch directory and the plan's id in the world's own source,
+/// and answers where the plan landed.
+fn homed_by(name: &str, copy: impl FnOnce(&World, &Linear, &Path, &str) -> String) -> Homed {
     let world = World::new(name).with_env(KEY_ENV, "a-loopback-key");
     let linear = Linear::serve_empty(STATES, STATUSES);
     let launch = world.root.join("launch-directory");
@@ -105,13 +119,33 @@ fn homed(name: &str) -> Homed {
 
     // The store's own copy files the plan in Linear: the project, then each task under it,
     // then the plan's design document after them, as an operator's tooling copies one.
-    let home = copied(
+    let home = copy(
         &world,
+        &linear,
         &launch,
         &format!("{STORE_SOURCE}:{}", project_id(NAME)),
-        onetaskgraph_core::CopyScope::Projects { tasks: true },
     );
     assert_eq!(home, format!("{SOURCE}:{}", linear.project_id()));
+    // Each task filed under the plan's project, which the copy created in a Linear that held
+    // none.
+    // The create that filed each issue Linear holds is its last under that issue's id: one a
+    // refused earlier attempt sent under the same id filed nothing.
+    let log = linear.log();
+    for (held, _, _) in linear.issues() {
+        let filed = log
+            .iter()
+            .rev()
+            .find(|request| {
+                request.operation == Operation::IssueCreate
+                    && request.variables["input"]["id"] == held
+            })
+            .unwrap_or_else(|| panic!("no create filed {held}: {log:#?}"));
+        assert_eq!(
+            filed.variables["input"]["projectId"],
+            json!(linear.project_id()),
+            "{held} was not filed under the plan's project: {filed:?}"
+        );
+    }
     world.write_item(
         &world.store().join("documents").join("design.md"),
         &[
@@ -181,8 +215,31 @@ const DESIGN_STORED: &str = "## Design\n\n* Build on the store.\n\nA paragraph l
 
 /// Copy `item` into Linear with the linked store's copy over `scope`, and answer where it landed.
 fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::CopyScope) -> String {
+    let report = copy_report(world, launch, item, scope)
+        .unwrap_or_else(|error| panic!("the copy files it in Linear: {error}"));
+    landed(&report)
+}
+
+/// Where the one item a copy reports landed.
+fn landed(report: &onetaskgraph_core::CopyReport) -> String {
+    report
+        .items
+        .first()
+        .and_then(|item| item.action.destination())
+        .unwrap_or_else(|| panic!("the copy reports where it landed: {report:?}"))
+        .to_string()
+}
+
+/// Copy `item` into Linear with the linked store's copy over `scope`, and answer its report, or
+/// the store's refusal as it renders it.
+fn copy_report(
+    world: &World,
+    launch: &Path,
+    item: &str,
+    scope: onetaskgraph_core::CopyScope,
+) -> Result<onetaskgraph_core::CopyReport, String> {
     let item = global(item);
-    let report = linked_store(world, launch, |engine| async move {
+    linked_store(world, launch, |engine| async move {
         engine
             .copy(&onetaskgraph_core::CopyRequest {
                 items: onetaskgraph_core::CopyItems::new(vec![item]).expect("one item"),
@@ -202,14 +259,8 @@ fn copied(world: &World, launch: &Path, item: &str, scope: onetaskgraph_core::Co
                 conditions: onetaskgraph_core::CopyConditions::default(),
             })
             .await
-            .unwrap_or_else(|error| panic!("the copy files it in Linear: {error}"))
-    });
-    report
-        .items
-        .first()
-        .and_then(|item| item.action.destination())
-        .unwrap_or_else(|| panic!("the copy reports where it landed: {report:?}"))
-        .to_string()
+            .map_err(|error| error.to_string())
+    })
 }
 
 /// One task of `native`, created by the released `onetaskgraph` from `plan-task` with `criteria`.
@@ -310,40 +361,9 @@ impl Homed {
     }
 }
 
-/// A plan of `plan-task` renderings, copied into a Linear that rewrites Markdown on write,
-/// launches from there under `--require-rendered true`: every node is dispatched, and every
-/// settlement is written back to its issue. An edit made to one issue in Linear afterwards is
-/// refused by the next launch, naming that task.
-#[test]
-fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_only_check() {
-    let homed = homed("linear-launch");
-
-    // What Linear holds is not what was rendered: every criterion's bullet came back `* `, the
-    // second node's wrapped constructs came back joined, split and escaped, and each rendering's
-    // provenance records the digest of what Linear stored rather than of what was rendered.
-    for (node, criteria) in NODES {
-        let held = homed.linear.description_of(homed.issue_of(node));
-        assert!(!held.contains("\n- "), "{node} kept a `- ` bullet:\n{held}");
-        assert!(
-            held.contains(&format!("* {}", criteria[0])),
-            "{node}'s first criterion is not held as a `* ` bullet:\n{held}"
-        );
-        let provenance = &metadata_of(&held)["onetaskgraph.template"];
-        assert_eq!(
-            provenance["body_digest"],
-            json!(onetaskgraph_plugin_api::body_digest(content_of(&held))),
-            "{node}'s rendering does not record the digest of what Linear stored:\n{held}"
-        );
-    }
-    let build = homed.linear.description_of(homed.issue_of("build"));
-    for stored in BUILD_STORED {
-        assert!(
-            build.contains(stored),
-            "build does not hold {stored:?} as Linear stores it:\n{build}"
-        );
-    }
-    let launched = homed.linear.log().len();
-
+/// Launch `homed` from its Linear home under the rendered-only check, with nothing refused, and
+/// see the run read every node of it and run each to its end.
+fn launched(homed: &Homed) {
     // Loaded under the rendered-only check, with nothing refused, and run to its end.
     let started = homed.start();
     started.exited(0);
@@ -383,6 +403,53 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
             .map(|held| held["status"].clone());
         assert_eq!(status, Some(json!("done")), "{result}");
     }
+}
+
+/// A plan of `plan-task` renderings, copied into a Linear that rewrites Markdown on write,
+/// launches from there under `--require-rendered true`: every node is dispatched, and every
+/// settlement is written back to its issue. An edit made to one issue in Linear afterwards is
+/// refused by the next launch, naming that task.
+#[test]
+fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_only_check() {
+    let homed = homed("linear-launch");
+    assert_eq!(
+        (
+            homed.linear.creates(Operation::ProjectCreate),
+            homed.linear.creates(Operation::IssueCreate)
+        ),
+        (1, NODES.len()),
+        "the copy into an empty Linear sent other than one project create and one issue \
+         create a node: {:#?}",
+        homed.linear.log()
+    );
+
+    // What Linear holds is not what was rendered: every criterion's bullet came back `* `, the
+    // second node's wrapped constructs came back joined, split and escaped, and each rendering's
+    // provenance records the digest of what Linear stored rather than of what was rendered.
+    for (node, criteria) in NODES {
+        let held = homed.linear.description_of(homed.issue_of(node));
+        assert!(!held.contains("\n- "), "{node} kept a `- ` bullet:\n{held}");
+        assert!(
+            held.contains(&format!("* {}", criteria[0])),
+            "{node}'s first criterion is not held as a `* ` bullet:\n{held}"
+        );
+        let provenance = &metadata_of(&held)["onetaskgraph.template"];
+        assert_eq!(
+            provenance["body_digest"],
+            json!(onetaskgraph_plugin_api::body_digest(content_of(&held))),
+            "{node}'s rendering does not record the digest of what Linear stored:\n{held}"
+        );
+    }
+    let build = homed.linear.description_of(homed.issue_of("build"));
+    for stored in BUILD_STORED {
+        assert!(
+            build.contains(stored),
+            "build does not hold {stored:?} as Linear stores it:\n{build}"
+        );
+    }
+    let before_launch = homed.linear.log().len();
+
+    launched(&homed);
 
     // Each settlement reaches its issue, as Linear stores it: the issue moved to the state
     // the mapping gives `done`, and its metadata carries the settlement record.
@@ -399,7 +466,7 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
     // before writing it: once the launch has written an issue, every read of it is followed
     // straight away by a write of it, and the last request it is sent is a write — no read of it
     // follows a write-back's metadata write.
-    let written_back = &homed.linear.log()[launched..];
+    let written_back = &homed.linear.log()[before_launch..];
     for (node, _) in NODES {
         let issue = homed.issue_of(node);
         let sent: Vec<Operation> = written_back
@@ -442,6 +509,105 @@ fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_onl
         said.contains(RULE_BODY_CHANGED) && said.contains(&format!("{SOURCE}:{edited}")),
         "the refusal does not name {SOURCE}:{edited} as differing from its rendering:\n{said}"
     );
+}
+
+/// Linear may apply a create whose answer never arrives. A plan copied into an empty Linear whose
+/// project create Linear applied and whose answer was lost, and then copied again, leaves Linear
+/// holding that one project with each task filed under it once — never a second project, and
+/// never a task twice — and the launch from there reads every node.
+#[test]
+fn a_plan_whose_project_create_lost_its_answer_is_copied_again_into_one_project() {
+    let homed = homed_by("linear-launch-retried", |world, linear, launch, plan| {
+        let scope = || onetaskgraph_core::CopyScope::Projects { tasks: true };
+        // The connection closes with no answer after the loopback applied the create.
+        linear.fail_next(Operation::ProjectCreate, Fault::Drop);
+        // The copy that lost the answer reads the id it sent the create under, finds the
+        // project Linear applied there, and finishes it with the tasks under it.
+        let first = copied(world, launch, plan, scope());
+        let log = linear.log();
+        let create = log
+            .iter()
+            .position(|request| request.operation == Operation::ProjectCreate)
+            .unwrap_or_else(|| panic!("the copy sent no project create: {log:#?}"));
+        let sent = log[create].variables["input"]["id"].clone();
+        assert!(
+            log[create + 1..].iter().any(|request| {
+                request.operation == Operation::Project && request.variables["id"] == sent
+            }),
+            "the copy never read the project its unanswered create was sent as: {log:#?}"
+        );
+        assert_eq!(linear.issues().len(), NODES.len(), "{log:#?}");
+        // Copied again, it lands where the first did and files nothing more.
+        let again = copied(world, launch, plan, scope());
+        assert_eq!(first, again, "the two copies landed in different places");
+        again
+    });
+    assert_eq!(
+        (
+            homed.linear.creates(Operation::ProjectCreate),
+            homed.linear.creates(Operation::IssueCreate)
+        ),
+        (1, NODES.len()),
+        "the project or a task was created again after the answer was lost: {:#?}",
+        homed.linear.log()
+    );
+    launched(&homed);
+}
+
+/// A copy Linear refuses partway is undone, and its undo takes back the project it created — but
+/// Linear lets an id name one record ever, so the id that project held, which the copy's create
+/// key derives and every later copy of the plan sends again, is one Linear refuses a create
+/// under (`conflict on insert of Project`). Copied again into a Linear that holds no project,
+/// the plan lands in one new project under another id its key derives, with each task filed
+/// under it once, and the launch from there reads every node.
+#[test]
+fn a_plan_copied_again_after_its_undo_took_its_project_back_lands_in_one_new_project() {
+    let mut taken_back = String::new();
+    let homed = homed_by("linear-launch-undone", |world, linear, launch, plan| {
+        let scope = || onetaskgraph_core::CopyScope::Projects { tasks: true };
+        // Every id the first task's create could be tried under is refused, so the copy fails
+        // after creating its project, and its undo deletes that project.
+        for _ in 0..onetaskgraph_linear::CREATE_ID_GENERATIONS {
+            linear.fail_next(Operation::IssueCreate, Fault::Refuse);
+        }
+        let refused = copy_report(world, launch, plan, scope());
+        assert!(
+            refused.is_err(),
+            "a copy whose task creates were refused landed: {refused:?}"
+        );
+        linear.clear_faults();
+        let log = linear.log();
+        taken_back = log
+            .iter()
+            .find(|request| request.operation == Operation::ProjectDelete)
+            .and_then(|request| request.variables["id"].as_str())
+            .unwrap_or_else(|| panic!("the undo took no project back: {log:#?}"))
+            .to_owned();
+        assert!(
+            linear.issues().is_empty() && linear.creates(Operation::ProjectCreate) == 1,
+            "the refused copy left Linear holding something: {log:#?}"
+        );
+        copied(world, launch, plan, scope())
+    });
+    let log = homed.linear.log();
+    let creates: Vec<&serde_json::Value> = log
+        .iter()
+        .filter(|request| request.operation == Operation::ProjectCreate)
+        .map(|request| &request.variables["input"]["id"])
+        .collect();
+    // The second copy sends its create first under the deleted project's id, which Linear
+    // refuses, and lands under the next id its key derives.
+    assert_eq!(
+        creates,
+        [
+            &json!(taken_back),
+            &json!(taken_back),
+            &json!(homed.linear.project_id())
+        ],
+        "{log:#?}"
+    );
+    assert_ne!(homed.linear.project_id(), taken_back);
+    launched(&homed);
 }
 
 /// A plan homed in Linear is copied there again after every review, finish and approval, and
