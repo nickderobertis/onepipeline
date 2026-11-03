@@ -43,7 +43,14 @@ const FOLLOW: &str = "0.2";
 /// A world publishing `service` on a team repository whose watch sees [`WATCHED`] and
 /// whose follow reads answer `follow`, and whose dependent `after` holds until told.
 fn world_following(name: &str, follow: &str) -> World {
-    let world = World::new(name).with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW);
+    // The harness's two-second checks timeout bounds a watch over a host that
+    // answers at once; here it is also how long a change is followed, and the
+    // journeys need several follow reads — each a subprocess — inside it, which a
+    // loaded macOS runner did not fit into two seconds. A journey about that
+    // timeout sets its own, after this one.
+    let world = World::new(name)
+        .with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "60");
     team_repository(&world);
     world.script("service.work", "the worker wrote this\n");
     world.script("gh.checks", WATCHED);
