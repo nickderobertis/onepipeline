@@ -1013,12 +1013,20 @@ pub(crate) fn ending_sections(exited: Option<&Envelope>) -> String {
             "checks no longer followed (timed out):",
         ),
     ] {
-        let listed: Vec<&Value> = exited
-            .payload
-            .get(key)
-            .and_then(Value::as_array)
-            .map(|list| list.iter().collect())
-            .unwrap_or_default();
+        // An ending that names neither leaves the field out; one that names it as
+        // anything but a list is shown as unreadable rather than as naming nothing.
+        let Some(value) = exited.payload.get(key) else {
+            continue;
+        };
+        let Some(listed) = value.as_array() else {
+            out.push_str(heading);
+            out.push('\n');
+            out.push_str(&format!(
+                "  this record's {key} is not a list, so what it names is not shown: {}\n",
+                crate::views::one_line(&value.to_string()),
+            ));
+            continue;
+        };
         if listed.is_empty() {
             continue;
         }
@@ -1096,6 +1104,20 @@ mod tests {
             "{sections}"
         );
         assert!(!sections.contains("does not block"), "{sections}");
+    }
+
+    #[test]
+    fn an_ending_list_that_is_not_a_list_is_shown_as_unreadable_rather_than_empty() {
+        let exited = check(
+            json!({"checks_running": "lint", "checks_unfollowed": []}),
+            "milestone",
+        );
+        let sections = ending_sections(Some(&exited));
+        assert_eq!(
+            sections,
+            "checks still running at run end:\n  this record's checks_running is not a list, \
+             so what it names is not shown: \"lint\"\n"
+        );
     }
 
     #[test]

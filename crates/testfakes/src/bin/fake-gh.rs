@@ -2628,10 +2628,20 @@ fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
         Ok(response) => response,
         Err(error) => return fake::refuse(&format!("gh.{script} is not JSON: {error}")),
     };
+    // A replayed answer is charged at the cost it states; one stating none, or not a
+    // count, is refused rather than recorded as a read that cost nothing.
+    let Some(cost) = response
+        .pointer("/data/rateLimit/cost")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return fake::refuse(&format!(
+            "gh.{script} states no rateLimit.cost as a non-negative integer"
+        ));
+    };
     let at = fake::monotonic_ms();
     let line = serde_json::json!({
         "at_ms": at, "query": query,
-        "graphql_points": response.pointer("/data/rateLimit/cost").cloned().unwrap_or_default(),
+        "graphql_points": cost,
         "rest_requests": 0,
     });
     if let Err(error) = append_line(
