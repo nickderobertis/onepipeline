@@ -1401,16 +1401,18 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
         .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", &timeout.to_string());
     world.write_graphs();
     // Every change request watched for its checks and kept for review; the release
-    // producer's repository lands directly, so its release can be asked about.
+    // producer's repository lands directly, so its release can be asked about, and
+    // opens none of the workload's 12 change requests.
     world.repository("change-open", &[]);
     std::fs::write(
         world.onevcs_home().join("rules.yml"),
         "version: 3\nrules:\n  - match: {owner: owner, name: engine}\n    publication: \
-         local-direct\n    approvals: none\ndefault:\n  publication: change-open\n  approvals: \
-         required\n",
+         local-direct\n    approvals: none\ndefault:\n  publication: change-open\n  \
+         approvals: required\n",
     )
     .expect("the rules file is written");
     let _tools = world.extra_repository("tools");
+    let _app = world.extra_repository("app");
     let engine_repo = world.extra_repository("engine");
     let (script, answer) = world.probe_in(&engine_repo, "engine");
     world.releases(&format!(
@@ -1435,26 +1437,29 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     let settled = "lint completed success required";
     let running = "lint completed success required\nslow-a in_progress - advisory\nslow-b \
                    in_progress - advisory\nslow-c in_progress - advisory";
-    world.script("gh.checks.repo.owner.service", running);
+    // The 6 followed change requests are spread over two of the three repositories
+    // that open change requests, 3 in each, so follow reads batch per repository as
+    // the workload makes them.
+    let clock = format!(
+        "after_ms 0\n{running}\n---\nafter_ms {running_ms}\n{settled}\nslow-a completed \
+         success advisory\nslow-b completed success advisory\nslow-c completed success \
+         advisory"
+    );
+    for followed in ["service", "app"] {
+        world.script(&format!("gh.checks.repo.owner.{followed}"), running);
+        world.script(&format!("gh.follow-clock.repo.owner.{followed}"), &clock);
+    }
     world.script("gh.checks.repo.owner.tools", settled);
     world.script("gh.checks.repo.owner.engine", settled);
-    world.script(
-        "gh.follow-clock.repo.owner.service",
-        &format!(
-            "after_ms 0\n{running}\n---\nafter_ms {running_ms}\n{settled}\nslow-a completed \
-             success advisory\nslow-b completed success advisory\nslow-c completed success \
-             advisory"
-        ),
-    );
 
     // The release producer lands directly; every other node opens a change request.
     let mut producer = lifecycle("producer", &[]);
     producer["repo"] = Value::from("engine");
     let mut nodes = vec![producer];
-    for id in ["s1", "s2", "s3", "s4", "s5", "s6"] {
+    for id in ["s1", "s2", "s3"] {
         nodes.push(published_in(id, "service", &[]));
     }
-    for id in ["t1", "t2"] {
+    for id in ["t1", "t2", "t3", "t4"] {
         nodes.push(published_in(id, "tools", &[]));
     }
     for id in ["c1", "c2"] {
@@ -1462,10 +1467,8 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
         held["adoption"] = Value::from("published");
         nodes.push(held);
     }
-    for id in ["e1", "e2"] {
-        let mut node = published_in(id, "engine", &[]);
-        node["merge_policy"] = Value::from("change-open");
-        nodes.push(node);
+    for id in ["a1", "a2", "a3"] {
+        nodes.push(published_in(id, "app", &[]));
     }
     let run = crate::adoption::start(&world, "checkvisibilitybudget", nodes);
 
@@ -1525,9 +1528,17 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
             .collect::<Vec<_>>()
     );
     assert!(
-        follows.iter().all(|read| read["repo"] == "owner/service"),
+        follows
+            .iter()
+            .all(|read| read["repo"] == "owner/service" || read["repo"] == "owner/app"),
         "a change request with nothing running was followed: {follows:?}"
     );
+    for followed in ["owner/service", "owner/app"] {
+        assert!(
+            follows.iter().any(|read| read["repo"] == followed),
+            "{followed} was never followed: {follows:?}"
+        );
+    }
     assert!(
         closer_than(&listings, "query", (holdup * 1000.0) as u64).is_empty(),
         "{listings:?}"
