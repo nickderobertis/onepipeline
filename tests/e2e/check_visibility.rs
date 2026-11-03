@@ -532,10 +532,11 @@ fn an_adopting_driver_resumes_following_and_raises_nothing_twice() {
 
 // llmlint: ignore-block[tests_mirror_real_usage] this block is the helper and the one journey that
 // calls it. The records the journey plants — a `check-failed` and a `checks-unfollowed` short of
-// fields their payloads require, and an ending entry that does not say whether its check blocks —
-// are written by no build of onepipeline, which writes each from a typed payload, so no interface
-// reaches them; they are what a journal another build or a person edited reads like, which is the
-// input under test. Everything after each edit is the compiled binary's own `adopt` and `results`.
+// fields their payloads require, an ending entry that does not say whether its check blocks, and
+// an ending list that is not a list — are written by no build of onepipeline, which writes each
+// from a typed payload, so no interface reaches them; they are what a journal another build or a
+// person edited reads like, which is the input under test. Everything after each edit is the
+// compiled binary's own `adopt`, `results` and `status`.
 /// Rewrite `run`'s journal through `edit`, which sees every record and appends any it
 /// returns after the last; the fold checkpoint is dropped, as a journal it no longer
 /// corroborates leaves it, so the run is read from the journal alone.
