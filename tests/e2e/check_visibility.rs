@@ -523,6 +523,105 @@ fn an_adopting_driver_resumes_following_and_raises_nothing_twice() {
         .out_has("slower on https://github.com/owner/service/pull/1 (node 'service') — not required — does not block");
 }
 
+/// Rewrite `run`'s journal through `edit`, which sees every record and appends any it
+/// returns after the last; the fold checkpoint is dropped, as a journal it no longer
+/// corroborates leaves it, so the run is read from the journal alone.
+// llmlint: ignore-block[tests_mirror_real_usage] the records this plants — a `checks-unfollowed`
+// that names nobody's checks and an ending entry that does not say whether its check blocks — are
+// written by no build of onepipeline, which writes both from typed payloads; they are what a
+// journal another build or a person edited reads like, and that is the input the reader refuses.
+// Everything after the edit is the compiled binary's own `adopt` and `results`.
+fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
+    let path = world.run_file(run, "events.jsonl");
+    let mut records: Vec<Value> = std::fs::read_to_string(&path)
+        .expect("the run's journal reads")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a journal line is JSON"))
+        .collect();
+    edit(&mut records);
+    let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+    std::fs::write(&path, text).expect("the journal is rewritten");
+    let _ = std::fs::remove_file(world.run_file(run, "checkpoint.json"));
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A journal whose `checks-unfollowed` record does not say whose checks it named, or
+/// whose ending lists a check without saying whether it blocks, is read as neither an
+/// advisory check of nobody's nor a check that does not block: the adopting driver
+/// names the record it could not read and lists the change's running check as still
+/// running, and `results` shows the unreadable entry as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_check_record_that_does_not_say_what_it_names_is_not_read_as_advisory() {
+    let world = world_following(
+        "malformed-ending",
+        "lint completed success required\nslow in_progress - advisory",
+    );
+    let run = "malformedending";
+    launch(&world, run);
+    world.until("a follow read", |world| !follow_reads(world).is_empty());
+    crate::harness::end_driver(&world, run);
+    edit_journal(&world, run, |records| {
+        let mut planted = records.last().expect("a journal record").clone();
+        planted["seq"] = serde_json::json!(planted["seq"].as_u64().unwrap_or(0) + 1);
+        planted["kind"] = serde_json::json!("checks-unfollowed");
+        planted["payload"] = serde_json::json!({
+            "reason": "timeout",
+            "checks": [{"check": "slow"}],
+        });
+        records.push(planted);
+    });
+
+    let stderr = world.fakes.join("adopt-malformed.stderr");
+    let mut adopting = world
+        .cmd(&["adopt", run])
+        .env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&stderr).expect("a stderr file"))
+        .spawn()
+        .expect("the adoption starts");
+    world.script("after.go", "");
+    let ended = adopting.wait().expect("the adoption ends");
+    assert!(ended.success(), "adopt exited {ended}: {}", world.dump());
+    let said = std::fs::read_to_string(&stderr).unwrap_or_default();
+    assert!(
+        said.contains("a checks-unfollowed record of this run is not one"),
+        "{said}"
+    );
+    let exited = last_exit(&world, run);
+    assert_eq!(
+        listed(&exited, "checks_running"),
+        [(
+            "slow".to_owned(),
+            "not required — does not block".to_owned()
+        )],
+        "{exited}"
+    );
+    assert!(
+        exited["payload"].get("checks_unfollowed").is_none(),
+        "{exited}"
+    );
+
+    edit_journal(&world, run, |records| {
+        let exited = records
+            .iter_mut()
+            .rev()
+            .find(|record| record["kind"] == "driver-exited")
+            .expect("the ending record");
+        let entry = exited["payload"]["checks_running"][0]
+            .as_object_mut()
+            .expect("the running check");
+        entry.remove("required");
+        entry.remove("requirement");
+    });
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_has("checks still running at run end:")
+        .out_has("  an entry this record does not state readably (")
+        .out_lacks("does not block");
+}
+
 /// A check that blocks nothing fails while the publication's own watch is still
 /// reading, before its required check settles: the node settles exactly as it does
 /// when that check passes, is not retried, its dependent runs, and the failure is
