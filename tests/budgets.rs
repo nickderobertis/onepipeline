@@ -2017,6 +2017,25 @@ fn the_check_visibility_reporter_charges_its_record_and_refuses_what_it_cannot_v
         "{detail}"
     );
 
+    // A REST request is charged one unit beside each GraphQL point, in either phase.
+    let mut with_rest = check_visibility_record();
+    with_rest["phases"][0]["calls"][0]["rest_requests"] = serde_json::json!(2);
+    with_rest["phases"][1]["calls"][1]["rest_requests"] = serde_json::json!(3);
+    std::fs::write(&record, with_rest.to_string()).expect("a record");
+    let reported = check_visibility_report(&dir, Some(&result));
+    assert_eq!(reported.status.code(), Some(0), "{}", stderr(&reported));
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&result).expect("the result is written"))
+            .expect("the result is JSON");
+    assert_eq!(written["value"].as_f64(), Some(9.0), "{written}");
+    let detail = written["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("follow reads: 2 calls, 2 GraphQL points, 2 REST requests")
+            && detail
+                .contains("holdup reads: 1 reads in 2 queries, 2 GraphQL points, 3 REST requests"),
+        "{detail}"
+    );
+
     let mut other = check_visibility_record();
     other["workload"]["changes"] = serde_json::json!(11);
     std::fs::write(&record, other.to_string()).expect("a record");
