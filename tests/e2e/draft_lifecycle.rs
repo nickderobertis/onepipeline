@@ -662,7 +662,6 @@ fn a_skipped_required_check_is_named_and_never_shown_as_passed() {
         .filter(|line| line.contains(" change-check "))
         .collect();
     assert_eq!(lines.len(), checks.len(), "{}", monitor.stdout);
-    // Each line names its check, its state and whether it blocks the merge.
     assert!(
         lines
             .iter()

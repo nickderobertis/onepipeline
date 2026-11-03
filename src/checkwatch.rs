@@ -462,6 +462,7 @@ impl CheckWatch {
             answers,
             taken: Vec::new(),
             every: seconds_env(FOLLOW_ENV, DEFAULT_FOLLOW_SECONDS),
+            // llmlint: ignore[changed_behavior_has_e2e] the shipped hour cannot be waited out by a journey, and this variable is onevcs's own, which reads it for the publication's watch too — so a journey handing it an unusable value changes the publication under test. `seconds_env`'s fallback is held by this module's `an_unusable_interval_falls_back_to_the_shipped_one`, and the variable's wiring here by every timeout journey in `tests/e2e/check_visibility.rs`.
             timeout: seconds_env(CHECKS_TIMEOUT_ENV, DEFAULT_CHECKS_TIMEOUT_SECONDS),
         }
     }

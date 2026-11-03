@@ -1310,7 +1310,6 @@ fn a_failing_check_that_blocks_nothing_wakes_the_owners_default_flow_watch() {
         "{}",
         red.record
     );
-    // The line names the check, whether it blocks the merge, and its address.
     let line = "change-check 'slow' failed (not required — does not block) [attention] log: \
                 https://github.com/owner/service/actions/runs/1/job/2";
     assert!(red.human.contains(line), "{line:?} is not in {}", red.human);

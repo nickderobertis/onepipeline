@@ -800,8 +800,18 @@ fn holdup_standings(set: &[(&str, &str, Option<&str>)]) -> String {
 /// automated release, whose host rule declares `release_change` when `declared`, and
 /// whose host answers a holdup read with `standings`.
 fn held_world(name: &str, declared: bool, standings: &str) -> (World, std::path::PathBuf) {
+    held_world_every(name, "0.5", declared, standings)
+}
+
+/// [`held_world`], reading holdups at most every `holdup` seconds.
+fn held_world_every(
+    name: &str,
+    holdup: &str,
+    declared: bool,
+    standings: &str,
+) -> (World, std::path::PathBuf) {
     let world =
-        crate::adoption::watching(name).with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", "0.5");
+        crate::adoption::watching(name).with_env("ONEPIPELINE_RELEASE_HOLDUP_SECONDS", holdup);
     world.write_graphs();
     let (engine_repo, _consumer) = crate::adoption::two_repositories(&world);
     let (script, answer) = world.probe_in(&engine_repo, "engine");
@@ -1579,4 +1589,35 @@ fn a_holdup_that_changes_raises_the_wait_again_with_what_holds_the_release_now()
                         "url": entry["holdup"]["changes"][0]["failing"][0]["url"]}])
             })
     });
+}
+
+/// A holdup interval this build cannot use leaves the wait reading what holds the
+/// release at the shipped ten minutes: once at the first `not-released`, and not again
+/// in the seconds after it.
+#[test]
+fn an_unusable_holdup_interval_reads_at_the_shipped_one() {
+    let (world, _answer) = held_world_every(
+        "release-holdup-unusable",
+        "soon",
+        true,
+        &holdup_standings(&[]),
+    );
+    let run = crate::adoption::start(
+        &world,
+        "releaseholdupunusable",
+        vec![
+            crate::adoption::engine(),
+            crate::adoption::consumer(Some("published")),
+        ],
+    );
+    world.until("the first holdup read", |world| {
+        !holdup_reads(world).is_empty()
+    });
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let listings = holdup_reads(&world)
+        .into_iter()
+        .filter(|read| read["query"] == "listing")
+        .count();
+    assert_eq!(listings, 1, "{:?}", holdup_reads(&world));
+    assert!(crate::adoption::wait_surface(&world, &run, "consumer").contains("held by"));
 }
