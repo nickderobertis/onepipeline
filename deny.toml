@@ -9,7 +9,13 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = []
+# RUSTSEC-2026-0215 reports `smallstr` unmaintained (not vulnerable) and names no upgrade.
+# It arrives only through `yrs`, the Yjs decoder `onetaskgraph-linear` 0.13.3 requires, and
+# every `yrs` release up to the newest, 0.28.0, depends on it. onetaskgraph ignores the same
+# ID for the same reason. Retired by: a `yrs` release that drops `smallstr`.
+ignore = [
+    { id = "RUSTSEC-2026-0215", reason = "smallstr is unmaintained, reached only through onetaskgraph-linear -> yrs, whose every release depends on it; remove when a yrs release drops smallstr" },
+]
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
