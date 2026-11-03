@@ -677,6 +677,24 @@ fn a_check_record_that_does_not_say_what_it_names_is_not_taken_at_its_word() {
         .out_has("checks still running at run end:")
         .out_has("  an entry this record does not state readably (")
         .out_lacks("does not block");
+
+    // An ending whose list is not a list is shown as unreadable, not as naming nothing.
+    edit_journal(&world, run, |records| {
+        let exited = records
+            .iter_mut()
+            .rev()
+            .find(|record| record["kind"] == "driver-exited")
+            .expect("the ending record");
+        exited["payload"]["checks_unfollowed"] = serde_json::json!("slower");
+    });
+    world
+        .run(&["status", run])
+        .exited(0)
+        .out_has("checks no longer followed (timed out):")
+        .out_has(
+            "  this record's checks_unfollowed is not a list, so what it names is not shown: \
+             \"slower\"",
+        );
 }
 
 // llmlint: ignore-end[tests_mirror_real_usage]

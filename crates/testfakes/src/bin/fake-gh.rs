@@ -599,6 +599,28 @@ fn read_if_present(path: &Path) -> Option<String> {
     }
 }
 
+/// When a clock kept at `path` started, starting it at `now` when it has not. A file
+/// that exists and does not hold a time is fatal rather than a clock never started,
+/// which would silently restart the delay it times; a new start is written whole
+/// before it is visible, so a concurrent read never sees it half written.
+fn first_seen(path: &Path, now: u64) -> u64 {
+    if let Some(text) = read_if_present(path) {
+        return text.trim().parse().unwrap_or_else(|_| {
+            fake::fail(&format!("{} holds {text:?}, not a time", path.display()))
+        });
+    }
+    let staged = path.with_extension(format!("staged-{}", std::process::id()));
+    if let Err(error) =
+        std::fs::write(&staged, now.to_string()).and_then(|()| std::fs::rename(&staged, path))
+    {
+        fake::fail(&format!(
+            "cannot start the clock at {}: {error}",
+            path.display()
+        ));
+    }
+    now
+}
+
 /// What this host knows about a change request, or nothing if it opened none.
 ///
 /// A state file that exists and does not read as one of the two states is
@@ -1504,12 +1526,7 @@ fn scripted_checks(dir: &Path, id: &str, repo: &str, change: Change) -> Vec<Chec
                 .map_or(0, |at| at.as_millis()),
         )
         .unwrap_or(u64::MAX);
-        let since = read_if_present(&first)
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or_else(|| {
-                let _ = std::fs::write(&first, now.to_string());
-                now
-            });
+        let since = first_seen(&first, now);
         now.saturating_sub(since) >= wait
     });
     let text = later.or_else(|| {
@@ -2824,12 +2841,7 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
         let first = dir
             .join("gh")
             .join(format!("{}.follow-first", fake::segment(&change.0)));
-        let since = read_if_present(&first)
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or_else(|| {
-                let _ = std::fs::write(&first, now.to_string());
-                now
-            });
+        let since = first_seen(&first, now);
         let scripted: Vec<Vec<onevcs::Check>> = if mode == FollowMode::Clock {
             let elapsed = now.saturating_sub(since);
             let current = readings
