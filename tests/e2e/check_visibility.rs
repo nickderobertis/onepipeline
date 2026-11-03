@@ -523,15 +523,15 @@ fn an_adopting_driver_resumes_following_and_raises_nothing_twice() {
         .out_has("slower on https://github.com/owner/service/pull/1 (node 'service') — not required — does not block");
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] this block is the helper and the one journey that
+// calls it. The records the journey plants — a `check-failed` and a `checks-unfollowed` short of
+// fields their payloads require, and an ending entry that does not say whether its check blocks —
+// are written by no build of onepipeline, which writes each from a typed payload, so no interface
+// reaches them; they are what a journal another build or a person edited reads like, which is the
+// input under test. Everything after each edit is the compiled binary's own `adopt` and `results`.
 /// Rewrite `run`'s journal through `edit`, which sees every record and appends any it
 /// returns after the last; the fold checkpoint is dropped, as a journal it no longer
 /// corroborates leaves it, so the run is read from the journal alone.
-// llmlint: ignore-block[tests_mirror_real_usage] the records this plants — a `check-failed` and a
-// `checks-unfollowed` short of fields their payloads require, and an ending entry that does not say
-// whether its check blocks — are
-// written by no build of onepipeline, which writes each from a typed payload; they are what a
-// journal another build or a person edited reads like, and that is the input the reader refuses.
-// Everything after the edit is the compiled binary's own `adopt` and `results`.
 fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
     let path = world.run_file(run, "events.jsonl");
     let mut records: Vec<Value> = std::fs::read_to_string(&path)
@@ -544,8 +544,6 @@ fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
     std::fs::write(&path, text).expect("the journal is rewritten");
     let _ = std::fs::remove_file(world.run_file(run, "checkpoint.json"));
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
-
 /// A journal whose `check-failed` and `checks-unfollowed` records do not say all they
 /// must, or whose ending lists a check without saying whether it blocks, is not taken
 /// at its word: the adopting driver names each record it could not read, still raises
@@ -672,6 +670,8 @@ fn a_check_record_that_does_not_say_what_it_names_is_not_taken_at_its_word() {
         .out_has("  an entry this record does not state readably (")
         .out_lacks("does not block");
 }
+
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A check that blocks nothing fails while the publication's own watch is still
 /// reading, before its required check settles: the node settles exactly as it does
