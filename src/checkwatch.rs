@@ -75,13 +75,15 @@ pub const UNFOLLOWED_SURFACE_KIND: &str = "checks-unfollowed";
 const NO_ADDRESS: &str = "the host reported no address for this check";
 
 /// A duration read from `name` in seconds, fractions allowed; `default` for an unset
-/// value and for one that is not a positive number a `Duration` can hold.
+/// value and for one that is not a positive number a `Duration` can hold — one so
+/// small it rounds to zero included, since a zero interval is no interval.
 pub(crate) fn seconds_env(name: &str, default: f64) -> Duration {
     std::env::var(name)
         .ok()
         .and_then(|value| value.trim().parse::<f64>().ok())
         .filter(|seconds| *seconds > 0.0)
         .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok())
+        .filter(|interval| !interval.is_zero())
         .unwrap_or_else(|| Duration::from_secs_f64(default))
 }
 
@@ -1168,6 +1170,8 @@ mod tests {
             ("ONEPIPELINE_TEST_NEGATIVE_SECONDS", "-1"),
             ("ONEPIPELINE_TEST_NAN_SECONDS", "NaN"),
             ("ONEPIPELINE_TEST_WORD_SECONDS", "soon"),
+            // Positive, but nearer zero than a `Duration` resolves.
+            ("ONEPIPELINE_TEST_VANISHING_SECONDS", "1e-100"),
         ] {
             // Names no other test reads, so setting them races nothing.
             std::env::set_var(name, value);

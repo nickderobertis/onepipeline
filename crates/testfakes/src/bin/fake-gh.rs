@@ -2653,8 +2653,6 @@ fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
-/// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
 /// How a follow script moves from one reading to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FollowMode {
@@ -2673,6 +2671,8 @@ enum Run {
     Rerun,
 }
 
+/// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
+/// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
 fn follow_script(dir: &Path, repo: &str, number: &str) -> Option<(String, FollowMode)> {
     if let Some(text) = fake::node_script(dir, "gh", &format!("follow.{number}")) {
         return Some((text, FollowMode::Readings));
