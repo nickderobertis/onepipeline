@@ -2655,13 +2655,31 @@ fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
 
 /// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
 /// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
-fn follow_script(dir: &Path, repo: &str, number: &str) -> Option<(String, bool)> {
+/// How a follow script moves from one reading to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FollowMode {
+    /// One block per read, the last answering every read after it.
+    Readings,
+    /// The block whose `after_ms` the time since the first read has passed.
+    Clock,
+}
+
+/// Which run of its checks a reading reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// The run the publication's watch saw.
+    Original,
+    /// A later run on the same head, as a job re-run on the host is.
+    Rerun,
+}
+
+fn follow_script(dir: &Path, repo: &str, number: &str) -> Option<(String, FollowMode)> {
     if let Some(text) = fake::node_script(dir, "gh", &format!("follow.{number}")) {
-        return Some((text, false));
+        return Some((text, FollowMode::Readings));
     }
     fake::node_script(dir, "gh", &format!("follow-clock.{number}"))
         .or_else(|| fake::node_script(dir, "gh", &repo_script("follow-clock", repo)))
-        .map(|text| (text, true))
+        .map(|text| (text, FollowMode::Clock))
 }
 
 /// The name of a script about every change request of `repo`: `<what>.repo.<OWNER>.<NAME>`.
@@ -2679,21 +2697,21 @@ fn repo_script(what: &str, repo: &str) -> String {
 /// milliseconds after the change request's first follow read it starts answering. A
 /// block holding a `rerun` line reports its checks as a later run on the same head, as
 /// a job re-run on the host is.
-fn follow_readings(text: &str, clock: bool) -> Vec<(u64, bool, Vec<Check>)> {
+fn follow_readings(text: &str, mode: FollowMode) -> Vec<(u64, Run, Vec<Check>)> {
     text.split("\n---")
         .map(|block| {
             let mut after = 0;
-            let mut rerun = false;
+            let mut run = Run::Original;
             let mut checks = Vec::new();
             for line in block.lines().map(str::trim).filter(|line| !line.is_empty()) {
                 if line == "---" {
                     continue;
                 }
                 if line == "rerun" {
-                    rerun = true;
+                    run = Run::Rerun;
                     continue;
                 }
-                if clock {
+                if mode == FollowMode::Clock {
                     if let Some(ms) = line.strip_prefix("after_ms ") {
                         after = ms
                             .trim()
@@ -2704,21 +2722,15 @@ fn follow_readings(text: &str, clock: bool) -> Vec<(u64, bool, Vec<Check>)> {
                 }
                 checks.push(Check::parse(line).unwrap_or_else(|why| fake::fail(&why)));
             }
-            (after, rerun, checks)
+            (after, run, checks)
         })
         .collect()
 }
 
 /// A scripted check as `onevcs` names one, on `head`, with the address
 /// `gh pr checks` gives it.
-fn sibling_check(
-    check: &Check,
-    repo: &str,
-    index: usize,
-    head: &str,
-    rerun: bool,
-) -> onevcs::Check {
-    let entry = check.rollup_entry(rerun);
+fn sibling_check(check: &Check, repo: &str, index: usize, head: &str, run: Run) -> onevcs::Check {
+    let entry = check.rollup_entry(run == Run::Rerun);
     onevcs::Check {
         name: check.name.clone(),
         status: check.state.status().to_owned(),
@@ -2780,14 +2792,18 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
     )
     .unwrap_or(u64::MAX);
     for (change, standing) in changes.iter().zip(&standings) {
-        let (text, clock) = follow_script(dir, &repo, &change.0).expect("every change is scripted");
-        let readings = follow_readings(&text, clock);
+        // Re-read rather than carried from the routing check, so a script removed in
+        // between is a refusal rather than a panic.
+        let Some((text, mode)) = follow_script(dir, &repo, &change.0) else {
+            return fake::refuse(&format!("change request {} has no follow script", change.0));
+        };
+        let readings = follow_readings(&text, mode);
         let head = standing.head.0.clone();
-        let checks = |rerun: bool, reading: &[Check]| -> Vec<onevcs::Check> {
+        let checks = |run: Run, reading: &[Check]| -> Vec<onevcs::Check> {
             reading
                 .iter()
                 .enumerate()
-                .map(|(index, check)| sibling_check(check, &repo, index, &head, rerun))
+                .map(|(index, check)| sibling_check(check, &repo, index, &head, run))
                 .collect()
         };
         // The double's copy follows the change request to the head it carries now —
@@ -2816,20 +2832,20 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
                 let _ = std::fs::write(&first, now.to_string());
                 now
             });
-        let scripted: Vec<Vec<onevcs::Check>> = if clock {
+        let scripted: Vec<Vec<onevcs::Check>> = if mode == FollowMode::Clock {
             let elapsed = now.saturating_sub(since);
             let current = readings
                 .iter()
                 .rev()
                 .find(|(after, _, _)| *after <= elapsed)
                 .or_else(|| readings.first())
-                .map(|(_, rerun, reading)| checks(*rerun, reading))
+                .map(|(_, run, reading)| checks(*run, reading))
                 .unwrap_or_default();
             vec![current]
         } else {
             readings
                 .iter()
-                .map(|(_, rerun, reading)| checks(*rerun, reading))
+                .map(|(_, run, reading)| checks(*run, reading))
                 .collect()
         };
         state.check_readings.insert(change.clone(), scripted);
