@@ -526,9 +526,10 @@ fn an_adopting_driver_resumes_following_and_raises_nothing_twice() {
 /// Rewrite `run`'s journal through `edit`, which sees every record and appends any it
 /// returns after the last; the fold checkpoint is dropped, as a journal it no longer
 /// corroborates leaves it, so the run is read from the journal alone.
-// llmlint: ignore-block[tests_mirror_real_usage] the records this plants — a `checks-unfollowed`
-// that names nobody's checks and an ending entry that does not say whether its check blocks — are
-// written by no build of onepipeline, which writes both from typed payloads; they are what a
+// llmlint: ignore-block[tests_mirror_real_usage] the records this plants — a `check-failed` and a
+// `checks-unfollowed` short of fields their payloads require, and an ending entry that does not say
+// whether its check blocks — are
+// written by no build of onepipeline, which writes each from a typed payload; they are what a
 // journal another build or a person edited reads like, and that is the input the reader refuses.
 // Everything after the edit is the compiled binary's own `adopt` and `results`.
 fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
@@ -545,29 +546,59 @@ fn edit_journal(world: &World, run: &str, edit: impl Fn(&mut Vec<Value>)) {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A journal whose `checks-unfollowed` record does not say whose checks it named, or
-/// whose ending lists a check without saying whether it blocks, is read as neither an
-/// advisory check of nobody's nor a check that does not block: the adopting driver
-/// names the record it could not read and lists the change's running check as still
-/// running, and `results` shows the unreadable entry as unreadable.
+/// A journal whose `check-failed` and `checks-unfollowed` records do not say all they
+/// must, or whose ending lists a check without saying whether it blocks, is not taken
+/// at its word: the adopting driver names each record it could not read, still raises
+/// the failure the unreadable `check-failed` claimed, still follows and lists the check
+/// the unreadable `checks-unfollowed` claimed, and `results` shows an unreadable ending
+/// entry as unreadable rather than as a check that does not block.
 #[cfg(unix)]
 #[test]
-fn a_check_record_that_does_not_say_what_it_names_is_not_read_as_advisory() {
-    let world = world_following(
-        "malformed-ending",
-        "lint completed success required\nslow in_progress - advisory",
+fn a_check_record_that_does_not_say_what_it_names_is_not_taken_at_its_word() {
+    let world =
+        World::new("malformed-records").with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW);
+    team_repository(&world);
+    world.script("service.work", "the worker wrote this\n");
+    world.script(
+        "gh.checks",
+        "lint completed success required\nslow in_progress - advisory\nslower in_progress - \
+         advisory",
     );
-    let run = "malformedending";
+    world.script(
+        "gh.follow-clock.1",
+        "after_ms 0\nlint completed success required\nslow in_progress - advisory\nslower \
+         in_progress - advisory\n---\nafter_ms 5000\nlint completed success required\nslow \
+         completed failure advisory\nslower in_progress - advisory",
+    );
+    world.script("after.wait", "hold");
+    let run = "malformedrecords";
     launch(&world, run);
     world.until("a follow read", |world| !follow_reads(world).is_empty());
     crate::harness::end_driver(&world, run);
+    let change = "https://github.com/owner/service/pull/1";
     edit_journal(&world, run, |records| {
+        let head = records
+            .iter()
+            .rev()
+            .find_map(|record| record["payload"]["head"].as_str().map(str::to_owned))
+            .expect("a record naming the published head");
         let mut planted = records.last().expect("a journal record").clone();
-        planted["seq"] = serde_json::json!(planted["seq"].as_u64().unwrap_or(0) + 1);
+        let seq = planted["seq"].as_u64().unwrap_or(0);
+        // A `check-failed` with no state, requirement or address, and a
+        // `checks-unfollowed` with no reason whose check does not say whether it blocks:
+        // each names the real change and head, so a reader taking either at its word
+        // would silence `slow`'s failure or stop following `slower`.
+        planted["seq"] = serde_json::json!(seq + 1);
+        planted["kind"] = serde_json::json!("check-failed");
+        planted["payload"] = serde_json::json!({
+            "node": "service", "change": change, "head": head, "check": "slow",
+        });
+        records.push(planted.clone());
+        planted["seq"] = serde_json::json!(seq + 2);
         planted["kind"] = serde_json::json!("checks-unfollowed");
         planted["payload"] = serde_json::json!({
-            "reason": "timeout",
-            "checks": [{"check": "slow"}],
+            "node": "service", "change": change, "head": head,
+            "checks": [{"check": "slower"}],
         });
         records.push(planted);
     });
@@ -576,23 +607,43 @@ fn a_check_record_that_does_not_say_what_it_names_is_not_read_as_advisory() {
     let mut adopting = world
         .cmd(&["adopt", run])
         .env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", FOLLOW)
+        .env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "60")
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&stderr).expect("a stderr file"))
         .spawn()
         .expect("the adoption starts");
+    let failed = |world: &World| {
+        raised(world, run, "check-failed")
+            .iter()
+            .filter(|surface| {
+                surface["payload"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with("check 'slow' failed"))
+            })
+            .count()
+    };
+    if !crate::harness::waited(|| failed(&world) > 0) {
+        panic!(
+            "the unreadable check-failed silenced slow's failure; adopt said: {}",
+            std::fs::read_to_string(&stderr).unwrap_or_default()
+        );
+    }
     world.script("after.go", "");
     let ended = adopting.wait().expect("the adoption ends");
     assert!(ended.success(), "adopt exited {ended}: {}", world.dump());
+    assert_eq!(failed(&world), 1, "{}", world.dump());
     let said = std::fs::read_to_string(&stderr).unwrap_or_default();
-    assert!(
-        said.contains("a checks-unfollowed record of this run is not one"),
-        "{said}"
-    );
+    for kind in ["check-failed", "checks-unfollowed"] {
+        assert!(
+            said.contains(&format!("a {kind} record of this run is not one")),
+            "{said}"
+        );
+    }
     let exited = last_exit(&world, run);
     assert_eq!(
         listed(&exited, "checks_running"),
         [(
-            "slow".to_owned(),
+            "slower".to_owned(),
             "not required — does not block".to_owned()
         )],
         "{exited}"

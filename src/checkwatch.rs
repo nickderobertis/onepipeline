@@ -446,24 +446,32 @@ impl CheckWatch {
         let mut raised = BTreeSet::new();
         let mut unfollowed = BTreeSet::new();
         for event in crate::checkpoint::recalled(paths) {
-            let text = |key: &str| {
-                event
-                    .payload
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
+            // Another process may have written the record, so it is read as the payload
+            // its kind declares: one that does not say what it raised, or what it stopped
+            // following, is named and neither silences a later surface nor stops a follow.
+            let payload = Value::Object(event.payload.clone());
+            let unreadable = |error: serde_json::Error| {
+                eprintln!(
+                    "onepipeline: a {} record of this run is not one, so a driver taking the \
+                     run up does not act on it: {error}",
+                    event.kind
+                );
             };
             match journal::PipelineKind::from_wire(&event.kind) {
                 Some(journal::PipelineKind::CheckFailed) => {
-                    if let (Some(change), Some(head), Some(check)) =
-                        (text("change"), text("head"), text("check"))
-                    {
-                        raised.insert((change, head, check));
+                    match serde_json::from_value::<crate::payload::CheckFailed>(payload) {
+                        Ok(record) => {
+                            raised.insert((record.change, record.head, record.check));
+                        }
+                        Err(error) => unreadable(error),
                     }
                 }
                 Some(journal::PipelineKind::ChecksUnfollowed) => {
-                    if let (Some(change), Some(head)) = (text("change"), text("head")) {
-                        unfollowed.insert((change, head));
+                    match serde_json::from_value::<crate::payload::ChecksUnfollowed>(payload) {
+                        Ok(record) => {
+                            unfollowed.insert((record.change, record.head));
+                        }
+                        Err(error) => unreadable(error),
                     }
                 }
                 _ => {}
