@@ -101,6 +101,12 @@ impl Reading {
     /// for one that does not say what it read: a name, a state this stack names, and
     /// whether the check is required. A relayed record is another process's output, so a
     /// field missing or of another type is not read as a pending advisory check.
+    // llmlint: ignore-block[changed_behavior_has_e2e] a malformed `change-check` needs a
+    // record no invocation a user can type produces: onevcs writes this payload from its own
+    // typed `Check` (`publish::change_check_payload`), so a field missing or of another kind is
+    // a stream another build or a person edited. The refusals are held by this module's
+    // `a_change_check_that_does_not_say_what_it_read_is_no_reading`; every well-formed reading
+    // is driven end to end by `tests/e2e/check_visibility.rs`.
     pub(crate) fn of(event: &Envelope) -> Option<Self> {
         if event.source != Source::Vcs || event.kind.0 != "change-check" {
             return None;
@@ -149,7 +155,7 @@ impl Reading {
             url,
             state,
         })
-    }
+    } // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// Whether this reading is one the manager is told about: a check that failed or
     /// ended with no verdict, required or not.
