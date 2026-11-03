@@ -926,6 +926,120 @@ fn a_check_the_timeout_stops_following_is_named_and_its_later_failure_is_not() {
     }
 }
 
+/// What a follow read answers when a required check, `e2e`, is running beside `slow`:
+/// one the host started on the published head after the publication's watch returned.
+const REQUIRED_RUNNING: &str =
+    "lint completed success required\ne2e in_progress - required\nslow in_progress - advisory";
+
+/// The line `results` and `status` print for that required check.
+const REQUIRED_LINE: &str =
+    "e2e on https://github.com/owner/service/pull/1 (node 'service') — required — blocks the merge";
+
+/// The checks one `driver-exited` list names, in name order.
+fn listed_sorted(exited: &Value, key: &str) -> Vec<(String, String)> {
+    let mut checks = listed(exited, key);
+    checks.sort();
+    checks
+}
+
+/// A required check still running when the run ends is listed at its end as one that
+/// blocks the merge, beside the advisory one, and moves nothing about the node.
+#[test]
+fn a_required_check_still_running_at_the_run_end_is_listed_as_blocking() {
+    let world = world_following("required-running", REQUIRED_RUNNING);
+    let run = "requiredrunning";
+    launch(&world, run);
+    world.until("a follow read", |world| !follow_reads(world).is_empty());
+    release(&world, run);
+
+    let exited = last_exit(&world, run);
+    assert_eq!(
+        listed_sorted(&exited, "checks_running"),
+        [
+            ("e2e".to_owned(), "required — blocks the merge".to_owned()),
+            (
+                "slow".to_owned(),
+                "not required — does not block".to_owned()
+            ),
+        ],
+        "{exited}"
+    );
+    for verb in ["results", "status"] {
+        world
+            .run(&[verb, run])
+            .exited(0)
+            .out_has("checks still running at run end:")
+            .out_has(REQUIRED_LINE);
+    }
+}
+
+/// A required check still running when the checks timeout expires is named on the
+/// `checks-unfollowed` surface and record as one that blocks the merge, and listed so
+/// at the run's end; the node settles as it does when nothing is left running.
+#[test]
+fn a_required_check_the_timeout_stops_following_is_named_as_blocking() {
+    let world = world_following("required-unfollowed", REQUIRED_RUNNING)
+        .with_env("ONEVCS_CHECKS_TIMEOUT_SECONDS", "3");
+    let run = "requiredunfollowed";
+    launch(&world, run);
+    world.until("the follow to stop", |world| {
+        !world.events_of(run, "checks-unfollowed").is_empty()
+    });
+
+    let records = world.events_of(run, "checks-unfollowed");
+    assert_eq!(records.len(), 1, "{}", world.dump());
+    let required = records[0]["payload"]["checks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|check| check["check"] == "e2e")
+        .unwrap_or_else(|| panic!("e2e is not named: {}", records[0]));
+    assert_eq!(required["required"], true);
+    assert_eq!(required["requirement"], "required — blocks the merge");
+    let surfaces = raised(&world, run, "checks-unfollowed");
+    assert_eq!(surfaces.len(), 1);
+    let message = surfaces[0]["payload"]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.starts_with(
+            "stopped following 2 check(s) still running on https://github.com/owner/service/pull/1"
+        ) && message.contains("'e2e' (required — blocks the merge)")
+            && message.contains("'slow' (not required — does not block)")
+            && !message.contains('\n'),
+        "{message}"
+    );
+
+    release(&world, run);
+    assert_eq!(
+        settlement(&world, run, "service"),
+        (
+            Value::from("done"),
+            Value::from("change-review-draft"),
+            Value::from("unlanded")
+        )
+    );
+    let exited = last_exit(&world, run);
+    assert_eq!(
+        listed_sorted(&exited, "checks_unfollowed"),
+        [
+            ("e2e".to_owned(), "required — blocks the merge".to_owned()),
+            (
+                "slow".to_owned(),
+                "not required — does not block".to_owned()
+            ),
+        ],
+        "{exited}"
+    );
+    for verb in ["results", "status"] {
+        world
+            .run(&[verb, run])
+            .exited(0)
+            .out_has("checks no longer followed (timed out):")
+            .out_has(REQUIRED_LINE);
+    }
+}
+
 /// The recorded listing of `printobserver`'s open release change request.
 const HOLDUP_LISTING: &str =
     include_str!("../fixtures/check-visibility/printobserver-holdup-listing.json");
