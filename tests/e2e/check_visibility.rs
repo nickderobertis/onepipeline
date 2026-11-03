@@ -1220,6 +1220,9 @@ const SCALE: f64 = 1000.0;
 
 /// The slack one recorded call time may carry past the engine's own clock: the double
 /// stamps a call when its process starts, a few milliseconds after the engine asked.
+/// Both read the host's monotonic clock (`monotonic_ms` in the doubles' library), so a
+/// step of the wall clock — a virtual machine's guest agent re-synchronising it — moves
+/// neither, and the slack need not cover one.
 const STAMP_SLACK_MS: u64 = 25;
 
 /// A lifecycle node of repository `repo`.

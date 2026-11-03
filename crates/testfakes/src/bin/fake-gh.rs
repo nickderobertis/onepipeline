@@ -2608,17 +2608,13 @@ fn holdup_numbers_only(dir: &Path, query: &str) -> bool {
 }
 
 /// Print the recorded response `gh.<script>`, and write the call with when it was made
+/// (on [`fake::monotonic_ms`]'s clock, so successive calls are as far apart as made)
 /// and the `rateLimit.cost` it reports to `gh/holdup-reads.jsonl`.
 fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
     // `gh.holdup-outage`: every holdup query refused while it exists, each refusal
     // written to `gh/holdup-refused.jsonl` with when it was made.
     if dir.join("gh.holdup-outage").exists() {
-        let at = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |at| at.as_millis()),
-        )
-        .unwrap_or(u64::MAX);
+        let at = fake::monotonic_ms();
         let line = serde_json::json!({"at_ms": at, "query": query}).to_string();
         if let Err(error) = append_line(&dir.join("gh").join("holdup-refused.jsonl"), &line) {
             fake::fail(&format!("cannot record a refused holdup read: {error}"));
@@ -2632,12 +2628,7 @@ fn replayed(dir: &Path, script: &str, query: &str) -> ExitCode {
         Ok(response) => response,
         Err(error) => return fake::refuse(&format!("gh.{script} is not JSON: {error}")),
     };
-    let at = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |at| at.as_millis()),
-    )
-    .unwrap_or(u64::MAX);
+    let at = fake::monotonic_ms();
     let line = serde_json::json!({
         "at_ms": at, "query": query,
         "graphql_points": response.pointer("/data/rateLimit/cost").cloned().unwrap_or_default(),
@@ -2672,7 +2663,8 @@ enum Run {
 }
 
 /// The follow script of change request `number`: `gh.follow.<NUMBER>` for one read
-/// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the wall clock.
+/// after another, or `gh.follow-clock.<NUMBER>` for checks that move on the host's
+/// monotonic clock ([`fake::monotonic_ms`]), the one the engine times its intervals on.
 fn follow_script(dir: &Path, repo: &str, number: &str) -> Option<(String, FollowMode)> {
     if let Some(text) = fake::node_script(dir, "gh", &format!("follow.{number}")) {
         return Some((text, FollowMode::Readings));
@@ -2748,8 +2740,9 @@ fn sibling_check(check: &Check, repo: &str, index: usize, head: &str, run: Run) 
 /// A follow read: every check on each change request's head as its follow script
 /// says at this read, answered — and charged on its ledger — by `onevcs-testing`'s
 /// host, which holds a copy of each followed change request in `follow-host.json`.
-/// Every call is written to `gh/follow-reads.jsonl` with when it was made and what
-/// it was charged, which is what a journey reads a cadence off.
+/// Every call is written to `gh/follow-reads.jsonl` with when it was made — on
+/// [`fake::monotonic_ms`]'s clock, the engine's own — and what it was charged, which
+/// is what a journey reads a cadence off.
 fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path) -> ExitCode {
     use onevcs::RemoteHost;
     let repo = format!("{owner}/{name}");
@@ -2785,12 +2778,7 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
     } else {
         onevcs_testing::HostState::default()
     };
-    let now = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |at| at.as_millis()),
-    )
-    .unwrap_or(u64::MAX);
+    let now = fake::monotonic_ms();
     for (change, standing) in changes.iter().zip(&standings) {
         // Re-read rather than carried from the routing check, so a script removed in
         // between is a refusal rather than a panic.

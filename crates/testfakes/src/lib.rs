@@ -632,6 +632,47 @@ pub fn barrier(path: &Path, party: &str, parties: std::num::NonZeroUsize) {
     ));
 }
 
+/// Milliseconds on the host's monotonic clock: the one every process on the machine
+/// reads alike and nothing steps, so two calls a double recorded in two processes are
+/// as far apart as the engine — which times its intervals on `Instant`, the same
+/// clock — kept them. The wall clock is no measure of that: a virtual machine whose
+/// guest agent re-synchronises it steps it, and a lima guest steps it back about
+/// 110 ms every 10 seconds, so two reads 600 ms apart can carry stamps 555 ms apart.
+/// Only a difference of two of these means anything.
+pub fn monotonic_ms() -> u64 {
+    #[cfg(unix)]
+    {
+        let mut at = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `at` is a valid, writable `timespec`, and `CLOCK_MONOTONIC` is a clock
+        // every unix this crate builds on provides.
+        if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut at) } != 0 {
+            fail("the monotonic clock could not be read");
+        }
+        let secs = u64::try_from(at.tv_sec).unwrap_or(0);
+        let nanos = u64::try_from(at.tv_nsec).unwrap_or(0);
+        secs.saturating_mul(1_000).saturating_add(nanos / 1_000_000)
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
+        let (mut count, mut frequency) = (0i64, 0i64);
+        // SAFETY: each call writes one `i64` through a pointer to a live local.
+        let read = unsafe {
+            QueryPerformanceCounter(&mut count) != 0
+                && QueryPerformanceFrequency(&mut frequency) != 0
+        };
+        if !read || frequency <= 0 {
+            fail("the monotonic clock could not be read");
+        }
+        u64::try_from(i128::from(count) * 1_000 / i128::from(frequency)).unwrap_or(0)
+    }
+}
+
 /// An RFC 3339 millisecond UTC timestamp, in the envelope's one format.
 pub fn now() -> String {
     moved_by(0)
