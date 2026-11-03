@@ -635,10 +635,9 @@ pub fn barrier(path: &Path, party: &str, parties: std::num::NonZeroUsize) {
 /// Milliseconds on the host's monotonic clock: the one every process on the machine
 /// reads alike and nothing steps, so two calls a double recorded in two processes are
 /// as far apart as the engine — which times its intervals on `Instant`, the same
-/// clock — kept them. The wall clock is no measure of that: a virtual machine whose
-/// guest agent re-synchronises it steps it, and a lima guest steps it back about
-/// 110 ms every 10 seconds, so two reads 600 ms apart can carry stamps 555 ms apart.
-/// Only a difference of two of these means anything.
+/// clock — kept them. The wall clock is no measure of that: re-synchronising it steps
+/// it, so a difference of two wall-clock stamps is not the time between them. Only a
+/// difference of two of these means anything.
 pub fn monotonic_ms() -> u64 {
     #[cfg(unix)]
     {
