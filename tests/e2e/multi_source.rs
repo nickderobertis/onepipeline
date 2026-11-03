@@ -1292,10 +1292,35 @@ fn a_design_documents_fragment_link_to_a_filed_task_lands_on_that_tasks_copy() {
     let content = landed["items"][0]["item"]["content"]
         .as_str()
         .unwrap_or_else(|| panic!("the copied document holds no content: {landed}"));
+    // A folder of Markdown writes a section link relative to the linking record's own file,
+    // so the link is read back the way a Markdown viewer follows it: from the board's copy of
+    // the document to the file it names.
+    let document = landed["items"][0]["item"]["location"]["path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the copied document names no location: {landed}"));
+    let link = content
+        .split_once("See [core's budgets](")
+        .and_then(|(_, rest)| rest.split_once("#budgets)"))
+        .map(|(path, _)| path)
+        .unwrap_or_else(|| panic!("the copied document holds no section link to core: {content}"));
+    assert!(
+        std::path::Path::new(link).is_relative(),
+        "the board's link to core is not relative to the document: {link}"
+    );
+    let followed = std::path::Path::new(document)
+        .parent()
+        .expect("the copied document sits in a folder")
+        .join(link);
+    assert_eq!(
+        std::fs::canonicalize(&followed)
+            .unwrap_or_else(|error| panic!("{} names no file: {error}", followed.display())),
+        std::path::PathBuf::from(core),
+        "the board's link from {document} does not reach its copy of core"
+    );
     assert_eq!(
         content,
         format!(
-            "## Budgets\nSee [core's budgets]({core}#budgets).\n\
+            "## Budgets\nSee [core's budgets]({link}#budgets).\n\
              Not filed: [gone]({gone}#budgets).\n"
         ),
         "the link did not land on the board's copy of the task with its fragment kept"
