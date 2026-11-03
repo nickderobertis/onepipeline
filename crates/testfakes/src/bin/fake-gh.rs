@@ -2838,9 +2838,11 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
             }))
             .unwrap_or_else(|error| fake::fail(&format!("a followed change: {error}"))),
         );
-        let first = dir
-            .join("gh")
-            .join(format!("{}.follow-first", fake::segment(&change.0)));
+        let first = dir.join("gh").join(format!(
+            "{}.{}.follow-first",
+            repo_script("clock", &repo),
+            fake::segment(&change.0)
+        ));
         let since = first_seen(&first, now);
         let scripted: Vec<Vec<onevcs::Check>> = if mode == FollowMode::Clock {
             let elapsed = now.saturating_sub(since);

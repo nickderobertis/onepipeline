@@ -1470,7 +1470,39 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     for id in ["a1", "a2", "a3"] {
         nodes.push(published_in(id, "app", &[]));
     }
+    // Keep the run alive until every followed check finishes. A fixed release
+    // hold alone can elapse before the last publication returns on a slow host,
+    // letting the run end before that change gets its first follow read.
+    world.script("producer.wait", "hold");
+    // GitHub numbers changes within each repository: these collisions also prove
+    // that every change gets its own full clock, rather than another repo's start.
+    world.script("gh.repo-numbering", "");
     let run = crate::adoption::start(&world, "checkvisibilitybudget", nodes);
+    world.until("all six publications' followed checks to finish", |world| {
+        assert!(
+            !world.run_file(&run, "result.json").exists(),
+            "the run ended before all six follows completed: {}",
+            world.dump()
+        );
+        assert!(
+            world.events_of(&run, "checks-unfollowed").is_empty(),
+            "a workload check exhausted its follow timeout: {}",
+            world.dump()
+        );
+        let events = world.events_of(&run, "change-check");
+        ["s1", "s2", "s3", "a1", "a2", "a3"].iter().all(|node| {
+            events.iter().any(|event| {
+                event["labels"]["node"] == *node
+                    && event["payload"]["name"] == "slow-c"
+                    && event["payload"]["state"] == "passed"
+            })
+        })
+    });
+    assert!(
+        !world.run_file(&run, "result.json").exists(),
+        "the producer must still hold the run open"
+    );
+    world.script("producer.go", "");
 
     world.until("the first holdup read", |world| {
         !holdup_reads(world).is_empty()
@@ -1496,6 +1528,22 @@ fn the_check_visibility_workload_reads_at_its_cadence_and_records_what_it_spent(
     // than its interval, and shared by both held nodes.
     let follows = follow_reads(&world);
     let holdups = holdup_reads(&world);
+    let mut spans = std::collections::BTreeMap::new();
+    for read in &follows {
+        let at = read["at_ms"].as_u64().expect("a follow stamp");
+        for change in read["changes"].as_array().expect("followed changes") {
+            let key = (read["repo"].to_string(), change.to_string());
+            let span = spans.entry(key).or_insert((at, at));
+            span.1 = at;
+        }
+    }
+    assert_eq!(spans.len(), 6, "every still-running change is followed");
+    for (change, (first, last)) in spans {
+        assert!(
+            last.saturating_sub(first) + STAMP_SLACK_MS >= running_ms,
+            "{change:?} finished before its own 20 scaled minutes: {first}..{last}"
+        );
+    }
     let listings: Vec<Value> = holdups
         .iter()
         .filter(|read| read["query"] == "listing")
