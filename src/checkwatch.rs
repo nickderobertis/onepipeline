@@ -129,12 +129,24 @@ impl Reading {
             None | Some(Value::Null) => state != "pending",
             Some(_) => return None,
         };
+        // Optional, and so absent or null; a value of another kind, or an address that is
+        // not one, is a record that does not say what it read.
+        let optional = |key: &str| match event.payload.get(key) {
+            None | Some(Value::Null) => Some(None),
+            Some(Value::String(text)) => Some(Some(text.clone())),
+            Some(_) => None,
+        };
+        let conclusion = optional("conclusion")?;
+        let url = match optional("url")? {
+            Some(url) => Some(url.parse::<onevcs::Url>().ok()?.to_string()),
+            None => None,
+        };
         Some(Self {
             name,
             settled,
-            conclusion: text("conclusion"),
+            conclusion,
             required,
-            url: text("url"),
+            url,
             state,
         })
     }
@@ -1081,6 +1093,9 @@ mod tests {
             json!({"name": "slow", "state": "failed"}),
             json!({"name": "slow", "state": "failed", "required": "no"}),
             json!({"name": "slow", "state": "failed", "required": false, "status": 3}),
+            json!({"name": "slow", "state": "failed", "required": false, "conclusion": 1}),
+            json!({"name": "slow", "state": "failed", "required": false, "url": "not an address"}),
+            json!({"name": "slow", "state": "failed", "required": false, "url": false}),
         ] {
             assert_eq!(
                 Reading::of(&check(payload.clone(), "attention")),
