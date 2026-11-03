@@ -77,6 +77,12 @@ function readRecord() {
       count(call.at_ms, `${at}.at_ms`);
       count(call.graphql_points, `${at}.graphql_points`);
       count(call.rest_requests, `${at}.rest_requests`);
+      if (phase.phase === "follow" && (typeof call.repo !== "string" || call.repo === "")) {
+        fail(`${at}.repo must name the repository read`);
+      }
+      if (phase.phase === "holdup" && !["listing", "standings"].includes(call.query)) {
+        fail(`${at}.query must be listing or standings`);
+      }
     });
   });
   return held;

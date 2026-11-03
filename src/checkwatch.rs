@@ -113,30 +113,19 @@ impl Reading {
                 .map(str::to_owned)
         };
         let name = text("name").filter(|name| !name.is_empty())?;
-        let state = text("state").filter(|state| {
-            matches!(
-                state.as_str(),
-                "passed" | "failed" | "skipped" | "pending" | "no-verdict"
-            )
-        })?;
+        // Through the sibling's own type, so a state it adds or renames is the sibling's
+        // word here too rather than a list copied beside it.
+        let state = event
+            .payload
+            .get("state")
+            .cloned()
+            .and_then(|state| serde_json::from_value::<onevcs::CheckState>(state).ok())
+            .and_then(|state| serde_json::to_value(state).ok())
+            .and_then(|state| state.as_str().map(str::to_owned))?;
         let required = event.payload.get("required").and_then(Value::as_bool)?;
         let settled = match event.payload.get("status") {
-            // The status words GitHub's check runs and commit statuses report, which is
-            // the host vocabulary onevcs passes through.
-            Some(Value::String(status))
-                if [
-                    "completed",
-                    "in_progress",
-                    "queued",
-                    "pending",
-                    "waiting",
-                    "requested",
-                ]
-                .iter()
-                .any(|known| status.eq_ignore_ascii_case(known)) =>
-            {
-                status.eq_ignore_ascii_case("completed")
-            }
+            // llmlint: ignore[boundary_inputs_validated] onevcs fixes no status vocabulary — the field is the host's own words, passed through — and decides a check settled by `completed` alone (`onevcs::Check::settled`), so any other word is a check still running, read here exactly as the sibling reads it.
+            Some(Value::String(status)) => status.eq_ignore_ascii_case("completed"),
             None | Some(Value::Null) => state != "pending",
             Some(_) => return None,
         };
@@ -1091,7 +1080,6 @@ mod tests {
             json!({"name": "slow", "state": "failed"}),
             json!({"name": "slow", "state": "failed", "required": "no"}),
             json!({"name": "slow", "state": "failed", "required": false, "status": 3}),
-            json!({"name": "slow", "state": "pending", "required": false, "status": "lost"}),
         ] {
             assert_eq!(
                 Reading::of(&check(payload.clone(), "attention")),

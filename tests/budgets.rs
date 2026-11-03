@@ -2042,7 +2042,76 @@ fn the_check_visibility_reporter_charges_its_record_and_refuses_what_it_cannot_v
         stderr(&refused)
     );
 
+    // Every other record it cannot vouch for, each refused naming what is wrong.
+    let staged = |change: &dyn Fn(&mut serde_json::Value)| {
+        let mut held = check_visibility_record();
+        change(&mut held);
+        held.to_string()
+    };
+    for (text, said) in [
+        ("{not json".to_owned(), "unreadable"),
+        (
+            staged(&|held| held["schema_version"] = serde_json::json!(2)),
+            "schema_version must be 1",
+        ),
+        (
+            staged(&|held| held["workload"]["extra"] = serde_json::json!(1)),
+            "workload names more",
+        ),
+        (
+            staged(&|held| {
+                let phases = held["phases"].as_array_mut().expect("phases");
+                phases.reverse();
+            }),
+            "phases must be follow, holdup",
+        ),
+        (
+            staged(&|held| held["phases"][1]["calls"] = serde_json::json!([])),
+            "must not be empty",
+        ),
+        (
+            staged(&|held| held["phases"][0]["calls"][0]["rest_requests"] = serde_json::json!(-1)),
+            "rest_requests must be a nonnegative integer",
+        ),
+        (
+            staged(&|held| held["phases"][1]["calls"][0]["query"] = serde_json::json!("other")),
+            "query must be listing or standings",
+        ),
+        (
+            staged(&|held| {
+                held["phases"][0]["calls"][0]
+                    .as_object_mut()
+                    .expect("a call")
+                    .remove("repo");
+            }),
+            "repo must name the repository read",
+        ),
+    ] {
+        std::fs::write(&record, text).expect("a record");
+        let refused = check_visibility_report(&dir, Some(&result));
+        assert_eq!(
+            refused.status.code(),
+            Some(1),
+            "{said}: {}",
+            stderr(&refused)
+        );
+        assert!(
+            stderr(&refused).contains(said),
+            "{said}: {}",
+            stderr(&refused)
+        );
+    }
+
+    // A result it cannot write is a failure that says how to run it.
     std::fs::write(&record, check_visibility_record().to_string()).expect("a record");
+    let unwritable = check_visibility_report(&dir, Some(&dir.join("absent/result.json")));
+    assert_eq!(unwritable.status.code(), Some(1), "{}", stderr(&unwritable));
+    assert!(
+        stderr(&unwritable).contains("next:"),
+        "{}",
+        stderr(&unwritable)
+    );
+
     let outside = check_visibility_report(&dir, None);
     assert_eq!(outside.status.code(), Some(2), "{}", stderr(&outside));
     assert!(stderr(&outside).contains("ONEBUDGETSPEC_RESULT is not set"));

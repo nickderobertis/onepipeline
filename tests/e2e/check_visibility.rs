@@ -348,6 +348,28 @@ fn a_required_check_that_fails_is_shown_once_per_head_and_rules_as_before() {
             );
             assert_eq!(surface["payload"]["blocking"], false);
         }
+        // This identity's watch reports no address for its checks: the line ends at the
+        // label's bracket, and the surface says the host gave none.
+        if !rerun {
+            let monitor = world.run(&["monitor", &run, "--all"]);
+            monitor.exited(0);
+            let line = monitor
+                .stdout
+                .lines()
+                .find(|line| line.contains("change-check 'lint' failed"))
+                .unwrap_or_else(|| panic!("{}", monitor.stdout));
+            assert!(
+                line.ends_with(
+                    "change-check 'lint' failed (required — blocks the merge) [blocker]"
+                ),
+                "{line}"
+            );
+            assert!(surfaces.iter().all(|surface| surface["payload"]["message"]
+                .as_str()
+                .is_some_and(
+                    |message| message.contains("log: the host reported no address for this check.")
+                )));
+        }
         for record in &records {
             assert_eq!(record["payload"]["required"], true);
             assert_eq!(
