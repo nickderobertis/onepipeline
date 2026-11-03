@@ -14,6 +14,13 @@
 //! A journey can make the next request of one operation fail the way a hosted Linear fails: a
 //! GraphQL error ([`Fault::Refuse`]), a connection closed with no answer ([`Fault::Drop`]), or an
 //! answer held back until the journey lets it go ([`Fault::Hold`]).
+//!
+//! It answers what it does not hold as Linear does, on the terms the linked plugin's own
+//! `onetaskgraph_linear::graphql` states and its live journeys check against Linear: a read of an
+//! issue, project or document id it does not hold is an errored `Entity not found: <type>`
+//! answer under HTTP 400, never a null; and a create naming an id a record already holds is
+//! refused under HTTP 200 as `conflict on insert of <type>`, because Linear lets one id name one
+//! record.
 
 // llmlint: ignore-file[e2e_not_mocked] this is the one thing the journeys beside it do not drive
 // for real: Linear's hosted API, which an offline check may not reach. It is a stand-in for that
@@ -26,6 +33,8 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use onetaskgraph_linear::graphql;
+use onetaskgraph_plugin_api::MetadataRecord;
 use serde_json::{json, Map, Value};
 
 /// The team key a source over this endpoint is configured with.
@@ -33,6 +42,14 @@ pub const TEAM: &str = "TEAM";
 
 /// The one project this endpoint holds, by the id Linear would give it.
 pub const PROJECT: &str = "project-1";
+
+/// Linear's answer to an issue, a project or a document id it does not hold, which it sends
+/// under HTTP 400.
+const NOT_FOUND: [&str; 3] = [
+    graphql::ISSUE_NOT_FOUND_MESSAGE,
+    graphql::PROJECT_NOT_FOUND_MESSAGE,
+    graphql::DOCUMENT_NOT_FOUND_MESSAGE,
+];
 
 /// The operation one request named, by the root field of the document the plugin sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -173,7 +190,8 @@ pub struct Request {
 pub enum Fault {
     /// Answered with a GraphQL error, HTTP 200 — what Linear answers an input it will not take.
     Refuse,
-    /// Read whole and then the connection closed with no answer, as a network failure mid-call.
+    /// Read whole and applied, and then the connection closed with no answer, as a network
+    /// failure after Linear took the request: a write is held, and its answer never arrives.
     Drop,
     /// Not answered until [`Linear::release`], then answered as usual.
     Hold,
@@ -317,6 +335,16 @@ impl Linear {
             .find(|held| held.id == issue)
             .unwrap_or_else(|| panic!("no issue {issue}"));
         held.description = linear_stores(&edit(&held.description));
+    }
+
+    /// How many requests of `operation` this endpoint was sent: of a create, how many times it
+    /// was asked to file one.
+    pub fn creates(&self, operation: Operation) -> usize {
+        self.lock()
+            .log
+            .iter()
+            .filter(|request| request.operation == operation)
+            .count()
     }
 
     /// Every document this endpoint holds, by id, with its content as stored.
@@ -543,7 +571,10 @@ impl Linear {
                 fault
             };
             let answer = match fault {
-                Some(Fault::Drop) => return,
+                Some(Fault::Drop) => {
+                    self.answer(operation, query, &variables);
+                    return;
+                }
                 Some(Fault::Refuse) => json!({"errors": [{
                     "message": format!("the loopback refuses this {operation:?}"),
                     "extensions": {"code": "INVALID_INPUT"}
@@ -559,10 +590,20 @@ impl Linear {
                 }
                 None => self.answer(operation, query, &variables),
             };
+            // Linear sends its not-found answer under HTTP 400, and every other answer here
+            // under HTTP 200 — an id conflict among them.
+            let status = if answer["errors"][0]["message"]
+                .as_str()
+                .is_some_and(|message| NOT_FOUND.contains(&message))
+            {
+                "400 Bad Request"
+            } else {
+                "200 OK"
+            };
             let body = answer.to_string();
             let written = write!(
                 writer,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             if written.and_then(|()| writer.flush()).is_err() {
@@ -591,8 +632,11 @@ impl Linear {
         let data = match operation {
             Operation::Resolution => world.resolution(),
             Operation::IssueResolved => {
+                let Some(issue) = world.issue(id) else {
+                    return not_found(graphql::ISSUE_NOT_FOUND_MESSAGE);
+                };
                 let mut data = world.resolution();
-                data["issue"] = match world.related(world.issue(id), query) {
+                data["issue"] = match world.related(issue, query) {
                     Ok(issue) => issue,
                     Err(why) => return refusal(&why),
                 };
@@ -612,10 +656,15 @@ impl Linear {
                 });
                 data
             }
-            Operation::Issue => match world.related(world.issue(id), query) {
-                Ok(issue) => json!({"issue": issue}),
-                Err(why) => return refusal(&why),
-            },
+            Operation::Issue => {
+                let Some(issue) = world.issue(id) else {
+                    return not_found(graphql::ISSUE_NOT_FOUND_MESSAGE);
+                };
+                match world.related(issue, query) {
+                    Ok(issue) => json!({"issue": issue}),
+                    Err(why) => return refusal(&why),
+                }
+            }
             Operation::IssueRelations => {
                 let description = world
                     .issues
@@ -623,7 +672,7 @@ impl Linear {
                     .find(|held| held.id == id)
                     .map(|held| held.description.clone());
                 match description {
-                    None => json!({"issue": null}),
+                    None => return not_found(graphql::ISSUE_NOT_FOUND_MESSAGE),
                     Some(description) => {
                         // The relation connections are what this document selects beside the
                         // description, so the issue's own id is not among them.
@@ -649,12 +698,15 @@ impl Linear {
                 "nodes": if world.project_held { vec![world.project()] } else { Vec::new() },
                 "pageInfo": {"hasNextPage": false, "endCursor": null},
             }}),
-            Operation::Project => json!({"project": world.holds(id).then(|| world.project())}),
-            Operation::ProjectRelations => json!({"project": world.holds(id).then(|| json!({
+            Operation::Project | Operation::ProjectRelations if !world.holds(id) => {
+                return not_found(graphql::PROJECT_NOT_FOUND_MESSAGE);
+            }
+            Operation::Project => json!({"project": world.project()}),
+            Operation::ProjectRelations => json!({"project": {
                 "content": world.project_content,
                 "relations": empty_page(),
                 "inverseRelations": empty_page(),
-            }))}),
+            }}),
             Operation::IssueUpdate => {
                 let Some(input) = variables["input"]
                     .as_object()
@@ -690,7 +742,7 @@ impl Linear {
                     );
                 };
                 if !world.holds(id) {
-                    return refusal(&format!("no project {id}"));
+                    return not_found(graphql::PROJECT_NOT_FOUND_MESSAGE);
                 }
                 world.project_status = status.name.clone();
                 json!({"projectUpdate": {"success": true, "project": {
@@ -702,7 +754,7 @@ impl Linear {
                     return refusal("a projectUpdate carries the project's `content`");
                 };
                 if !world.holds(id) {
-                    return refusal(&format!("no project {id}"));
+                    return not_found(graphql::PROJECT_NOT_FOUND_MESSAGE);
                 }
                 // A rewrite sends the project whole: its name, its status and its labels beside
                 // its content, of which this endpoint holds none.
@@ -745,6 +797,9 @@ impl Linear {
                 let Some(input) = variables["input"].as_object() else {
                     return refusal("an issueCreate carries an `input` object");
                 };
+                if let Some(conflict) = world.conflict(MetadataRecord::Task, input) {
+                    return conflict;
+                }
                 match world.create_issue(input) {
                     Ok(issue) => json!({"issueCreate": {"success": true, "issue": issue}}),
                     Err(why) => return refusal(&why),
@@ -754,16 +809,20 @@ impl Linear {
                 let Some(input) = variables["input"].as_object() else {
                     return refusal("a projectCreate carries an `input` object");
                 };
+                if let Some(conflict) = world.conflict(MetadataRecord::Project, input) {
+                    return conflict;
+                }
                 match world.create_project(input) {
                     Ok(project) => json!({"projectCreate": {"success": true, "project": project}}),
                     Err(why) => return refusal(&why),
                 }
             }
-            Operation::Document => json!({"document": world
-                .documents
-                .iter()
-                .find(|held| held.id == id)
-                .map_or(Value::Null, |held| world.render_document(held))}),
+            Operation::Document => {
+                let Some(held) = world.documents.iter().find(|held| held.id == id) else {
+                    return not_found(graphql::DOCUMENT_NOT_FOUND_MESSAGE);
+                };
+                json!({"document": world.render_document(held)})
+            }
             Operation::Documents => json!({"documents": {
                 "nodes": world
                     .documents
@@ -777,6 +836,11 @@ impl Linear {
                     return refusal("a document write carries an `input` object");
                 };
                 let target = (operation == Operation::DocumentUpdate).then_some(id);
+                if target.is_none() {
+                    if let Some(conflict) = world.conflict(MetadataRecord::Document, input) {
+                        return conflict;
+                    }
+                }
                 match world.write_document(target, input) {
                     Ok(document) => {
                         let root = if target.is_some() {
@@ -982,11 +1046,40 @@ impl World {
         })
     }
 
-    fn issue(&self, id: &str) -> Value {
+    fn issue(&self, id: &str) -> Option<Value> {
         self.issues
             .iter()
             .find(|held| held.id == id)
-            .map_or(Value::Null, |held| self.render(held))
+            .map(|held| self.render(held))
+    }
+
+    /// Linear's refusal of a `record` create whose `input` names an id a record here already
+    /// holds — the project, an issue or a document, since Linear lets one id name one record —
+    /// as the linked plugin states Linear answers it: under HTTP 200, with no data, its message
+    /// `conflict on insert of <type>` and its presentable sentence naming the id.
+    fn conflict(&self, record: MetadataRecord, input: &Map<String, Value>) -> Option<Value> {
+        let id = input.get("id").and_then(Value::as_str)?;
+        let held = self.holds(id)
+            || self.issues.iter().any(|held| held.id == id)
+            || self.documents.iter().any(|held| held.id == id);
+        held.then(|| {
+            let root = match record {
+                MetadataRecord::Task => "issueCreate",
+                MetadataRecord::Project => "projectCreate",
+                MetadataRecord::Document => "documentCreate",
+            };
+            json!({"data": null, "errors": [{
+                "message": graphql::id_conflict_message(record),
+                "path": [root],
+                "extensions": {
+                    "code": "INPUT_ERROR",
+                    "statusCode": 400,
+                    "type": "invalid input",
+                    "userError": true,
+                    "userPresentableMessage": graphql::id_conflict_presentable(record, id),
+                },
+            }]})
+        })
     }
 
     fn project(&self) -> Value {
@@ -1240,6 +1333,12 @@ fn page(nodes: Vec<Value>) -> Value {
 
 fn empty_page() -> Value {
     page(Vec::new())
+}
+
+/// Linear's errored answer to a read or a write of an id it does not hold, `message` the
+/// plugin's own `*_NOT_FOUND_MESSAGE` for the kind it addressed.
+fn not_found(message: &str) -> Value {
+    json!({"errors": [{"message": message}]})
 }
 
 fn refusal(message: &str) -> Value {
@@ -2066,4 +2165,101 @@ fn the_linked_linear_plugin_files_reads_and_replaces_a_dependency_through_this_e
             .is_some_and(|message| message.contains("createdAt")),
         "{answered}"
     );
+}
+
+/// What this endpoint answers an id it does not hold, and a create under an id a record already
+/// holds, on the wire: Linear's errored not-found answer under HTTP 400 for an issue, a project
+/// and a document — never a null — and its `conflict on insert` refusal under HTTP 200, naming
+/// the id, for a `projectCreate`, which files nothing.
+#[test]
+fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers() {
+    use onetaskgraph_linear::graphql;
+    let linear = Linear::serve(
+        &[("Todo", "unstarted")],
+        &[("Planned", "planned")],
+        "generic",
+        "",
+        "Planned",
+    );
+    let issue = linear.file("work", "description", "Todo");
+    let post = |query: &str, variables: Value| -> (String, Value) {
+        let mut stream =
+            TcpStream::connect(("127.0.0.1", linear.port)).expect("connect to the loopback");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bounded response read");
+        let body = json!({"query": query, "variables": variables}).to_string();
+        write!(
+            stream,
+            "POST /graphql HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("the request is sent");
+        stream
+            .shutdown(std::net::Shutdown::Write)
+            .expect("the request is finished");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .expect("the loopback answers");
+        let (head, body) = response.split_once("\r\n\r\n").expect("an HTTP response");
+        let status = head.lines().next().expect("a status line").to_owned();
+        (
+            status,
+            serde_json::from_str(body).expect("a GraphQL response"),
+        )
+    };
+    for (query, held, missing) in [
+        (
+            graphql::ISSUE,
+            Some(issue.as_str()),
+            graphql::ISSUE_NOT_FOUND_MESSAGE,
+        ),
+        (
+            graphql::PROJECT,
+            Some(PROJECT),
+            graphql::PROJECT_NOT_FOUND_MESSAGE,
+        ),
+        (graphql::DOCUMENT, None, graphql::DOCUMENT_NOT_FOUND_MESSAGE),
+    ] {
+        let (status, answer) = post(query, json!({"id": "id-nothing-holds"}));
+        assert_eq!(status, "HTTP/1.1 400 Bad Request", "{answer}");
+        assert_eq!(
+            answer,
+            json!({"errors": [{"message": missing}]}),
+            "an absent id was not answered {missing:?}"
+        );
+        // An id this endpoint holds is still answered with its item.
+        if let Some(held) = held {
+            let (status, answer) = post(query, json!({"id": held}));
+            assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+            assert!(answer.get("errors").is_none(), "{answer}");
+        }
+    }
+
+    // A project create under the id the held project holds is refused as Linear refuses it, and
+    // files nothing; under an issue's id, likewise.
+    for taken in [PROJECT, issue.as_str()] {
+        let before = linear.project_id();
+        let (status, answer) = post(
+            graphql::PROJECT_CREATE,
+            json!({"input": {"id": taken, "name": "again", "content": "", "statusId": "status-0"}}),
+        );
+        assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+        assert_eq!(answer["data"], Value::Null, "{answer}");
+        assert_eq!(
+            answer["errors"][0]["message"],
+            graphql::PROJECT_ID_CONFLICT_MESSAGE,
+            "{answer}"
+        );
+        assert_eq!(
+            answer["errors"][0]["extensions"]["userPresentableMessage"],
+            graphql::id_conflict_presentable(
+                onetaskgraph_plugin_api::MetadataRecord::Project,
+                taken
+            ),
+            "{answer}"
+        );
+        assert_eq!(linear.project_id(), before);
+    }
 }
