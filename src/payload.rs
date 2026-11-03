@@ -2229,7 +2229,7 @@ pub(crate) enum ScratchEnding {
     Paused,
 }
 
-// llmlint: ignore-block[invalid_states_unrepresentable] a runs-root record's payload document: the node id, change request URL, commit and check address are the plain strings every payload of this module spells them as (`ReleaseArrived.node`, `NodeSettled`'s `change_url` and `head`), each read off another process's record rather than built here, and the registered schema is the wire contract the browser view reads. `requirement` sits beside `required` because the plan's agreed contract with the browser view carries both — the boolean to decide on, the words to show — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`).
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
 /// `check-failed`: one failing check on a change request the run published, and its
 /// one non-blocking surface.
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, stated at its head: a key no document names is not refused, because a record a later build wrote is the ordinary contents of a runs root. What a reader acts on is still typed and required.
@@ -2256,7 +2256,7 @@ pub(crate) struct CheckFailed {
 }
 // llmlint: ignore-end[invalid_states_unrepresentable]
 
-// llmlint: ignore-block[invalid_states_unrepresentable] a runs-root record's payload document: the node id, change request URL, commit and check address are the plain strings every payload of this module spells them as (`ReleaseArrived.node`, `NodeSettled`'s `change_url` and `head`), each read off another process's record rather than built here, and the registered schema is the wire contract the browser view reads. `requirement` sits beside `required` because the plan's agreed contract with the browser view carries both — the boolean to decide on, the words to show — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`).
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
 /// `checks-unfollowed`: the checks the driver stopped following on one change request.
 // llmlint: ignore[boundary_inputs_validated] this module's own rule, as `CheckFailed` above records.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -2290,7 +2290,7 @@ pub(crate) enum UnfollowedReason {
     Timeout,
 }
 
-// llmlint: ignore-block[invalid_states_unrepresentable] a runs-root record's payload document: the node id, change request URL, commit and check address are the plain strings every payload of this module spells them as (`ReleaseArrived.node`, `NodeSettled`'s `change_url` and `head`), each read off another process's record rather than built here, and the registered schema is the wire contract the browser view reads. `requirement` sits beside `required` because the plan's agreed contract with the browser view carries both — the boolean to decide on, the words to show — and the one writer derives the words from the boolean through `vocabulary::requirement_label` (`src/checkwatch.rs`).
+// llmlint: ignore-block[invalid_states_unrepresentable] the same wire-format reason `EndingCheck` above gives: ids are this module's plain payload strings, and `requirement` is the words the one writer derives from `required`.
 /// One check a `checks-unfollowed` names.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct UnfollowedCheck {

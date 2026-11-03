@@ -121,7 +121,22 @@ impl Reading {
         })?;
         let required = event.payload.get("required").and_then(Value::as_bool)?;
         let settled = match event.payload.get("status") {
-            Some(Value::String(status)) => status.eq_ignore_ascii_case("completed"),
+            // The status words GitHub's check runs and commit statuses report, which is
+            // the host vocabulary onevcs passes through.
+            Some(Value::String(status))
+                if [
+                    "completed",
+                    "in_progress",
+                    "queued",
+                    "pending",
+                    "waiting",
+                    "requested",
+                ]
+                .iter()
+                .any(|known| status.eq_ignore_ascii_case(known)) =>
+            {
+                status.eq_ignore_ascii_case("completed")
+            }
             None | Some(Value::Null) => state != "pending",
             Some(_) => return None,
         };
@@ -369,6 +384,17 @@ fn returned(status: Option<&NodeStatus>) -> bool {
                 | NodeStatus::Failed
         )
     )
+}
+
+/// Each (change request, head) a follow read in this process answered superseded: its
+/// head moved on, so whatever its session last recorded running there is not running on
+/// the change request any more, and the run's ending does not list it. Held for the
+/// process rather than recorded, because the driver that read it is the one that writes
+/// the ending; a driver adopting the run reads the change again and learns it the same way.
+fn superseded() -> &'static std::sync::Mutex<BTreeSet<(String, String)>> {
+    static SUPERSEDED: std::sync::OnceLock<std::sync::Mutex<BTreeSet<(String, String)>>> =
+        std::sync::OnceLock::new();
+    SUPERSEDED.get_or_init(Default::default)
 }
 
 /// One answered follow read: the repository, the nodes it was about in the order
@@ -805,7 +831,14 @@ impl CheckWatch {
                 );
             }
             if !change.outstanding || change.superseded {
-                self.followed.remove(node);
+                if let Some(stopped) = self.followed.remove(node) {
+                    if change.superseded {
+                        superseded()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert((stopped.change, stopped.head));
+                    }
+                }
             }
         }
         Ok(())
@@ -929,7 +962,12 @@ pub(crate) fn ending(
         let Some(followed) = followed_of(&state, node, now) else {
             continue;
         };
-        if unfollowed_keys.contains(&(followed.change.clone(), followed.head.clone())) {
+        let key = (followed.change.clone(), followed.head.clone());
+        let moved_on = superseded()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&key);
+        if unfollowed_keys.contains(&key) || moved_on {
             continue;
         }
         for (check, required) in followed.running() {
@@ -1053,6 +1091,7 @@ mod tests {
             json!({"name": "slow", "state": "failed"}),
             json!({"name": "slow", "state": "failed", "required": "no"}),
             json!({"name": "slow", "state": "failed", "required": false, "status": 3}),
+            json!({"name": "slow", "state": "pending", "required": false, "status": "lost"}),
         ] {
             assert_eq!(
                 Reading::of(&check(payload.clone(), "attention")),

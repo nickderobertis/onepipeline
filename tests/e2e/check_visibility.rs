@@ -1276,9 +1276,41 @@ fn a_superseded_head_stops_being_followed() {
     release(&world, run);
     assert!(world.events_of(run, "check-failed").is_empty());
     assert!(world.events_of(run, "checks-unfollowed").is_empty());
-    assert!(last_exit(&world, run)["payload"]
-        .get("checks_unfollowed")
-        .is_none());
+    let exited = last_exit(&world, run);
+    assert!(
+        exited["payload"].get("checks_unfollowed").is_none(),
+        "{exited}"
+    );
+    // The head it was following is not the change request's any more, so the ending
+    // lists nothing as still running on it.
+    assert!(
+        exited["payload"].get("checks_running").is_none(),
+        "{exited}"
+    );
+    world
+        .run(&["results", run])
+        .exited(0)
+        .out_lacks("checks still running at run end:");
+}
+
+/// A follow interval this build cannot use leaves the run following at the shipped
+/// minute: one read as the publication returns, and none for the seconds after it.
+#[test]
+fn an_unusable_follow_interval_follows_at_the_shipped_one() {
+    let world = World::new("follow-unusable").with_env("ONEPIPELINE_CHECK_FOLLOW_SECONDS", "soon");
+    team_repository(&world);
+    world.script("service.work", "the worker wrote this\n");
+    world.script("gh.checks", WATCHED);
+    world.script("gh.follow.1", FAILS_ON_THE_THIRD_READ);
+    world.script("after.wait", "hold");
+    let run = "followunusable";
+    launch(&world, run);
+    world.until("the first follow read", |world| {
+        !follow_reads(world).is_empty()
+    });
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert_eq!(follow_reads(&world).len(), 1, "{:?}", follow_reads(&world));
+    release(&world, run);
 }
 
 /// An identity that declares a release change request and has none open says so on

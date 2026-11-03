@@ -2885,7 +2885,9 @@ fn follow_read(owner: &str, name: &str, changes: &[onevcs::ChangeId], dir: &Path
         repository[format!("c{at}")] = json!({
             "url": standing.url, "state": "OPEN", "isDraft": standing.draft,
             "body": standing.body, "baseRefName": standing.base,
-            "headRefName": standing.head_branch, "headRefOid": standing.head,
+            "headRefName": standing.head_branch,
+            // A superseded head is one the change request no longer carries.
+            "headRefOid": if one.superseded { "0".repeat(40) } else { standing.head.0.clone() },
             "mergedAt": Value::Null, "mergeCommit": Value::Null,
             "baseRef": {"name": standing.base},
             "headRef": {"target": {"statusCheckRollup": {"contexts": page(contexts)}}},
