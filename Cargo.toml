@@ -1319,9 +1319,10 @@ onevcs-testing = "0.19.26"
 # an issue, project or document id Linear does not hold as absent — Linear answers one with an
 # errored `Entity not found: <type>`, which 0.13.1 took for a failure, so its lookup ahead of a
 # keyed create failed every copy that had to create a new project — and a keyed create Linear
-# refuses as `conflict on insert` tries its key's next id (onetaskgraph #3867). The loopback
-# Linear answers both as Linear does, and `tests/e2e/linear_launch.rs` copies a plan into it,
-# once and with its project create's answer lost, and launches from there.
+# refuses as `conflict on insert` tries its key's next id (onetaskgraph #3867), so a plan copied
+# again after an undo deleted its project — whose id Linear never lets a create take again —
+# lands. The loopback Linear answers both as Linear does, and `tests/e2e/linear_launch.rs`
+# copies a plan into it fresh, with its project create's answer lost, and after such an undo.
 onetaskgraph-core = "=0.13.2"
 onetaskgraph-plugin-api = "=0.13.2"
 onetaskgraph-local-md = "=0.13.2"

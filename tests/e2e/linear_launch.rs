@@ -126,23 +126,26 @@ fn homed_by(name: &str, copy: impl FnOnce(&World, &Linear, &Path, &str) -> Strin
         &format!("{STORE_SOURCE}:{}", project_id(NAME)),
     );
     assert_eq!(home, format!("{SOURCE}:{}", linear.project_id()));
-    // One new project, and each task filed under it once: Linear held no project, so the copy
-    // created it, and the store's lookup of that create beforehand read Linear's not-found
-    // answer as no such project rather than as a failure.
-    assert!(
-        linear.creates(Operation::ProjectCreate) >= 1
-            && linear.creates(Operation::IssueCreate) == NODES.len(),
-        "the copy did not create the project and one issue a node: {:#?}",
-        linear.log()
-    );
-    for request in linear.log() {
-        if request.operation == Operation::IssueCreate {
-            assert_eq!(
-                request.variables["input"]["projectId"],
-                json!(linear.project_id()),
-                "an issue was not filed under the plan's project: {request:?}"
-            );
-        }
+    // Each task filed under the plan's project: the copy created that project in a Linear that
+    // held none, its lookup of that create's key reading Linear's not-found answer as no such
+    // project rather than as a failure.
+    // The create that filed each issue Linear holds is its last under that issue's id: one a
+    // refused earlier attempt sent under the same id filed nothing.
+    let log = linear.log();
+    for (held, _, _) in linear.issues() {
+        let filed = log
+            .iter()
+            .rev()
+            .find(|request| {
+                request.operation == Operation::IssueCreate
+                    && request.variables["input"]["id"] == held
+            })
+            .unwrap_or_else(|| panic!("no create filed {held}: {log:#?}"));
+        assert_eq!(
+            filed.variables["input"]["projectId"],
+            json!(linear.project_id()),
+            "{held} was not filed under the plan's project: {filed:?}"
+        );
     }
     world.write_item(
         &world.store().join("documents").join("design.md"),
@@ -228,13 +231,14 @@ fn landed(report: &onetaskgraph_core::CopyReport) -> String {
         .to_string()
 }
 
-/// Copy `item` into Linear with the linked store's copy over `scope`, and answer its report.
+/// Copy `item` into Linear with the linked store's copy over `scope`, and answer its report, or
+/// the store's refusal as it renders it.
 fn copy_report(
     world: &World,
     launch: &Path,
     item: &str,
     scope: onetaskgraph_core::CopyScope,
-) -> Result<onetaskgraph_core::CopyReport, onetaskgraph_core::EngineError> {
+) -> Result<onetaskgraph_core::CopyReport, String> {
     let item = global(item);
     linked_store(world, launch, |engine| async move {
         engine
@@ -256,6 +260,7 @@ fn copy_report(
                 conditions: onetaskgraph_core::CopyConditions::default(),
             })
             .await
+            .map_err(|error| error.to_string())
     })
 }
 
@@ -409,9 +414,13 @@ fn launched(homed: &Homed) {
 fn a_rendered_plan_copied_into_linear_launches_from_there_under_the_rendered_only_check() {
     let homed = homed("linear-launch");
     assert_eq!(
-        homed.linear.creates(Operation::ProjectCreate),
-        1,
-        "the copy into an empty Linear sent other than one project create: {:#?}",
+        (
+            homed.linear.creates(Operation::ProjectCreate),
+            homed.linear.creates(Operation::IssueCreate)
+        ),
+        (1, NODES.len()),
+        "the copy into an empty Linear sent other than one project create and one issue \
+         create a node: {:#?}",
         homed.linear.log()
     );
 
@@ -535,11 +544,70 @@ fn a_plan_whose_project_create_lost_its_answer_is_copied_again_into_one_project(
         again
     });
     assert_eq!(
-        homed.linear.creates(Operation::ProjectCreate),
-        1,
-        "the project was created again after its answer was lost: {:#?}",
+        (
+            homed.linear.creates(Operation::ProjectCreate),
+            homed.linear.creates(Operation::IssueCreate)
+        ),
+        (1, NODES.len()),
+        "the project or a task was created again after the answer was lost: {:#?}",
         homed.linear.log()
     );
+    launched(&homed);
+}
+
+/// A copy Linear refuses partway is undone, and its undo takes back the project it created — but
+/// Linear lets an id name one record ever, so the id that project held, which the copy's create
+/// key derives and every later copy of the plan sends again, is one Linear refuses a create
+/// under (`conflict on insert of Project`). Copied again into a Linear that holds no project,
+/// the plan lands in one new project under another id its key derives, with each task filed
+/// under it once, and the launch from there reads every node.
+#[test]
+fn a_plan_copied_again_after_its_undo_took_its_project_back_lands_in_one_new_project() {
+    let mut taken_back = String::new();
+    let homed = homed_by("linear-launch-undone", |world, linear, launch, plan| {
+        let scope = || onetaskgraph_core::CopyScope::Projects { tasks: true };
+        // Every id the first task's create could be tried under is refused, so the copy fails
+        // after creating its project, and its undo deletes that project.
+        for _ in 0..onetaskgraph_linear::CREATE_ID_GENERATIONS {
+            linear.fail_next(Operation::IssueCreate, Fault::Refuse);
+        }
+        let refused = copy_report(world, launch, plan, scope());
+        assert!(
+            refused.is_err(),
+            "a copy whose task creates were refused landed: {refused:?}"
+        );
+        linear.clear_faults();
+        let log = linear.log();
+        taken_back = log
+            .iter()
+            .find(|request| request.operation == Operation::ProjectDelete)
+            .and_then(|request| request.variables["id"].as_str())
+            .unwrap_or_else(|| panic!("the undo took no project back: {log:#?}"))
+            .to_owned();
+        assert!(
+            linear.issues().is_empty() && linear.creates(Operation::ProjectCreate) == 1,
+            "the refused copy left Linear holding something: {log:#?}"
+        );
+        copied(world, launch, plan, scope())
+    });
+    let log = homed.linear.log();
+    let creates: Vec<&serde_json::Value> = log
+        .iter()
+        .filter(|request| request.operation == Operation::ProjectCreate)
+        .map(|request| &request.variables["input"]["id"])
+        .collect();
+    // The second copy sends its create first under the deleted project's id, which Linear
+    // refuses, and lands under the next id its key derives.
+    assert_eq!(
+        creates,
+        [
+            &json!(taken_back),
+            &json!(taken_back),
+            &json!(homed.linear.project_id())
+        ],
+        "{log:#?}"
+    );
+    assert_ne!(homed.linear.project_id(), taken_back);
     launched(&homed);
 }
 

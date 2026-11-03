@@ -18,9 +18,9 @@
 //! It answers what it does not hold as Linear does, on the terms the linked plugin's own
 //! `onetaskgraph_linear::graphql` states and its live journeys check against Linear: a read of an
 //! issue, project or document id it does not hold is an errored `Entity not found: <type>`
-//! answer under HTTP 400, never a null; and a create naming an id a record already holds is
-//! refused under HTTP 200 as `conflict on insert of <type>`, because Linear lets one id name one
-//! record.
+//! answer under HTTP 400, never a null; and a create naming an id a record holds — or held, until
+//! a delete took it back — is refused under HTTP 200 as `conflict on insert of <type>`, because
+//! Linear lets one id name one record ever.
 
 // llmlint: ignore-file[e2e_not_mocked] this is the one thing the journeys beside it do not drive
 // for real: Linear's hosted API, which an offline check may not reach. It is a stand-in for that
@@ -100,6 +100,12 @@ pub enum Operation {
     IssueRelationCreate,
     /// `issueRelationDelete`: one dependency between two issues taken back.
     IssueRelationDelete,
+    /// `issueDelete`: one issue taken back, as a copy's undo takes back what it filed.
+    IssueDelete,
+    /// `projectDelete`: the project taken back, as a copy's undo takes back what it filed.
+    ProjectDelete,
+    /// `documentDelete`: one document taken back.
+    DocumentDelete,
     /// Anything else, which this endpoint refuses by name.
     Unknown,
 }
@@ -129,6 +135,12 @@ impl Operation {
             Self::IssueRelationCreate
         } else if query.starts_with("mutation") && query.contains("issueRelationDelete(") {
             Self::IssueRelationDelete
+        } else if query.starts_with("mutation") && query.contains("issueDelete(") {
+            Self::IssueDelete
+        } else if query.starts_with("mutation") && query.contains("projectDelete(") {
+            Self::ProjectDelete
+        } else if query.starts_with("mutation") && query.contains("documentDelete(") {
+            Self::DocumentDelete
         } else if query.starts_with("mutation") {
             Self::Unknown
         } else if query.contains("projects(") {
@@ -173,6 +185,9 @@ impl Operation {
                 | Self::DocumentUpdate
                 | Self::IssueRelationCreate
                 | Self::IssueRelationDelete
+                | Self::IssueDelete
+                | Self::ProjectDelete
+                | Self::DocumentDelete
                 | Self::Unknown
         )
     }
@@ -251,6 +266,9 @@ struct World {
     /// How many relations were ever filed, so a relation filed after one was taken back never
     /// reuses its id.
     relations_filed: usize,
+    /// Every id a record this endpoint deleted held: Linear lets one id name one record ever,
+    /// so no create may take one, and a read of one finds nothing.
+    burnt: Vec<String>,
     log: Vec<Request>,
     faults: BTreeMap<Operation, VecDeque<Fault>>,
     held: bool,
@@ -429,6 +447,12 @@ impl Linear {
             .push_back(fault);
     }
 
+    /// Fail no further request: every fault [`Linear::fail_next`] queued and no request took yet
+    /// is dropped.
+    pub fn clear_faults(&self) {
+        self.lock().faults.clear();
+    }
+
     /// Let every held request go.
     pub fn release(&self) {
         let (lock, changed) = &*self.world;
@@ -549,6 +573,9 @@ impl Linear {
                     | Operation::Document
                     | Operation::DocumentUpdate
                     | Operation::IssueRelationDelete
+                    | Operation::IssueDelete
+                    | Operation::ProjectDelete
+                    | Operation::DocumentDelete
             ) && !variables["id"]
                 .as_str()
                 .is_some_and(|id| !id.trim().is_empty())
@@ -624,9 +651,10 @@ impl Linear {
             | Operation::ProjectUpdate
             | Operation::Document
             | Operation::DocumentUpdate
-            | Operation::IssueRelationDelete => {
-                variables["id"].as_str().expect("validated request ID")
-            }
+            | Operation::IssueRelationDelete
+            | Operation::IssueDelete
+            | Operation::ProjectDelete
+            | Operation::DocumentDelete => variables["id"].as_str().expect("validated request ID"),
             _ => "",
         };
         let data = match operation {
@@ -872,6 +900,35 @@ impl Linear {
                 }
                 json!({"issueRelationDelete": {"success": true}})
             }
+            Operation::ProjectDelete => {
+                if !world.holds(id) {
+                    return not_found(graphql::PROJECT_NOT_FOUND_MESSAGE);
+                }
+                world.project_held = false;
+                world.burnt.push(id.to_owned());
+                json!({"projectDelete": {"success": true}})
+            }
+            Operation::IssueDelete => {
+                let before = world.issues.len();
+                world.issues.retain(|held| held.id != id);
+                if world.issues.len() == before {
+                    return not_found(graphql::ISSUE_NOT_FOUND_MESSAGE);
+                }
+                world
+                    .relations
+                    .retain(|held| held.issue != id && held.related != id);
+                world.burnt.push(id.to_owned());
+                json!({"issueDelete": {"success": true}})
+            }
+            Operation::DocumentDelete => {
+                let before = world.documents.len();
+                world.documents.retain(|held| held.id != id);
+                if world.documents.len() == before {
+                    return not_found(graphql::DOCUMENT_NOT_FOUND_MESSAGE);
+                }
+                world.burnt.push(id.to_owned());
+                json!({"documentDelete": {"success": true}})
+            }
             Operation::Unknown => return refusal(&format!("the loopback answers no {query}")),
         };
         json!({"data": data})
@@ -1054,12 +1111,14 @@ impl World {
     }
 
     /// Linear's refusal of a `record` create whose `input` names an id a record here already
-    /// holds — the project, an issue or a document, since Linear lets one id name one record —
+    /// holds or once held — the project, an issue or a document, deleted or not, since Linear
+    /// lets one id name one record ever —
     /// as the linked plugin states Linear answers it: under HTTP 200, with no data, its message
     /// `conflict on insert of <type>` and its presentable sentence naming the id.
     fn conflict(&self, record: MetadataRecord, input: &Map<String, Value>) -> Option<Value> {
         let id = input.get("id").and_then(Value::as_str)?;
         let held = self.holds(id)
+            || self.burnt.iter().any(|held| held == id)
             || self.issues.iter().any(|held| held.id == id)
             || self.documents.iter().any(|held| held.id == id);
         held.then(|| {
@@ -2167,10 +2226,10 @@ fn the_linked_linear_plugin_files_reads_and_replaces_a_dependency_through_this_e
     );
 }
 
-/// What this endpoint answers an id it does not hold, and a create under an id a record already
-/// holds, on the wire: Linear's errored not-found answer under HTTP 400 for an issue, a project
+/// What this endpoint answers an id it does not hold, and a create under an id a record holds or
+/// held, on the wire: Linear's errored not-found answer under HTTP 400 for an issue, a project
 /// and a document — never a null — and its `conflict on insert` refusal under HTTP 200, naming
-/// the id, for a `projectCreate`, which files nothing.
+/// the id, for a `projectCreate`, which files nothing, while a create under a fresh id lands.
 #[test]
 fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers() {
     use onetaskgraph_linear::graphql;
@@ -2262,4 +2321,36 @@ fn an_absent_id_is_not_found_and_a_held_id_refuses_its_create_as_linear_answers(
         );
         assert_eq!(linear.project_id(), before);
     }
+
+    // Deleted, the project reads as absent, and its id is still one no create may take.
+    let (status, answer) = post(graphql::PROJECT_DELETE, json!({"id": PROJECT}));
+    assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+    assert_eq!(answer["data"]["projectDelete"]["success"], true, "{answer}");
+    let (status, answer) = post(graphql::PROJECT, json!({"id": PROJECT}));
+    assert_eq!(status, "HTTP/1.1 400 Bad Request", "{answer}");
+    assert_eq!(
+        answer["errors"][0]["message"],
+        graphql::PROJECT_NOT_FOUND_MESSAGE
+    );
+    let create = |id: &str| {
+        post(
+            graphql::PROJECT_CREATE,
+            json!({"input": {"id": id, "name": "again", "content": "", "statusId": "status-0"}}),
+        )
+    };
+    let (status, answer) = create(PROJECT);
+    assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+    assert_eq!(
+        answer["errors"][0]["message"],
+        graphql::PROJECT_ID_CONFLICT_MESSAGE,
+        "a deleted project's id was taken again: {answer}"
+    );
+    // Under an id nothing ever held, the create is filed.
+    let (status, answer) = create("project-fresh");
+    assert_eq!(status, "HTTP/1.1 200 OK", "{answer}");
+    assert_eq!(
+        answer["data"]["projectCreate"]["project"]["id"], "project-fresh",
+        "{answer}"
+    );
+    assert_eq!(linear.project_id(), "project-fresh");
 }
