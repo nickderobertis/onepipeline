@@ -1315,14 +1315,16 @@ onevcs-testing = "0.19.26"
 # the repositories its plan's tasks name, so the store's human-task routes classify and place
 # it (`src/human_items/projection.rs`); `tests/e2e/human_board_projection.rs` drives a public,
 # a private, a mixed and an organization's plan through it.
-# **0.13.2 is the floor for a plan copied into an empty Linear** (`otg-linear-create`): it reads
-# an issue, project or document id Linear does not hold as absent — Linear answers one with an
-# errored `Entity not found: <type>`, which 0.13.1 took for a failure, so its lookup ahead of a
-# keyed create failed every copy that had to create a new project — and a keyed create Linear
-# refuses as `conflict on insert` tries its key's next id (onetaskgraph #3867), so a plan copied
-# again after an undo deleted its project — whose id Linear never lets a create take again —
-# lands. The loopback Linear answers both as Linear does, and `tests/e2e/linear_launch.rs`
-# copies a plan into it fresh, with its project create's answer lost, and after such an undo.
+# **0.13.2 is the floor for a plan copied again after an undo** (`otg-linear-create`): a copy
+# refused partway is undone, which deletes the project it created, and Linear never lets a
+# create take a deleted record's id again — so a re-copy, which sends the same create key and so
+# the same project id, is refused `conflict on insert of Project`. 0.13.1 then read that id for
+# an earlier attempt's project, took Linear's `Entity not found: Project` answer for a failure,
+# and reported it in place of the refusal; 0.13.2 reads an absent id as absent and creates the
+# project under its key's next candidate id (onetaskgraph #3867). A fresh copy into an empty
+# Linear lands on either release. The loopback Linear answers both as Linear does, and
+# `tests/e2e/linear_launch.rs` copies a plan into it fresh, with its project create's answer
+# lost, and again after such an undo — the last being the journey 0.13.1 fails.
 onetaskgraph-core = "=0.13.2"
 onetaskgraph-plugin-api = "=0.13.2"
 onetaskgraph-local-md = "=0.13.2"

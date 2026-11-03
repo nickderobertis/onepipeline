@@ -126,9 +126,8 @@ fn homed_by(name: &str, copy: impl FnOnce(&World, &Linear, &Path, &str) -> Strin
         &format!("{STORE_SOURCE}:{}", project_id(NAME)),
     );
     assert_eq!(home, format!("{SOURCE}:{}", linear.project_id()));
-    // Each task filed under the plan's project: the copy created that project in a Linear that
-    // held none, its lookup of that create's key reading Linear's not-found answer as no such
-    // project rather than as a failure.
+    // Each task filed under the plan's project, which the copy created in a Linear that held
+    // none.
     // The create that filed each issue Linear holds is its last under that issue's id: one a
     // refused earlier attempt sent under the same id filed nothing.
     let log = linear.log();
